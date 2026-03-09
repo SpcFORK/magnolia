@@ -1,6 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 
+if not exist build (
+    mkdir build
+)
+
 echo Building ELF target...
 go build -o ./build/magnolia
 if errorlevel 1 exit /b 1
