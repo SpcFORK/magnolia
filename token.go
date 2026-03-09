@@ -51,6 +51,7 @@ const (
 	ellipsis
 	qmark
 	exclam
+	tilde
 
 	// binary operators
 	plus
@@ -67,6 +68,7 @@ const (
 	geq
 	leq
 	neq
+	rshift
 
 	// keywords
 	ifKeyword
@@ -126,6 +128,8 @@ func (t token) String() string {
 		return "?"
 	case exclam:
 		return "!"
+	case tilde:
+		return "~"
 	case plus:
 		return "+"
 	case minus:
@@ -154,6 +158,8 @@ func (t token) String() string {
 		return "<="
 	case neq:
 		return "!="
+	case rshift:
+		return ">>"
 	case ifKeyword:
 		return "if"
 	case fnKeyword:
@@ -370,6 +376,8 @@ func (t *tokenizer) nextToken() token {
 		return token{kind: divide, pos: t.currentPos()}
 	case '%':
 		return token{kind: modulus, pos: t.currentPos()}
+	case '~':
+		return token{kind: tilde, pos: t.currentPos()}
 	case '^':
 		return token{kind: xor, pos: t.currentPos()}
 	case '&':
@@ -381,10 +389,17 @@ func (t *tokenizer) nextToken() token {
 		}
 		return token{kind: or, pos: t.currentPos()}
 	case '>':
-		if !t.isEOF() && t.peek() == '=' {
-			pos := t.currentPos()
-			t.next()
-			return token{kind: geq, pos: pos}
+		if !t.isEOF() {
+			switch t.peek() {
+			case '=':
+				pos := t.currentPos()
+				t.next()
+				return token{kind: geq, pos: pos}
+			case '>':
+				pos := t.currentPos()
+				t.next()
+				return token{kind: rshift, pos: pos}
+			}
 		}
 		return token{kind: greater, pos: t.currentPos()}
 	case '=':

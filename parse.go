@@ -707,7 +707,7 @@ func (p *parser) parseUnit() (astNode, error) {
 		return emptyNode{tok: &tok}, nil
 	case identifier:
 		return identifierNode{payload: tok.payload, tok: &tok}, nil
-	case minus, exclam:
+	case minus, exclam, tilde:
 		right, err := p.parseSubNode()
 		if err != nil {
 			return nil, err
@@ -886,6 +886,9 @@ func infixOpPrecedence(op tokKind) int {
 		return 50
 	case modulus:
 		return 80
+	case pushArrow, rshift:
+		// bitwise shift operators
+		return 45
 	case eq, greater, less, geq, leq, neq:
 		return 30
 	case and:
@@ -894,9 +897,6 @@ func infixOpPrecedence(op tokKind) int {
 		return 15
 	case or:
 		return 10
-	case pushArrow:
-		// assignment-like semantics
-		return 1
 	default:
 		return -1
 	}
@@ -988,7 +988,7 @@ func (p *parser) parseNode() (astNode, error) {
 			// assignment expression itself by syntax rule, so we simply return
 			return p.parseAssignment(node)
 		case plus, minus, times, divide, modulus,
-			xor, and, or, pushArrow,
+			xor, and, or, pushArrow, rshift,
 			greater, less, eq, geq, leq, neq:
 			// this case implements a mini Pratt parser threaded through the
 			// larger Oak syntax parser, using the parser struct itself to keep

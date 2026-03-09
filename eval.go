@@ -572,6 +572,22 @@ func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 		return IntValue(left & right), nil
 	case or:
 		return IntValue(left | right), nil
+	case pushArrow:
+		// bitwise left shift
+		if right < 0 {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Shift amount must be non-negative, got %d", right),
+			}
+		}
+		return IntValue(left << uint(right)), nil
+	case rshift:
+		// bitwise right shift
+		if right < 0 {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Shift amount must be non-negative, got %d", right),
+			}
+		}
+		return IntValue(left >> uint(right)), nil
 	case greater:
 		return BoolValue(left > right), nil
 	case less:
@@ -1007,6 +1023,8 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				return right, nil
 			case minus:
 				return -right, nil
+			case tilde:
+				return ^right, nil
 			}
 		case FloatValue:
 			switch n.op {
