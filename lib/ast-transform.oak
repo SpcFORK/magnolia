@@ -1,0 +1,54 @@
+// ast-transform -- utilities for transforming and wrapping AST nodes
+
+{
+	clone: clone
+	entries: entries
+} := import('std')
+
+// wrapBlock returns a block AST node containing all the given nodes as
+// sub-expressions of the block. In effect, it makes N AST nodes 1 node.
+fn wrapBlock(nodes) {
+	type: :block
+	tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+	exprs: nodes
+}
+
+// wrapModule transforms an AST node into a module wrapper that can be used
+// for bundling. This creates a function that exports the module's contents.
+fn wrapModule(block) {
+	type: :function
+	tok: { pos: [0, 1, 1], type: :fnKeyword, val: ? }
+	name: ''
+	args: []
+	restArg: ?
+	body: block
+	decls: block.decls
+}
+
+// formatIdent creates a safe identifier name that avoids conflicts with
+// reserved words and language keywords. Takes the original name and an
+// optional key for uniqueness.
+fn formatIdentForWeb(name, key) if name {
+	// prevent shadowing of some meaningful global '_' variable
+	'_' -> '__oak_empty_ident' << string(key |> default(''))
+	// ECMAScript 2021 reserved words
+	'await', 'break', 'case', 'catch', 'class', 'const', 'continue'
+	'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export'
+	'extends', 'false', 'finally', 'for', 'function', 'if', 'in'
+	'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this'
+	'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with'
+	'yield' -> '__oak_js_' << name
+	_ -> name
+}
+
+fn formatIdentForOak(name) if name {
+	'import' -> '__oak_module_import'
+	_ -> name |> clone()
+}
+
+{
+	wrapBlock: wrapBlock
+	wrapModule: wrapModule
+	formatIdentForWeb: formatIdentForWeb
+	formatIdentForOak: formatIdentForOak
+}

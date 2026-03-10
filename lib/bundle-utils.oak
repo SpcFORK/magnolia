@@ -1,0 +1,73 @@
+// bundle-utils -- utilities for bundling Oak modules
+
+{
+	default: default
+	slice: slice
+	clone: clone
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+} := import('std')
+{
+	split: split
+} := import('str')
+{
+	dir: dir
+} := import('path')
+
+// commonPrefix returns the longest common prefix path among a list of paths
+fn commonPrefix(paths) {
+	if len(paths) = 0 -> ''
+	if len(paths) = 1 -> paths.(0)
+
+	allPairs := reduce(paths |> slice(1), paths.(0), fn(prefix, path) {
+		// iterate through path characters until we find a mismatch
+		minLen := {
+			len(prefix) < len(path) -> len(prefix)
+			_ -> len(path)
+		}
+		matchLen := 0
+		_ := {
+			fn scan(i) if i {
+				minLen -> if prefix.(i) = path.(i) {
+					true -> {
+						matchLen <- matchLen + 1
+						scan(i + 1)
+					}
+					_ -> ?
+				}
+				_ -> ?
+			}
+			scan(0)
+		}
+
+		if matchLen > 0 {
+			true -> prefix |> slice(0, matchLen)
+			_ -> ''
+		}
+	})
+	allPairs
+}
+
+// normalizeModulePath converts an absolute file path to a module identifier
+// by stripping the common prefix from all module paths and removing file extensions
+fn normalizeModulePath(path, allPaths) if allPaths {
+	? -> path
+	_ -> {
+		prefix := commonPrefix(allPaths)
+		if prefix {
+			'' -> path
+			_ -> {
+				suffix := path |> slice(len(prefix))
+				if suffix.0 = '/' -> path |> slice(len(prefix) + 1)
+				_ -> suffix
+			}
+		}
+	}
+}
+
+{
+	commonPrefix: commonPrefix
+	normalizeModulePath: normalizeModulePath
+}

@@ -566,6 +566,17 @@ func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 			return nil, &divisionByZeroErr
 		}
 		return IntValue(left % right), nil
+	case power:
+		// int ** int can produce a float if exponent is negative
+		if right < 0 {
+			return FloatValue(math.Pow(float64(left), float64(right))), nil
+		}
+		// for positive exponents, try to keep as int if possible
+		result := math.Pow(float64(left), float64(right))
+		if result > math.MaxInt64 || result < math.MinInt64 {
+			return FloatValue(result), nil
+		}
+		return IntValue(int64(result)), nil
 	case xor:
 		return IntValue(left ^ right), nil
 	case and:
@@ -620,6 +631,8 @@ func floatBinaryOp(op tokKind, left, right FloatValue) (Value, *runtimeError) {
 			return nil, &divisionByZeroErr
 		}
 		return FloatValue(math.Mod(float64(left), float64(right))), nil
+	case power:
+		return FloatValue(math.Pow(float64(left), float64(right))), nil
 	case greater:
 		return BoolValue(left > right), nil
 	case less:

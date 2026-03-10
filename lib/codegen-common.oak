@@ -1,0 +1,89 @@
+// codegen-common -- shared code generation utilities
+
+{
+	default: default
+	clone: clone
+} := import('std')
+{
+	split: split
+	join: join
+	replace: replace
+} := import('str')
+{
+	printf: printf
+	format: format
+} := import('fmt')
+
+// renderNode converts an AST node back into source code text
+fn renderNode(node) if node.type {
+	:null -> '?'
+	:empty -> '_'
+	:number -> string(node.val)
+	:string -> '\'' << replace(string(node.val), '\'', '\\\'') << '\''
+	:atom -> ':' << node.val
+	:bool -> if node.val { true -> 'true', _ -> 'false' }
+	:identifier -> node.val
+	:list -> '[' << (node.elems |> map(renderNode) |> join(', ')) << ']'
+	:object -> '{' << (
+		node.entries |> map(fn(entry) {
+			renderNode(entry.key) << ': ' << renderNode(entry.val)
+		}) |> join(', ')
+	) << '}'
+	:fnCall -> (
+		renderNode(node.function) << '(' <<
+		(node.args |> map(renderNode) |> join(', ')) <<
+		if node.restArg { ? -> '', _ -> ', ' << renderNode(node.restArg) << '...' } <<
+		')'
+	)
+	:function -> (
+		'fn' << if node.name { '', ? -> '', _ -> ' ' << node.name } <<
+		'(' << (node.args |> join(', ')) <<
+		if node.restArg { ? -> '', _ -> ', ' << node.restArg << '...' } <<
+		') ' << renderNode(node.body)
+	)
+	_ -> '(unknown node)'
+}
+
+// traceDependencies analyzes an AST to find all module dependencies
+fn traceDependencies(nodes) {
+	deps := []
+	fn walkNode(node) if node.type {
+		:fnCall -> if node.function.type = :identifier & node.function.val = 'import' {
+			true -> if node.args.0 {
+				? -> ?
+				_ -> deps << node.args.0.val
+			}
+		}
+		:block -> node.exprs |> each(walkNode)
+		:function -> walkNode(node.body)
+		:ifExpr -> {
+			walkNode(node.cond)
+			node.branches |> each(fn(br) {
+				walkNode(br.target)
+				walkNode(br.body)
+			})
+		}
+		:assignment -> {
+			walkNode(node.left)
+			walkNode(node.right)
+		}
+		:binary, :propertyAccess -> {
+			walkNode(node.left)
+			walkNode(node.right)
+		}
+		:unary -> walkNode(node.right)
+		:list -> node.elems |> each(walkNode)
+		:object -> node.entries |> each(fn(e) {
+			walkNode(e.key)
+			walkNode(e.val)
+		})
+		_ -> ?
+	}
+	nodes |> each(walkNode)
+	deps
+}
+
+{
+	renderNode: renderNode
+	traceDependencies: traceDependencies
+}

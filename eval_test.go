@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -904,4 +907,525 @@ func TestRestArgs(t *testing.T) {
 		IntValue(4),
 		IntValue(5),
 	))
+}
+
+// bitwise operations for integers
+
+func TestBitwiseLeftShift(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		1 << 0
+		1 << 1
+		1 << 2
+		1 << 3
+		5 << 2
+		8 << 4
+	]
+	`, MakeList(
+		IntValue(1),
+		IntValue(2),
+		IntValue(4),
+		IntValue(8),
+		IntValue(20),
+		IntValue(128),
+	))
+}
+
+func TestBitwiseRightShift(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		8 >> 0
+		8 >> 1
+		8 >> 2
+		8 >> 3
+		20 >> 2
+		128 >> 4
+	]
+	`, MakeList(
+		IntValue(8),
+		IntValue(4),
+		IntValue(2),
+		IntValue(1),
+		IntValue(5),
+		IntValue(8),
+	))
+}
+
+func TestBitwiseAnd(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		12 & 10
+		15 & 7
+		255 & 15
+		0 & 255
+		255 & 255
+	]
+	`, MakeList(
+		IntValue(8),
+		IntValue(7),
+		IntValue(15),
+		IntValue(0),
+		IntValue(255),
+	))
+}
+
+func TestBitwiseOr(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		12 | 10
+		8 | 4
+		1 | 2
+		0 | 255
+		15 | 240
+	]
+	`, MakeList(
+		IntValue(14),
+		IntValue(12),
+		IntValue(3),
+		IntValue(255),
+		IntValue(255),
+	))
+}
+
+func TestBitwiseXor(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		12 ^ 10
+		15 ^ 7
+		255 ^ 0
+		255 ^ 255
+		1 ^ 1
+		1 ^ 0
+	]
+	`, MakeList(
+		IntValue(6),
+		IntValue(8),
+		IntValue(255),
+		IntValue(0),
+		IntValue(0),
+		IntValue(1),
+	))
+}
+
+func TestBitwiseNot(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		~0
+		~1
+		~(-1)
+		~(~5)
+	]
+	`, MakeList(
+		IntValue(-1),
+		IntValue(-2),
+		IntValue(0),
+		IntValue(5),
+	))
+}
+
+func TestBitwiseCombined(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		(1 << 4) | (1 << 2)
+		(5 << 1) & 15
+		~(~10)
+		(12 & 10) | (8 ^ 4)
+	]
+	`, MakeList(
+		IntValue(20),
+		IntValue(10),
+		IntValue(10),
+		IntValue(12),
+	))
+}
+
+func TestBitwiseShiftPrecedence(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		1 + 2 << 1
+		1 << 2 + 1
+		10 - 2 >> 1
+	]
+	`, MakeList(
+		IntValue(6),
+		IntValue(8),
+		IntValue(4),
+	))
+}
+
+// power operator tests
+
+func TestPowerInt(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		2 ** 0
+		2 ** 1
+		2 ** 2
+		2 ** 3
+		2 ** 10
+		5 ** 2
+	]
+	`, MakeList(
+		IntValue(1),
+		IntValue(2),
+		IntValue(4),
+		IntValue(8),
+		IntValue(1024),
+		IntValue(25),
+	))
+}
+
+func TestPowerFloat(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		2.0 ** 0.0
+		2.0 ** 1.0
+		2.0 ** 0.5
+		4.0 ** 0.5
+		10.0 ** 2.0
+	]
+	`, MakeList(
+		FloatValue(1.0),
+		FloatValue(2.0),
+		FloatValue(math.Sqrt(2)),
+		FloatValue(2.0),
+		FloatValue(100.0),
+	))
+}
+
+func TestPowerMixed(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		2 ** 2.0
+		2.0 ** 2
+		3 ** 0.5
+	]
+	`, MakeList(
+		FloatValue(4.0),
+		FloatValue(4.0),
+		FloatValue(math.Sqrt(3)),
+	))
+}
+
+func TestPowerNegativeExponent(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		2 ** -1
+		2 ** -2
+		10.0 ** -1.0
+	]
+	`, MakeList(
+		FloatValue(0.5),
+		FloatValue(0.25),
+		FloatValue(0.1),
+	))
+}
+
+func TestPowerPrecedence(t *testing.T) {
+	expectProgramToReturn(t, `
+	[
+		2 + 3 ** 2
+		2 * 3 ** 2
+		2 ** 3 * 2
+		10 - 2 ** 2
+	]
+	`, MakeList(
+		IntValue(11),
+		IntValue(18),
+		IntValue(16),
+		IntValue(6),
+	))
+}
+
+// Virtual interpreter tests
+
+func TestVirtualInterpreterCreation(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        type(Virtual.createVM())
+        `, AtomValue("object"))
+}
+
+func TestVirtualStandardVM(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        type(vm.globalScope.print)
+        `, AtomValue("function"))
+}
+
+func TestVirtualContextCreation(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        type(Virtual.createVirtualContext())
+        `, AtomValue("object"))
+}
+
+func TestVirtualLiteralEvaluation(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('?', {})
+                vm.run('_', {})
+                vm.run('42', {})
+                vm.run('3.5', {})
+                vm.run('\'hello\'', {})
+                vm.run(':test', {})
+                vm.run('true', {})
+                vm.run('false', {})
+        ]
+        `, MakeList(
+		null,
+		empty,
+		IntValue(42),
+		FloatValue(3.5),
+		MakeString("hello"),
+		AtomValue("test"),
+		oakTrue,
+		oakFalse,
+	))
+}
+
+func TestVirtualArithmeticAndComparison(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('2 + 3', {})
+                vm.run('3 * 4', {})
+                vm.run('17 % 5', {})
+                vm.run('3.5 + 2.1', {})
+                vm.run('5 = 5', {})
+                vm.run('5 != 3', {})
+                vm.run('4 >= 3', {})
+        ]
+        `, MakeList(
+		IntValue(5),
+		IntValue(12),
+		IntValue(2),
+		FloatValue(5.6),
+		oakTrue,
+		oakTrue,
+		oakTrue,
+	))
+}
+
+func TestVirtualLogicalAndUnaryOperations(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('true & false', {})
+                vm.run('true | false', {})
+                vm.run('!false', {})
+                vm.run('-5', {})
+        ]
+        `, MakeList(
+		oakFalse,
+		oakTrue,
+		oakTrue,
+		IntValue(-5),
+	))
+}
+
+func TestVirtualVariableOperations(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        ctx := Virtual.createVirtualContext()
+        ctx.define('x', 42)
+        ctx.evalExpr('x')
+        `, IntValue(42))
+}
+
+func TestVirtualVariableAssignment(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        ctx := Virtual.createVirtualContext()
+        ctx.define('y', 10)
+        ctx.evalExpr('y <- 20')
+        ctx.evalExpr('y')
+        `, IntValue(20))
+}
+
+func TestVirtualFunctionDefinition(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        ctx := Virtual.createVirtualContext()
+        ctx.defineFunction('double', ['n'], {
+                type: :binary
+                op: :times
+                left: { type: :identifier, val: 'n' }
+                right: { type: :int, val: 2 }
+        })
+        ctx.evalExpr('double(5)')
+        `, IntValue(10))
+}
+
+func TestVirtualFunctionWithClosure(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        ctx := Virtual.createVirtualContext()
+        ctx.define('multiplier', 3)
+        ctx.defineFunction('multiply', ['x'], {
+                type: :binary
+                op: :times
+                left: { type: :identifier, val: 'multiplier' }
+                right: { type: :identifier, val: 'x' }
+        })
+        ctx.evalExpr('multiply(4)')
+        `, IntValue(12))
+}
+
+func TestVirtualIfExpressions(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('if true { true -> 42, _ -> 24, }', {})
+                vm.run('if false { false -> 24, _ -> 42, }', {})
+                vm.run('if 5 > 3 { true -> \'yes\', _ -> \'no\', }', {})
+        ]
+        `, MakeList(
+		IntValue(42),
+		IntValue(24),
+		MakeString("yes"),
+	))
+}
+
+func TestVirtualDataStructures(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('[1, 2, 3]', {})
+                vm.run('{a: 1, b: 2}', {})
+        ]
+        `, MakeList(
+		MakeList(IntValue(1), IntValue(2), IntValue(3)),
+		ObjectValue{"a": IntValue(1), "b": IntValue(2)},
+	))
+}
+
+func TestVirtualStandardLibrary(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('type(42)', {})
+                vm.run('len([1,2,3,4])', {})
+                vm.run('len(\'hello\')', {})
+                vm.run('len(keys({a:1, b:2}))', {})
+                vm.run('string(123)', {})
+                vm.run('int(\'456\')', {})
+                vm.run('float(\'3.14\')', {})
+        ]
+        `, MakeList(
+		AtomValue("int"),
+		IntValue(4),
+		IntValue(5),
+		IntValue(2),
+		MakeString("123"),
+		IntValue(456),
+		FloatValue(3.14),
+	))
+}
+
+func TestVirtualUnsupportedFeaturesReturnErrors(t *testing.T) {
+	expectProgramToReturn(t, `
+        Virtual := import('Virtual')
+        vm := Virtual.createStandardVM()
+        [
+                vm.run('2 ** 3', {}).type
+                vm.run('if true { 42 } else { 24 }', {}).type
+        ]
+        `, MakeList(
+		AtomValue("error"),
+		AtomValue("error"),
+	))
+}
+func TestSyscallFunctionExists(t *testing.T) {
+	expectProgramToReturn(t, `
+		result := syscall(-1) // Invalid syscall number
+		result.type
+	`, AtomValue("error"))
+}
+
+func TestUTF16Builtin(t *testing.T) {
+	expectProgramToReturn(t, `
+		buf := utf16('Az')
+		[
+			len(buf)
+			codepoint(buf.0)
+			codepoint(buf.1)
+			codepoint(buf.2)
+			codepoint(buf.3)
+			codepoint(buf.4)
+			codepoint(buf.5)
+		]
+	`, MakeList(
+		IntValue(6),
+		IntValue(65),
+		IntValue(0),
+		IntValue(122),
+		IntValue(0),
+		IntValue(0),
+		IntValue(0),
+	))
+}
+
+func TestSysprocMissingLibraryReturnsError(t *testing.T) {
+	expectProgramToReturn(t, `
+		sysproc('definitely-missing-oak-syscall.dll', 'MissingProc').type
+	`, AtomValue("error"))
+}
+
+func TestVirtualSyscallBuiltinsExist(t *testing.T) {
+	expectProgramToReturn(t, `
+		Virtual := import('Virtual')
+		vm := Virtual.createStandardVM()
+		[
+			type(vm.globalScope.utf16)
+			type(vm.globalScope.sysproc)
+			type(vm.globalScope.syscall)
+		]
+	`, MakeList(
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+	))
+}
+
+func TestSyscallCanInvokeResolvedProcOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("sysproc-backed syscall test is Windows-specific")
+	}
+
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+	val, err := ctx.Eval(strings.NewReader(`
+		proc := sysproc('kernel32.dll', 'GetCurrentProcessId')
+		syscall(proc)
+	`))
+	if err != nil {
+		t.Fatalf("Did not expect program to exit with error: %s", err.Error())
+	}
+
+	result, ok := val.(ObjectValue)
+	if !ok {
+		t.Fatalf("Expected syscall result object, got %T", val)
+	}
+
+	if typeVal, ok := result["type"].(AtomValue); !ok || typeVal != AtomValue("success") {
+		t.Fatalf("Expected syscall success result, got %v", result["type"])
+	}
+
+	pid, ok := result["r1"].(IntValue)
+	if !ok {
+		t.Fatalf("Expected syscall result to contain integer r1, got %T", result["r1"])
+	}
+
+	if pid != IntValue(os.Getpid()) {
+		t.Fatalf("Expected PID %d, got %d", os.Getpid(), pid)
+	}
 }

@@ -1,0 +1,165 @@
+// virtual.test.oak -- Tests for the Virtual Oak interpreter
+
+Virtual := import('Virtual')
+
+fn run(t) {
+	{
+		'createVM creates a VM object' |> t.eq(
+			type(Virtual.createVM())
+			:object
+		)
+
+		'createStandardVM has print function' |> t.eq(
+			type(Virtual.createStandardVM().globalScope.print)
+			:function
+		)
+
+		'createVirtualContext creates context' |> t.eq(
+			type(Virtual.createVirtualContext())
+			:object
+		)
+	}
+
+	{
+		vm := Virtual.createStandardVM()
+
+		'evaluate null literal' |> t.eq(vm.run('?', {}), ?)
+		'evaluate empty literal' |> t.eq(vm.run('_', {}), _)
+		'evaluate int literal' |> t.eq(vm.run('42', {}), 42)
+		'evaluate float literal' |> t.eq(vm.run('3.5', {}), 3.5)
+		'evaluate string literal' |> t.eq(vm.run('\'hello\'', {}), 'hello')
+		'evaluate atom literal' |> t.eq(vm.run(':test', {}), :test)
+		'evaluate boolean true' |> t.eq(vm.run('true', {}), true)
+		'evaluate boolean false' |> t.eq(vm.run('false', {}), false)
+	}
+
+	{
+		vm := Virtual.createStandardVM()
+
+		'integer addition' |> t.eq(vm.run('2 + 3', {}), 5)
+		'integer subtraction' |> t.eq(vm.run('10 - 4', {}), 6)
+		'integer multiplication' |> t.eq(vm.run('3 * 4', {}), 12)
+		'integer division' |> t.eq(vm.run('15 / 3', {}), 5)
+		'integer modulus' |> t.eq(vm.run('17 % 5', {}), 2)
+		'float arithmetic' |> t.approx(vm.run('3.5 + 2.1', {}), 5.6)
+
+		'equal comparison' |> t.eq(vm.run('5 = 5', {}), true)
+		'not equal comparison' |> t.eq(vm.run('5 != 3', {}), true)
+		'less than' |> t.eq(vm.run('3 < 5', {}), true)
+		'greater than' |> t.eq(vm.run('7 > 2', {}), true)
+		'less than or equal' |> t.eq(vm.run('5 <= 5', {}), true)
+		'greater than or equal' |> t.eq(vm.run('4 >= 3', {}), true)
+
+		'logical AND' |> t.eq(vm.run('true & false', {}), false)
+		'logical OR' |> t.eq(vm.run('true | false', {}), true)
+		'logical NOT' |> t.eq(vm.run('!false', {}), true)
+		'unary minus' |> t.eq(vm.run('-5', {}), -5)
+	}
+
+	{
+		ctx := Virtual.createVirtualContext()
+
+		'define and access variable' |> t.eq(
+			{
+				ctx.define('x', 42)
+				ctx.evalExpr('x')
+			}
+			42
+		)
+
+		'variable assignment persists in context scope' |> t.eq(
+			{
+				ctx.define('y', 10)
+				ctx.evalExpr('y <- 20')
+				ctx.evalExpr('y')
+			}
+			20
+		)
+	}
+
+	{
+		ctx := Virtual.createVirtualContext()
+
+		'function definition uses parser-compatible AST' |> t.eq(
+			{
+				ctx.defineFunction('double', ['n'], {
+					type: :binary
+					op: :times
+					left: { type: :identifier, val: 'n' }
+					right: { type: :int, val: 2 }
+				})
+				ctx.evalExpr('double(5)')
+			}
+			10
+		)
+
+		'function closure uses captured scope' |> t.eq(
+			{
+				ctx.define('multiplier', 3)
+				ctx.defineFunction('multiply', ['x'], {
+					type: :binary
+					op: :times
+					left: { type: :identifier, val: 'multiplier' }
+					right: { type: :identifier, val: 'x' }
+				})
+				ctx.evalExpr('multiply(4)')
+			}
+			12
+		)
+	}
+
+	{
+		vm := Virtual.createStandardVM()
+
+		'if expression matches true branch' |> t.eq(
+			vm.run('if true { true -> 42, _ -> 24, }', {})
+			42
+		)
+
+		'if expression matches false branch' |> t.eq(
+			vm.run('if false { false -> 24, _ -> 42, }', {})
+			24
+		)
+
+		'if expression supports computed conditions' |> t.eq(
+			vm.run('if 5 > 3 { true -> \'yes\', _ -> \'no\', }', {})
+			'yes'
+		)
+	}
+
+	{
+		vm := Virtual.createStandardVM()
+
+		'list literal' |> t.eq(vm.run('[1, 2, 3]', {}), [1, 2, 3])
+		'object literal' |> t.eq(vm.run('{a: 1, b: 2}', {}), {a: 1, b: 2})
+	}
+
+	{
+		vm := Virtual.createStandardVM()
+
+		'type returns virtual int type' |> t.eq(vm.run('type(42)', {}), :int)
+		'len works on lists' |> t.eq(vm.run('len([1, 2, 3, 4])', {}), 4)
+		'len works on strings' |> t.eq(vm.run('len(\'hello\')', {}), 5)
+		'keys works on objects' |> t.eq(vm.run('len(keys({a: 1, b: 2}))', {}), 2)
+		'string conversion' |> t.eq(vm.run('string(123)', {}), '123')
+		'int conversion' |> t.eq(vm.run('int(\'456\')', {}), 456)
+		'float conversion from string' |> t.approx(vm.run('float(\'3.14\')', {}), 3.14)
+		'utf16 builtin is available in virtual vm' |> t.eq(vm.run('type(utf16)', {}), :function)
+		'sysproc builtin is available in virtual vm' |> t.eq(vm.run('type(sysproc)', {}), :function)
+		'syscall builtin is available in virtual vm' |> t.eq(vm.run('type(syscall)', {}), :function)
+	}
+
+	{
+		vm := Virtual.createStandardVM()
+
+		'unsupported power syntax returns parse error' |> t.eq(
+			vm.run('2 ** 3', {}).type
+			:error
+		)
+
+		'unsupported if/else syntax returns parse error' |> t.eq(
+			vm.run('if true { 42 } else { 24 }', {}).type
+			:error
+		)
+	}
+}

@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	utf16pkg "unicode/utf16"
+	"unsafe"
 )
 
 func (c *Context) requireArgLen(fnName string, args []Value, count int) *runtimeError {
@@ -87,6 +89,10 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("wait", c.callbackify(c.oakWait))
 	c.LoadFunc("exit", c.oakExit)
 	c.LoadFunc("exec", c.callbackify(c.oakExec))
+	c.LoadFunc("sysproc", c.oakSysProc)
+	c.LoadFunc("syscall", c.oakSyscall)
+	c.LoadFunc("utf16", c.oakUTF16)
+	c.LoadFunc("go", c.oakGo)
 
 	// i/o interfaces
 	c.LoadFunc("input", c.callbackify(c.oakInput))
@@ -118,12 +124,91 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("___runtime_gc", c.rtGC)
 	c.LoadFunc("___runtime_mem", c.rtMem)
 	c.LoadFunc("___runtime_proc", c.rtProc)
+	c.LoadFunc("___runtime_go_version", c.rtGoVersion)
+	c.LoadFunc("___runtime_sys_info", c.rtSysInfo)
 }
 
 func errObj(message string) ObjectValue {
 	return ObjectValue{
 		"type":  AtomValue("error"),
 		"error": MakeString(message),
+	}
+}
+
+func syscallErrObj(message string) ObjectValue {
+	return ObjectValue{
+		var (
+	sysProcMu    sync.Mutex
+	sysProcCache = map[string]uintptr{}
+)
+
+func lookupSysProc(library, name string) (uintptr, error) {
+	if runtime.GOOS != "windows" {
+		return 0, fmt.Errorf("sysproc is only supported on Windows")
+	}
+
+	cacheKey := library + "\x00" + name
+
+	sysProcMu.Lock()
+	if addr, ok := sysProcCache[cacheKey]; ok {
+		sysProcMu.Unlock()
+		return addr, nil
+	}
+	sysProcMu.Unlock()
+
+	script := fmt.Sprintf(`
+$native = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class OakNative {
+	[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+	public static extern IntPtr LoadLibrary(string fileName);
+
+	[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi, ExactSpelling = true)]
+	public static extern IntPtr GetProcAddress(IntPtr module, string procName);
+}
+"@
+
+Add-Type -TypeDefinition $native -ErrorAction Stop
+$module = [OakNative]::LoadLibrary(%q)
+if ($module -eq [IntPtr]::Zero) {
+	throw "LoadLibrary failed"
+}
+
+$proc = [OakNative]::GetProcAddress($module, %q)
+if ($proc -eq [IntPtr]::Zero) {
+	throw "GetProcAddress failed"
+}
+
+[Console]::Out.Write([UInt64] $proc.ToInt64())
+`, library, name)
+
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	stdout, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return 0, fmt.Errorf("%s", strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return 0, err
+	}
+
+	addr, err := strconv.ParseUint(strings.TrimSpace(string(stdout)), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	sysProcMu.Lock()
+	sysProcCache[cacheKey] = uintptr(addr)
+	sysProcMu.Unlock()
+	return uintptr(addr), nil
+}
+
+"type":  AtomValue("error"),
+		"error": MakeString(message),
+		"errno": IntValue(0),
+		"r1":    IntValue(0),
+		"r2":    IntValue(0),
 	}
 }
 
@@ -565,6 +650,180 @@ func (c *Context) oakExec(args []Value) (Value, *runtimeError) {
 		"stdout": &stdoutVal,
 		"stderr": &stderrVal,
 	}, nil
+}
+
+func (c *Context) oakSysProc(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("sysproc", args, 2); err != nil {
+		return nil, err
+	}
+
+	library, ok1 := args[0].(*StringValue)
+	name, ok2 := args[1].(*StringValue)
+	if !ok1 || !ok2 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Mismatched types in call sysproc(%s, %s)", args[0], args[1]),
+		}
+	}
+
+	addr, err := lookupSysProc(library.stringContent(), name.stringContent())
+	if err != nil {
+		return errObj(fmt.Sprintf("Could not resolve procedure %s!%s: %s",
+			library.stringContent(), name.stringContent(), err.Error())), nil
+	}
+
+	return ObjectValue{
+		"type":    AtomValue("proc"),
+		"library": MakeString(library.stringContent()),
+		"name":    MakeString(name.stringContent()),
+		"addr":    IntValue(addr),
+	}, nil
+}
+
+func (c *Context) oakUTF16(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("utf16", args, 1); err != nil {
+		return nil, err
+	}
+
+	arg, ok := args[0].(*StringValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Mismatched types in call utf16(%s)", args[0]),
+		}
+	}
+
+	encoded := utf16pkg.Encode([]rune(arg.stringContent()))
+	buf := make([]byte, 0, (len(encoded)+1)*2)
+	for _, word := range encoded {
+		buf = append(buf, byte(word), byte(word>>8))
+	}
+	buf = append(buf, 0, 0)
+
+	val := StringValue(buf)
+	return &val, nil
+}
+
+func (c *Context) oakSyscall(args []Value) (Value, *runtimeError) {
+	if len(args) < 1 {
+		return syscallErrObj("syscall requires at least 1 argument (procedure or address)"), nil
+	}
+
+	var syscallTarget uintptr
+	switch target := args[0].(type) {
+	case IntValue:
+		if target <= 0 {
+			return syscallErrObj("invalid syscall target"), nil
+		}
+		syscallTarget = uintptr(target)
+	case ObjectValue:
+		if typeVal, ok := target["type"].(AtomValue); ok && typeVal == AtomValue("error") {
+			return target, nil
+		}
+
+		typeVal, ok := target["type"].(AtomValue)
+		if !ok || typeVal != AtomValue("proc") {
+			return syscallErrObj(fmt.Sprintf("syscall target must be an integer or proc, got %s", args[0])), nil
+		}
+
+		addr, ok := target["addr"].(IntValue)
+		if !ok || addr <= 0 {
+			return syscallErrObj("invalid syscall target"), nil
+		}
+		syscallTarget = uintptr(addr)
+	default:
+		return syscallErrObj(fmt.Sprintf("syscall target must be an integer or proc, got %s", args[0])), nil
+	}
+
+	var syscallArgs []uintptr
+	for i := 1; i < len(args); i++ {
+		switch arg := args[i].(type) {
+		case IntValue:
+			syscallArgs = append(syscallArgs, uintptr(arg))
+		case BoolValue:
+			if arg {
+				syscallArgs = append(syscallArgs, 1)
+			} else {
+				syscallArgs = append(syscallArgs, 0)
+			}
+		case NullValue:
+			syscallArgs = append(syscallArgs, 0)
+		case *StringValue:
+			if len(*arg) == 0 {
+				syscallArgs = append(syscallArgs, 0)
+				continue
+			}
+			syscallArgs = append(syscallArgs, uintptr(unsafe.Pointer(&(*arg)[0])))
+		default:
+			return syscallErrObj(fmt.Sprintf(
+				"syscall argument %d must be int, bool, string, or ?, got %s", i, arg,
+			)), nil
+		}
+	}
+
+	r1, r2, err := syscall.SyscallN(syscallTarget, syscallArgs...)
+	runtime.KeepAlive(args)
+
+	if err != 0 {
+		return ObjectValue{
+			"type":  AtomValue("error"),
+			"error": MakeString(err.Error()),
+			"errno": IntValue(err),
+			"r1":    IntValue(r1),
+			"r2":    IntValue(r2),
+		}, nil
+	}
+
+	return ObjectValue{
+		"type":  AtomValue("success"),
+		"errno": IntValue(0),
+		"r1":    IntValue(r1),
+		"r2":    IntValue(r2),
+	}, nil
+}
+
+func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
+	if len(args) < 1 {
+		return nil, &runtimeError{
+			reason: "go requires at least 1 argument (function to run)",
+		}
+	}
+
+	fn, ok := args[0].(FnValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("go argument must be a function, got %s", args[0]),
+		}
+	}
+
+	fnArgs := args[1:] // remaining arguments
+
+	c.eng.Add(1)
+	go func() {
+		defer c.eng.Done()
+		_, err := c.EvalFnValue(fn, false, fnArgs...)
+		if err != nil {
+			c.eng.reportErr(err)
+		}
+	}()
+
+	return null, nil
+}
+
+func (c *Context) oakMakeChan(_ []Value) (Value, *runtimeError) {
+	return nil, &runtimeError{
+		reason: "make_chan is not implemented",
+	}
+}
+
+func (c *Context) oakChanSend(_ []Value) (Value, *runtimeError) {
+	return nil, &runtimeError{
+		reason: "chan_send is not implemented",
+	}
+}
+
+func (c *Context) oakChanRecv(_ []Value) (Value, *runtimeError) {
+	return nil, &runtimeError{
+		reason: "chan_recv is not implemented",
+	}
 }
 
 var inputReaderInit sync.Once
@@ -1511,5 +1770,19 @@ func (c *Context) rtProc(_ []Value) (Value, *runtimeError) {
 	return ObjectValue{
 		"pid": IntValue(os.Getpid()),
 		"exe": exeValue,
+	}, nil
+}
+
+// ___runtime_go_version returns the Go version
+func (c *Context) rtGoVersion(_ []Value) (Value, *runtimeError) {
+	return MakeString(runtime.Version()), nil
+}
+
+// ___runtime_sys_info returns system information
+func (c *Context) rtSysInfo(_ []Value) (Value, *runtimeError) {
+	return ObjectValue{
+		"os":   MakeString(runtime.GOOS),
+		"arch": MakeString(runtime.GOARCH),
+		"cpus": IntValue(runtime.NumCPU()),
 	}, nil
 }

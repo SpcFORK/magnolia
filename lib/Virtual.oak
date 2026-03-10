@@ -1,0 +1,344 @@
+// Virtual.oak -- Oak interpreter written in Oak
+// A self-hosting implementation that can parse and execute Oak code
+
+{
+	default: default
+	slice: slice
+	clone: clone
+	map: map
+	each: each
+	take: take
+	filter: filter
+	reduce: reduce
+	append: append
+	entries: entries
+	contains?: contains?
+	merge: merge
+	keys: keys
+} := import('std')
+{
+	join: join
+	split: split
+	replace: replace
+	contains?: strContains?
+} := import('str')
+{
+	printf: printf
+	format: format
+} := import('fmt')
+syntax := import('syntax')
+
+// VirtualMachine holds the execution state for running Oak code
+fn createVM() {
+	globalScope := {}
+	callStack := []
+	
+	fn evalBinaryOp(op, left, right) if op {
+		:plus -> if type(left) {
+			:int -> left + right
+			:float -> left + right
+			:string -> left << right
+			:list -> left |> append(right)
+			_ -> ?
+		}
+		:minus -> left - right
+		:times -> left * right
+		:divide -> left / right
+		:modulus -> left % right
+		:power -> left ** right
+		:and -> left & right
+		:or -> left | right
+		:xor -> left ^ right
+		:greater -> left > right
+		:less -> left < right
+		:eq -> left = right
+		:geq -> left >= right
+		:leq -> left <= right
+		:neq -> left != right
+		_ -> ?
+	}
+	
+	fn evalUnaryOp(op, right) if op {
+		:minus -> -right
+		:exclam -> !right
+		:tilde -> ~right
+		_ -> ?
+	}
+	
+	// evaluates an expression
+	fn evalExpr(node, sc) if node.type {
+		:null -> ?
+		:empty -> _
+		:int -> node.val
+		:float -> node.val
+		:string -> node.val
+		:atom -> atom(node.val)
+		:bool -> node.val
+		:identifier -> sc.(node.val) |> default(?)
+		:list -> node.elems |> map(fn(el) evalExpr(el, sc))
+		:object -> {
+			result := {}
+			node.entries |> each(fn(entry) {
+				key := if entry.key.type = :identifier {
+					true -> entry.key.val
+					_ -> evalExpr(entry.key, sc) |> string()
+				}
+				result.(key) := evalExpr(entry.val, sc)
+			})
+			result
+		}
+		:function -> {
+			type: :function
+			params: node.args
+			restArg: node.restArg
+			body: node.body
+			closure: clone(sc)
+		}
+		:fnCall -> {
+			fn_val := evalExpr(node.function, sc)
+			args := node.args |> map(fn(arg) evalExpr(arg, sc))
+			if type(fn_val) = :object & fn_val.type = :function {
+				true -> {
+					fnScope := clone(fn_val.closure)
+					fn_val.params |> each(fn(param, i) {
+						fnScope.(param) := args.(i) |> default(?)
+					})
+					if fn_val.restArg {
+						? -> ?
+						_ -> fnScope.(fn_val.restArg) := 
+							args |> slice(len(fn_val.params))
+					}
+					evalExpr(fn_val.body, fnScope)
+				}
+				_ -> {
+					// try to call as builtin
+					if type(fn_val) = :function {
+						true -> fn_val(args...)
+						_ -> ?
+					}
+				}
+			}
+		}
+		:binary -> {
+			left := evalExpr(node.left, sc)
+			right := evalExpr(node.right, sc)
+			evalBinaryOp(node.op, left, right)
+		}
+		:unary -> {
+			right := evalExpr(node.right, sc)
+			evalUnaryOp(node.op, right)
+		}
+		:assignment -> {
+			val := evalExpr(node.right, sc)
+			if node.left.type = :identifier {
+				true -> sc.(node.left.val) := val
+				_ -> val
+			}
+		}
+		:ifExpr -> {
+			cond := evalExpr(node.cond, sc)
+			matched := false
+			result := ?
+			node.branches |> each(fn(branch) if matched {
+				false -> {
+					target := evalExpr(branch.target, sc)
+					if target = cond {
+						true -> {
+							result <- evalExpr(branch.body, sc)
+							matched <- true
+						}
+					}
+				}
+			})
+			result
+		}
+		:block -> {
+			blockScope := clone(sc)
+			result := ?
+			node.exprs |> each(fn(expr) {
+				result <- evalExpr(expr, blockScope)
+			})
+			result
+		}
+		_ -> ?
+	}
+	
+	{
+		globalScope: globalScope
+		callStack: callStack
+		
+		// registers a builtin function in the global scope
+		registerBuiltin: fn(name, f) {
+			globalScope.(name) := f
+		}
+		
+		// parses Oak source code and returns AST
+		parse: fn(source) {
+			ast := syntax.parse(source)
+			if type(ast) {
+				:object -> if ast.type {
+					:error -> {
+						type: :error
+						message: format('Parse error at {{0}}:{{1}}: {{2}}', 
+							ast.pos.0, ast.pos.1, ast.error)
+					}
+					_ -> ast
+				}
+				_ -> ast
+			}
+		}
+		
+		// evaluates an expression
+		evalExpr: evalExpr
+		
+		// evaluates an AST
+		eval: fn(ast, scope) {
+			scope := merge(clone(globalScope), scope |> default({}))
+			evalExpr(ast, scope)
+		}
+		
+		// run a complete program
+		run: fn(source, scope) {
+			parsed := syntax.parse(source)
+			if type(parsed) = :object & parsed.type = :error {
+				true -> {
+					type: :error
+					message: format('Parse error: {{0}}', parsed.error)
+				}
+				_ -> {
+					scope := merge(clone(globalScope), scope |> default({}))
+					result := ?
+					parsed |> each(fn(node) {
+						result <- evalExpr(node, scope)
+					})
+					result
+				}
+			}
+		}
+	}
+}
+
+// StandardVM creates a VM with standard library functions pre-loaded
+fn createStandardVM() {
+	vm := createVM()
+	
+	// Register standard builtins
+	vm.registerBuiltin('print', fn(s) {
+		printf(string(s))
+		s
+	})
+	vm.registerBuiltin('type', fn(x) {
+		xtype := type(x)
+		if xtype {
+			:null -> :null
+			:empty -> :empty
+			:int -> :int
+			:float -> :float
+			:string -> :string
+			:atom -> :atom
+			:bool -> :bool
+			:function -> :function
+			:list -> :list
+			:object -> :object
+			_ -> :unknown
+		}
+	})
+	vm.registerBuiltin('len', fn(x) if type(x) {
+		:string -> len(x)
+		:list -> len(x)
+		:object -> len(x)
+		_ -> ?
+	})
+	vm.registerBuiltin('keys', fn(x) if type(x) {
+		:list -> [0] |> take(len(x))
+		:object -> x |> keys()
+		_ -> ?
+	})
+	vm.registerBuiltin('string', fn(x) string(x))
+	vm.registerBuiltin('int', fn(x) if type(x) {
+		:int -> x
+		:float -> int(x)
+		:string -> int(x) |> default(?)
+		_ -> ?
+	})
+	vm.registerBuiltin('float', fn(x) if type(x) {
+		:float -> x
+		:int -> float(x)
+		:string -> float(x) |> default(?)
+		_ -> ?
+	})
+	vm.registerBuiltin('utf16', fn(x) utf16(x))
+	vm.registerBuiltin('sysproc', fn(library, name) sysproc(library, name))
+	vm.registerBuiltin('syscall', fn(target, args...) syscall(target, args...))
+	
+	vm
+}
+
+// VirtualContext provides a high-level interface for running Oak in Oak
+fn createVirtualContext(initialScope) {
+	vm := createStandardVM()
+	scope := initialScope |> default({})
+	scope |> merge(clone(vm.globalScope))
+	
+	{
+		vm: vm
+		scope: scope
+		
+		// define a variable
+		define: fn(name, value) {
+			scope.(name) := value
+		}
+		
+		// implement a function
+		defineFunction: fn(name, params, body) {
+			scope.(name) := {
+				type: :function
+				params: params
+				body: body
+				closure: clone(scope)
+			}
+		}
+		
+		// evaluate an expression
+		evalExpr: fn(code, localScope) {
+			localScope := localScope |> default(scope)
+			localScope |> merge(clone(vm.globalScope))
+			if localScope != scope -> localScope |> merge(scope)
+			parsed := vm.parse(code)
+			if type(parsed) {
+				:object -> if parsed.type {
+					:error -> parsed
+					_ -> ?
+				}
+				_ -> {
+					result := ?
+					parsed |> each(fn(node) {
+						result <- vm.evalExpr(node, localScope)
+					})
+					result
+				}
+			}
+		}
+		
+		// execute a program
+		execute: fn(program) {
+			vm.run(program, clone(scope))
+		}
+		
+		// import and execute an Oak file
+		importOak: fn(path) {
+			// This would require OS integration
+			// For now, return a placeholder
+			{
+				type: :error
+				message: 'File I/O not implemented in virtual context'
+			}
+		}
+	}
+}
+
+{
+	createVM: createVM
+	createStandardVM: createStandardVM
+	createVirtualContext: createVirtualContext
+}

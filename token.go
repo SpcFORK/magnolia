@@ -59,6 +59,7 @@ const (
 	times
 	divide
 	modulus
+	power
 	xor
 	and
 	or
@@ -140,6 +141,8 @@ func (t token) String() string {
 		return "/"
 	case modulus:
 		return "%"
+	case power:
+		return "**"
 	case xor:
 		return "^"
 	case and:
@@ -361,6 +364,11 @@ func (t *tokenizer) nextToken() token {
 		}
 		return token{kind: minus, pos: t.currentPos()}
 	case '*':
+		if !t.isEOF() && t.peek() == '*' {
+			pos := t.currentPos()
+			t.next()
+			return token{kind: power, pos: pos}
+		}
 		return token{kind: times, pos: t.currentPos()}
 	case '/':
 		if !t.isEOF() && t.peek() == '/' {

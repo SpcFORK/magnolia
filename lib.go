@@ -58,6 +58,9 @@ var libcrypto string
 //go:embed lib/syntax.oak
 var libsyntax string
 
+//go:embed lib/Virtual.oak
+var libvirtual string
+
 var stdlibs = map[string]string{
 	"std":      libstd,
 	"str":      libstr,
@@ -76,6 +79,7 @@ var stdlibs = map[string]string{
 	"md":       libmd,
 	"crypto":   libcrypto,
 	"syntax":   libsyntax,
+	"Virtual":  libvirtual,
 }
 
 func isStdLib(name string) bool {

@@ -1,0 +1,79 @@
+// bundle-ast -- AST bundling utilities for creating Oak modules
+
+{
+	clone: clone
+	merge: merge
+	map: map
+} := import('std')
+{
+	split: split
+} := import('str')
+transform := import('ast-transform')
+
+// wrapBundle creates a bundle AST that combines multiple parsed modules
+// into a single bundled program with proper module system initialization
+fn wrapBundle(modules, entryModuleName) {
+	// Create module initialization table
+	moduleEntries := modules |> map(fn([modulePath, moduleNodes]) {
+		moduleName := modulePath
+		{
+			key: {
+				type: :string
+				val: moduleName
+				tok: { pos: [0, 1, 0], type: :stringLiteral, val: moduleName }
+			}
+			val: {
+				type: :fnCall
+				tok: { pos: [0, 1, 0], type: :leftParen, val: ? }
+				function: {
+					type: :identifier
+					tok: { pos: [0, 1, 0], type: :identifier, val: '__oak_modularize' }
+					val: '__oak_modularize'
+				}
+				args: [{
+					type: :string
+					val: moduleName
+					tok: { pos: [0, 1, 0], type: :stringLiteral, val: moduleName }
+				}, {
+					type: :fnCall
+					tok: { pos: [0, 1, 0], type: :leftParen, val: ? }
+					function: {
+						type: :identifier
+						tok: { pos: [0, 1, 0], type: :identifier, val: moduleNodes.name }
+						val: moduleNodes.name
+					}
+					args: []
+					restArg: ?
+				}]
+				restArg: ?
+			}
+		}
+	})
+
+	{
+		type: :block
+		tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+		exprs: modules |> map(fn([_, moduleNodes]) moduleNodes) |> append([
+			{
+				type: :fnCall
+				tok: { pos: [0, 1, 0], type: :leftParen, val: ? }
+				function: {
+					type: :identifier
+					tok: { pos: [0, 1, 0], type: :identifier, val: '__oak_module_import' }
+					val: '__oak_module_import'
+				}
+				args: [{
+					type: :string
+					val: entryModuleName
+					tok: { type: :stringLiteral, pos: [0, 1, 0], val: entryModuleName }
+				}]
+				restArg: ?
+			}
+		])
+		decls: []
+	}
+}
+
+{
+	wrapBundle: wrapBundle
+}

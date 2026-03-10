@@ -1,0 +1,38 @@
+// pack-utils -- utilities for packing Oak programs as stand-alone binaries
+
+{
+	default: default
+} := import('std')
+{
+	padStart: padStart
+} := import('str')
+
+// Magic bytes appended to packed executable files to identify Oak bundles
+// "oak " (3 bytes) + date 1998-10-15 encoded as \x19\x98\x10\x15 = 8 bytes total
+MagicBytes := 'oak \x19\x98\x10\x15'
+
+// MaxBundleSizeLen is the number of bytes used to store the length of the Oak
+// bundle itself in a packed executable. UINT64_MAX is 20 decimal digits, so 24
+// is sufficient. This also has the aesthetically pleasing property that 24 + 8
+// (magic bytes) = 32 bytes.
+MaxBundleSizeLen := 24
+
+// encodeBundleSize encodes the size of an Oak bundle as a padded string
+// suitable for packing at the end of an executable
+fn encodeBundleSize(bundleSize) {
+	string(bundleSize) |> padStart(MaxBundleSizeLen, ' ')
+}
+
+// packBundle combines an executable, Oak bundle, size encoding, and magic bytes
+// into a final packed binary format
+fn packBundle(executable, oakBundle) {
+	bundleSizeString := encodeBundleSize(len(oakBundle))
+	executable << oakBundle << bundleSizeString << MagicBytes
+}
+
+{
+	MagicBytes: MagicBytes
+	MaxBundleSizeLen: MaxBundleSizeLen
+	encodeBundleSize: encodeBundleSize
+	packBundle: packBundle
+}

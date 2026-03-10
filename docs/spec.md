@@ -101,6 +101,9 @@ rand()
 srand(length)
 wait(duration)
 exec(path, args, stdin) // returns stdout, stderr, end events
+sysproc(library, name)
+syscall(proc, args...)
+utf16(string)
 
 ---- I/O interfaces
 input()
