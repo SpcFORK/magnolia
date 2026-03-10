@@ -102,7 +102,7 @@ Marks a test as skipped. The test is not run but is counted in the report.
 suite := new('Tests with Skips')
 
 suite.eq('passing test', 1 + 1, 2)
-suite.skip('not implemented yet', someFunc(), expectedValue)
+suite.skip('pending', someFunc(), expectedValue)
 suite.eq('another passing test', 'a' + 'b', 'ab')
 ```
 

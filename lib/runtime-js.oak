@@ -328,13 +328,95 @@ function exit(code) {
 	if (__Is_Oak_Node) process.exit(code);
 	return null;
 }
-function exec() {
-	throw new Error(\'exec() not implemented\');
+
+let __Oak_FS;
+let __Oak_Path;
+let __Oak_ChildProc;
+let __Oak_VirtualFDNext = 100000;
+const __Oak_VirtualFDs = new Map();
+
+function __oak_require_fs() {
+	if (!__Is_Oak_Node) return null;
+	if (!__Oak_FS) __Oak_FS = require("fs");
+	return __Oak_FS;
+}
+function __oak_require_path() {
+	if (!__Is_Oak_Node) return null;
+	if (!__Oak_Path) __Oak_Path = require("path");
+	return __Oak_Path;
+}
+function __oak_require_child_process() {
+	if (!__Is_Oak_Node) return null;
+	if (!__Oak_ChildProc) __Oak_ChildProc = require("child_process");
+	return __Oak_ChildProc;
+}
+function __oak_io_error(message) {
+	return {
+		type: Symbol.for("error"),
+		error: __as_oak_string(String(message)),
+	};
+}
+function __oak_to_string_value(x) {
+	x = __as_oak_string(x);
+	if (__is_oak_string(x)) return x.valueOf();
+	if (x == null) return "";
+	return String(x);
+}
+function __oak_to_event_data(s) {
+	return {
+		type: Symbol.for("data"),
+		data: __as_oak_string(s ?? ""),
+	};
+}
+function __oak_get_vfs() {
+	if (typeof ___packed_vfs === "function") {
+		return ___packed_vfs();
+	}
+	return null;
+}
+
+function exec(path, args = [], stdin = "") {
+	if (__Is_Oak_Node) {
+		try {
+			const cp = __oak_require_child_process();
+			const result = cp.spawnSync(__oak_to_string_value(path),
+				(Array.isArray(args) ? args : []).map(__oak_to_string_value), {
+					input: __oak_to_string_value(stdin),
+					encoding: "latin1",
+				});
+			if (result.error) return __oak_io_error(result.error.message || result.error);
+			return {
+				type: Symbol.for("end"),
+				status: int(result.status ?? 0) ?? 0,
+				stdout: __as_oak_string(result.stdout ?? ""),
+				stderr: __as_oak_string(result.stderr ?? ""),
+			};
+		} catch (e) {
+			return __oak_io_error("exec() failed: " + e);
+		}
+	}
+	return __oak_io_error("exec() unavailable in this runtime");
 }
 
 // I/O
 function input() {
-	throw new Error(\'input() not implemented\');
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const buf = Buffer.alloc(4096);
+			const count = fs.readSync(0, buf, 0, buf.length, null);
+			if (count <= 0) return __oak_io_error("eof");
+			return __oak_to_event_data(buf.subarray(0, count).toString("latin1").replace(/[\r\n]+$/, ""));
+		} catch (e) {
+			return __oak_io_error("input() failed: " + e);
+		}
+	}
+	if (typeof prompt === "function") {
+		const value = prompt("");
+		if (value == null) return __oak_io_error("eof");
+		return __oak_to_event_data(value);
+	}
+	return __oak_io_error("input() unavailable in this runtime");
 }
 function print(s) {
 	s = __as_oak_string(s);
@@ -346,34 +428,191 @@ function print(s) {
 	return s.length;
 }
 function ls() {
-	throw new Error(\'ls() not implemented\');
+	const target = __oak_to_string_value(arguments[0] ?? ".");
+	const vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.listFiles === "function" && !__Is_Oak_Node) {
+		const names = vfs.listFiles() || [];
+		const normalized = target.replace(/\\/g, "/");
+		const prefix = normalized === "/" || normalized === "" ? "" : normalized + "/";
+		const result = [];
+		for (const fullName of names) {
+			const name = __oak_to_string_value(fullName);
+			if (prefix !== "" && !name.startsWith(prefix)) continue;
+			const rel = prefix === "" ? name : name.slice(prefix.length);
+			if (rel === "" || rel.includes("/")) continue;
+			result.push({ name: __as_oak_string(rel), dir: false });
+		}
+		return __oak_to_event_data(result);
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const list = fs.readdirSync(target, { withFileTypes: true }).map(entry => ({
+				name: __as_oak_string(entry.name),
+				dir: !!entry.isDirectory(),
+			}));
+			return __oak_to_event_data(list);
+		} catch (e) {
+			return __oak_io_error("ls() failed: " + e);
+		}
+	}
+	return __oak_io_error("ls() unavailable in this runtime");
 }
 function rm() {
-	throw new Error(\'rm() not implemented\');
+	if (__Is_Oak_Node) {
+		try {
+			__oak_require_fs().rmSync(__oak_to_string_value(arguments[0]), { recursive: true, force: true });
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("rm() failed: " + e);
+		}
+	}
+	return __oak_io_error("rm() unavailable in this runtime");
 }
 function mkdir() {
-	throw new Error(\'mkdir() not implemented\');
+	if (__Is_Oak_Node) {
+		try {
+			__oak_require_fs().mkdirSync(__oak_to_string_value(arguments[0]), { recursive: true });
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("mkdir() failed: " + e);
+		}
+	}
+	return __oak_io_error("mkdir() unavailable in this runtime");
 }
 function stat() {
-	throw new Error(\'stat() not implemented\');
+	const target = __oak_to_string_value(arguments[0]);
+	vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.statFile === "function" && !__Is_Oak_Node) {
+		const st = vfs.statFile(target);
+		if (st == null) return __oak_to_event_data(null);
+		return __oak_to_event_data({
+			name: __as_oak_string(st.name ?? target),
+			len: int(st.size ?? 0) ?? 0,
+			dir: !!(st.dir ?? false),
+			mod: int(st.mod ?? 0) ?? 0,
+		});
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const path = __oak_require_path();
+			const st = fs.statSync(target);
+			return __oak_to_event_data({
+				name: __as_oak_string(path.basename(target)),
+				len: int(st.size) ?? 0,
+				dir: !!st.isDirectory(),
+				mod: int(Math.floor(st.mtimeMs / 1000)) ?? 0,
+			});
+		} catch (e) {
+			if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) return __oak_to_event_data(null);
+			return __oak_io_error("stat() failed: " + e);
+		}
+	}
+	return __oak_io_error("stat() unavailable in this runtime");
 }
 function open() {
-	throw new Error(\'open() not implemented\');
+	const path = __oak_to_string_value(arguments[0]);
+	const flagAtom = arguments[1];
+	const flag = typeof flagAtom === "symbol" ? Symbol.keyFor(flagAtom) : __oak_to_string_value(flagAtom || "readwrite");
+	const vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.readFile === "function" && !__Is_Oak_Node) {
+		const fd = __Oak_VirtualFDNext++;
+		let content = __oak_to_string_value(vfs.readFile(path) ?? "");
+		if (flag === "truncate") content = "";
+		__Oak_VirtualFDs.set(fd, { path, content, append: flag === "append", readonly: flag === "readonly" });
+		return { type: Symbol.for("file"), fd: int(fd) ?? fd };
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const map = { readonly: "r", readwrite: "w+", append: "a+", truncate: "w+" };
+			const fd = fs.openSync(path, map[flag] || "w+");
+			return { type: Symbol.for("file"), fd: int(fd) ?? fd };
+		} catch (e) {
+			return __oak_io_error("open() failed: " + e);
+		}
+	}
+	return __oak_io_error("open() unavailable in this runtime");
 }
 function close() {
-	throw new Error(\'close() not implemented\');
+	const fd = int(arguments[0]);
+	if (__Oak_VirtualFDs.has(fd)) {
+		const file = __Oak_VirtualFDs.get(fd);
+		const vfs = __oak_get_vfs();
+		if (vfs && !file.readonly && typeof vfs.writeFile === "function") {
+			vfs.writeFile(file.path, __as_oak_string(file.content));
+		}
+		__Oak_VirtualFDs.delete(fd);
+		return { type: Symbol.for("end") };
+	}
+	if (__Is_Oak_Node) {
+		try {
+			__oak_require_fs().closeSync(fd);
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("close() failed: " + e);
+		}
+	}
+	return __oak_io_error("close() unavailable in this runtime");
 }
 function read() {
-	throw new Error(\'read() not implemented\');
+	const fd = int(arguments[0]);
+	const offset = int(arguments[1]) ?? 0;
+	const length = int(arguments[2]) ?? 0;
+	if (__Oak_VirtualFDs.has(fd)) {
+		const file = __Oak_VirtualFDs.get(fd);
+		return __oak_to_event_data(file.content.slice(offset, offset + length));
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const buf = Buffer.alloc(length);
+			const count = fs.readSync(fd, buf, 0, length, offset);
+			return __oak_to_event_data(buf.subarray(0, count).toString("latin1"));
+		} catch (e) {
+			return __oak_io_error("read() failed: " + e);
+		}
+	}
+	return __oak_io_error("read() unavailable in this runtime");
 }
 function write() {
-	throw new Error(\'write() not implemented\');
+	const fd = int(arguments[0]);
+	const offset = int(arguments[1]) ?? 0;
+	const data = __oak_to_string_value(arguments[2]);
+	if (__Oak_VirtualFDs.has(fd)) {
+		const file = __Oak_VirtualFDs.get(fd);
+		if (file.readonly) return __oak_io_error("write() failed: file is readonly");
+		if (file.append || offset < 0) {
+			file.content += data;
+		} else {
+			const start = file.content.slice(0, offset);
+			const end = file.content.slice(offset + data.length);
+			file.content = start + data + end;
+		}
+		return { type: Symbol.for("end") };
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const buf = Buffer.from(data, "latin1");
+			if (offset < 0) {
+				fs.writeSync(fd, buf, 0, buf.length, null);
+			} else {
+				fs.writeSync(fd, buf, 0, buf.length, offset);
+			}
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("write() failed: " + e);
+		}
+	}
+	return __oak_io_error("write() unavailable in this runtime");
 }
 function listen() {
-	throw new Error(\'listen() not implemented\');
+	return __oak_io_error("listen() unavailable in this runtime");
 }
 function req() {
-	throw new Error(\'req() not implemented\');
+	return __oak_io_error("req() unavailable in this runtime");
 }
 
 // math
@@ -404,19 +643,68 @@ function log(b, n) {
 
 // runtime
 function ___runtime_lib() {
-	throw new Error(\'___runtime_lib() not implemented\');
+	const name = __oak_to_string_value(arguments[0]);
+	const module = __Oak_Modules[name] || __Oak_Modules[(__Oak_Import_Aliases || {})[name]];
+	if (module == null) return null;
+	if (typeof module === "function") return __as_oak_string(module.toString());
+	if (typeof module === "object") return __as_oak_string("[bundled module object]");
+	return __as_oak_string(String(module));
 }
 function ___runtime_lib__oak_qm() {
-	throw new Error(\'___runtime_lib?() not implemented\');
+	const name = __oak_to_string_value(arguments[0]);
+	if (__Oak_Modules[name] != null) return true;
+	const alias = (__Oak_Import_Aliases || {})[name];
+	return alias != null && __Oak_Modules[alias] != null;
 }
 function ___runtime_gc() {
-	throw new Error(\'___runtime_gc() not implemented\');
+	if (__Is_Oak_Node && typeof global === "object" && typeof global.gc === "function") global.gc();
+	return null;
 }
 function ___runtime_mem() {
-	throw new Error(\'___runtime_mem() not implemented\');
+	if (__Is_Oak_Node && typeof process.memoryUsage === "function") {
+		const m = process.memoryUsage();
+		return {
+			allocs: int(m.heapTotal) ?? 0,
+			frees: 0,
+			live: int(m.heapUsed) ?? 0,
+			heap: int(m.heapUsed) ?? 0,
+			virt: int(m.rss) ?? 0,
+			gcs: 0,
+		};
+	}
+	return {
+		allocs: 0,
+		frees: 0,
+		live: 0,
+		heap: 0,
+		virt: 0,
+		gcs: 0,
+	};
 }
 function ___runtime_proc() {
-	throw new Error(\'___runtime_proc() not implemented\');
+	if (__Is_Oak_Node) {
+		return {
+			pid: int(process.pid) ?? 0,
+			exe: __as_oak_string((process.argv && process.argv[0]) || ""),
+			cwd: __as_oak_string((typeof process.cwd === "function" ? process.cwd() : "")),
+			argv: (process.argv || []).map(__as_oak_string),
+		};
+	}
+	return {
+		pid: 0,
+		exe: null,
+		cwd: __as_oak_string("/"),
+		argv: [__as_oak_string((typeof window === "object" && window.location ? window.location.href : ""))],
+	};
+}
+function ___packed_vfs() {
+	if (typeof __oak_get_vfs === \'function\') {
+		return __oak_get_vfs();
+	}
+	if (typeof __Oak_VFS !== \'undefined\') {
+		return __Oak_VFS;
+	}
+	return null;
 }
 
 // JavaScript interop

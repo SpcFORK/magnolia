@@ -326,12 +326,12 @@ function exit(code) {
 	return null;
 }
 function exec() {
-	throw new Error('exec() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('exec() unavailable in this runtime') };
 }
 
 // I/O
 function input() {
-	throw new Error('input() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('input() unavailable in this runtime') };
 }
 function print(s) {
 	s = __as_oak_string(s);
@@ -343,34 +343,34 @@ function print(s) {
 	return s.length;
 }
 function ls() {
-	throw new Error('ls() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('ls() unavailable in this runtime') };
 }
 function rm() {
-	throw new Error('rm() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('rm() unavailable in this runtime') };
 }
 function mkdir() {
-	throw new Error('mkdir() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('mkdir() unavailable in this runtime') };
 }
 function stat() {
-	throw new Error('stat() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('stat() unavailable in this runtime') };
 }
 function open() {
-	throw new Error('open() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('open() unavailable in this runtime') };
 }
 function close() {
-	throw new Error('close() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('close() unavailable in this runtime') };
 }
 function read() {
-	throw new Error('read() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('read() unavailable in this runtime') };
 }
 function write() {
-	throw new Error('write() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('write() unavailable in this runtime') };
 }
 function listen() {
-	throw new Error('listen() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('listen() unavailable in this runtime') };
 }
 function req() {
-	throw new Error('req() not implemented');
+	return { type: Symbol.for('error'), error: __as_oak_string('req() unavailable in this runtime') };
 }
 
 // math
@@ -401,19 +401,19 @@ function log(b, n) {
 
 // runtime
 function ___runtime_lib() {
-	throw new Error('___runtime_lib() not implemented');
+	return null;
 }
 function ___runtime_lib__oak_qm() {
-	throw new Error('___runtime_lib?() not implemented');
+	return false;
 }
 function ___runtime_gc() {
-	throw new Error('___runtime_gc() not implemented');
+	return null;
 }
 function ___runtime_mem() {
-	throw new Error('___runtime_mem() not implemented');
+	return { allocs: 0, frees: 0, live: 0, heap: 0, virt: 0, gcs: 0 };
 }
 function ___runtime_proc() {
-	throw new Error('___runtime_proc() not implemented');
+	return { pid: 0, exe: null, cwd: __as_oak_string('/'), argv: [] };
 }
 
 // JavaScript interop

@@ -18,6 +18,7 @@ str := import('str')
 join := str.join
 split := str.split
 replace := str.replace
+startsWith? := str.startsWith?
 
 sort := import('sort')
 sort! := sort.sort!
@@ -58,6 +59,9 @@ OakNativeRuntime := runtimeNative.OakNativeRuntime
 
 runtimeJS := import('runtime-js')
 OakJSRuntime := runtimeJS.OakJSRuntime
+
+Virtual := import('Virtual')
+shell := import('shell')
 
 Log := printf
 Abort := fn(msg) {
@@ -229,8 +233,57 @@ fn renderBundle(bundleNode) {
 	buildRender.renderBundle(bundleNode, Web?, Wasm?, renderOakBundle, renderJSBundle, renderWasmBundle)
 }
 
+fn applyInitialVirtualIO() if Web? | Wasm? {
+	false -> ?
+	_ -> {
+		vfs := Virtual.createVirtualFS({})
+		_ := shell.createShell(vfs)
+
+		readFile <- fn(path, withFile) vfs.readFile(path, withFile)
+		writeFile <- fn(path, file, withResult) vfs.writeFile(path, file, withResult)
+		statFile <- fn(path, withStat) vfs.statFile(path, withStat)
+		listFiles <- fn(path, withFiles) {
+			normalizedPath := path |> replace('\\', '/')
+			prefix := if normalizedPath {
+				'', '/' -> ''
+				_ -> normalizedPath + '/'
+			}
+			entries := vfs.listFiles() |>
+				filter(fn(name) {
+					rel := if prefix = '' {
+						true -> name
+						_ -> if startsWith?(name, prefix) {
+							true -> name |> slice(len(prefix))
+							_ -> ?
+						}
+					}
+					if rel {
+						?, '' -> false
+						_ -> !startsWith?(rel, '/')
+					}
+				}) |>
+				map(fn(name) {
+					rel := if prefix = '' {
+						true -> name
+						_ -> name |> slice(len(prefix))
+					}
+					firstSegment := rel |> split('/') |> default([rel])
+					{
+						name: firstSegment.0
+						dir?: rel |> split('/') |> len() > 1
+					}
+				})
+			if withFiles {
+				? -> entries
+				_ -> withFiles(entries)
+			}
+		}
+	}
+}
+
 fn run(config) {
 	applyConfig(config)
+	applyInitialVirtualIO()
 
 	// clear state for repeated invocations from non-CLI callers
 	ModuleNodes <- {}

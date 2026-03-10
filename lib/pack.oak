@@ -29,6 +29,8 @@ path := import('path')
 dir := path.dir
 resolve := path.resolve
 base := path.base
+Virtual := import('Virtual')
+shell := import('shell')
 packUtils := import('pack-utils')
 transpile := import('transpile')
 
@@ -177,10 +179,71 @@ fn run(config) {
 	Interp := config.interp |> default(___runtime_proc().exe)
 	OakExe := config.oakExe |> default(___runtime_proc().exe)
 	ExecFn := config.exec |> default(exec)
+	if Web? | Wasm? {
+		true -> {
+			vfs := Virtual.createVirtualFS({})
+			sh := shell.createShell(vfs)
+
+			readFile <- fn(path, withFile) vfs.readFile(path, withFile)
+			writeFile <- fn(path, file, withResult) vfs.writeFile(path, file, withResult)
+			statFile <- fn(path, withStat) vfs.statFile(path, withStat)
+			listFiles <- fn(path, withFiles) {
+				normalizedPath := path |> replace('\\', '/')
+				prefix := if normalizedPath {
+					'', '/' -> ''
+					_ -> normalizedPath + '/'
+				}
+				entries := vfs.listFiles() |>
+					filter(fn(name) {
+						rel := if prefix = '' {
+							true -> name
+							_ -> if startsWith?(name, prefix) {
+								true -> name |> slice(len(prefix))
+								_ -> ?
+							}
+						}
+						if rel {
+							?, '' -> false
+							_ -> !startsWith?(rel, '/')
+						}
+					}) |>
+					map(fn(name) {
+						rel := if prefix = '' {
+							true -> name
+							_ -> name |> slice(len(prefix))
+						}
+						firstSegment := rel |> split('/') |> default([rel])
+						{
+							name: firstSegment.0
+							dir?: rel |> split('/') |> len() > 1
+						}
+					})
+				if withFiles {
+					? -> entries
+					_ -> withFiles(entries)
+				}
+			}
+			ExecFn <- fn(cmd, args, stdin, withEvt) {
+				cmdline := [cmd] |> append(args) |> join(' ')
+				status := sh.exec(cmdline)
+				evt := {
+					type: :end
+					status: int(status |> default(0)) |> default(0)
+					stdout: ''
+					stderr: ''
+				}
+				if withEvt {
+					? -> evt
+					_ -> withEvt(evt)
+				}
+			}
+			Log('[oak pack] Initialized Virtual FS and shell for web/wasm target context.')
+		}
+	}
 
 	requireOpt('entry', Entry, Abort)
 	requireOpt('output', Output, Abort)
-	if Web? | Wasm? -> Abort('[oak pack] --web and --wasm are unsupported for pack targets.')
+	if Web? | Wasm? -> Abort('[oak pack] --web and --wasm remain experimental for pack targets.')
 	if Interp {
 		?, '', true -> Abort('[oak pack] Invalid --interp specified.')
 	}
