@@ -80,6 +80,31 @@ You can also run without installing:
 go run . <file-or-command>
 ```
 
+### Command name note
+
+Depending on how you build/install Magnolia, the executable may be named either `magnolia` or `oak`:
+
+- `go build .` in this repository typically produces `magnolia`/`magnolia.exe`
+- `make install` installs the binary as `oak`
+
+In examples below, use whichever name matches your local install.
+
+### Quick start
+
+```sh
+# Start REPL
+magnolia repl
+
+# Run a file
+magnolia samples/hello.oak
+
+# Evaluate a one-liner
+magnolia eval "1 + 2 * 3"
+
+# Show CLI help
+magnolia help
+```
+
 ## What's New in Magnolia
 
 Magnolia extends Oak with powerful new features for modern development:
@@ -424,7 +449,7 @@ For Magnolia-specific features, see:
 
 ### Builds and deployment
 
-While the Magnolia interpreter can run programs and modules directly from source code on the file system, Magnolia also offers a build tool, `magnolia build`, which can _bundle_ a Magnolia program distributed across many files into a single "bundle" source file. `magnolia build` can also cross-compile Magnolia bundles into JavaScript bundles, to run in the browser or in JavaScript environments like Node.js and Deno. This allows Magnolia programs to be deployed and distributed as single-file programs, both on the server and in the browser.
+While the Magnolia interpreter can run programs and modules directly from source code on the file system, Magnolia also offers a build tool, `build`, which can _bundle_ a Magnolia program distributed across many files into a single "bundle" source file. The same command can also cross-compile Magnolia bundles into JavaScript bundles, to run in the browser or in JavaScript environments like Node.js and Deno. This allows Magnolia programs to be deployed and distributed as single-file programs, both on the server and in the browser.
 
 To build a new bundle, we can simply pass an "entrypoint" to the program.
 
@@ -438,7 +463,7 @@ Compiling to JavaScript works similarly, but with the `--web` flag, which turns 
 magnolia build --entry src/app.js.oak --output dist/bundle.js --web
 ```
 
-The bundler and compiler are built on top of past work with the [September](https://github.com/thesephist/september) toolchain for Ink, but slightly re-architected to support bundling and multiple compilation targets. In the future, the goal of `magnolia build` is to become a lightly optimizing compiler and potentially help yield a `magnolia compile` command that could package the interpreter and a Magnolia bundle into a single executable binary. For more information on `magnolia build`, see `magnolia help build`.
+The bundler and compiler are built on top of past work with the [September](https://github.com/thesephist/september) toolchain for Ink, but slightly re-architected to support bundling and multiple compilation targets. In the future, the goal of `build` is to become a lightly optimizing compiler and potentially help yield a `compile` command that could package the interpreter and a Magnolia bundle into a single executable binary. For more information, see `magnolia help build` (or `oak help build`, depending on your install name).
 
 ### Performance
 
@@ -466,6 +491,11 @@ Magnolia (ab)uses GNU Make to run development workflows and tasks.
 - `make install` installs the interpreter on your `$GOPATH` as `oak`, and re-installs the Vim syntax file
 - `make site` builds a Magnolia bundle for the website, and `make site-w` does it on every file save
 - `make site-gen` rebuilds the statically generated parts of the Magnolia website, like the standard library documentation
+
+On Windows, if `-race` commands fail in local development due to CGO/toolchain constraints, use non-race alternatives:
+
+- `go test .`
+- `go run . test/main.oak`
 
 To try Magnolia by building from source, clone the repository and run `make install` (or simply `go build .`).
 
