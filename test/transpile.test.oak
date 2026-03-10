@@ -1,0 +1,307 @@
+{
+	contains?: contains?
+} := import('std')
+transpile := import('transpile')
+
+fn Token(type, val) {
+	type: type
+	tok: { pos: [0, 1, 1], type: type, val: val }
+	val: val
+}
+
+fn Int(val) Token(:int, val)
+
+fn run(t) {
+	transpile.clearTranspilers()
+	transpile.configure({
+		enabled?: true
+		verbose?: false
+	})
+
+	{
+		'createTranspiler + registerTranspiler applies visitor' |> t.eq(
+			{
+				transpile.clearTranspilers()
+				transpile.registerTranspiler(
+					transpile.createTranspiler(fn(node) if node.type {
+						:int -> {
+							node.val := node.val + 10
+							node
+						}
+						_ -> node
+					})
+				)
+				transpile.transpileNode(Int(2)).val
+			}
+			12
+		)
+
+		'non-function transpiler is ignored' |> t.eq(
+			{
+				transpile.clearTranspilers()
+				transpile.registerTranspiler('not a function')
+				transpile.transpileNode(Int(9)).val
+			}
+			9
+		)
+
+		'disabled transpilation leaves node unchanged' |> t.eq(
+			{
+				transpile.clearTranspilers()
+				transpile.configure({ enabled?: false })
+				transpile.registerTranspiler(fn(node) if node.type {
+					:int -> {
+						node.val := 100
+						node
+					}
+					_ -> node
+				})
+				result := transpile.transpileNode(Int(5)).val
+				transpile.configure({ enabled?: true })
+				result
+			}
+			5
+		)
+
+		'multiple transpilers run in sequence' |> t.eq(
+			{
+				transpile.clearTranspilers()
+				transpile.registerTranspiler(fn(node) if node.type {
+					:int -> {
+						node.val := node.val + 1
+						node
+					}
+					_ -> node
+				})
+				transpile.registerTranspiler(fn(node) if node.type {
+					:int -> {
+						node.val := node.val * 3
+						node
+					}
+					_ -> node
+				})
+				transpile.transpileNode(Int(4)).val
+			}
+			15
+		)
+
+		'verbose mode invokes configured logger' |> t.eq(
+			{
+				transpile.clearTranspilers()
+				logMessages := []
+				transpile.configure({
+					verbose?: true
+					log: fn(msg) logMessages << msg
+				})
+				transpile.registerTranspiler(fn(node) node)
+				transpile.transpileNode(Int(1))
+				transpile.configure({
+					verbose?: false
+					log: print
+				})
+				len(logMessages)
+			}
+			2
+		)
+	}
+
+	{
+		'optimizeConstants folds integer addition' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :plus
+				tok: Token(:plus, ?).tok
+				left: Int(2)
+				right: Int(3)
+			})
+			Int(5)
+		)
+
+		'optimizeConstants folds integer subtraction' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :minus
+				tok: Token(:minus, ?).tok
+				left: Int(9)
+				right: Int(4)
+			})
+			Int(5)
+		)
+
+		'optimizeConstants folds integer multiplication' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :times
+				tok: Token(:times, ?).tok
+				left: Int(6)
+				right: Int(7)
+			})
+			Int(42)
+		)
+
+		'optimizeConstants leaves unsupported operations untouched' |> t.eq(
+			{
+				node := {
+					type: :binary
+					op: :divide
+					tok: Token(:divide, ?).tok
+					left: Int(8)
+					right: Int(2)
+				}
+				transpile.optimizeConstants(node)
+			}
+			{
+				type: :binary
+				op: :divide
+				tok: Token(:divide, ?).tok
+				left: Int(8)
+				right: Int(2)
+			}
+		)
+	}
+
+	{
+		'removeDebugCalls drops direct debug calls' |> t.eq(
+			len(
+				transpile.removeDebugCalls({
+					type: :block
+					exprs: [
+						{
+							type: :fnCall
+							function: { type: :identifier, val: 'debug', tok: Token(:identifier, 'debug').tok }
+							args: []
+							restArg: ?
+							tok: Token(:leftParen, ?).tok
+						}
+						{
+							type: :fnCall
+							function: { type: :identifier, val: 'print', tok: Token(:identifier, 'print').tok }
+							args: []
+							restArg: ?
+							tok: Token(:leftParen, ?).tok
+						}
+					]
+					tok: Token(:leftBrace, ?).tok
+				}).exprs
+			)
+			1
+		)
+
+		'removeDebugCalls keeps non-identifier call targets' |> t.eq(
+			len(
+				transpile.removeDebugCalls({
+					type: :block
+					exprs: [
+						{
+							type: :fnCall
+							function: { type: :propertyAccess, left: Int(1), right: Int(2), tok: Token(:dot, ?).tok }
+							args: []
+							restArg: ?
+							tok: Token(:leftParen, ?).tok
+						}
+					]
+					tok: Token(:leftBrace, ?).tok
+				}).exprs
+			)
+			1
+		)
+	}
+
+	{
+		'walkNode recursively visits nested nodes' |> t.eq(
+			{
+				visited := []
+				node := {
+					type: :function
+					body: {
+						type: :ifExpr
+						cond: {
+							type: :unary
+							right: Int(1)
+							tok: Token(:bang, ?).tok
+						}
+						branches: [
+							{
+								type: :ifBranch
+								target: {
+									type: :list
+									elems: [Int(2)]
+									tok: Token(:leftBracket, ?).tok
+								}
+								body: {
+									type: :object
+									entries: [{ key: Int(3), val: Int(4) }]
+									tok: Token(:leftBrace, ?).tok
+								}
+								tok: Token(:arrow, ?).tok
+							}
+						]
+						tok: Token(:ifKeyword, ?).tok
+					}
+					tok: Token(:fnKeyword, ?).tok
+				}
+				transpile.walkNode(node, fn(n) {
+					visited << n.type
+					n
+				})
+				[
+					visited |> contains?(:function)
+					visited |> contains?(:ifExpr)
+					visited |> contains?(:ifBranch)
+					visited |> contains?(:unary)
+					visited |> contains?(:list)
+					visited |> contains?(:object)
+				]
+			}
+			[true, true, true, true, true, true]
+		)
+
+		'walkNode handles fnCall restArg and assignment/propertyAccess' |> t.eq(
+			{
+				seenTypes := []
+				node := {
+					type: :block
+					exprs: [
+						{
+							type: :fnCall
+							function: { type: :identifier, val: 'f', tok: Token(:identifier, 'f').tok }
+							args: [
+								{
+									type: :assignment
+									left: Int(1)
+									right: {
+										type: :propertyAccess
+										left: Int(2)
+										right: Int(3)
+										tok: Token(:dot, ?).tok
+									}
+									tok: Token(:assign, ?).tok
+								}
+							]
+							restArg: Int(4)
+							tok: Token(:leftParen, ?).tok
+						}
+					]
+					tok: Token(:leftBrace, ?).tok
+				}
+				transpile.walkNode(node, fn(n) {
+					seenTypes << n.type
+					n
+				})
+				[
+					seenTypes |> contains?(:fnCall)
+					seenTypes |> contains?(:assignment)
+					seenTypes |> contains?(:propertyAccess)
+				]
+			}
+			[true, true, true]
+		)
+	}
+
+	transpile.clearTranspilers()
+	transpile.configure({
+		enabled?: true
+		verbose?: false
+		log: print
+	})
+}

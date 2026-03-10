@@ -1,0 +1,190 @@
+// Example: Using transpile middleware with build
+
+build := import('build')
+{
+	printf: printf
+} := import('fmt')
+
+// Example 1: Using built-in transpilers
+fn exampleBuiltinTranspilers() {
+	printf('=== Example 1: Built-in Transpilers ===\n')
+	
+	build.run({
+		entry: 'samples/fib.oak'
+		output: 'build/fib-optimized.oak'
+		transpilers: [
+			build.transpile.optimizeConstants
+			build.transpile.removeDebugCalls
+		]
+		transpileVerbose?: true
+	})
+}
+
+// Example 2: Custom transpiler - rename variables
+fn exampleCustomTranspiler() {
+	printf('\n=== Example 2: Custom Transpiler ===\n')
+	
+	transpile := build.transpile
+	
+	// Create a custom transpiler that renames 'oldName' to 'newName'
+	renameVariable := transpile.createTranspiler(fn(node) if node.type {
+		:identifier -> if node.val {
+			'oldName' -> {
+				type: :identifier
+				tok: node.tok
+				val: 'newName'
+			}
+			_ -> node
+		}
+		_ -> node
+	})
+	
+	build.run({
+		entry: 'samples/hello.oak'
+		output: 'build/hello-renamed.oak'
+		transpilers: [renameVariable]
+		transpileVerbose?: true
+	})
+}
+
+// Example 3: Minification transpiler
+fn exampleMinification() {
+	printf('\n=== Example 3: Minification ===\n')
+	
+	transpile := build.transpile
+	
+	// Remove comments and debug statements
+	minify := transpile.createTranspiler(fn(node) if node.type {
+		:block -> {
+			// Filter out unnecessary expressions
+			node.exprs := node.exprs |> std.filter(fn(expr) if expr.type {
+				:fnCall -> if expr.function.type = :identifier {
+					true -> expr.function.val != 'debug'
+					_ -> true
+				}
+				_ -> true
+			})
+			node
+		}
+		_ -> node
+	})
+	
+	build.run({
+		entry: 'samples/fizzbuzz.oak'
+		output: 'build/fizzbuzz-min.oak'
+		transpilers: [
+			build.transpile.optimizeConstants
+			minify
+		]
+	})
+}
+
+// Example 4: Logging instrumentation
+fn exampleInstrumentation() {
+	printf('\n=== Example 4: Add Logging ===\n')
+	
+	transpile := build.transpile
+	{
+		format: format
+	} := import('fmt')
+	
+	// Add logging to all function calls
+	addLogging := transpile.createTranspiler(fn(node) if node.type {
+		:function -> if node.name != '' {
+			true -> {
+				// Wrap function body with entry/exit logging
+				logEntry := {
+					type: :fnCall
+					tok: node.tok
+					function: {
+						type: :identifier
+						tok: node.tok
+						val: 'printf'
+					}
+					args: [{
+						type: :string
+						tok: node.tok
+						val: format('[TRACE] Entering function: {{0}}\n', node.name)
+					}]
+					restArg: ?
+				}
+				
+				// Prepend logging to function body
+				if node.body.type = :block {
+					true -> {
+						node.body.exprs := [logEntry] |> std.append(node.body.exprs)
+						node
+					}
+					_ -> node
+				}
+			}
+			_ -> node
+		}
+		_ -> node
+	})
+	
+	build.run({
+		entry: 'samples/math.oak'
+		output: 'build/math-traced.oak'
+		transpilers: [addLogging]
+	})
+}
+
+// Example 5: Disable transpilation
+fn exampleDisableTranspile() {
+	printf('\n=== Example 5: Disable Transpilation ===\n')
+	
+	build.run({
+		entry: 'samples/hello.oak'
+		output: 'build/hello-plain.oak'
+		transpile?: false  // No transpilation applied
+	})
+}
+
+// Example 6: Chain multiple transformations
+fn exampleChainedTransformations() {
+	printf('\n=== Example 6: Chained Transformations ===\n')
+	
+	transpile := build.transpile
+	std := import('std')
+	
+	// Transformation 1: Constant folding
+	// Transformation 2: Remove debug calls
+	// Transformation 3: Simplify boolean expressions
+	
+	simplifyBooleans := transpile.createTranspiler(fn(node) if node.type {
+		:binary -> if {
+			// true & x => x
+			node.op = :and & node.left.type = :atom & node.left.val = :true -> node.right
+			// false | x => x
+			node.op = :or & node.left.type = :atom & node.left.val = :false -> node.right
+			_ -> node
+		}
+		_ -> node
+	})
+	
+	build.run({
+		entry: 'samples/fib.oak'
+		output: 'build/fib-optimized-full.oak'
+		transpilers: [
+			build.transpile.optimizeConstants
+			build.transpile.removeDebugCalls
+			simplifyBooleans
+		]
+		transpileVerbose?: true
+	})
+}
+
+// Run examples
+printf('Transpile Middleware Examples\n')
+printf('==============================\n\n')
+
+// Uncomment the examples you want to run:
+// exampleBuiltinTranspilers()
+// exampleCustomTranspiler()
+// exampleMinification()
+// exampleInstrumentation()
+// exampleDisableTranspile()
+// exampleChainedTransformations()
+
+printf('\nExamples available. Uncomment the ones you want to run.\n')
