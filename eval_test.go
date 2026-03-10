@@ -1712,6 +1712,21 @@ func TestBuildLibraryParseIncludesFromList(t *testing.T) {
 	))
 }
 
+func TestBuildLibraryParseIncludeKeepsExplicitExtension(t *testing.T) {
+	expectProgramToReturn(t, `
+		build := import('build')
+		str := import('str')
+		parsed := build.parseInclude('std.test:test/std.test.oak')
+		[
+			parsed.name
+			str.endsWith?(parsed.path, 'test/std.test.oak')
+		]
+	`, MakeList(
+		MakeString("std.test"),
+		BoolValue(true),
+	))
+}
+
 func TestBuildWebBundleIncludesStaticStdImport(t *testing.T) {
 	expectProgramToReturn(t, `
 		buildImports := import('build-imports')

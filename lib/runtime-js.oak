@@ -164,6 +164,7 @@ function __oak_trampoline(fn, ...args) {
 // reflection and types
 const __Is_Oak_Node = typeof process === \'object\';
 const __Oak_Int_RE = /^[+-]?\\d+$/;
+const __Oak_PointerValues = new Set();
 function int(x) {
 	x = __as_oak_string(x);
 	if (typeof x === \'number\') {
@@ -243,6 +244,8 @@ function type(x) {
 	x = __as_oak_string(x);
 	if (x == null) {
 		return Symbol.for(\'null\');
+	} else if (typeof x === \'number\' && __Oak_PointerValues.has(x)) {
+		return Symbol.for(\'pointer\');
 	} else if (typeof x === \'number\') {
 		// Many discrete APIs check for :int, so we consider all integer
 		// numbers :int and fall back to :float. This is not an airtight
@@ -327,6 +330,99 @@ function wait(duration, cb) {
 function exit(code) {
 	if (__Is_Oak_Node) process.exit(code);
 	return null;
+}
+
+let __Oak_NextPtr = 4096;
+const __Oak_MemoryRegions = new Map();
+function __oak_bytes_from_string(s) {
+	s = __as_oak_string(s);
+	if (!__is_oak_string(s)) return [];
+	const out = [];
+	const raw = s.valueOf();
+	for (let i = 0; i < raw.length; i++) out.push(raw.charCodeAt(i) & 0xff);
+	return out;
+}
+function __oak_alloc_region(bytes) {
+	const base = __Oak_NextPtr;
+	const size = Math.max(1, bytes.length);
+	__Oak_NextPtr += size + 16;
+	__Oak_MemoryRegions.set(base, bytes.slice());
+	__Oak_PointerValues.add(base);
+	return base;
+}
+function __oak_find_region(addr) {
+	for (const [base, bytes] of __Oak_MemoryRegions.entries()) {
+		if (addr >= base && addr < base + bytes.length) {
+			return { base, bytes };
+		}
+	}
+	return null;
+}
+function bits(x) {
+	x = __as_oak_string(x);
+	if (Array.isArray(x)) {
+		let out = \'\';
+		for (const val of x) {
+			const n = int(val);
+			if (n == null || n < 0 || n > 255) throw new Error(\'bits(list) expects byte values 0-255\');
+			out += String.fromCharCode(n);
+		}
+		return __as_oak_string(out);
+	}
+	if (__is_oak_string(x)) {
+		const out = [];
+		const raw = x.valueOf();
+		for (let i = 0; i < raw.length; i++) out.push(raw.charCodeAt(i) & 0xff);
+		return out;
+	}
+	throw new Error(\'bits() expects a list of bytes or a byte string\');
+}
+function pointer(x) {
+	x = __as_oak_string(x);
+	if (typeof x === \'number\') {
+		if (x < 0) throw new Error(\'pointer() expects non-negative integer\');
+		__Oak_PointerValues.add(x);
+		return x;
+	}
+	if (__is_oak_string(x)) {
+		if (x.length === 0) return 0;
+		return __oak_alloc_region(__oak_bytes_from_string(x));
+	}
+	throw new Error(\'pointer() expects int or byte string\');
+}
+function addr(x) {
+	x = __as_oak_string(x);
+	if (!__is_oak_string(x)) throw new Error(\'addr() expects a byte string\');
+	if (x.length === 0) return 0;
+	return __oak_alloc_region(__oak_bytes_from_string(x));
+}
+function memread(p, n) {
+	const addrValue = int(p);
+	const length = int(n);
+	if (addrValue == null || addrValue < 0) throw new Error(\'memread address must be non-negative\');
+	if (length == null || length < 0) throw new Error(\'memread length must be non-negative\');
+	if (length === 0) return __as_oak_string(\'\');
+	const region = __oak_find_region(addrValue);
+	if (!region) throw new Error(\'memread cannot read from unknown address\');
+	const start = addrValue - region.base;
+	let out = \'\';
+	for (let i = 0; i < length; i++) {
+		out += String.fromCharCode(region.bytes[start + i] ?? 0);
+	}
+	return __as_oak_string(out);
+}
+function memwrite(p, data) {
+	const addrValue = int(p);
+	const bytes = __oak_bytes_from_string(data);
+	if (addrValue == null || addrValue < 0) throw new Error(\'memwrite address must be non-negative\');
+	if (bytes.length === 0) return 0;
+	const region = __oak_find_region(addrValue);
+	if (!region) throw new Error(\'memwrite cannot write to unknown address\');
+	const start = addrValue - region.base;
+	for (let i = 0; i < bytes.length; i++) {
+		if (start + i < region.bytes.length) region.bytes[start + i] = bytes[i];
+	}
+	return bytes.length;
 }
 
 let __Oak_FS;
@@ -683,11 +779,22 @@ function ___runtime_mem() {
 }
 function ___runtime_proc() {
 	if (__Is_Oak_Node) {
+		let cpus = 1;
+		if (typeof require === "function") {
+			try {
+				const os = require("os");
+				if (os && typeof os.cpus === "function") {
+					const list = os.cpus() || [];
+					cpus = int(list.length) ?? 1;
+				}
+			} catch (_) {}
+		}
 		return {
 			pid: int(process.pid) ?? 0,
 			exe: __as_oak_string((process.argv && process.argv[0]) || ""),
 			cwd: __as_oak_string((typeof process.cwd === "function" ? process.cwd() : "")),
 			argv: (process.argv || []).map(__as_oak_string),
+			cpus,
 		};
 	}
 	return {
@@ -695,6 +802,37 @@ function ___runtime_proc() {
 		exe: null,
 		cwd: __as_oak_string("/"),
 		argv: [__as_oak_string((typeof window === "object" && window.location ? window.location.href : ""))],
+		cpus: 1,
+	};
+}
+function ___runtime_sys_info() {
+	if (__Is_Oak_Node) {
+		let cpus = 1;
+		let arch = process.arch || "unknown";
+		let platform = process.platform || "unknown";
+		if (typeof require === "function") {
+			try {
+				const os = require("os");
+				if (os) {
+					if (typeof os.cpus === "function") {
+						const list = os.cpus() || [];
+						cpus = int(list.length) ?? 1;
+					}
+					if (typeof os.arch === "function") arch = os.arch() || arch;
+					if (typeof os.platform === "function") platform = os.platform() || platform;
+				}
+			} catch (_) {}
+		}
+		return {
+			os: __as_oak_string(platform),
+			arch: __as_oak_string(arch),
+			cpus: cpus,
+		};
+	}
+	return {
+		os: __as_oak_string("js"),
+		arch: __as_oak_string("js"),
+		cpus: 1,
 	};
 }
 function ___packed_vfs() {
