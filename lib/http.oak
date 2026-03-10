@@ -83,27 +83,24 @@ fn _encodeChar(uri?) fn(c) if {
 	'-_.!~*\'()' |> contains?(c)
 	uri? & ';,/?:@&=+$#' |> contains?(c) -> c
 	_ -> '%' + codepoint(c) |> toHex() |> upper()
-//
-// Example:
-//   percentEncode('hello world!')
-//   // => 'hello%20world%21'
 }
+
 // percentEncode encodes the string `s` in the "percent encoding" or URI
 // encoding scheme. This function roughly corresponds to JavaScript's
 // `encodeURIComponent` function.
 //
 // Example:
-//   percentEncodeURI('http://example.com/search?q=hello world')
-//   // => 'http://example.com/search?q=hello%20world'
+//   percentEncode('hello world!')
+//   // => 'hello%20world%21'
+fn percentEncode(s) s |> map(_encodeChar(false))
 
-// percentDecode decodes a URI-encoded value from `s`
-//
-// Example:
-//   percentDecode('hello%20world%21')
-//   // => 'hello world!'
 // percentEncodeURI encodes the string `s` in the "percent encoding" or URI
 // encoding scheme, but preserves characters that are expected to appear in a
 // URL. It roughly corresponds to JavaScript's `encodeURI` function.
+//
+// Example:
+//   percentEncodeURI('http://example.com/search?q=hello world')
+//   // => 'http://example.com/search?q=hello%20world'
 fn percentEncodeURI(s) s |> map(_encodeChar(true))
 
 // _hex? reports whether a particular character is a valid hexadecimal character
@@ -255,12 +252,7 @@ MimeTypes := {
 	md: 'text/plain; charset=utf-8'
 	css: 'text/css; charset=utf-8'
 	js: 'application/javascript; charset=utf-8'
-	json: 'application/json; charset=utf-8' based on the
-// file extension.
-//
-// Example:
-//   mimeForPath('index.html')    // => 'text/html; charset=utf-8'
-//   mimeForPath('data.json')     // => 'application/json; charset=utf-8'
+	json: 'application/json; charset=utf-8'
 	ink: 'text/plain; charset=utf-8'
 	oak: 'text/plain; charset=utf-8'
 
@@ -276,20 +268,17 @@ MimeTypes := {
 }
 
 // mimeForPath takes a path and returns a likely MIME type string
+// based on the file extension.
+//
+// Example:
+//   mimeForPath('index.html')    // => 'text/html; charset=utf-8'
+//   mimeForPath('data.json')     // => 'application/json; charset=utf-8'
 fn mimeForPath(path) {
 	parts := path |> split('.')
 	ending := parts.(len(parts) - 1)
-	M   fn route(pattern, handler) - adds a handler for some path pattern.
-//                                The arguments are identical to Router.add.
-//   fn start(port)             - starts the server and begins listening for
-//                                requests to the specified local port.
-//
-// Example:
-//   server := Server()
-//   with server.route('/hello/:name') fn(params) {
-//       fn(req, end) end({status: 200, body: 'Hello, ' << params.name})
-//   }
-//   server.start(8080)
+	MimeTypes.(ending) |> default(MimeTypes.blob)
+}
+
 // MethodNotAllowed represents a 405 Method Not Allowed response
 MethodNotAllowed := { status: 405, body: 'method not allowed' }
 
@@ -310,19 +299,27 @@ fn _hdr(attrs) {
 //                                  The arguments are identical to Router.add.
 // fn start(port)                   starts the server and begins listening for
 //                                  requests to the specified local port.
+//
+// Example:
+//   server := Server()
+//   with server.route('/hello/:name') fn(params) {
+//       fn(req, end) end({status: 200, body: 'Hello, ' << params.name})
+//   }
+//   server.start(8080)
 fn Server {
 	router := Router()
 
 	fn start(port) {
-		router.catch(fn(pa
-//
-// Example:
-//   server := Server()
-//   with server.route('/static/*staticPath') fn(params) {
-//       handleStatic('./static/' << params.staticPath)
-//   }
-//   with server.route('/') fn(params) handleStatic('./index.html')
-//  	_ -> {
+		router.catch(fn(params) fn(req, end) end({
+			status: 404
+			body: 'not found'
+		}))
+
+		listen('0.0.0.0:' + string(port), fn(evt) if evt.type {
+			:error -> {
+				printf('Server error: {{ 0 }}', evt.error)
+			}
+			_ -> {
 				{ method: method, url: url } := evt.req
 				printf('{{ 0 }}: {{ 1 }}', method, url)
 
@@ -331,7 +328,7 @@ fn Server {
 					evt.end(resp)
 				}
 			}
-		}
+		})
 	}
 
 	{
