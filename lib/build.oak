@@ -165,34 +165,20 @@ fn cachedParse(path, text) if cached := ModuleNodes.(path) {
 	_ -> cached
 }
 
-// number of modules we started processing
-startedImport := 0
-// number of modules done processing
-finishedImport := 0
-ImportCounters := { started: 0, finished: 0 }
 // addImportsFromFile reads and parses a file at a given path, and potentially
 // dispatches further addImportsFromFile calls to modules imported by the given
 // module. Calling this on an entrypoint module will eventually reach all of
 // the modules it imports recursively.
-//
-// Takes a callback, next, that runs when the dependency tree is fully covered.
-fn addImportsFromFile(path, next) {
-	ImportCounters.started <- startedImport
-	ImportCounters.finished <- finishedImport
-	buildImports.addImportsFromFile(path, next, ImportCounters, readFile, printf, addImportsFromSource)
-	startedImport <- ImportCounters.started
-	finishedImport <- ImportCounters.finished
+fn addImportsFromFile(path) {
+	buildImports.addImportsFromFile(path, readFile, printf, addImportsFromSource)
 }
 // addImportsFromSource takes an Oak source file and recursively imports
 // modules included from that entrypoint. It is dual to addImportsFromFile, but
 // takes a source file rather than a path to a file on disk.
-//
-// Takes a callback, next, that runs when the dependency tree is fully covered.
-fn addImportsFromSource(path, file, next) {
+fn addImportsFromSource(path, file) {
 	buildImports.addImportsFromSource(
 		path
 		file
-		next
 		ModuleNodes
 		ImportAssignmentNode
 		Web?
@@ -248,32 +234,29 @@ fn run(config) {
 
 	// clear state for repeated invocations from non-CLI callers
 	ModuleNodes <- {}
-	startedImport <- 0
-	finishedImport <- 0
 	transpile.clearTranspilers()
 
 	// Start from entrypoint and explicit includes, collect all static imports
 	Log(format('[oak build] Bundling with entrypoint {{0}}', Entry))
-	postImport := with once() fn {
-		// compile the import map into a bundle with an entrypoint and render to
-		// bundle program text
-		BundleFile := ModuleNodes |>
-			keys() |>
-			sort!() |>
-			map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()]) |>
-			wrapBundle(AbsoluteEntry) |>
-			renderBundle()
-
-		with writeFile(Output, BundleFile) fn(res) if res {
-			? -> Log(format('[oak build] Could not write bundle to {{0}}', Output))
-			_ -> Log(format('[oak build] Bundle written to {{0}}', Output))
-		}
-	}
 	Includes |> with each() fn(spec) if ___runtime_lib?(spec.name) {
 		true -> if Web? -> addImportsFromSource(spec.name, ___runtime_lib(spec.name))
-		_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path, postImport)
+		_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path)
 	}
-	addImportsFromFile(AbsoluteEntry, postImport)
+	addImportsFromFile(AbsoluteEntry)
+
+	// compile the import map into a bundle with an entrypoint and render to
+	// bundle program text
+	BundleFile := ModuleNodes |>
+		keys() |>
+		sort!() |>
+		map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()]) |>
+		wrapBundle(AbsoluteEntry) |>
+		renderBundle()
+
+	if writeFile(Output, BundleFile) {
+		? -> Log(format('[oak build] Could not write bundle to {{0}}', Output))
+		_ -> Log(format('[oak build] Bundle written to {{0}}', Output))
+	}
 }
 
 {

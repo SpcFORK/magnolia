@@ -19,29 +19,22 @@ fn cachedParse(path, text, moduleNodes, log, abort, syntax, format) if cached :=
 	_ -> cached
 }
 
-fn addImportsFromSource(path, file, next, moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn) {
+fn addImportsFromSource(path, file, moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn) {
 	cachedParseFn(path, file) |> with each() fn(node) if node = importAssignmentNode -> {
 		if runtimeLibQ(importName := node.right.args.(0).val) {
-			true -> if web? -> addImportsFromSource(importName, runtimeLib(importName), next, moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn)
+			true -> if web? -> addImportsFromSource(importName, runtimeLib(importName), moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn)
 			_ -> {
 				importPath := resolve(importName, dir(path)) + '.oak'
-				if moduleNodes.(importPath) = ? -> addImportsFromFile(importPath, next)
+				if moduleNodes.(importPath) = ? -> addImportsFromFile(importPath)
 			}
 		}
 	}
 }
 
-fn addImportsFromFile(path, next, importCounters, readFile, printf, addImportsFromSource) {
-	importCounters.started <- importCounters.started + 1
-
-	with readFile(path) fn(file) if file {
+fn addImportsFromFile(path, readFile, printf, addImportsFromSource) {
+	if file := readFile(path) {
 		? -> printf('[oak build] Import {{0}} does not exist.', path)
-		_ -> {
-			addImportsFromSource(path, file, next)
-			if importCounters.finished <- importCounters.finished + 1 {
-				importCounters.started -> next()
-			}
-		}
+		_ -> addImportsFromSource(path, file)
 	}
 }
 
