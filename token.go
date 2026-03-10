@@ -66,6 +66,7 @@ const (
 	greater
 	less
 	eq
+	deepEq
 	geq
 	leq
 	neq
@@ -156,6 +157,8 @@ func (t token) String() string {
 		return "<"
 	case eq:
 		return "="
+	case deepEq:
+		return "=="
 	case geq:
 		return ">="
 	case leq:
@@ -292,8 +295,15 @@ func (t *tokenizer) readValidNumeral() string {
 		if unicode.IsDigit(c) {
 			accumulator = append(accumulator, c)
 		} else if c == '.' && !sawDot {
-			sawDot = true
-			accumulator = append(accumulator, c)
+			// Only treat '.' as part of a float literal when followed by a digit.
+			// This keeps property access like `x.0.name` tokenized correctly.
+			if !t.isEOF() && unicode.IsDigit(t.peek()) {
+				sawDot = true
+				accumulator = append(accumulator, c)
+			} else {
+				t.back()
+				break
+			}
 		} else {
 			t.back()
 			break
@@ -417,9 +427,9 @@ func (t *tokenizer) nextToken() token {
 		if !t.isEOF() && t.peek() == '=' {
 			pos := t.currentPos()
 			t.next() // consume the second '='
-			return token{kind: eq, pos: pos}
+			return token{kind: deepEq, pos: pos}
 		}
-		return token{kind: assign, pos: t.currentPos()}
+		return token{kind: eq, pos: t.currentPos()}
 	case '\'':
 		pos := t.currentPos()
 		payloadBuilder := strings.Builder{}

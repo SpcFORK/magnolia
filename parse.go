@@ -1194,7 +1194,7 @@ func infixOpPrecedence(op tokKind) int {
 		return 75
 	case modulus:
 		return 80
-	case eq, greater, less, geq, leq, neq:
+	case eq, deepEq, greater, less, geq, leq, neq:
 		return 30
 	case and:
 		return 20
@@ -1297,7 +1297,7 @@ func (p *parser) parseNode() (astNode, error) {
 			return p.parseAssignment(node)
 		case plus, minus, times, divide, modulus, power,
 			xor, and, or, pushArrow, rshift,
-			greater, less, eq, geq, leq, neq:
+			greater, less, eq, deepEq, geq, leq, neq:
 			// this case implements a mini Pratt parser threaded through the
 			// larger Oak syntax parser, using the parser struct itself to keep
 			// track of the power / precedence stack since other forms may be

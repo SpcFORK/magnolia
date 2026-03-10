@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -836,6 +837,22 @@ func incompatibleError(op tokKind, left, right Value, position pos) *runtimeErro
 	}
 }
 
+func shallowEqual(left, right Value) bool {
+	switch l := left.(type) {
+	case *ListValue:
+		r, ok := right.(*ListValue)
+		return ok && l == r
+	case ObjectValue:
+		r, ok := right.(ObjectValue)
+		if !ok {
+			return false
+		}
+		return reflect.ValueOf(l).Pointer() == reflect.ValueOf(r).Pointer()
+	default:
+		return left.Eq(right)
+	}
+}
+
 func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value, *runtimeError) {
 	switch n := node.(type) {
 	case emptyNode:
@@ -1305,6 +1322,8 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		}
 
 		if n.op == eq {
+			return BoolValue(shallowEqual(leftComputed, rightComputed)), nil
+		} else if n.op == deepEq {
 			return BoolValue(leftComputed.Eq(rightComputed)), nil
 		} else if n.op == neq {
 			return BoolValue(!leftComputed.Eq(rightComputed)), nil

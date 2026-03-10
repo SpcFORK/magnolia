@@ -409,6 +409,30 @@ func TestStringCompare(t *testing.T) {
 	`, MakeList(oakTrue, oakTrue, oakTrue, oakTrue, oakTrue))
 }
 
+func TestShallowVsDeepListEquality(t *testing.T) {
+	expectProgramToReturn(t, `
+		a := [1, 2]
+		b := [1, 2]
+		[
+			a = b
+			a == b
+			a = a
+		]
+	`, MakeList(oakFalse, oakTrue, oakTrue))
+}
+
+func TestShallowVsDeepObjectEquality(t *testing.T) {
+	expectProgramToReturn(t, `
+		a := {x: 1,}
+		b := {x: 1,}
+		[
+			a = b
+			a == b
+			a = a
+		]
+	`, MakeList(oakFalse, oakTrue, oakTrue))
+}
+
 func TestAndOperator(t *testing.T) {
 	expectProgramToReturn(t, `
 	[
@@ -1633,7 +1657,18 @@ func TestBuildLibraryParseIncludesFromString(t *testing.T) {
 }
 
 func TestBuildLibraryParseIncludesFromList(t *testing.T) {
-	expectProgramToReturn(t, `build := import('build'), str := import('str'), parsed := build.parseIncludes(['foo:./x', {name: 'bar', path: '/tmp/bar.oak'}]), [parsed.0.name, str.endsWith?(parsed.0.path, '.oak'), parsed.1.name, parsed.1.path, type(build.run)]`, MakeList(
+	expectProgramToReturn(t, `
+		build := import('build')
+		str := import('str')
+		parsed := build.parseIncludes(['foo:./x', { name: 'bar', path: '/tmp/bar.oak', }])
+		[
+			parsed.0.name,
+			str.endsWith?(parsed.0.path, '.oak'),
+			parsed.1.name,
+			parsed.1.path,
+			type(build.run)
+		]
+	`, MakeList(
 		MakeString("foo"),
 		BoolValue(true),
 		MakeString("bar"),
