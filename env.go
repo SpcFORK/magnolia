@@ -962,15 +962,13 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	switch args[0].(type) {
-	case FnValue, BuiltinFnValue:
-	default:
+	fn, ok := args[0].(FnValue)
+	if !ok {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("go argument must be a function, got %s", args[0]),
 		}
 	}
 
-	fn := args[0]
 	fnArgs := args[1:] // remaining arguments
 
 	c.eng.Add(1)

@@ -61,25 +61,37 @@ var libsyntax string
 //go:embed lib/Virtual.oak
 var libvirtual string
 
+//go:embed lib/pack-utils.oak
+var libpackutils string
+
+//go:embed lib/bundle-utils.oak
+var libbundleutils string
+
+//go:embed lib/ast-transform.oak
+var libasttransform string
+
 var stdlibs = map[string]string{
-	"std":      libstd,
-	"str":      libstr,
-	"math":     libmath,
-	"sort":     libsort,
-	"random":   librandom,
-	"fs":       libfs,
-	"fmt":      libfmt,
-	"json":     libjson,
-	"datetime": libdatetime,
-	"path":     libpath,
-	"http":     libhttp,
-	"test":     libtest,
-	"debug":    libdebug,
-	"cli":      libcli,
-	"md":       libmd,
-	"crypto":   libcrypto,
-	"syntax":   libsyntax,
-	"Virtual":  libvirtual,
+	"std":            libstd,
+	"str":            libstr,
+	"math":           libmath,
+	"sort":           libsort,
+	"random":         librandom,
+	"fs":             libfs,
+	"fmt":            libfmt,
+	"json":           libjson,
+	"datetime":       libdatetime,
+	"path":           libpath,
+	"http":           libhttp,
+	"test":           libtest,
+	"debug":          libdebug,
+	"cli":            libcli,
+	"md":             libmd,
+	"crypto":         libcrypto,
+	"syntax":         libsyntax,
+	"Virtual":        libvirtual,
+	"pack-utils":     libpackutils,
+	"bundle-utils":   libbundleutils,
+	"ast-transform":  libasttransform,
 }
 
 func isStdLib(name string) bool {

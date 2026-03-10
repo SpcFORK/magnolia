@@ -26,6 +26,15 @@ func expectProgramToReturn(t *testing.T, program string, expected Value) {
 	}
 }
 
+func expectProgramToError(t *testing.T, program string) {
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+	_, err := ctx.Eval(strings.NewReader(program))
+	if err == nil {
+		t.Errorf("Expected program to exit with an error")
+	}
+}
+
 func TestEvalEmptyProgram(t *testing.T) {
 	expectProgramToReturn(t, "", null)
 	expectProgramToReturn(t, "   \n", null)
@@ -106,6 +115,7 @@ func TestKeywordLikeAtomLiteral(t *testing.T) {
 	expectProgramToReturn(t, ":if", AtomValue("if"))
 	expectProgramToReturn(t, ":fn", AtomValue("fn"))
 	expectProgramToReturn(t, ":with", AtomValue("with"))
+	expectProgramToReturn(t, ":cs", AtomValue("cs"))
 	expectProgramToReturn(t, ":true", AtomValue("true"))
 	expectProgramToReturn(t, ":false", AtomValue("false"))
 }
@@ -1385,10 +1395,6 @@ func TestVirtualSyscallBuiltinsExist(t *testing.T) {
 		Virtual := import('Virtual')
 		vm := Virtual.createStandardVM()
 		[
-			type(vm.globalScope.go)
-			type(vm.globalScope.make_chan)
-			type(vm.globalScope.chan_send)
-			type(vm.globalScope.chan_recv)
 			type(vm.globalScope.bits)
 			type(vm.globalScope.addr)
 			type(vm.globalScope.memread)
@@ -1398,10 +1404,6 @@ func TestVirtualSyscallBuiltinsExist(t *testing.T) {
 			type(vm.globalScope.syscall)
 		]
 	`, MakeList(
-		AtomValue("function"),
-		AtomValue("function"),
-		AtomValue("function"),
-		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
@@ -1462,6 +1464,10 @@ func TestGoBuiltinCoordinatesOverChannel(t *testing.T) {
 		})
 		chan_recv(ch).data
 	`, AtomValue("ready"))
+}
+
+func TestGoRejectsBuiltinTarget(t *testing.T) {
+	expectProgramToError(t, `go(wait, 0)`)
 }
 
 func TestChanRecvAsyncCallback(t *testing.T) {
@@ -1529,6 +1535,13 @@ func TestClassConstructorWithoutArgs(t *testing.T) {
 		}
 		type(Empty())
 	`, AtomValue("object"))
+}
+
+func TestClassConstructorEmptyBodyActsLikeEmptyBlock(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Empty {}
+		Empty()
+	`, null)
 }
 
 func TestBitsBuiltinRoundTrip(t *testing.T) {

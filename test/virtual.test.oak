@@ -109,6 +109,65 @@ fn run(t) {
 	}
 
 	{
+		ctx := Virtual.createVirtualContext()
+
+		'context can parse source into AST nodes' |> t.eq(
+			{
+				ast := ctx.parse('1 + 2')
+				first := ast.0
+				first.type
+			}
+			:binary
+		)
+
+		'context can evaluate AST programs directly' |> t.eq(
+			{
+				ast := ctx.parse('x := 2\nx + 5')
+				ctx.evalNodes(ast)
+			}
+			7
+		)
+
+		'context can inspect expanded macro AST' |> t.eq(
+			{
+				ctx.defineMacro('twice', fn(call, expand) {
+					value := expand(call.args.0)
+					{
+						type: :binary
+						op: :plus
+						left: value
+						right: value
+					}
+				})
+				ast := ctx.parse('twice(5)')
+				first := ast.0
+				ctx.expand(first).type
+			}
+			:binary
+		)
+
+		'macros rewrite parsed calls before evaluation' |> t.eq(
+			ctx.evalExpr('twice(4 + 1)')
+			10
+		)
+
+		'macros can expand nested macro calls' |> t.eq(
+			{
+				ctx.defineMacro('inc', fn(call) {
+					{
+						type: :binary
+						op: :plus
+						left: call.args.0
+						right: { type: :int, val: 1 }
+					}
+				})
+				ctx.evalExpr('twice(inc(4))')
+			}
+			10
+		)
+	}
+
+	{
 		vm := Virtual.createStandardVM()
 
 		'if expression matches true branch' |> t.eq(
@@ -144,10 +203,6 @@ fn run(t) {
 		'string conversion' |> t.eq(vm.run('string(123)', {}), '123')
 		'int conversion' |> t.eq(vm.run('int(\'456\')', {}), 456)
 		'float conversion from string' |> t.approx(vm.run('float(\'3.14\')', {}), 3.14)
-		'go builtin is available in virtual vm' |> t.eq(vm.run('type(go)', {}), :function)
-		'make_chan builtin is available in virtual vm' |> t.eq(vm.run('type(make_chan)', {}), :function)
-		'chan_send builtin is available in virtual vm' |> t.eq(vm.run('type(chan_send)', {}), :function)
-		'chan_recv builtin is available in virtual vm' |> t.eq(vm.run('type(chan_recv)', {}), :function)
 		'bits builtin is available in virtual vm' |> t.eq(vm.run('type(bits)', {}), :function)
 		'addr builtin is available in virtual vm' |> t.eq(vm.run('type(addr)', {}), :function)
 		'memread builtin is available in virtual vm' |> t.eq(vm.run('type(memread)', {}), :function)

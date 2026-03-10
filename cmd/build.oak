@@ -6,11 +6,9 @@
 	clone: clone
 	map: map
 	each: each
-	take: take
 	filter: filter
 	reduce: reduce
 	append: append
-	entries: entries
 	contains?: contains?
 	merge: merge
 	once: once
@@ -38,32 +36,32 @@
 } := import('path')
 cli := import('cli')
 syntax := import('syntax')
+bundleUtils := import('bundle-utils')
+transform := import('ast-transform')
 
 Cli := cli.parse()
 
 Entry := Cli.opts.entry
 Web? := Cli.opts.web != ?
 Output := Cli.opts.output |> default(Cli.opts.o)
-Includes := Cli.opts.include |> default('') |>
-	split(',') |>
-	filter(fn(s) s != '') |>
-	with map() fn(spec) if [name, path] := spec |> split(':') {
+fn requireOpt(flag, value) if value {
+	?, '', true -> {
+		printf('[oak build] No --{{0}} specified.', flag)
+		exit(1)
+	}
+}
+fn parseInclude(spec) if [name, path] := spec |> split(':') {
 	[_, _] -> { name: name, path: resolve(path) + '.oak' }
 	_ -> { name: spec, path: resolve(spec) + '.oak' }
 }
+Includes := Cli.opts.include |>
+	default('') |>
+	split(',') |>
+	filter(fn(s) s != '') |>
+	map(parseInclude)
 
-if Entry {
-	?, '', true -> {
-		printf('[oak build] No --entry specified.')
-		exit(1)
-	}
-}
-if Output {
-	?, '', true -> {
-		printf('[oak build] No --output specified.')
-		exit(1)
-	}
-}
+requireOpt('entry', Entry)
+requireOpt('output', Output)
 if statFile(Entry) = ? -> {
 	printf('[oak build] {{0}} does not exist.', Entry)
 	exit(1)
@@ -171,14 +169,6 @@ fn addImportsFromSource(path, file, next) {
 	}
 }
 
-// wrapBlock returns a block AST node containing all the given nodes as
-// sub-expressions of the block. In effect, it makes N AST nodes 1 node.
-fn wrapBlock(nodes) {
-	type: :block
-	tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
-	exprs: nodes
-}
-
 // When translating between incompatible identifier names or symbols, Oak
 // names will be appended to "__oak_js_" to produce a valid JS name, e.g.
 // Oak identifier "const" (a JS reserve word) becomes "__oak_js_const".
@@ -259,24 +249,12 @@ fn wrapModule(block) {
 	}
 }
 
-// commonPrefix computes the "longest common prefix" (substring from start of
-// path that's shared between all paths) of all given paths. If there is only
-// one path or if there is no common prefix, it returns ''.
-//
-// commonPrefix is used to ensure that module paths in the bundle do not leak
-// information about the build environment unnecessarily.
-fn commonPrefix(paths) {
-	sortedPaths := paths |> sort!()
-	first := sortedPaths.0
-	last := sortedPaths.(len(sortedPaths) - 1)
-	fn sub(i) if i {
-		len(first) -> first
-		_ -> if first.(i) {
-			last.(i) -> sub(i + 1)
-			_ -> first |> take(i)
-		}
-	}
-	sub(0)
+// bundleCommonPrefix uses the shared bundle-utils implementation while
+// preserving the older bundler behavior of not stripping the full path when
+// only one module is present in the bundle.
+fn bundleCommonPrefix(paths) if len(paths) < 2 {
+	true -> ''
+	_ -> bundleUtils.commonPrefix(paths)
 }
 
 // wrapBundle takes a list of module AST nodes (closures) and wraps it into a
@@ -308,7 +286,7 @@ fn wrapBundle(modules, entryModuleName) {
 			modules |> map(0)
 			Includes |> map(:path)
 		) |> filter(fn(path) !___runtime_lib?(path))
-		bundlePrefixLen := commonPrefix(bundledPaths) |> len()
+		bundlePrefixLen := bundleCommonPrefix(bundledPaths) |> len()
 
 		fn normalizeModulePath(path) if {
 			___runtime_lib?(path) -> path
@@ -910,7 +888,7 @@ postImport := with once() fn {
 	BundleFile := ModuleNodes |>
 		keys() |>
 		sort!() |>
-		map(fn(name) [name, name |> cachedParse() |> wrapBlock() |> analyzeNode() |> wrapModule()]) |>
+		map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> analyzeNode() |> wrapModule()]) |>
 		wrapBundle(AbsoluteEntry) |>
 		renderBundle()
 

@@ -32,6 +32,7 @@ syntax := import('syntax')
 fn createVM() {
 	globalScope := {}
 	callStack := []
+	macros := {}
 	
 	fn evalBinaryOp(op, left, right) if op {
 		:plus -> if type(left) {
@@ -162,57 +163,154 @@ fn createVM() {
 		}
 		_ -> ?
 	}
+
+	fn evalNodes(nodes, sc) {
+		result := ?
+		nodes |> each(fn(node) {
+			result <- evalExpr(node, sc)
+		})
+		result
+	}
+
+	fn expandNode(node) if type(node) {
+		:object -> if node.type {
+			:list -> {
+				expanded := clone(node)
+				expanded.elems := node.elems |> map(expandNode)
+				expanded
+			}
+			:object -> {
+				expanded := clone(node)
+				expanded.entries := node.entries |> map(fn(entry) {
+					clone(entry) |> merge({
+						key: expandNode(entry.key)
+						val: expandNode(entry.val)
+					})
+				})
+				expanded
+			}
+			:function -> clone(node) |> merge({
+				body: expandNode(node.body)
+			})
+			:assignment -> clone(node) |> merge({
+				left: expandNode(node.left)
+				right: expandNode(node.right)
+			})
+			:propertyAccess -> clone(node) |> merge({
+				left: expandNode(node.left)
+				right: expandNode(node.right)
+			})
+			:unary -> clone(node) |> merge({
+				right: expandNode(node.right)
+			})
+			:binary -> clone(node) |> merge({
+				left: expandNode(node.left)
+				right: expandNode(node.right)
+			})
+			:ifBranch -> clone(node) |> merge({
+				target: expandNode(node.target)
+				body: expandNode(node.body)
+			})
+			:ifExpr -> clone(node) |> merge({
+				cond: expandNode(node.cond)
+				branches: node.branches |> map(expandNode)
+			})
+			:block -> clone(node) |> merge({
+				exprs: node.exprs |> map(expandNode)
+			})
+			:fnCall -> if node.function.type = :identifier {
+				true -> if macro := macros.(node.function.val) {
+					? -> clone(node) |> merge({
+						function: expandNode(node.function)
+						args: node.args |> map(expandNode)
+						restArg: if node.restArg {
+							? -> ?
+							_ -> expandNode(node.restArg)
+						}
+					})
+					_ -> macro(clone(node), expandNode) |> expandNode()
+				}
+				_ -> clone(node) |> merge({
+					function: expandNode(node.function)
+					args: node.args |> map(expandNode)
+					restArg: if node.restArg {
+						? -> ?
+						_ -> expandNode(node.restArg)
+					}
+				})
+			}
+			_ -> clone(node)
+		}
+		:list -> node |> map(expandNode)
+		_ -> node
+	}
+
+	fn expand(ast) ast |> expandNode()
+
+	fn evalAst(ast, sc) if type(ast) {
+		:list -> evalNodes(ast, sc)
+		_ -> evalExpr(ast, sc)
+	}
+
+	fn parseSource(source) {
+		ast := syntax.parse(source)
+		if type(ast) {
+			:object -> if ast.type {
+				:error -> {
+					type: :error
+					message: format('Parse error at {{0}}:{{1}}: {{2}}',
+						ast.pos.0, ast.pos.1, ast.error)
+				}
+				_ -> ast
+			}
+			_ -> ast
+		}
+	}
+
+	fn runAst(ast, scope) {
+		scope := merge(clone(globalScope), scope |> default({}))
+		evalAst(expand(ast), scope)
+	}
 	
 	{
 		globalScope: globalScope
 		callStack: callStack
+		macros: macros
 		
 		// registers a builtin function in the global scope
 		registerBuiltin: fn(name, f) {
 			globalScope.(name) := f
 		}
+
+		// registers a macro expander by the callee identifier it rewrites
+		registerMacro: fn(name, f) {
+			macros.(name) := f
+		}
 		
 		// parses Oak source code and returns AST
-		parse: fn(source) {
-			ast := syntax.parse(source)
-			if type(ast) {
-				:object -> if ast.type {
-					:error -> {
-						type: :error
-						message: format('Parse error at {{0}}:{{1}}: {{2}}', 
-							ast.pos.0, ast.pos.1, ast.error)
-					}
-					_ -> ast
-				}
-				_ -> ast
-			}
-		}
+		parse: parseSource
+
+		// expands any registered macros in an AST node or AST list
+		expand: expand
 		
 		// evaluates an expression
 		evalExpr: evalExpr
+
+		// evaluates a list of AST nodes against the given raw scope
+		evalNodes: evalNodes
+
+		// evaluates one AST node or a list of nodes against the given raw scope
+		evalAst: evalAst
 		
 		// evaluates an AST
-		eval: fn(ast, scope) {
-			scope := merge(clone(globalScope), scope |> default({}))
-			evalExpr(ast, scope)
-		}
+		eval: runAst
 		
 		// run a complete program
 		run: fn(source, scope) {
-			parsed := syntax.parse(source)
+			parsed := parseSource(source)
 			if type(parsed) = :object & parsed.type = :error {
-				true -> {
-					type: :error
-					message: format('Parse error: {{0}}', parsed.error)
-				}
-				_ -> {
-					scope := merge(clone(globalScope), scope |> default({}))
-					result := ?
-					parsed |> each(fn(node) {
-						result <- evalExpr(node, scope)
-					})
-					result
-				}
+				true -> parsed
+				_ -> runAst(parsed, scope)
 			}
 		}
 	}
@@ -267,10 +365,6 @@ fn createStandardVM() {
 		:string -> float(x) |> default(?)
 		_ -> ?
 	})
-	vm.registerBuiltin('go', fn(target, args...) go(target, args...))
-	vm.registerBuiltin('make_chan', fn(args...) make_chan(args...))
-	vm.registerBuiltin('chan_send', fn(ch, val, args...) chan_send(ch, val, args...))
-	vm.registerBuiltin('chan_recv', fn(ch, args...) chan_recv(ch, args...))
 	vm.registerBuiltin('bits', fn(x) bits(x))
 	vm.registerBuiltin('addr', fn(x) addr(x))
 	vm.registerBuiltin('memread', fn(address, length) memread(address, length))
@@ -287,8 +381,15 @@ fn createVirtualContext(initialScope) {
 	vm := createStandardVM()
 	scope := initialScope |> default({})
 	scope |> merge(clone(vm.globalScope))
-	
-	{
+
+	fn prepareScope(localScope) {
+		localScope := localScope |> default(scope)
+		localScope |> merge(clone(vm.globalScope))
+		if localScope != scope -> localScope |> merge(scope)
+		localScope
+	}
+
+	ctx := {
 		vm: vm
 		scope: scope
 		
@@ -302,6 +403,7 @@ fn createVirtualContext(initialScope) {
 			scope.(name) := {
 				type: :function
 				params: params
+				restArg: ''
 				body: body
 				closure: clone(scope)
 			}
@@ -309,22 +411,14 @@ fn createVirtualContext(initialScope) {
 		
 		// evaluate an expression
 		evalExpr: fn(code, localScope) {
-			localScope := localScope |> default(scope)
-			localScope |> merge(clone(vm.globalScope))
-			if localScope != scope -> localScope |> merge(scope)
+			localScope := prepareScope(localScope)
 			parsed := vm.parse(code)
 			if type(parsed) {
 				:object -> if parsed.type {
 					:error -> parsed
-					_ -> ?
+					_ -> vm.evalAst(vm.expand(parsed), localScope)
 				}
-				_ -> {
-					result := ?
-					parsed |> each(fn(node) {
-						result <- vm.evalExpr(node, localScope)
-					})
-					result
-				}
+				_ -> vm.evalAst(vm.expand(parsed), localScope)
 			}
 		}
 		
@@ -343,6 +437,22 @@ fn createVirtualContext(initialScope) {
 			}
 		}
 	}
+
+	ctx.defineMacro := fn(name, f) {
+		vm.registerMacro(name, f)
+	}
+	ctx.parse := vm.parse
+	ctx.expand := vm.expand
+	ctx.evalAst := fn(ast, localScope) {
+		localScope := prepareScope(localScope)
+		vm.evalAst(vm.expand(ast), localScope)
+	}
+	ctx.evalNodes := fn(nodes, localScope) {
+		localScope := prepareScope(localScope)
+		vm.evalAst(vm.expand(nodes), localScope)
+	}
+
+	ctx
 }
 
 {

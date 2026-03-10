@@ -20,7 +20,7 @@ expr := literal | identifier |
 literal := nullLiteral |
     numberLiteral | stringLiteral | atomLiteral | boolLiteral |
     listLiteral | objectLiteral |
-    fnLiterael
+    fnLiteral | csLiteral
 
 nullLiteral := '?'
 numberLiteral := \d+ | \d* '.' \d+
@@ -30,6 +30,7 @@ boolLiteral := 'true' | 'false'
 listLiteral := '[' ( expr ',' )* ']' // last comma optional
 objectLiteral := '{' ( expr ':' expr ',' )* '}' // last comma optional
 fnLiteral := 'fn' '(' ( identifier ',' )* (identifier '...')? ')' expr
+csLiteral := 'cs' identifier ('(' ( identifier ',' )* (identifier '...')? ')')? expr
 
 identifier := \w_ (\w\d_?!)* | _
 
@@ -66,6 +67,7 @@ atomLiteral
 listLiteral
 objectLiteral
 fnLiteral
+csLiteral
 identifier
 assignment
 propertyAccess
@@ -104,6 +106,14 @@ exec(path, args, stdin) // returns stdout, stderr, end events
 sysproc(library, name)
 syscall(proc, args...)
 utf16(string)
+go(fn, args...)
+make_chan(cap?)
+chan_send(ch, value, callback?)
+chan_recv(ch, callback?)
+bits(x) // list<byte> <-> byte string
+addr(bits)
+memread(address, length)
+memwrite(address, bits)
 
 ---- I/O interfaces
 input()
@@ -145,6 +155,12 @@ fn sq(n) { n * n } // equivalent
 fn say() { std.println('Hi!') }
 // if no arguments, () is optiona
 fn { std.println('Hi!') }
+
+// class constructor sugar
+cs Pair(left, right) {
+	{ left: left, right: right }
+}
+Pair(1, 2).left
 
 // factorial
 fn factorial(n) if n <= 1 {

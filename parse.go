@@ -509,6 +509,9 @@ func (p *parser) parseUnit() (astNode, error) {
 		case withKeyword:
 			p.next()
 			return atomNode{payload: "with", tok: &tok}, nil
+		case csKeyword:
+			p.next()
+			return atomNode{payload: "cs", tok: &tok}, nil
 		case trueLiteral:
 			p.next()
 			return atomNode{payload: "true", tok: &tok}, nil
@@ -760,6 +763,12 @@ func (p *parser) parseUnit() (astNode, error) {
 		body, err := p.parseNode()
 		if err != nil {
 			return nil, err
+		}
+
+		// Exception to the "{} is empty object" rule is that `cs Name {}`
+		// should parse like `Name := fn Name {}` with an empty block body.
+		if objBody, ok := body.(objectNode); ok && len(objBody.entries) == 0 {
+			body = blockNode{exprs: []astNode{}, tok: objBody.tok}
 		}
 
 		return assignmentNode{
