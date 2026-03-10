@@ -442,9 +442,11 @@ For Magnolia-specific features, see:
 - [Transpile Middleware documentation](docs/transpile.md)
 - [Code Generation documentation](docs/runtime-codegen.md)
 - [Go Runtime and System Interop documentation](docs/go.md)
+- [System interop wrappers (`sys`) documentation](docs/sys.md)
 - [Bitwise and pointer helper documentation](docs/bitwise.md)
 - [Classes (`cs`) documentation](docs/cs.md)
 - [Syntax and Macros documentation](docs/syntax.md)
+- [Multi-backend GPU helpers (`gpus`) documentation](docs/gpus.md)
 - [Advanced Build Features](docs/build.md)
 - [String manipulation library](docs/str.md)
 - Example programs in [samples/](samples/) including threading, transpilation, VFS, and pointer/bitwise examples
