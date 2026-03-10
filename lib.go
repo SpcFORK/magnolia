@@ -162,6 +162,47 @@ var stdlibs = map[string]string{
 	"codegen-common":  libcodegencommon,
 }
 
+var stdlibLoadOrder = []string{
+	"std",
+	"str",
+	"math",
+	"sort",
+	"random",
+	"fs",
+	"fmt",
+	"json",
+	"datetime",
+	"path",
+	"http",
+	"test",
+	"debug",
+	"cli",
+	"md",
+	"crypto",
+	"gpu",
+	"syntax",
+	"Virtual",
+	"pack-utils",
+	"bundle-utils",
+	"ast-transform",
+	"shell",
+	"transpile",
+	"pack",
+	"build",
+	"build-includes",
+	"build-ident",
+	"build-wasm",
+	"build-ast",
+	"build-analyze",
+	"build-render",
+	"build-config",
+	"build-imports",
+	"runtime-native",
+	"runtime-js",
+	"runtime-codegen",
+	"codegen-common",
+}
+
 func isStdLib(name string) bool {
 	_, ok := stdlibs[name]
 	return ok
@@ -201,7 +242,7 @@ func (c *Context) LoadLib(name string) (Value, *runtimeError) {
 }
 
 func (c *Context) loadAllLibs() error {
-	for libname := range stdlibs {
+	for _, libname := range stdlibLoadOrder {
 		_, err := c.Eval(strings.NewReader(fmt.Sprintf("%s := import('%s')", libname, libname)))
 		if err != nil {
 			return err

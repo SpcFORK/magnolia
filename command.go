@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chzyer/readline"
 )
@@ -194,6 +195,7 @@ func runRepl() {
 	ctx := NewContextWithCwd()
 	ctx.LoadBuiltins()
 	ctx.mustLoadAllLibs()
+	replStartedAt := time.Now()
 
 	for {
 		line, err := rl.Readline()
@@ -201,14 +203,35 @@ func runRepl() {
 			break
 		}
 
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && time.Since(replStartedAt) < 200*time.Millisecond {
+			_, isCliCommand := cliCommands[trimmed]
+			if isCliCommand || trimmed == "repl" || trimmed == "eval" || trimmed == "pipe" ||
+				strings.Contains(trimmed, "magnolia.exe") || strings.HasPrefix(trimmed, "Set-Location ") ||
+				strings.HasPrefix(trimmed, ".\\") || strings.HasPrefix(trimmed, "./") ||
+				strings.HasPrefix(trimmed, "go run ") || strings.HasPrefix(trimmed, "go build ") ||
+				strings.HasPrefix(trimmed, "Write-Output ") {
+				continue
+			}
+		}
+
 		// if no input, don't print the null output
-		if strings.TrimSpace(line) == "" {
+		if trimmed == "" {
 			continue
 		}
 
 		ctx.currentFile = "(repl)"
 		val, err := ctx.Eval(strings.NewReader(line))
 		if err != nil {
+			if time.Since(replStartedAt) < 3*time.Second {
+				if rtErr, ok := err.(*runtimeError); ok {
+					if rtErr.line == 1 && rtErr.col == 1 && strings.HasSuffix(rtErr.reason, " is undefined") {
+						if _, isCliCommand := cliCommands[trimmed]; isCliCommand || trimmed == "repl" || trimmed == "eval" || trimmed == "pipe" {
+							continue
+						}
+					}
+				}
+			}
 			config := DefaultErrorConfig()
 			config.ShowContext = false // Don't show context for REPL
 			DisplayError(err, config)
