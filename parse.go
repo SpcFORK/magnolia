@@ -12,6 +12,19 @@ type astNode interface {
 	pos() pos
 }
 
+func parseIntLiteral(payload string) (int64, error) {
+	base := 10
+	if strings.HasPrefix(payload, "0x") || strings.HasPrefix(payload, "0X") {
+		base = 16
+		payload = payload[2:]
+	} else if strings.HasPrefix(payload, "0b") || strings.HasPrefix(payload, "0B") {
+		base = 2
+		payload = payload[2:]
+	}
+
+	return strconv.ParseInt(payload, base, 64)
+}
+
 type emptyNode struct {
 	tok *token
 }
@@ -680,7 +693,7 @@ func (p *parser) parseUnit() (astNode, error) {
 				tok:     &tok,
 			}, nil
 		}
-		n, err := strconv.ParseInt(tok.payload, 10, 64)
+		n, err := parseIntLiteral(tok.payload)
 		if err != nil {
 			return nil, parseError{reason: err.Error(), pos: tok.pos}
 		}

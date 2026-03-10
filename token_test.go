@@ -79,3 +79,34 @@ func TestTokenizerPeekAheadEOF(t *testing.T) {
 		t.Fatalf("expected EOF sentinel whitespace, got %q", got)
 	}
 }
+
+func TestTokenizerBasePrefixedNumerals(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		payload string
+	}{
+		{name: "hex", source: "0x3", payload: "0x3"},
+		{name: "hex uppercase prefix", source: "0XAf", payload: "0XAf"},
+		{name: "binary", source: "0b0011", payload: "0b0011"},
+		{name: "binary uppercase prefix", source: "0B11", payload: "0B11"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tk := newTokenizer(tt.source, "x.oak")
+			tokens := tk.tokenize()
+			if len(tokens) == 0 {
+				t.Fatal("expected at least one token")
+			}
+
+			if tokens[0].kind != numberLiteral {
+				t.Fatalf("expected first token to be numberLiteral, got %v", tokens[0].kind)
+			}
+
+			if tokens[0].payload != tt.payload {
+				t.Fatalf("unexpected number payload: got %q, want %q", tokens[0].payload, tt.payload)
+			}
+		})
+	}
+}

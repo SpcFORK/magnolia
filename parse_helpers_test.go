@@ -192,6 +192,38 @@ func TestParseUnitErrors(t *testing.T) {
 	}
 }
 
+func TestParseUnitBasePrefixedIntLiteral(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    int64
+	}{
+		{name: "hex", payload: "0x3", want: 3},
+		{name: "hex uppercase prefix", payload: "0Xf", want: 15},
+		{name: "binary", payload: "0b0011", want: 3},
+		{name: "binary uppercase prefix", payload: "0B11", want: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newParser([]token{tokv(numberLiteral, tt.payload, 1, 1)})
+			node, err := p.parseUnit()
+			if err != nil {
+				t.Fatalf("parseUnit returned error: %v", err)
+			}
+
+			intLit, ok := node.(intNode)
+			if !ok {
+				t.Fatalf("expected intNode, got %T", node)
+			}
+
+			if intLit.payload != tt.want {
+				t.Fatalf("unexpected int value: got %d, want %d", intLit.payload, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseNodePipeAndWithErrors(t *testing.T) {
 	p := newParser([]token{
 		tokv(identifier, "x", 1, 1),

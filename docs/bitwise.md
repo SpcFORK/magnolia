@@ -136,10 +136,6 @@ println(update(value, mask, false)) // 8
 
 ## Pointer and Memory Helpers
 
-### `ptr(x)`
-
-Converts int, pointer, or byte string into a pointer value.
-
 ### `null()` and `null?(p)`
 
 Creates/checks the null pointer.

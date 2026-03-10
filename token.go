@@ -312,6 +312,35 @@ func (t *tokenizer) readValidNumeral() string {
 	return string(accumulator)
 }
 
+func isValidNumeralBaseDigit(c rune, base int) bool {
+	switch base {
+	case 2:
+		return c == '0' || c == '1'
+	case 16:
+		return unicode.IsDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+	default:
+		return false
+	}
+}
+
+func (t *tokenizer) readValidNumeralBase(base int) string {
+	accumulator := []rune{}
+	for {
+		if t.isEOF() {
+			break
+		}
+
+		c := t.next()
+		if isValidNumeralBaseDigit(c, base) {
+			accumulator = append(accumulator, c)
+		} else {
+			t.back()
+			break
+		}
+	}
+	return string(accumulator)
+}
+
 func (t *tokenizer) nextToken() token {
 	c := t.next()
 
@@ -462,6 +491,16 @@ func (t *tokenizer) nextToken() token {
 	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		pos := t.currentPos()
 		payload := string(c) + t.readValidNumeral()
+		if c == '0' && !t.isEOF() {
+			switch t.peek() {
+			case 'x', 'X':
+				basePrefix := t.next()
+				payload = "0" + string(basePrefix) + t.readValidNumeralBase(16)
+			case 'b', 'B':
+				basePrefix := t.next()
+				payload = "0" + string(basePrefix) + t.readValidNumeralBase(2)
+			}
+		}
 		return token{
 			kind:    numberLiteral,
 			pos:     pos,
