@@ -137,7 +137,15 @@ func errObj(message string) ObjectValue {
 
 func syscallErrObj(message string) ObjectValue {
 	return ObjectValue{
-		var (
+		"type":  AtomValue("error"),
+		"error": MakeString(message),
+		"errno": IntValue(0),
+		"r1":    IntValue(0),
+		"r2":    IntValue(0),
+	}
+}
+
+var (
 	sysProcMu    sync.Mutex
 	sysProcCache = map[string]uintptr{}
 )
@@ -202,14 +210,6 @@ if ($proc -eq [IntPtr]::Zero) {
 	sysProcCache[cacheKey] = uintptr(addr)
 	sysProcMu.Unlock()
 	return uintptr(addr), nil
-}
-
-"type":  AtomValue("error"),
-		"error": MakeString(message),
-		"errno": IntValue(0),
-		"r1":    IntValue(0),
-		"r2":    IntValue(0),
-	}
 }
 
 func (c *Context) callbackify(syncFn builtinFn) builtinFn {
