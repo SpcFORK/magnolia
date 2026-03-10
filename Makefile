@@ -38,6 +38,11 @@ test-js:
 	${RUN} build --entry test/main.oak --output /tmp/oak-test.js --web --include ${INCLUDES}
 	node /tmp/oak-test.js
 
+# run oak build --wasm tests
+test-wasm:
+	${RUN} build --entry test/main.oak --output /tmp/oak-test.wat --wasm --include ${INCLUDES}
+	wasm-interp /tmp/oak-test.wat
+
 # build for a specific GOOS target
 build-%:
 	GOOS=$* go build ${LDFLAGS} -o oak-$* .

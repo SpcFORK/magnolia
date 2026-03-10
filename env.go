@@ -78,6 +78,7 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("type", c.oakType)
 	c.LoadFunc("len", c.oakLen)
 	c.LoadFunc("keys", c.oakKeys)
+	c.LoadFunc("___stdlibs", c.oakStdlibs)
 
 	// os interfaces
 	c.LoadFunc("args", c.oakArgs)
@@ -94,6 +95,7 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("utf16", c.oakUTF16)
 	c.LoadFunc("bits", c.oakBits)
 	c.LoadFunc("addr", c.oakAddr)
+	c.LoadFunc("pointer", c.oakPointer) // convert integer or string to a pointer value
 	c.LoadFunc("memread", c.oakMemRead)
 	c.LoadFunc("memwrite", c.oakMemWrite)
 	c.LoadFunc("go", c.oakGo)
@@ -306,6 +308,18 @@ func (c *Context) callbackify(syncFn builtinFn) builtinFn {
 	}
 }
 
+func (c *Context) oakStdlibs(args []Value) (Value, *runtimeError) {
+	if len(args) != 0 {
+		return nil, &runtimeError{reason: "___stdlibs takes no arguments"}
+	}
+
+	obj := make(map[string]Value)
+	for name, source := range stdlibs {
+		obj[name] = MakeString(source)
+	}
+	return ObjectValue(obj), nil
+}
+
 func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 	if err := c.requireArgLen("import", args, 1); err != nil {
 		return nil, err
@@ -496,6 +510,8 @@ func (c *Context) oakType(args []Value) (Value, *runtimeError) {
 		return AtomValue("object"), nil
 	case FnValue, BuiltinFnValue, ClassValue:
 		return AtomValue("function"), nil
+	case PointerValue:
+		return AtomValue("pointer"), nil
 	}
 
 	panic("Unreachable: unknown runtime value")
@@ -792,6 +808,38 @@ func (c *Context) oakBits(args []Value) (Value, *runtimeError) {
 	}
 }
 
+// oakPointer converts its argument to a pointer value.  It accepts an
+// integer or a byte string; the latter behaves exactly like addr(), returning
+// a pointer to the first element. Passing a pointer already returns it
+// unchanged. The function exists purely to make pointer conversions explicit
+// rather than relying on implicit casting from integers.
+func (c *Context) oakPointer(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("pointer", args, 1); err != nil {
+		return nil, err
+	}
+
+	switch arg := args[0].(type) {
+	case IntValue:
+		if arg < 0 {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("pointer() expects a non-negative integer, got %d", arg),
+			}
+		}
+		return PointerValue(uintptr(arg)), nil
+	case *StringValue:
+		if len(*arg) == 0 {
+			return PointerValue(0), nil
+		}
+		return PointerValue(uintptr(unsafe.Pointer(&(*arg)[0]))), nil
+	case PointerValue:
+		return arg, nil
+	default:
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("pointer() expects int or byte string, got %s", args[0]),
+		}
+	}
+}
+
 func (c *Context) oakAddr(args []Value) (Value, *runtimeError) {
 	if err := c.requireArgLen("addr", args, 1); err != nil {
 		return nil, err
@@ -800,9 +848,9 @@ func (c *Context) oakAddr(args []Value) (Value, *runtimeError) {
 	switch arg := args[0].(type) {
 	case *StringValue:
 		if len(*arg) == 0 {
-			return IntValue(0), nil
+			return PointerValue(0), nil
 		}
-		return IntValue(uintptr(unsafe.Pointer(&(*arg)[0]))), nil
+		return PointerValue(uintptr(unsafe.Pointer(&(*arg)[0]))), nil
 	default:
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("addr() expects a byte string, got %s", args[0]),
@@ -815,16 +863,28 @@ func (c *Context) oakMemRead(args []Value) (Value, *runtimeError) {
 		return nil, err
 	}
 
-	addr, ok1 := args[0].(IntValue)
+	// memread now accepts either an integer or pointer as its first argument.
+	addrVal := args[0]
 	length, ok2 := args[1].(IntValue)
-	if !ok1 || !ok2 {
+	if !ok2 {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("Mismatched types in call memread(%s, %s)", args[0], args[1]),
 		}
 	}
-	if addr < 0 {
+	var addr uintptr
+	switch v := addrVal.(type) {
+	case IntValue:
+		if v < 0 {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("memread address must be non-negative, got %d", v),
+			}
+		}
+		addr = uintptr(v)
+	case PointerValue:
+		addr = uintptr(v)
+	default:
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("memread address must be non-negative, got %d", addr),
+			reason: fmt.Sprintf("memread address must be int or pointer, got %s", addrVal),
 		}
 	}
 	if length < 0 {
@@ -852,16 +912,27 @@ func (c *Context) oakMemWrite(args []Value) (Value, *runtimeError) {
 		return nil, err
 	}
 
-	addr, ok1 := args[0].(IntValue)
+	addrVal := args[0]
 	data, ok2 := args[1].(*StringValue)
-	if !ok1 || !ok2 {
+	if !ok2 {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("Mismatched types in call memwrite(%s, %s)", args[0], args[1]),
 		}
 	}
-	if addr < 0 {
+	var addr uintptr
+	switch v := addrVal.(type) {
+	case IntValue:
+		if v < 0 {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("memwrite address must be non-negative, got %d", v),
+			}
+		}
+		addr = uintptr(v)
+	case PointerValue:
+		addr = uintptr(v)
+	default:
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("memwrite address must be non-negative, got %d", addr),
+			reason: fmt.Sprintf("memwrite address must be int or pointer, got %s", addrVal),
 		}
 	}
 	if len(*data) == 0 {
@@ -873,7 +944,7 @@ func (c *Context) oakMemWrite(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	region := rawMemoryRegion(uintptr(addr), len(*data))
+	region := rawMemoryRegion(addr, len(*data))
 	return IntValue(copy(region, *data)), nil
 }
 
@@ -913,6 +984,8 @@ func (c *Context) oakSyscall(args []Value) (Value, *runtimeError) {
 		switch arg := args[i].(type) {
 		case IntValue:
 			syscallArgs = append(syscallArgs, uintptr(arg))
+		case PointerValue:
+			syscallArgs = append(syscallArgs, uintptr(arg))
 		case BoolValue:
 			if arg {
 				syscallArgs = append(syscallArgs, 1)
@@ -929,7 +1002,7 @@ func (c *Context) oakSyscall(args []Value) (Value, *runtimeError) {
 			syscallArgs = append(syscallArgs, uintptr(unsafe.Pointer(&(*arg)[0])))
 		default:
 			return syscallErrObj(fmt.Sprintf(
-				"syscall argument %d must be int, bool, string, or ?, got %s", i, arg,
+				"syscall argument %d must be int, pointer, bool, string, or ?, got %s", i, arg,
 			)), nil
 		}
 	}

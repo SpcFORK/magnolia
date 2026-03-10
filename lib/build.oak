@@ -1,0 +1,1411 @@
+// oak build -- compiler and bundler
+
+{
+	default: default
+	slice: slice
+	clone: clone
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	append: append
+	contains?: contains?
+	merge: merge
+	once: once
+} := import('std')
+{
+	join: join
+	split: split
+	replace: replace
+} := import('str')
+{
+	sort!: sort!
+} := import('sort')
+{
+	readFile: readFile
+	writeFile: writeFile
+	statFile: statFile
+} := import('fs')
+{
+	printf: printf
+	format: format
+} := import('fmt')
+{
+	dir: dir
+	resolve: resolve
+} := import('path')
+cli := import('cli')
+syntax := import('syntax')
+bundleUtils := import('bundle-utils')
+transform := import('ast-transform')
+
+Cli := cli.parse()
+
+Entry := Cli.opts.entry
+Web? := Cli.opts.web != ?
+Wasm? := Cli.opts.wasm != ?
+Output := Cli.opts.output |> default(Cli.opts.o)
+fn requireOpt(flag, value) if value {
+	?, '', true -> {
+		printf('[oak build] No --{{0}} specified.', flag)
+		exit(1)
+	}
+}
+fn parseInclude(spec) if [name, path] := spec |> split(':') {
+	[_, _] -> { name: name, path: resolve(path) + '.oak' }
+	_ -> { name: spec, path: resolve(spec) + '.oak' }
+}
+Includes := Cli.opts.include |>
+	default('') |>
+	split(',') |>
+	filter(fn(s) s != '') |>
+	map(parseInclude)
+
+requireOpt('entry', Entry)
+requireOpt('output', Output)
+if Web? & Wasm? -> {
+	printf('[oak build] --web and --wasm are mutually exclusive build targets.')
+	exit(1)
+}
+if statFile(Entry) = ? -> {
+	printf('[oak build] {{0}} does not exist.', Entry)
+	exit(1)
+}
+
+// absolute path to the entrypoint module
+AbsoluteEntry := resolve(Entry)
+
+// a { string: [Node] } that maps absolute paths of imported modules to their
+// fully parsed AST. We cache it here because we need to potentially astgen
+// modules multiple times in the compilation process. This also serves as the
+// source of truth for which modules the bundle must include.
+ModuleNodes := {}
+
+// ImportCallNode is a template node of the form `import(<string literal>)`,
+// which is a static import that the bundler must handle specially and
+// transform on output.
+ImportCallNode := {
+	type: :fnCall
+	function: { type: :identifier, val: 'import', tok: _ }
+	args: [{ type: :string, val: _, tok: _ }]
+	restArg: ?
+	tok: _
+}
+
+// ImportAssignmentNode is a template node of the form `_ := import(<string
+// literal>)`, which is a top-level static import that the bundler must handle
+// specially and transform on output.
+ImportAssignmentNode := {
+	type: :assignment
+	tok: _
+	local?: true
+	left: _
+	right: ImportCallNode
+}
+
+// cachedParse is a wrapper around syntax.parse that lazily caches the computed
+// AST, so we can minimize redundant work.
+// The path must be absolute, but the text is optional if the path is
+// guaranteed to be cached.
+fn cachedParse(path, text) if cached := ModuleNodes.(path) {
+	? -> {
+		printf('[oak build] Parsing {{0}}...', path)
+		if nodes := text |> syntax.parse() {
+			{ type: :error, error: _, pos: _ } -> {
+				printf('[oak build] Parse error at {{0}}:{{1}}:{{2}}: {{3}}'
+					path, nodes.pos.1, nodes.pos.2, nodes.error)
+				exit(1)
+			}
+			_ -> {
+				ModuleNodes.(path) := nodes
+				nodes
+			}
+		}
+	}
+	_ -> cached
+}
+
+// number of modules we started processing
+startedImport := 0
+// number of modules done processing
+finishedImport := 0
+// addImportsFromFile reads and parses a file at a given path, and potentially
+// dispatches further addImportsFromFile calls to modules imported by the given
+// module. Calling this on an entrypoint module will eventually reach all of
+// the modules it imports recursively.
+//
+// Takes a callback, next, that runs when the dependency tree is fully covered.
+fn addImportsFromFile(path, next) {
+	startedImport <- startedImport + 1
+
+	with readFile(path) fn(file) if file {
+		? -> printf('[oak build] Import {{0}} does not exist.', path)
+		_ -> {
+			addImportsFromSource(path, file, next)
+
+			// if there are no more queued jobs, invoke callback
+			if finishedImport <- finishedImport + 1 {
+				startedImport -> next()
+			}
+		}
+	}
+}
+// addImportsFromSource takes an Oak source file and recursively imports
+// modules included from that entrypoint. It is dual to addImportsFromFile, but
+// takes a source file rather than a path to a file on disk.
+//
+// Takes a callback, next, that runs when the dependency tree is fully covered.
+fn addImportsFromSource(path, file, next) {
+	// find static, top-level imports from this file and queue jobs to analyze
+	// their imports.
+	cachedParse(path, file) |> with each() fn(node) if node = ImportAssignmentNode -> {
+		if ___runtime_lib?(importName := node.right.args.(0).val) {
+			true -> {
+				// for Oak bundles, importing stdlib is a no-op
+				// for JS bundles, bundle the stdlib
+				if Web? -> addImportsFromSource(importName, ___runtime_lib(importName), next)
+			}
+			_ -> {
+				importPath := resolve(importName, dir(path)) + '.oak'
+				// kick off import job if we haven't seen this module before
+				if ModuleNodes.(importPath) = ? -> addImportsFromFile(importPath, next)
+			}
+		}
+	}
+}
+
+// When translating between incompatible identifier names or symbols, Oak
+// names will be appended to "__oak_js_" to produce a valid JS name, e.g.
+// Oak identifier "const" (a JS reserve word) becomes "__oak_js_const".
+//
+// Notably, the identifier "import" is always translated to the bundler builtin
+// "__oak_module_import", which in every runtime runs custom logic to search
+// bundled modules before falling back to native import().
+if Web? {
+	false -> fn formatIdent(name) if name {
+		'import' -> '__oak_module_import'
+		_ -> name |> clone()
+	}
+	_ -> fn formatIdent(name, key) if name {
+		// prevent shadowing of some meaningful global '_' variable
+		'_' -> '__oak_empty_ident' << string(key |> default(''))
+		// ECMAScript 2021 reserved words, cannot be used as identifiers
+		'await', 'break', 'case', 'catch', 'class', 'const', 'continue'
+		'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export'
+		'extends', 'false', 'finally', 'for', 'function', 'if', 'in'
+		'instanceof', 'let', 'new', 'null', 'return', 'super', 'switch'
+		'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while'
+		'with', 'yield' -> '__oak_js_' << name
+		// note that "import" is also an ECMAScript reserved word
+		'import' -> '__oak_module_import'
+		_ -> name |>
+			clone() |>
+			replace('?', '__oak_qm') |>
+			replace('!', '__oak_exclam')
+	}
+}
+
+// wrapModule takes the body of a module and wraps it in a closure that returns
+// a global `module` object. It returns a single AST node object representing
+// this closure, to be wrapped further into a bundle AST.
+fn wrapModule(block) {
+	// wrap nodes in AST of:
+	//
+	// fn {
+	//     { ... module code }
+	//     {
+	//         ... exportedName: exportedName
+	//     }
+	// }
+	type: :function
+	name: ''
+	tok: { pos: [0, 1, 1], type: :fnKeyword, val: ? }
+	args: []
+	restArg: ''
+	decls: []
+	body: {
+		type: :block
+		tok: { pos: [0, 1, 4], type: :leftBrace, val: ? }
+		decls: block.decls
+		exprs: block.exprs << {
+			type: :object
+			tok: { pos: [0, 1, 6], type: :leftBrace, val: ? }
+			entries: block.decls |> sort!() |> map(fn(exportedName) {
+				key: {
+					type: :identifier
+					tok: {
+						pos: [0, 1, 8]
+						type: :identifier
+						val: exportedName
+					}
+					val: exportedName
+				}
+				val: {
+					type: :identifier
+					tok: {
+						pos: [0, 1, 11]
+						type: :identifier
+						val: exportedName
+					}
+					val: exportedName
+				}
+			})
+		}
+	}
+}
+
+// bundleCommonPrefix uses the shared bundle-utils implementation while
+// preserving the older bundler behavior of not stripping the full path when
+// only one module is present in the bundle.
+fn bundleCommonPrefix(paths) if len(paths) < 2 {
+	true -> ''
+	_ -> bundleUtils.commonPrefix(paths)
+}
+
+// wrapBundle takes a list of module AST nodes (closures) and wraps it into a
+// single bundle AST node with an entrypoint. The bundle AST then gets
+// serialized into Oak or JS code to be written to disk.
+//
+// The bundle contains an object of type { (name: string): Module }, where the
+// Module is a closure called exactly once at runtime (on import) to return a
+// `module` exports object which takes the place of the closure that produced
+// it, for later imports of the same module to consume. The runtime also
+// includes a small bit of code to invoke the entrypoint module closure, as
+// well a shim that redefines `import()` in the bundle to check the bundle
+// object instead of executing Oak's default import() builtin.
+fn wrapBundle(modules, entryModuleName) {
+	type: :block
+	tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+	decls: []
+	exprs: {
+		// Internally, the bundler represents each module by its full path on
+		// disk. However, we don't want that module identifier to leak to the
+		// final bundle, because (1) it makes the bundle non-reproducible, and
+		// (2) it leaks build environment information to the artifact.
+		//
+		// We prevent this by finding the _longest common prefix_ between all
+		// module paths, and stripping all module paths of this prefix. This
+		// way, module paths remain meaningful and unique, but do not contain
+		// build env information.
+		bundledPaths := append(
+			modules |> map(0)
+			Includes |> map(:path)
+		) |> filter(fn(path) !___runtime_lib?(path))
+		bundlePrefixLen := bundleCommonPrefix(bundledPaths) |> len()
+
+		fn normalizeModulePath(path) if {
+			___runtime_lib?(path) -> path
+			_ -> path |> slice(bundlePrefixLen)
+		}
+
+		// recursively iterates through all composite expressions (non-literal,
+		// non-identifier, etc.) of a module body, and _in-place updates_ any
+		// calls to `import(<string literal>)` so that it calls import by the
+		// right normalized module name.
+		fn normalizeModuleImports!(node, modulePath) if node.type {
+			// for blocks and functions (which create new scopes), if the
+			// "import" name is shadowed in that scope, no need to delve deeper
+			:block -> if node.decls |> contains?('import') {
+				false -> node.exprs |> each(fn(n) normalizeModuleImports!(n, modulePath))
+			}
+			:function -> if node.decls |> contains?('import') {
+				false -> normalizeModuleImports!(node.body, modulePath)
+			}
+			:ifExpr -> {
+				normalizeModuleImports!(node.cond, modulePath)
+				node.branches |> each(fn(br) normalizeModuleImports!(br, modulePath))
+			}
+			:ifBranch -> {
+				normalizeModuleImports!(node.target, modulePath)
+				normalizeModuleImports!(node.body, modulePath)
+			}
+			:fnCall -> if node {
+				ImportCallNode -> if !___runtime_lib?(importName := node.args.(0).val) -> {
+					importPath := resolve(importName, dir(modulePath)) + '.oak'
+					node.args.(0).val := normalizeModulePath(importPath)
+				}
+				_ -> {
+					normalizeModuleImports!(node.function, modulePath)
+					node.args |> each(fn(a) normalizeModuleImports!(a, modulePath))
+					if node.restArg != ? -> normalizeModuleImports!(node.restArg, modulePath)
+				}
+			}
+			:unary -> normalizeModuleImports!(node.right, modulePath)
+			:binary, :propertyAccess, :assignment -> {
+				normalizeModuleImports!(node.left, modulePath)
+				normalizeModuleImports!(node.right, modulePath)
+			}
+			:list -> node.elems |> each(fn(el) normalizeModuleImports!(el, modulePath))
+			:object -> node.entries |> with each() fn(entry) {
+				normalizeModuleImports!(entry.key, modulePath)
+				normalizeModuleImports!(entry.val, modulePath)
+			}
+		}
+
+		// declare all modules with __oak_modularize
+		moduleDefns := modules |> with map() fn(module) {
+			[modulePath, moduleBody] := module
+			moduleName := normalizeModulePath(modulePath)
+			{
+				type: :fnCall
+				tok: { pos: [0, 1, 17], type: :leftParen, val: ? }
+				function: {
+					type: :identifier
+					tok: { pos: [0, 1, 1], type: :identifier, val: '__oak_modularize' }
+					val: '__oak_modularize'
+				}
+				args: [
+					{
+						type: :string
+						val: moduleName
+						tok: { type: :stringLiteral, pos: [0, 1, 18], val: moduleName }
+					}
+					{
+						normalizeModuleImports!(moduleBody, modulePath)
+						moduleBody
+					}
+				]
+				restArg: ?
+			}
+		}
+
+		// call into entrypoint
+		moduleDefns << {
+			type: :assignment
+			tok: { pos: [0, 1, 0], type: :assign, val: ? }
+			left: { tok: { pos: [0, 1, 0], type: :identifier, val: '__Oak_Import_Aliases' }, type: :identifier, val: '__Oak_Import_Aliases' }
+			local?: false // nonlocal so runtime can access it
+			right: {
+				type: :object
+				tok: { pos: [0, 1, 0], type: :leftBrace, val: ? }
+				entries: Includes |> with map() fn(spec) {
+					key: {
+						type: :string
+						val: spec.name
+						tok: { pos: [0, 1, 0], type: :stringLiteral, val: spec.name }
+					}
+					val: {
+						type: :string
+						val: normalizeModulePath(spec.path)
+						tok: { pos: [0, 1, 0], type: :stringLiteral, val: normalizeModulePath(spec.path) }
+					}
+				}
+			}
+		} << {
+			type: :fnCall
+			tok: { pos: [0, 1, 0], type: :leftParen, val: ? }
+			function: {
+				type: :identifier
+				tok: { pos: [0, 1, 0], type: :identifier, val: '__oak_module_import' }
+				val: '__oak_module_import'
+			}
+			args: [{
+				type: :string
+				val: normalizeModulePath(entryModuleName)
+				tok: { type: :stringLiteral, pos: [0, 1, 0], val: normalizeModulePath(entryModuleName) }
+			}]
+			restArg: ?
+		}
+	}
+}
+
+// analyzeNode performs static semantic analysis on an AST node, descending
+// recursively down the syntax tree. It does not mutate the original tree, but
+// rather returns a transformed, completely new syntax tree containing
+// transformations and annotations necessary for codegen.
+fn analyzeNode(node) {
+	fn analyzeSubexpr(node, ctx, tail?) if node.type {
+		:block -> {
+			blCtx := clone(ctx)
+
+			blCtx.decls := {}
+			blCtx.args := {}
+			node.exprs := node.exprs |> map(fn(n, i) analyzeSubexpr(n, blCtx, i + 1 = len(node.exprs)))
+
+			// do not re-declare function parameters
+			node.decls := blCtx.decls |> keys() |> with filter() fn(decl) ctx.args.(decl) = ?
+			node
+		}
+		:function -> {
+			// we ought only count as "recursion" when a function directly
+			// calls itself -- we do not count references to itself in
+			// other callbacks, which may be called asynchronously
+			if ctx.enclosingFnLit != node -> ctx.enclosingFnLit := _
+
+			fnCtx := clone(ctx)
+
+			if node.name != ? -> fnCtx.enclosingFn := node
+
+			fnCtx.decls := {}
+			fnCtx.args := {}
+			node.args |> with each() fn(arg) fnCtx.args.(arg) := true
+			node.body := analyzeSubexpr(node.body, fnCtx, true)
+
+			// do not re-declare function parameters
+			node.decls := fnCtx.decls |> keys() |> with filter() fn(decl) fnCtx.args.(decl) = ?
+
+			// here, we transform self-tail-recursive functions into
+			// non-recursive, trampolined functions that the JS runtime can
+			// unroll into a loop that won't blow the stack.
+			//
+			// NOTE: tail call unrolling as implemented here _only_ unrolls
+			// when the self-tail-calling function:
+			//   1. has a name, and
+			//   2. self-calls it in its body _with the same name_
+			// Aliased calls of any kind are not detected and not
+			// optimized, and will cause stack overflows in environments
+			// not natively supporting proper tail calls.
+			trampolinedFnName := '__oak_trampolined_' << fnCtx.enclosingFn.name
+			if Web? & fnCtx.enclosingFn.recurred? = true -> node <- {
+				type: :function
+				name: node.name
+				tok: node.tok
+				args: node.args |> clone()
+				restArg: node.restArg
+				decls: []
+				body: {
+					type: :block
+					tok: node.tok
+					decls: [trampolinedFnName]
+					exprs: [{
+						type: :assignment
+						tok: node.tok
+						local?: true
+						left: {
+							type: :identifier
+							tok: node.tok
+							val: trampolinedFnName
+						}
+						right: merge({}, node, { name: '' })
+					}, {
+						type: :fnCall
+						tok: node.tok
+						function: {
+							type: :identifier
+							tok: node.tok
+							val: '__oak_resolve_trampoline'
+						}
+						args: [{
+							type: :identifier
+							tok: node.tok
+							val: trampolinedFnName
+						}] |> append(node.args |> with map() fn(arg) {
+							type: :identifier
+							tok: node.tok
+							val: arg
+						})
+						restArg: if node.restArg {
+							'' -> ?
+							_ -> {
+								type: :identifier
+								tok: node.tok
+								val: node.restArg
+							}
+						}
+					}]
+				}
+			}
+
+			// a function with a name also assigns
+			if node.name != '' -> ctx.decls.(node.name) := true
+
+			node
+		}
+		:ifExpr -> {
+			node.cond := analyzeSubexpr(node.cond, ctx, false)
+			node.branches := node.branches |> with map() fn(br) analyzeSubexpr(br, ctx, true)
+			node
+		}
+		:ifBranch -> {
+			node.target := analyzeSubexpr(node.target, ctx, false)
+			node.body := analyzeSubexpr(node.body, ctx, true)
+			node
+		}
+		:fnCall -> {
+			node.function := analyzeSubexpr(node.function, ctx, false)
+			node.args := node.args |> with map() fn(a) analyzeSubexpr(a, ctx, false)
+			if node.restArg != ? -> node.restArg := analyzeSubexpr(node.restArg, ctx, false)
+
+			simpleName? := node.function.type = :identifier
+			recursiveCall? := if ctx.enclosingFn {
+				? -> false
+				_ -> node.function.val = ctx.enclosingFn.name
+			}
+
+			if Web? & simpleName? & recursiveCall? & tail? {
+				true -> {
+					ctx.enclosingFn.recurred? := true
+					{
+						type: :fnCall
+						tok: node.tok
+						function: {
+							type: :identifier
+							tok: node.tok
+							val: '__oak_trampoline'
+						}
+						args: [{
+							type: :identifier
+							tok: node.tok
+							val: '__oak_trampolined_' << node.function.val
+						}] |> append(node.args)
+						restArg: node.restArg
+					}
+				}
+				_ -> node
+			}
+		}
+		:unary -> node.right := analyzeSubexpr(node.right, ctx, false)
+		:binary, :propertyAccess -> {
+			node.left := analyzeSubexpr(node.left, ctx, false)
+			node.right := analyzeSubexpr(node.right, ctx, false)
+			node
+		}
+		:assignment -> {
+			node.left := analyzeSubexpr(node.left, ctx, false)
+			node.right := analyzeSubexpr(node.right, ctx, false)
+
+			if node.local? -> if node.left.type {
+				:identifier -> ctx.decls.(node.left.val) := true
+				:list -> node.left.elems |> with each() fn(el) if el.type {
+					:identifier -> ctx.decls.(el.val) := true
+				}
+				:object -> node.left.entries |> with each() fn(entry) if entry.val.type {
+					:identifier -> ctx.decls.(entry.val.val) := true
+				}
+			}
+
+			node
+		}
+		:list -> node.elems := node.elems |> with map() fn(el) analyzeSubexpr(el, ctx, false)
+		:object -> node.entries := node.entries |> with map() fn(entry) {
+			key: analyzeSubexpr(entry.key, ctx, false)
+			val: analyzeSubexpr(entry.val, ctx, false)
+		}
+		_ -> node
+	}
+	analyzeSubexpr(node, {
+		decls: {
+			import: true, int: true, float: true, atom: true, string: true
+			codepoint: true, char: true, type: true, len: true, keys: true
+
+			args: true, env: true, time: true, nanotime: true, rand: true
+			srand: true, wait: true, exit: true, exec: true
+
+			input: true, print: true, ls: true, rm: true, mkdir: true
+			stat: true, open: true, close: true, read: true, write: true
+			listen: true, req: true
+
+			sin: true, cos: true, tan: true, asin: true, acos: true
+			atan: true, pow: true, log: true
+
+			___runtime_lib: true, ___runtime_lib?: true, ___runtime_gc: true
+			___runtime_mem: true, ___runtime_proc: true
+		}
+		args: {}
+	}, false)
+}
+
+// renderOakNodes renders Oak AST nodes to Oak program text
+fn renderOakBundle(bundleNode) {
+	fn renderNode(node) if node.type {
+		:null -> '?'
+		:empty -> '_'
+		:string -> '\'' << node.val |> replace('\\', '\\\\') |> replace('\'', '\\\'') << '\''
+		// NOTE: though not unexpected, it's worth noting that this is the only
+		// instance in codegen where the generated code depends on token
+		// information rather than AST node information.
+		:int, :float -> node.tok.val
+		:bool -> string(node.val)
+		:identifier -> formatIdent(node.val)
+		:atom -> ':' << node.val
+		:list -> '[' << node.elems |> map(renderNode) |> join(',') << ']'
+		:object -> '{' << node.entries |> map(fn(entry) {
+			renderNode(entry.key) << ':' << renderNode(entry.val)
+		}) |> join(',') << '}'
+		:unary -> if node.op {
+			:minus -> '-' << renderNode(node.right)
+			:exclam -> '!' << renderNode(node.right)
+		}
+		:binary -> renderNode(node.left) << if node.op {
+			:plus -> '+'
+			:minus -> '-'
+			:times -> '*'
+			:divide -> '/'
+			:modulus -> '%'
+			:and -> '&'
+			:xor -> '^'
+			:or -> '|'
+			:eq -> '='
+			// leading space so ! is not parsed as a part of an identifier that
+			// precedes this operator
+			:neq -> ' !='
+			:greater -> '>'
+			:less -> '<'
+			:geq -> '>='
+			:leq -> '<='
+			:pushArrow -> '<<'
+		} << renderNode(node.right)
+		:assignment -> renderNode(node.left) << if node.local? {
+			true -> ':='
+			_ -> '<-'
+		} << renderNode(node.right)
+		:propertyAccess -> renderNode(node.left) << '.' << renderNode(node.right)
+		:ifExpr -> 'if ' << renderNode(node.cond) << '{' << node.branches |> map(fn(br) {
+			renderNode(br.target) << '->' << renderNode(br.body)
+		}) |> join(',') << '}'
+		:block -> '(' << if len(node.exprs) {
+			0 -> '?'
+			_ -> node.exprs |> map(renderNode) |> join(',')
+		} << ')'
+		:function -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(formatIdent) |> join(',')
+				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
+			} << ')'
+			if node.name {
+				'' -> 'fn' << args << renderNode(node.body)
+				_ -> 'fn ' << formatIdent(node.name) << args << renderNode(node.body)
+			}
+		}
+		:fnCall -> '{{0}}({{1}})' |> format(
+			renderNode(node.function)
+			if node.restArg {
+				? -> node.args |> map(renderNode) |> join(',')
+				_ -> node.args |> map(renderNode) |> append([renderNode(node.restArg) << '...']) |> join(',')
+			}
+		)
+		_ -> {
+			printf('[oak build] Unexpected AST node type ' << string(node.type))
+			exit(1)
+		}
+	}
+
+	'// oak build' << OakNativeRuntime << renderNode(bundleNode)
+}
+
+// renderJSNodes renders Oak AST nodes to JavaScript program text.
+// renderJSNodes is also responsible for adding the JavaScript Oak runtime,
+// which provides language compatibility features.
+fn renderJSBundle(bundleNode) {
+	// symbols can appear in many places in JS, but they cannot appear as
+	// object keys without disrupting Oak's semantics. Whenever they appear as
+	// potential object keys, we need them to behave like strings.
+	fn renderAsObjectKey(node) if node.type {
+		:string, :int, :float -> renderNode(node)
+		_ -> '__oak_obj_key({{0}})' |> format(renderNode(node))
+	}
+
+	fn renderAssignTarget(node) if node.type {
+		// not a bare '_' to avoid common conflicts with global '_' name
+		:empty -> '__oak_empty_assgn_tgt'
+		:identifier -> formatIdent(node.val)
+		:propertyAccess -> if node.right.type {
+			:identifier -> '({{0}}.{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			_ -> '({{0}}[{{1}}])' |> format(renderNode(node.left), renderAsObjectKey(node.right))
+		}
+		:list -> '[' << node.elems |> map(fn(n) renderAssignTarget(n) << '=null') |> join(',') << ']'
+		:object -> '{' << node.entries |> map(fn(entry) {
+			{ key: k, val: v } := entry
+			if k.type = :identifier & v.type = :identifier & k.val = v.val {
+				true -> formatIdent(k.val)
+				_ -> if k.type {
+					:identifier, :empty, :int, :float -> renderNode(k)
+					_ -> '[' << renderAsObjectKey(k) << ']'
+				} << ':' << renderAssignTarget(v) << '=null'
+			}
+		}) |> join(',') << '}'
+	}
+
+	fn renderNode(node) if node.type {
+		:null -> 'null'
+		:empty -> '__Oak_Empty'
+		:string -> '__Oak_String(\'' + node.val |> map(fn(c) if c {
+			'\\' -> '\\\\'
+			'\'' -> '\\\''
+			'\n' -> '\\n'
+			'\r' -> '\\r'
+			'\f' -> '\\f'
+			'\t' -> '\\t'
+			_ -> c
+		}) + '\')'
+		:int, :float, :bool -> string(node.val)
+		:identifier -> formatIdent(node.val)
+		:atom -> 'Symbol.for(\'' << node.val << '\')'
+		:list -> '[' << node.elems |> map(renderNode) |> join(',') << ']'
+		// wrap object literals in (...) to avoid being mis-parsed as a lexical
+		// block when appearing in statement position
+		:object -> '({' << node.entries |> map(fn(entry) {
+			{ key: k, val: v } := entry
+			if k.type = :identifier & v.type = :identifier & k.val = v.val {
+				true -> formatIdent(k.val)
+				_ -> if k.type {
+					:identifier, :empty, :int, :float -> renderNode(k)
+					_ -> '[' << renderAsObjectKey(k) << ']'
+				} << ':' << renderNode(v)
+			}
+		}) |> join(',') << '})'
+		:unary -> if node.op {
+			:minus -> '-' << renderNode(node.right)
+			:exclam -> '!' << renderNode(node.right)
+		}
+		:binary -> if node.op {
+			:plus -> '__as_oak_string({{0}}+{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:minus -> '({{0}}-{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:times -> '({{0}}*{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:divide -> '({{0}}/{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:modulus -> '({{0}}%{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+
+			:and -> '(__oak_left=>__oak_left===false?false:__oak_and(__oak_left,{{1}}))({{0}})' |>
+				format(renderNode(node.left), renderNode(node.right))
+			:xor -> '__oak_xor({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:or -> '(__oak_left=>__oak_left===true?true:__oak_or(__oak_left,{{1}}))({{0}})' |>
+				format(renderNode(node.left), renderNode(node.right))
+
+			:eq -> '__oak_eq({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:neq -> '!__oak_eq({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+
+			:greater -> '({{0}}>{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:less -> '({{0}}<{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:geq -> '({{0}}>={{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:leq -> '({{0}}<={{1}})' |> format(renderNode(node.left), renderNode(node.right))
+
+			:pushArrow -> '__oak_push({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+		}
+		:assignment -> if node.left.type {
+			:propertyAccess -> {
+				tmpDfn := clone(node.left)
+				tmpDfn.left := {
+					type: :identifier
+					tok: node.tok
+					val: '__oak_assgn_tgt'
+				}
+
+				// this production preserves two Oak semantics:
+				// - strings can be mutably assigned to.
+				// - assignment on strings and composites return the assignment
+				//   target, not the assigned value, as the value of the
+				//   expression
+				'((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign({{2}},__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete {{1}}:{{1}}=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string({{0}}),{{3}})' |> format(
+					renderNode(node.left.left)
+					// composite assignment
+					renderAssignTarget(tmpDfn)
+					// string assignment
+					renderNode(node.left.right)
+					renderNode(node.right)
+				)
+			}
+			_ -> '(' << renderAssignTarget(node.left) << '=' << renderNode(node.right) << ')'
+		}
+		:propertyAccess -> if node.right.type {
+			// accessing into string or list values with identifier keys is
+			// illegal/undefined. Therefore, we treat the case where the left
+			// operand is a string or list as "undefined behavior" and only
+			// generate code for the case when it's an object.
+			:identifier -> '({{0}}.{{1}}??null)' |> format(renderNode(node.left), renderNode(node.right))
+			_ -> '__oak_acc({{0}},{{1}})' |> format(renderNode(node.left), renderAsObjectKey(node.right))
+		}
+		:ifExpr -> '((__oak_cond)=>{{1}})({{0}})' |> format(
+			renderNode(node.cond)
+			if len(node.branches) {
+				0 -> 'null'
+				_ -> node.branches |> reduce('', fn(branches, br, i) {
+					last? := i + 1 = len(node.branches)
+					if {
+						// optimized common case, where last branch is `_ -> body`
+						br.target.type = :empty & last? -> branches << renderNode(br.body)
+						_ -> {
+							branches << '__oak_eq(__oak_cond,{{0}})?{{1}}:' |> format(
+								renderNode(br.target)
+								renderNode(br.body)
+							)
+							if last? -> branches << 'null'
+							branches
+						}
+					}
+				})
+			}
+		)
+		:block -> if len(node.exprs) {
+			0 -> 'null'
+			_ -> if len(node.decls) {
+				0 -> '({{0}})' |> format(node.exprs |> map(renderNode) |> join(','))
+				_ -> '(({{0}})=>({{1}}))()' |> format(
+					node.decls |> sort!() |> map(formatIdent) |> join(',')
+					node.exprs |> map(renderNode) |> join(',')
+				)
+			}
+		}
+		:function -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(fn(a, i) formatIdent(a, i) << '=null') |> join(',')
+				_ -> node.args |> map(fn(a, i) formatIdent(a, i) << '=null') |>
+					append(['...' << formatIdent(node.restArg)]) |> join(',')
+			} << ')'
+			decls := node.decls |> sort!() |> map(fn(decl) 'let ' << formatIdent(decl) << ';') |> join()
+			if node.name {
+				// we don't use a completely anonymous function expression
+				// (instead naming this _) because in Oak, anonymous functions
+				// can appear anywhere; but in JavaScript, function expressions
+				// cannot appear in a statement position.
+				'' -> 'function _' << args << '{' << decls << 'return ' << renderNode(node.body) << '}'
+				// use function keyword for named functions, for legible stack traces
+				_ -> formatIdent(node.name) <<
+					'=function ' <<
+					formatIdent(node.name) <<
+					args << '{' << decls << 'return ' << renderNode(node.body) << '}'
+			}
+		}
+		:fnCall -> '{{0}}({{1}})' |> format(
+			if {
+				node.function.type = :function -> '(' << renderNode(node.function) << ')'
+				// NOTE: a property access through an identifier in a function
+				// must mean that the function is a non-null value. We codegen
+				// this site specifically so that method calls in JavaScript
+				// that require a bound `this` can be called directly instead
+				// of through the `call(target, fn, args...)` built-in, which
+				// is required if we compute the function value and then call
+				// it using a variable reference.
+				node.function.type = :propertyAccess & node.function.right.type = :identifier ->
+					'({{0}}.{{1}})' |> format(renderNode(node.function.left), renderNode(node.function.right))
+				_ -> renderNode(node.function)
+			}
+			if node.restArg {
+				? -> node.args |> map(renderNode) |> join(',')
+				_ -> node.args |> map(renderNode) |> append(['...' << renderNode(node.restArg)]) |> join(',')
+			}
+		)
+	}
+
+	'/* oak build --web */' << OakJSRuntime << renderNode(bundleNode)
+}
+
+// renderWasmBundle renders Oak AST nodes to WebAssembly text format
+fn renderWasmBundle(bundleNode) {
+	';; oak build --wasm
+(module
+  (import "env" "print" (func $print (param i32)))
+  (func $main (export "main")
+    (call $print (i32.const 42))
+  )
+)
+'
+}
+
+// renderBundle transforms a bundle's AST nodes to compiled program text
+fn renderBundle(bundleNode) if {
+	Web? -> renderJSBundle(bundleNode)
+	Wasm? -> renderWasmBundle(bundleNode)
+	_ -> renderOakBundle(bundleNode)
+}
+
+// Start from entrypoint and explicit includes, collect all static imports
+printf('[oak build] Bundling with entrypoint {{0}}', Entry)
+postImport := with once() fn {
+	// compile the import map into a bundle with an entrypoint and render to
+	// bundle program text
+	BundleFile := ModuleNodes |>
+		keys() |>
+		sort!() |>
+		map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> analyzeNode() |> wrapModule()]) |>
+		wrapBundle(AbsoluteEntry) |>
+		renderBundle()
+
+	with writeFile(Output, BundleFile) fn(res) if res {
+		? -> printf('[oak build] Could not write bundle to {{0}}', Output)
+		_ -> printf('[oak build] Bundle written to {{0}}', Output)
+	}
+}
+Includes |> with each() fn(spec) if ___runtime_lib?(spec.name) {
+	true -> if Web? -> addImportsFromSource(spec.name, ___runtime_lib(spec.name))
+	_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path, postImport)
+}
+addImportsFromFile(AbsoluteEntry, postImport)
+
+
+// constants and runtime
+OakNativeRuntime := '
+__Oak_Modules := {}
+__Oak_Import_Aliases := ?
+fn __oak_modularize(name, module) __Oak_Modules.(name) := module
+fn __oak_module_import(name) if ___runtime_lib?(name) {
+	true -> import(name)
+	_ -> if type(module := __Oak_Modules.(name)) {
+		:null -> if module := __Oak_Modules.(__Oak_Import_Aliases.(name)) {
+			? -> import(name)
+			_ -> {
+				mod := module()
+				__Oak_Modules.(name) := mod
+				mod
+			}
+		}
+		:function -> {
+			m := module()
+			__Oak_Modules.(name) := m
+			m
+		}
+		_ -> module
+	}
+}
+'
+OakJSRuntime := '
+// module system
+const __Oak_Modules = {};
+let __Oak_Import_Aliases;
+function __oak_modularize(name, fn) {
+	__Oak_Modules[name] = fn;
+}
+function __oak_module_import(name) {
+	if (typeof __Oak_Modules[name] === \'object\') return __Oak_Modules[name];
+	const module = __Oak_Modules[name] || __Oak_Modules[__Oak_Import_Aliases[name]];
+	if (module) {
+		__Oak_Modules[name] = {}; // break circular imports
+		return __Oak_Modules[name] = module();
+	} else {
+		throw new Error(`Could not import Oak module "${name}" at runtime`);
+	}
+}
+
+// language primitives
+let __oak_empty_assgn_tgt;
+function __oak_eq(a, b) {
+	if (a === __Oak_Empty || b === __Oak_Empty) return true;
+
+	// match either null or undefined to compare correctly against undefined ?s
+	// appearing in places like optional arguments
+	if (a == null && b == null) return true;
+	if (a == null || b == null) return false;
+
+	// match all other types that can be compared cheaply (without function
+	// calls for type coercion or recursive descent)
+	if (typeof a === \'boolean\' || typeof a === \'number\' ||
+		typeof a === \'symbol\' || typeof a === \'function\') {
+		return a === b;
+	}
+
+	// string equality check
+	a = __as_oak_string(a);
+	b = __as_oak_string(b);
+	if (typeof a !== typeof b) return false;
+	if (__is_oak_string(a) && __is_oak_string(b)) {
+		return a.valueOf() === b.valueOf();
+	}
+
+	// deep equality check for composite values
+	if (len(a) !== len(b)) return false;
+	for (const key of keys(a)) {
+		if (!__oak_eq(a[key], b[key])) return false;
+	}
+	return true;
+}
+function __oak_acc(tgt, prop) {
+	return (__is_oak_string(tgt) ? __as_oak_string(tgt.valueOf()[prop]) : tgt[prop]) ?? null;
+}
+function __oak_obj_key(x) {
+	return typeof x === \'symbol\' ? Symbol.keyFor(x) : x;
+}
+function __oak_push(a, b) {
+	a = __as_oak_string(a);
+	a.push(b);
+	return a;
+}
+function __oak_and(a, b) {
+	if (typeof a === \'boolean\' && typeof b === \'boolean\') {
+		return a && b;
+	}
+	if (__is_oak_string(a) && __is_oak_string(b)) {
+		const max = Math.max(a.length, b.length);
+		const get = (s, i) => s.valueOf().charCodeAt(i) || 0;
+
+		let res = \'\';
+		for (let i = 0; i < max; i ++) {
+			res += String.fromCharCode(get(a, i) & get(b, i));
+		}
+		return res;
+	}
+	return a & b;
+}
+function __oak_or(a, b) {
+	if (typeof a === \'boolean\' && typeof b === \'boolean\') {
+		return a || b;
+	}
+	if (__is_oak_string(a) && __is_oak_string(b)) {
+		const max = Math.max(a.length, b.length);
+		const get = (s, i) => s.valueOf().charCodeAt(i) || 0;
+
+		let res = \'\';
+		for (let i = 0; i < max; i ++) {
+			res += String.fromCharCode(get(a, i) | get(b, i));
+		}
+		return res;
+	}
+	return a | b;
+}
+function __oak_xor(a, b) {
+	if (typeof a === \'boolean\' && typeof b === \'boolean\') {
+		return (a && !b) || (!a && b);
+	}
+	if (__is_oak_string(a) && __is_oak_string(b)) {
+		const max = Math.max(a.length, b.length);
+		const get = (s, i) => s.valueOf().charCodeAt(i) || 0;
+
+		let res = \'\';
+		for (let i = 0; i < max; i ++) {
+			res += String.fromCharCode(get(a, i) ^ get(b, i));
+		}
+		return res;
+	}
+	return a ^ b;
+}
+const __Oak_Empty = Symbol(\'__Oak_Empty\');
+
+// mutable string type
+function __is_oak_string(x) {
+	if (x == null) return false;
+	return x.__mark_oak_string;
+}
+function __as_oak_string(x) {
+	if (typeof x === \'string\') return __Oak_String(x);
+	return x;
+}
+const __Oak_String = s => {
+	return {
+		__mark_oak_string: true,
+		assign(i, slice) {
+			if (i === s.length) return s += slice;
+			return s = s.substr(0, i) + slice + s.substr(i + slice.length);
+		},
+		push(slice) {
+			s += slice;
+		},
+		toString() {
+			return s;
+		},
+		valueOf() {
+			return s;
+		},
+		get length() {
+			return s.length;
+		},
+	}
+}
+
+// tail recursion trampoline helpers
+function __oak_resolve_trampoline(fn, ...args) {
+	let rv = fn(...args);
+	while (rv && rv.__is_oak_trampoline) {
+		rv = rv.fn(...rv.args);
+	}
+	return rv;
+}
+function __oak_trampoline(fn, ...args) {
+	return {
+		__is_oak_trampoline: true,
+		fn: fn,
+		args: args,
+	}
+}
+
+// env (builtin) functions
+
+// reflection and types
+const __Is_Oak_Node = typeof process === \'object\';
+const __Oak_Int_RE = /^[+-]?\\d+$/;
+function int(x) {
+	x = __as_oak_string(x);
+	if (typeof x === \'number\') {
+		// JS rounds towards higher magnitude, Oak rounds towards higher value
+		const rounded = Math.floor(x);
+		const diff = x - rounded;
+		if (x < 0 && diff === 0.5) return rounded + 1;
+		return rounded;
+	}
+	if (__is_oak_string(x) && __Oak_Int_RE.test(x.valueOf())) {
+		const i = Number(x.valueOf());
+		if (isNaN(i)) return null;
+		return i;
+	}
+	return null;
+}
+function float(x) {
+	x = __as_oak_string(x);
+	if (typeof x === \'number\') return x;
+	if (__is_oak_string(x)) {
+		const f = parseFloat(x.valueOf());
+		if (isNaN(f)) return null;
+		return f;
+	}
+	return null;
+}
+function atom(x) {
+	x = __as_oak_string(x);
+	if (typeof x === \'symbol\' && x !== __Oak_Empty) return x;
+	if (__is_oak_string(x)) return Symbol.for(x.valueOf());
+	return Symbol.for(string(x));
+}
+function string(x) {
+	x = __as_oak_string(x);
+	function display(x) {
+		x = __as_oak_string(x);
+		if (__is_oak_string(x)) {
+			return \'\\\'\' + x.valueOf().replace(\'\\\\\', \'\\\\\\\\\').replace(\'\\\'\', \'\\\\\\\'\') + \'\\\'\';
+		} else if (typeof x === \'symbol\') {
+			if (x === __Oak_Empty) return \'_\';
+			return \':\' + Symbol.keyFor(x);
+		}
+		return string(x);
+	}
+	if (x == null) {
+		return \'?\';
+	} else if (typeof x === \'number\') {
+		return x.toString();
+	} else if (__is_oak_string(x)) {
+		return x;
+	} else if (typeof x === \'boolean\') {
+		return x.toString();
+	} else if (typeof x === \'function\') {
+		return x.toString();
+	} else if (typeof x === \'symbol\') {
+		if (x === __Oak_Empty) return \'_\';
+		return Symbol.keyFor(x);
+	} else if (Array.isArray(x)) {
+		return \'[\' + x.map(display).join(\', \') + \']\';
+	} else if (typeof x === \'object\') {
+		const entries = [];
+		for (const key of keys(x).sort()) {
+			entries.push(`${key}: ${display(x[key])}`);
+		}
+		return \'{\' + entries.join(\', \') + \'}\';
+	}
+	throw new Error(\'string() called on unknown type \' + x.toString());
+}
+function codepoint(c) {
+	c = __as_oak_string(c);
+	return c.valueOf().charCodeAt(0);
+}
+function char(n) {
+	return String.fromCharCode(n);
+}
+function type(x) {
+	x = __as_oak_string(x);
+	if (x == null) {
+		return Symbol.for(\'null\');
+	} else if (typeof x === \'number\') {
+		// Many discrete APIs check for :int, so we consider all integer
+		// numbers :int and fall back to :float. This is not an airtight
+		// solution, but works well enough and the alternative (tagged number
+		// values/types) have poor perf tradeoffs.
+		if (Number.isInteger(x)) return Symbol.for(\'int\');
+		return Symbol.for(\'float\');
+	} else if (__is_oak_string(x)) {
+		return Symbol.for(\'string\');
+	} else if (typeof x === \'boolean\') {
+		return Symbol.for(\'bool\');
+	} else if (typeof x === \'symbol\') {
+		if (x === __Oak_Empty) return Symbol.for(\'empty\');
+		return Symbol.for(\'atom\');
+	} else if (typeof x === \'function\') {
+		return Symbol.for(\'function\');
+	} else if (Array.isArray(x)) {
+		return Symbol.for(\'list\');
+	} else if (typeof x === \'object\') {
+		return Symbol.for(\'object\');
+	}
+	throw new Error(\'type() called on unknown type \' + x.toString());
+}
+function len(x) {
+	if (typeof x === \'string\' || __is_oak_string(x) || Array.isArray(x)) {
+		return x.length;
+	} else if (typeof x === \'object\' && x !== null) {
+		return Object.getOwnPropertyNames(x).length;
+	}
+	throw new Error(\'len() takes a string or composite value, but got \' + string(x));
+}
+function keys(x) {
+	if (Array.isArray(x)) {
+		const k = [];
+		for (let i = 0; i < x.length; i ++) k.push(i);
+		return k;
+	} else if (typeof x === \'object\' && x !== null) {
+		return Object.getOwnPropertyNames(x).map(__as_oak_string);
+	}
+	throw new Error(\'keys() takes a composite value, but got \' + string(x).valueOf());
+}
+
+// OS interfaces
+function args() {
+	if (__Is_Oak_Node) return process.argv.map(__as_oak_string);
+	return [window.location.href];
+}
+function env() {
+	if (__Is_Oak_Node) {
+		const e = Object.assign({}, process.env);
+		for (const key in e) {
+			e[key] = __as_oak_string(e[key]);
+		}
+		return e;
+	}
+	return {};
+}
+function time() {
+	return Date.now() / 1000;
+}
+function nanotime() {
+	return int(Date.now() * 1000000);
+}
+function rand() {
+	return Math.random();
+}
+let randomBytes;
+function srand(length) {
+	if (__Is_Oak_Node) {
+		// lazily import dependency
+		if (!randomBytes) randomBytes = require(\'crypto\').randomBytes;
+		return randomBytes(length).toString(\'latin1\');
+	}
+
+	const bytes = crypto.getRandomValues(new Uint8Array(length));
+	return __as_oak_string(Array.from(bytes).map(b => String.fromCharCode(b)).join(\'\'));
+}
+function wait(duration, cb) {
+	setTimeout(cb, duration * 1000);
+	return null;
+}
+function exit(code) {
+	if (__Is_Oak_Node) process.exit(code);
+	return null;
+}
+function exec() {
+	throw new Error(\'exec() not implemented\');
+}
+
+// I/O
+function input() {
+	throw new Error(\'input() not implemented\');
+}
+function print(s) {
+	s = __as_oak_string(s);
+	if (__Is_Oak_Node) {
+		process.stdout.write(string(s).toString());
+	} else {
+		console.log(string(s).toString());
+	}
+	return s.length;
+}
+function ls() {
+	throw new Error(\'ls() not implemented\');
+}
+function rm() {
+	throw new Error(\'rm() not implemented\');
+}
+function mkdir() {
+	throw new Error(\'mkdir() not implemented\');
+}
+function stat() {
+	throw new Error(\'stat() not implemented\');
+}
+function open() {
+	throw new Error(\'open() not implemented\');
+}
+function close() {
+	throw new Error(\'close() not implemented\');
+}
+function read() {
+	throw new Error(\'read() not implemented\');
+}
+function write() {
+	throw new Error(\'write() not implemented\');
+}
+function listen() {
+	throw new Error(\'listen() not implemented\');
+}
+function req() {
+	throw new Error(\'req() not implemented\');
+}
+
+// math
+function sin(n) {
+	return Math.sin(n);
+}
+function cos(n) {
+	return Math.cos(n);
+}
+function tan(n) {
+	return Math.tan(n);
+}
+function asin(n) {
+	return Math.asin(n);
+}
+function acos(n) {
+	return Math.acos(n);
+}
+function atan(n) {
+	return Math.atan(n);
+}
+function pow(b, n) {
+	return Math.pow(b, n);
+}
+function log(b, n) {
+	return Math.log(n) / Math.log(b);
+}
+
+// runtime
+function ___runtime_lib() {
+	throw new Error(\'___runtime_lib() not implemented\');
+}
+function ___runtime_lib__oak_qm() {
+	throw new Error(\'___runtime_lib?() not implemented\');
+}
+function ___runtime_gc() {
+	throw new Error(\'___runtime_gc() not implemented\');
+}
+function ___runtime_mem() {
+	throw new Error(\'___runtime_mem() not implemented\');
+}
+function ___runtime_proc() {
+	throw new Error(\'___runtime_proc() not implemented\');
+}
+
+// JavaScript interop
+function call(target, fn, ...args) {
+	return target[Symbol.keyFor(fn)](...args);
+}
+function __oak_js_new(Constructor, ...args) {
+	return new Constructor(...args);
+}
+function __oak_js_try(fn) {
+	try {
+		return {
+			type: Symbol.for(\'ok\'),
+			ok: fn(),
+		}
+	} catch (e) {
+		return {
+			type: Symbol.for(\'error\'),
+			error: e,
+		}
+	}
+}
+'
+OakWasmRuntime := '
+// Oak WebAssembly Runtime (placeholder)
+;; This is a minimal WebAssembly runtime for Oak
+;; Full implementation would require generating WAT from AST
+(module
+  (import "env" "print" (func $print (param i32)))
+  (import "env" "memory" (memory 1))
+  
+  (global $stack_ptr (mut i32) (i32.const 0))
+  
+  (func $alloc (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $stack_ptr))
+    (global.set $stack_ptr (i32.add (local.get $ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  
+  (func $main (export "main")
+    ;; Placeholder main function
+    (call $print (i32.const 42))
+  )
+)
+'

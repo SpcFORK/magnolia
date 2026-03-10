@@ -112,6 +112,7 @@ chan_send(ch, value, callback?)
 chan_recv(ch, callback?)
 bits(x) // list<byte> <-> byte string
 addr(bits)
+pointer(x)               -- convert integer or byte string to pointer (pointer type)
 memread(address, length)
 memwrite(address, bits)
 

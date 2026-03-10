@@ -16,6 +16,7 @@
 	merge: merge
 	keys: keys
 } := import('std')
+syntax := import('syntax')
 {
 	join: join
 	split: split
@@ -31,6 +32,7 @@ syntax := import('syntax')
 // VirtualMachine holds the execution state for running Oak code
 fn createVM() {
 	globalScope := {}
+	stdlibs := ___stdlibs()
 	callStack := []
 	macros := {}
 	
@@ -95,7 +97,19 @@ fn createVM() {
 			body: node.body
 			closure: clone(sc)
 		}
-		:fnCall -> {
+		:fnCall -> if node.function.type = :identifier & node.function.val = 'import' {
+			name := node.args.0.val
+			source := stdlibs.(name)
+			if source = ? {
+				{
+					type: :error
+					message: 'Module not found: ' + name
+				}
+			} else {
+				parsed := parseSource(source)
+				evalAst(parsed, {})
+			}
+		} else {
 			fn_val := evalExpr(node.function, sc)
 			args := node.args |> map(fn(arg) evalExpr(arg, sc))
 			if type(fn_val) = :object & fn_val.type = :function {
@@ -367,6 +381,7 @@ fn createStandardVM() {
 	})
 	vm.registerBuiltin('bits', fn(x) bits(x))
 	vm.registerBuiltin('addr', fn(x) addr(x))
+	vm.registerBuiltin('pointer', fn(x) pointer(x))
 	vm.registerBuiltin('memread', fn(address, length) memread(address, length))
 	vm.registerBuiltin('memwrite', fn(address, data) memwrite(address, data))
 	vm.registerBuiltin('utf16', fn(x) utf16(x))

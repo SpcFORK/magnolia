@@ -43,6 +43,7 @@ Cli := cli.parse()
 
 Entry := Cli.opts.entry
 Web? := Cli.opts.web != ?
+Wasm? := Cli.opts.wasm != ?
 Output := Cli.opts.output |> default(Cli.opts.o)
 fn requireOpt(flag, value) if value {
 	?, '', true -> {
@@ -62,6 +63,10 @@ Includes := Cli.opts.include |>
 
 requireOpt('entry', Entry)
 requireOpt('output', Output)
+if Web? & Wasm? -> {
+	printf('[oak build] --web and --wasm are mutually exclusive build targets.')
+	exit(1)
+}
 if statFile(Entry) = ? -> {
 	printf('[oak build] {{0}} does not exist.', Entry)
 	exit(1)
@@ -874,9 +879,22 @@ fn renderJSBundle(bundleNode) {
 	'/* oak build --web */' << OakJSRuntime << renderNode(bundleNode)
 }
 
+// renderWasmBundle renders Oak AST nodes to WebAssembly text format
+fn renderWasmBundle(bundleNode) {
+	';; oak build --wasm
+(module
+  (import "env" "print" (func $print (param i32)))
+  (func $main (export "main")
+    (call $print (i32.const 42))
+  )
+)
+'
+}
+
 // renderBundle transforms a bundle's AST nodes to compiled program text
 fn renderBundle(bundleNode) if {
 	Web? -> renderJSBundle(bundleNode)
+	Wasm? -> renderWasmBundle(bundleNode)
 	_ -> renderOakBundle(bundleNode)
 }
 
@@ -1367,4 +1385,27 @@ function __oak_js_try(fn) {
 		}
 	}
 }
+'
+OakWasmRuntime := '
+// Oak WebAssembly Runtime (placeholder)
+;; This is a minimal WebAssembly runtime for Oak
+;; Full implementation would require generating WAT from AST
+(module
+  (import "env" "print" (func $print (param i32)))
+  (import "env" "memory" (memory 1))
+  
+  (global $stack_ptr (mut i32) (i32.const 0))
+  
+  (func $alloc (param $size i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $stack_ptr))
+    (global.set $stack_ptr (i32.add (local.get $ptr) (local.get $size)))
+    (local.get $ptr)
+  )
+  
+  (func $main (export "main")
+    ;; Placeholder main function
+    (call $print (i32.const 42))
+  )
+)
 '

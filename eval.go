@@ -134,6 +134,31 @@ func (v FloatValue) Eq(u Value) bool {
 	return false
 }
 
+// PointerValue represents a raw memory address. It is primarily used for
+// interoperability with OS APIs and low-level memory operations. Unlike
+// IntValue, pointers are treated as a separate type in the language to make
+// intent explicit, but many arithmetic operations between ints and pointers
+// are still permitted (e.g. pointer + int). Internally we just store a
+// uintptr.
+type PointerValue uintptr
+
+func (v PointerValue) String() string {
+	return fmt.Sprintf("ptr(0x%x)", uintptr(v))
+}
+func (v PointerValue) Eq(u Value) bool {
+	if _, ok := u.(EmptyValue); ok {
+		return true
+	}
+
+	switch w := u.(type) {
+	case PointerValue:
+		return uintptr(v) == uintptr(w)
+	case IntValue:
+		return uintptr(v) == uintptr(w)
+	}
+	return false
+}
+
 type BoolValue bool
 
 // interned bools
@@ -400,6 +425,8 @@ type Context struct {
 	rootPath string
 	// top level ("global") scope of this context
 	scope
+	// cached Oak VM for evaluation
+	vm Value
 }
 
 func NewContext(rootPath string) Context {
@@ -418,6 +445,7 @@ func NewContext(rootPath string) Context {
 			parent: nil,
 			vars:   map[string]Value{},
 		},
+		vm: nil,
 	}
 }
 
@@ -486,7 +514,7 @@ func (e *runtimeError) Error() string {
 	return fmt.Sprintf("Runtime error %s: %s\n%s", e.pos, e.reason, strings.Join(trace, "\n"))
 }
 
-func (c *Context) Eval(programReader io.Reader) (Value, error) {
+func (c *Context) evalGo(programReader io.Reader) (Value, error) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -510,6 +538,49 @@ func (c *Context) Eval(programReader io.Reader) (Value, error) {
 	}
 	return val, runtimeErr
 
+}
+
+func (c *Context) Eval(programReader io.Reader) (Value, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	programBytes, err := io.ReadAll(programReader)
+	if err != nil {
+		return nil, err
+	}
+
+	program := string(programBytes)
+
+	if c.vm == nil {
+		vmCode := "Virtual := import('Virtual'); Virtual.createStandardVM()"
+		val, err := c.evalGo(strings.NewReader(vmCode))
+		if err != nil {
+			return nil, err
+		}
+		c.vm = val
+	}
+
+	vmObj := c.vm.(ObjectValue)
+	runFn, ok := vmObj["run"]
+	if !ok {
+		return nil, fmt.Errorf("vm has no run function")
+	}
+
+	scope := ObjectValue{}
+	val, runtimeErr := c.EvalFnValue(runFn, false, MakeString(program), scope)
+	if runtimeErr != nil {
+		return nil, runtimeErr
+	}
+
+	if obj, ok := val.(ObjectValue); ok {
+		if t, ok := obj["type"]; ok && t.Eq(AtomValue("error")) {
+			if msg, ok := obj["message"]; ok {
+				return nil, fmt.Errorf("Oak error: %s", msg.String())
+			}
+		}
+	}
+
+	return val, nil
 }
 
 func normalizeCallArgs(paramCount int, args []Value) []Value {
@@ -1276,6 +1347,28 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 
 		switch left := leftComputed.(type) {
 		case IntValue:
+			// if the right side is a pointer we can perform pointer arithmetic or
+			// comparisons; for simplicity we treat `int + ptr` as `ptr + int` and
+			// `int - ptr` as `ptr - int`.
+			if ptr, ok := rightComputed.(PointerValue); ok {
+				switch n.op {
+				case plus:
+					return PointerValue(uintptr(ptr) + uintptr(left)), nil
+				case minus:
+					return PointerValue(uintptr(ptr) - uintptr(left)), nil
+				case greater:
+					return BoolValue(uintptr(left) > uintptr(ptr)), nil
+				case less:
+					return BoolValue(uintptr(left) < uintptr(ptr)), nil
+				case geq:
+					return BoolValue(uintptr(left) >= uintptr(ptr)), nil
+				case leq:
+					return BoolValue(uintptr(left) <= uintptr(ptr)), nil
+				default:
+					return nil, incompatibleError(n.op, leftComputed, rightComputed, n.pos())
+				}
+			}
+
 			right, ok := rightComputed.(IntValue)
 			if !ok {
 				rightFloat, ok := rightComputed.(FloatValue)
@@ -1394,6 +1487,44 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				return left, nil
 			}
 			return nil, incompatibleError(n.op, leftComputed, rightComputed, n.pos())
+		case PointerValue:
+			// pointer arithmetic and comparisons with integers or other pointers
+			switch r := rightComputed.(type) {
+			case IntValue:
+				switch n.op {
+				case plus:
+					return PointerValue(uintptr(left) + uintptr(r)), nil
+				case minus:
+					return PointerValue(uintptr(left) - uintptr(r)), nil
+				case greater:
+					return BoolValue(uintptr(left) > uintptr(r)), nil
+				case less:
+					return BoolValue(uintptr(left) < uintptr(r)), nil
+				case geq:
+					return BoolValue(uintptr(left) >= uintptr(r)), nil
+				case leq:
+					return BoolValue(uintptr(left) <= uintptr(r)), nil
+				default:
+					return nil, incompatibleError(n.op, leftComputed, rightComputed, n.pos())
+				}
+			case PointerValue:
+				switch n.op {
+				case minus:
+					return IntValue(int64(uintptr(left) - uintptr(r))), nil
+				case greater:
+					return BoolValue(uintptr(left) > uintptr(r)), nil
+				case less:
+					return BoolValue(uintptr(left) < uintptr(r)), nil
+				case geq:
+					return BoolValue(uintptr(left) >= uintptr(r)), nil
+				case leq:
+					return BoolValue(uintptr(left) <= uintptr(r)), nil
+				default:
+					return nil, incompatibleError(n.op, leftComputed, rightComputed, n.pos())
+				}
+			default:
+				return nil, incompatibleError(n.op, leftComputed, rightComputed, n.pos())
+			}
 		}
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("Binary operator %s is not defined for values %s, %s",

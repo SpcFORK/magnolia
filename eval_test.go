@@ -1598,3 +1598,38 @@ func TestMemReadWriteViaAddress(t *testing.T) {
 		IntValue(67),
 	))
 }
+
+func TestMemReadWriteViaPointerBuiltin(t *testing.T) {
+	expectProgramToReturn(t, `
+			buf := bits([65, 66, 67])
+			ptr := pointer(addr(buf))
+			memwrite(ptr + 1, bits([90]))
+			bits(memread(ptr, 3))
+		`, MakeList(
+			IntValue(65),
+			IntValue(90),
+			IntValue(67),
+		))
+}
+func TestPointerBuiltinAndArithmetic(t *testing.T) {
+	expectProgramToReturn(t, `
+			[ type(pointer(0))
+			, pointer(0) == 0
+			, pointer(5) == pointer(5)
+			, pointer(100) + 5 == pointer(105)
+			, 5 + pointer(100) == pointer(105)
+			, pointer(105) - 5 == pointer(100)
+			, pointer(20) > pointer(10)
+			, pointer(20) < pointer(10) == false
+			]
+	`, MakeList(
+		AtomValue("pointer"),
+		BoolValue(true),
+		BoolValue(true),
+		BoolValue(true),
+		BoolValue(true),
+		BoolValue(true),
+		BoolValue(true),
+		BoolValue(true),
+	))
+}
