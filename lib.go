@@ -70,6 +70,9 @@ var libsyntax string
 //go:embed lib/Virtual.oak
 var libvirtual string
 
+//go:embed lib/VirtualToken.oak
+var libvirtualtoken string
+
 //go:embed lib/pack-utils.oak
 var libpackutils string
 
@@ -155,6 +158,7 @@ var stdlibs = map[string]string{
 	"gpu":             libgpu,
 	"syntax":          libsyntax,
 	"Virtual":         libvirtual,
+	"VirtualToken":    libvirtualtoken,
 	"pack-utils":      libpackutils,
 	"bundle-utils":    libbundleutils,
 	"ast-transform":   libasttransform,

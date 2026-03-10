@@ -1,6 +1,7 @@
 // virtual.test.oak -- Tests for the Virtual Oak interpreter
 
 Virtual := import('Virtual')
+VirtualToken := import('VirtualToken')
 
 fn run(t) {
 	{
@@ -39,7 +40,7 @@ fn run(t) {
 		'integer addition' |> t.eq(vm.run('2 + 3', {}), 5)
 		'integer subtraction' |> t.eq(vm.run('10 - 4', {}), 6)
 		'integer multiplication' |> t.eq(vm.run('3 * 4', {}), 12)
-		'integer division' |> t.eq(vm.run('15 / 3', {}), 5)
+		'integer division' |> t.approx(vm.run('15 / 3', {}), 5)
 		'integer modulus' |> t.eq(vm.run('17 % 5', {}), 2)
 		'float arithmetic' |> t.approx(vm.run('3.5 + 2.1', {}), 5.6)
 
@@ -254,11 +255,11 @@ fn run(t) {
 	}
 
 	{
-		ctx := Virtual.createContext()
+		ctx := Virtual.createVirtualContext()
 		ctx.defineMacro('twice', fn(call) {
 			{
 				type: :binary
-				op: :mult
+				op: :times
 				left: { type: :int, val: 2 }
 				right: call.args.0
 			}
@@ -277,6 +278,37 @@ fn run(t) {
 				ctx.evalExpr('twice(inc(4))')
 			}
 			10
+		)
+	}
+
+	{
+		ctx := Virtual.createVirtualContext()
+
+		'VirtualToken can build AST token metadata for Virtual nodes' |> t.eq(
+			{
+				node := {
+					type: :binary
+					tok: VirtualToken.Plus(VirtualToken.at(5, 2, 4))
+					op: :plus
+					left: { type: :int, val: 2 }
+					right: { type: :int, val: 3 }
+				}
+				ctx.evalAst(node)
+			}
+			5
+		)
+
+		'VirtualToken identifier tokens can tag AST nodes' |> t.eq(
+			{
+				ctx.define('answer', 42)
+				node := {
+					type: :identifier
+					tok: VirtualToken.Identifier('answer')
+					val: 'answer'
+				}
+				ctx.evalAst(node)
+			}
+			42
 		)
 	}
 

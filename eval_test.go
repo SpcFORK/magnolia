@@ -1379,6 +1379,40 @@ func TestVirtualUnsupportedFeaturesReturnErrors(t *testing.T) {
 		AtomValue("error"),
 	))
 }
+
+func TestVirtualTokenConstructors(t *testing.T) {
+	expectProgramToReturn(t, `
+		VirtualToken := import('VirtualToken')
+		[
+			VirtualToken.Comma()
+			VirtualToken.Identifier('myVar', VirtualToken.at(10, 2, 7))
+			VirtualToken.NumberLiteral('42')
+			VirtualToken.Comment('note', [3, 1, 9])
+		]
+	`, MakeList(
+		ObjectValue{
+			"type": AtomValue("comma"),
+			"val":  null,
+			"pos":  MakeList(IntValue(0), IntValue(1), IntValue(1)),
+		},
+		ObjectValue{
+			"type": AtomValue("identifier"),
+			"val":  MakeString("myVar"),
+			"pos":  MakeList(IntValue(10), IntValue(2), IntValue(7)),
+		},
+		ObjectValue{
+			"type": AtomValue("numberLiteral"),
+			"val":  MakeString("42"),
+			"pos":  MakeList(IntValue(0), IntValue(1), IntValue(1)),
+		},
+		ObjectValue{
+			"type": AtomValue("comment"),
+			"val":  MakeString("note"),
+			"pos":  MakeList(IntValue(3), IntValue(1), IntValue(9)),
+		},
+	))
+}
+
 func TestSyscallFunctionExists(t *testing.T) {
 	expectProgramToReturn(t, `
 		result := syscall(-1) // Invalid syscall number
