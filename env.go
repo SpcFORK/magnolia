@@ -1543,13 +1543,13 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		bodyBuf, err := io.ReadAll(r.Body)
 		if err != nil {
 			ctx.Lock()
-			_, err = ctx.EvalFnValue(cb, false, errObj(
+			_, rtErr := ctx.EvalFnValue(cb, false, errObj(
 				fmt.Sprintf("Could not read request in listen(), %s", err.Error()),
 			))
 			ctx.Unlock()
 
-			if err != nil {
-				ctx.eng.reportErr(err)
+			if rtErr != nil {
+				ctx.eng.reportErr(rtErr)
 			}
 		}
 		bodyStr := StringValue(bodyBuf)
@@ -1566,7 +1566,7 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if responseEnded {
 			ctx.eng.reportErr(&runtimeError{
-				reason: fmt.Sprintf("listen/end called more than once"),
+				reason: "listen/end called more than once",
 			})
 		}
 
@@ -1656,11 +1656,11 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, err = ctx.EvalFnValue(cb, false, errObj(
+		_, rtErr := ctx.EvalFnValue(cb, false, errObj(
 			fmt.Sprintf("Error writing request body in listen/end: %s", err.Error()),
 		))
-		if err != nil {
-			ctx.eng.reportErr(err)
+		if rtErr != nil {
+			ctx.eng.reportErr(rtErr)
 		}
 	}
 }
@@ -2000,11 +2000,11 @@ func (c *Context) oakPow(args []Value) (Value, *runtimeError) {
 
 	if base == 0 && exp == 0 {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("pow(0, 0) is not defined"),
+			reason: "pow(0, 0) is not defined",
 		}
 	} else if base < 0 && float64(int64(exp)) != exp {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("pow() of negative number to fractional exponent is not defined"),
+			reason: "pow() of negative number to fractional exponent is not defined",
 		}
 	}
 
@@ -2042,11 +2042,11 @@ func (c *Context) oakLog(args []Value) (Value, *runtimeError) {
 
 	if base == 0 {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("log(0, _) is not defined"),
+			reason: "log(0, _) is not defined",
 		}
 	} else if exp == 0 {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("log(_, 0) is not defined"),
+			reason: "log(_, 0) is not defined",
 		}
 	}
 

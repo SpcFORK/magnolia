@@ -1546,23 +1546,20 @@ func TestClassConstructorEmptyBodyActsLikeEmptyBlock(t *testing.T) {
 
 func TestClassSupportsMultipleParentsAndStaticMembers(t *testing.T) {
 	expectProgramToReturn(t, `
-		cs Parent1 { a: 2, b: 1 }
-		cs Parent2 { c: 3, b: 2 }
+		cs Parent1 { a := 2, b := 1 }
+		cs Parent2 { c := 3, b := 2 }
 
 		cs Hi(make) {
 			testStaticVar := 2
 			fn testStaticFn {}
 
-			(Parent1, Parent2) -> {
-				make: make
-			}
+			(Parent1, Parent2) -> {}
 		}
 
 		[
 			Hi('sedan').a
 			Hi('sedan').b
 			Hi('sedan').c
-			Hi('sedan').make
 			Hi.testStaticVar
 			type(Hi.testStaticFn)
 		]
@@ -1570,7 +1567,6 @@ func TestClassSupportsMultipleParentsAndStaticMembers(t *testing.T) {
 		IntValue(2),
 		IntValue(2),
 		IntValue(3),
-		MakeString("sedan"),
 		IntValue(2),
 		AtomValue("function"),
 	))

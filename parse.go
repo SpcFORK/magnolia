@@ -434,6 +434,37 @@ func (p *parser) restore(index int, minPrecLen int) {
 	p.minBinaryPrec = p.minBinaryPrec[:minPrecLen]
 }
 
+func classBodyFromAssignmentBlock(body astNode) (astNode, bool) {
+	block, ok := body.(blockNode)
+	if !ok || len(block.exprs) == 0 {
+		return nil, false
+	}
+
+	entries := make([]objectEntry, 0, len(block.exprs))
+	for _, expr := range block.exprs {
+		assign, ok := expr.(assignmentNode)
+		if !ok || !assign.isLocal {
+			return nil, false
+		}
+
+		ident, ok := assign.left.(identifierNode)
+		if !ok {
+			return nil, false
+		}
+
+		entries = append(entries, objectEntry{
+			key: ident,
+			val: ident,
+		})
+	}
+
+	newExprs := append(append([]astNode{}, block.exprs...), objectNode{
+		entries: entries,
+		tok:     block.tok,
+	})
+	return blockNode{exprs: newExprs, tok: block.tok}, true
+}
+
 func (p *parser) tryParseClassParentsClause() ([]astNode, astNode, bool, error) {
 	startIndex := p.index
 	startMinPrecLen := len(p.minBinaryPrec)
@@ -465,13 +496,19 @@ func (p *parser) tryParseClassParentsClause() ([]astNode, astNode, bool, error) 
 			restore()
 			return nil, nil, false, nil
 		}
-		if _, err := p.expect(comma); err != nil {
+
+		parents = append(parents, parent)
+
+		if p.peek().kind == comma {
+			p.next()
+			continue
+		}
+
+		if p.peek().kind != rightParen {
 			pop()
 			restore()
 			return nil, nil, false, nil
 		}
-
-		parents = append(parents, parent)
 	}
 
 	if _, err := p.expect(rightParen); err != nil {
@@ -719,7 +756,7 @@ func (p *parser) parseUnit() (astNode, error) {
 		}
 		if p.isEOF() {
 			return nil, parseError{
-				reason: fmt.Sprintf("Unexpected end of input inside block or object"),
+				reason: "Unexpected end of input inside block or object",
 				pos:    tok.pos,
 			}
 		}
@@ -946,6 +983,10 @@ func (p *parser) parseUnit() (astNode, error) {
 		// should parse like `Name := fn Name {}` with an empty block body.
 		if objBody, ok := body.(objectNode); ok && len(objBody.entries) == 0 {
 			body = blockNode{exprs: []astNode{}, tok: objBody.tok}
+		}
+
+		if desugaredBody, ok := classBodyFromAssignmentBlock(body); ok {
+			body = desugaredBody
 		}
 
 		return classNode{

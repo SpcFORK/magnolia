@@ -101,7 +101,7 @@ func runPackFile() bool {
 	exeFileSize := info.Size()
 	// 24 bundle size bytes, 8 magic bytes. See: cmd/pack.oak
 	readFrom := exeFileSize - 24 - 8
-	endOfFileBytes := make([]byte, 24+8, 24+8)
+	endOfFileBytes := make([]byte, 24+8)
 	_, err = exeFile.ReadAt(endOfFileBytes, readFrom)
 	if err != nil {
 		return false
@@ -122,7 +122,7 @@ func runPackFile() bool {
 	}
 
 	readBundleFrom := readFrom - bundleSize
-	bundleBytes := make([]byte, bundleSize, bundleSize)
+	bundleBytes := make([]byte, bundleSize)
 	_, err = exeFile.ReadAt(bundleBytes, readBundleFrom)
 	if err != nil {
 		return false

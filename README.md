@@ -31,7 +31,7 @@ with fs.readFile('./file.txt') fn(file) if file {
 }
 ```
 
-Magnolia also has a pragmatic standard library that comes built into the `magnolia` executable. For example, there's a built-in HTTP server and router in the `http` library.
+Magnolia also has a pragmatic standard library that comes built into the interpreter executable. For example, there's a built-in HTTP server and router in the `http` library.
 
 ```js
 std := import('std')
@@ -54,16 +54,30 @@ server.start(9999)
 
 ## Install
 
-To install Magnolia, build it from source:
+Magnolia is currently installed from source.
+
+On Unix-like systems, build with Make:
 
 ```sh
 make install
 ```
 
-Or use `go build` directly:
+On Windows, use the provided build script:
+
+```bat
+build.bat
+```
+
+Or build directly with Go on any platform:
 
 ```sh
 go build .
+```
+
+You can also run without installing:
+
+```sh
+go run . <file-or-command>
 ```
 
 ## What's New in Magnolia
@@ -335,13 +349,13 @@ There are several immediately actionable things we can do to speed up Magnolia p
 Magnolia (ab)uses GNU Make to run development workflows and tasks.
 
 - `make run` compiles and runs the Magnolia binary, which opens an interactive REPL
-- `make fmt` or `make f` runs the `magnolia fmt` code formatter over any _files with unstaged changes in the git repository_. This is equivalent to running `magnolia fmt --changes --fix`.
+- `make fmt` or `make f` runs the formatter over files with unstaged changes (currently via `oak fmt --changes --fix` for compatibility)
 - `make tests` or `make t` runs the Go test suite for the Magnolia language and interpreter
 - `make test-oak` or `make tk` runs the Magnolia test suite, which tests the standard libraries
-- `make test-bundle` runs the Magnolia test suite, bundled using `magnolia build`
-- `make test-js` runs the Magnolia test suite on the system's Node.js, compiled using `magnolia build --web`
+- `make test-bundle` runs the Magnolia test suite, bundled via the `build` command
+- `make test-js` runs the Magnolia test suite on Node.js, compiled with the `--web` target
 - `make build` generates release builds of Magnolia for various operating systems; `make build-<OS>` builds for a specific OS
-- `make install` installs the Magnolia interpreter on your `$GOPATH` as `magnolia`, and re-installs Magnolia's vim syntax file
+- `make install` installs the interpreter on your `$GOPATH` as `oak`, and re-installs the Vim syntax file
 - `make site` builds a Magnolia bundle for the website, and `make site-w` does it on every file save
 - `make site-gen` rebuilds the statically generated parts of the Magnolia website, like the standard library documentation
 
@@ -349,6 +363,6 @@ To try Magnolia by building from source, clone the repository and run `make inst
 
 ## Unit and generative tests
 
-The Magnolia repository so far as two kinds of tests: unit tests and generative/fuzz tests. **Unit tests** are just what they sound like -- tests validated with assertions -- and are built on the `libtest` Magnolia library with the exception of Go tests in `eval_test.go`. **Generative tests** include fuzz tests, and are tests that run some pre-defined behavior of functions through a much larger body of procedurally generated set of inputs, for validating behavior that's difficult to validate manually like correctness of parsers and `libdatetime`'s date/time conversion algorithms.
+The Magnolia repository has two kinds of tests: unit tests and generative/fuzz tests. **Unit tests** are just what they sound like -- tests validated with assertions -- and are built on the `libtest` Magnolia library with the exception of Go tests in `eval_test.go`. **Generative tests** include fuzz tests, and are tests that run some pre-defined behavior of functions through a much larger body of procedurally generated inputs, for validating behavior that's difficult to validate manually like correctness of parsers and `libdatetime`'s date/time conversion algorithms.
 
 Both sets of tests are written and run entirely in the "userland" of Magnolia, without invoking the interpreter separately. Unit tests live in `./test` and are run with `./test/main.oak`; generative tests are in `test/generative`, and can be run manually.

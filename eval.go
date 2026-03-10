@@ -514,10 +514,7 @@ func (e *runtimeError) Error() string {
 	return fmt.Sprintf("Runtime error %s: %s\n%s", e.pos, e.reason, strings.Join(trace, "\n"))
 }
 
-func (c *Context) evalGo(programReader io.Reader) (Value, error) {
-	c.Lock()
-	defer c.Unlock()
-
+func (c *Context) evalGoUnlocked(programReader io.Reader) (Value, error) {
 	program, err := io.ReadAll(programReader)
 	if err != nil {
 		return nil, err
@@ -537,7 +534,12 @@ func (c *Context) evalGo(programReader io.Reader) (Value, error) {
 		return val, nil
 	}
 	return val, runtimeErr
+}
 
+func (c *Context) evalGo(programReader io.Reader) (Value, error) {
+	c.Lock()
+	defer c.Unlock()
+	return c.evalGoUnlocked(programReader)
 }
 
 func (c *Context) Eval(programReader io.Reader) (Value, error) {
@@ -553,7 +555,7 @@ func (c *Context) Eval(programReader io.Reader) (Value, error) {
 
 	if c.vm == nil {
 		vmCode := "Virtual := import('Virtual'); Virtual.createStandardVM()"
-		val, err := c.evalGo(strings.NewReader(vmCode))
+		val, err := c.evalGoUnlocked(strings.NewReader(vmCode))
 		if err != nil {
 			return nil, err
 		}
@@ -749,7 +751,7 @@ func (c *Context) evalNodes(nodes []astNode) (Value, *runtimeError) {
 }
 
 var divisionByZeroErr = runtimeError{
-	reason: fmt.Sprintf("Division by zero"),
+	reason: "Division by zero",
 }
 
 func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
@@ -878,7 +880,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 	case nullNode:
 		return null, nil
 	case stringNode:
-		payload := make([]byte, len(n.payload), len(n.payload))
+		payload := make([]byte, len(n.payload))
 		copy(payload, n.payload)
 		v := StringValue(payload)
 		return &v, nil
