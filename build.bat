@@ -5,6 +5,21 @@ set "LOGO_PNG=./SushaLogo.png"
 set "ICON_PATH=./build/magnolia.ico"
 set "SYSO_FILE=./magnolia.syso"
 
+set "OAK_VSCODE_DIR=.\tools\oak-vscode"
+set "OAK_VSCODE_ZIP=.\tools\oak-vscode.zip"
+
+if not exist "%OAK_VSCODE_DIR%" (
+    echo VS Code extension folder not found: %OAK_VSCODE_DIR%
+    exit /b 1
+)
+
+if exist "%OAK_VSCODE_ZIP%" del "%OAK_VSCODE_ZIP%"
+
+echo Zipping %OAK_VSCODE_DIR%...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+"Compress-Archive -Path '%OAK_VSCODE_DIR%' -DestinationPath '%OAK_VSCODE_ZIP%' -Force"
+if errorlevel 1 exit /b 1
+
 if not exist build (
     mkdir build
 )
