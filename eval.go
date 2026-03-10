@@ -293,6 +293,27 @@ func (v FnValue) Eq(u Value) bool {
 	return false
 }
 
+type ClassValue struct {
+	defn   *classNode
+	scope  scope
+	static ObjectValue
+}
+
+func (v ClassValue) String() string {
+	return v.defn.String()
+}
+func (v ClassValue) Eq(u Value) bool {
+	if _, ok := u.(EmptyValue); ok {
+		return true
+	}
+
+	if w, ok := u.(ClassValue); ok {
+		return v.defn == w.defn
+	}
+
+	return false
+}
+
 type thunkValue struct {
 	defn *fnNode
 	scope
@@ -491,33 +512,138 @@ func (c *Context) Eval(programReader io.Reader) (Value, error) {
 
 }
 
+func normalizeCallArgs(paramCount int, args []Value) []Value {
+	if len(args) >= paramCount {
+		return args
+	}
+
+	normalized := make([]Value, len(args), paramCount)
+	copy(normalized, args)
+	for len(normalized) < paramCount {
+		normalized = append(normalized, null)
+	}
+	return normalized
+}
+
+func bindCallScope(parent *scope, params []string, restArg string, args []Value) scope {
+	callScope := scope{
+		parent: parent,
+		vars:   map[string]Value{},
+	}
+
+	for i, argName := range params {
+		if argName != "" {
+			callScope.put(argName, args[i])
+		}
+	}
+
+	if restArg != "" {
+		var restList ListValue
+		if len(args) > len(params) {
+			restList = ListValue(args[len(params):])
+		} else {
+			restList = ListValue{}
+		}
+		callScope.put(restArg, &restList)
+	}
+
+	return callScope
+}
+
+func mergeObjectValue(dst ObjectValue, src ObjectValue) {
+	for key, val := range src {
+		dst[key] = val
+	}
+}
+
+func (c *Context) constructClassValue(class ClassValue, args ...Value) (Value, *runtimeError) {
+	args = normalizeCallArgs(len(class.defn.args), args)
+	constructorScope := bindCallScope(&class.scope, class.defn.args, class.defn.restArg, args)
+
+	if len(class.defn.parents) == 0 {
+		val, err := c.evalExpr(class.defn.body, constructorScope)
+		if err != nil {
+			err.stackTrace = append(err.stackTrace, stackEntry{
+				name: class.defn.name,
+				pos:  class.defn.pos(),
+			})
+		}
+		return val, err
+	}
+
+	instance := ObjectValue{}
+	for _, parentNode := range class.defn.parents {
+		parentValue, err := c.evalExpr(parentNode, constructorScope)
+		if err != nil {
+			return nil, err
+		}
+
+		if parentObj, ok := parentValue.(ObjectValue); ok {
+			mergeObjectValue(instance, parentObj)
+			continue
+		}
+
+		parentInstance, err := c.EvalFnValue(parentValue, false, args...)
+		if err != nil {
+			err.stackTrace = append(err.stackTrace, stackEntry{
+				name: class.defn.name,
+				pos:  class.defn.pos(),
+			})
+			return nil, err
+		}
+
+		parentObj, ok := parentInstance.(ObjectValue)
+		if !ok {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Parent class %s must construct an object, got %s", parentNode, parentInstance),
+				pos:    parentNode.pos(),
+				stackTrace: []stackEntry{
+					{
+						name: class.defn.name,
+						pos:  class.defn.pos(),
+					},
+				},
+			}
+		}
+
+		mergeObjectValue(instance, parentObj)
+	}
+
+	ownValue, err := c.evalExpr(class.defn.body, constructorScope)
+	if err != nil {
+		err.stackTrace = append(err.stackTrace, stackEntry{
+			name: class.defn.name,
+			pos:  class.defn.pos(),
+		})
+		return nil, err
+	}
+
+	if ownValue == nil || ownValue.Eq(null) {
+		return instance, nil
+	}
+
+	ownObj, ok := ownValue.(ObjectValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Inherited class body for %s must construct an object, got %s", class.defn.name, ownValue),
+			pos:    class.defn.body.pos(),
+			stackTrace: []stackEntry{
+				{
+					name: class.defn.name,
+					pos:  class.defn.pos(),
+				},
+			},
+		}
+	}
+
+	mergeObjectValue(instance, ownObj)
+	return instance, nil
+}
+
 func (c *Context) EvalFnValue(maybeFn Value, thunkable bool, args ...Value) (Value, *runtimeError) {
 	if fn, ok := maybeFn.(FnValue); ok {
-		// if not enough arguments, fill them with nulls
-		difference := len(fn.defn.args) - len(args)
-		for i := 0; i < difference; i++ {
-			args = append(args, null)
-		}
-
-		fnScope := scope{
-			parent: &fn.scope,
-			vars:   map[string]Value{},
-		}
-		for i, argName := range fn.defn.args {
-			if argName != "" {
-				fnScope.put(argName, args[i])
-			}
-		}
-
-		if fn.defn.restArg != "" {
-			var restList ListValue
-			if len(args) > len(fn.defn.args) {
-				restList = ListValue(args[len(fn.defn.args):])
-			} else {
-				restList = ListValue{}
-			}
-			fnScope.put(fn.defn.restArg, &restList)
-		}
+		args = normalizeCallArgs(len(fn.defn.args), args)
+		fnScope := bindCallScope(&fn.scope, fn.defn.args, fn.defn.restArg, args)
 
 		thunk := thunkValue{
 			defn:  fn.defn,
@@ -530,6 +656,8 @@ func (c *Context) EvalFnValue(maybeFn Value, thunkable bool, args ...Value) (Val
 		return c.unwrapThunk(thunk)
 	} else if fn, ok := maybeFn.(BuiltinFnValue); ok {
 		return fn.fn(args)
+	} else if class, ok := maybeFn.(ClassValue); ok {
+		return c.constructClassValue(class, args...)
 	}
 
 	return nil, &runtimeError{
@@ -738,6 +866,36 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			obj[keyString] = val
 		}
 		return obj, nil
+	case classNode:
+		class := ClassValue{
+			defn:   &n,
+			scope:  sc,
+			static: ObjectValue{},
+		}
+		sc.put(n.name, class)
+
+		if len(n.staticExprs) != 0 {
+			staticScope := scope{
+				parent: &sc,
+				vars:   map[string]Value{},
+			}
+			staticScope.put(n.name, class)
+
+			for _, expr := range n.staticExprs {
+				if _, err := c.evalExpr(expr, staticScope); err != nil {
+					return nil, err
+				}
+			}
+
+			for key, val := range staticScope.vars {
+				if key != n.name {
+					class.static[key] = val
+				}
+			}
+		}
+
+		sc.put(n.name, class)
+		return class, nil
 	case fnNode:
 		fn := FnValue{
 			defn:  &n,
@@ -952,6 +1110,21 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				} else {
 					target[objKeyString] = assignedValue
 				}
+			case ClassValue:
+				var objKeyString string
+				if objKey, ok := assignRight.(*StringValue); ok {
+					objKeyString = string(*objKey)
+				} else if objKey, ok := assignRight.(AtomValue); ok {
+					objKeyString = string(objKey)
+				} else {
+					objKeyString = assignRight.String()
+				}
+
+				if _, ok := assignedValue.(EmptyValue); ok {
+					delete(target.static, objKeyString)
+				} else {
+					target.static[objKeyString] = assignedValue
+				}
 			default:
 				return nil, &runtimeError{
 					reason: fmt.Sprintf("Expected string, list, or object in left-hand side of property assignment, got %s", left.String()),
@@ -1018,6 +1191,21 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			}
 
 			if val, ok := target[objKeyString]; ok {
+				return val, nil
+			}
+
+			return null, nil
+		case ClassValue:
+			var objKeyString string
+			if objKey, ok := right.(*StringValue); ok {
+				objKeyString = string(*objKey)
+			} else if objKey, ok := right.(AtomValue); ok {
+				objKeyString = string(objKey)
+			} else {
+				objKeyString = right.String()
+			}
+
+			if val, ok := target.static[objKeyString]; ok {
 				return val, nil
 			}
 

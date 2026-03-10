@@ -167,6 +167,46 @@ func (n fnNode) pos() pos {
 	return n.tok.pos
 }
 
+type classNode struct {
+	name        string
+	args        []string
+	restArg     string
+	body        astNode
+	staticExprs []astNode
+	parents     []astNode
+	tok         *token
+}
+
+func (n classNode) String() string {
+	argStrings := make([]string, len(n.args))
+	copy(argStrings, n.args)
+	if n.restArg != "" {
+		argStrings = append(argStrings, n.restArg+"...")
+	}
+
+	head := "cs " + n.name + "(" + strings.Join(argStrings, ", ") + ")"
+	if len(n.parents) == 0 {
+		return head + " " + n.body.String()
+	}
+
+	staticStrings := make([]string, len(n.staticExprs))
+	for i, expr := range n.staticExprs {
+		staticStrings[i] = expr.String()
+	}
+
+	parentStrings := make([]string, len(n.parents))
+	for i, parent := range n.parents {
+		parentStrings[i] = parent.String()
+	}
+
+	bodyParts := staticStrings
+	bodyParts = append(bodyParts, "("+strings.Join(parentStrings, ", ")+") -> "+n.body.String())
+	return head + " { " + strings.Join(bodyParts, ", ") + " }"
+}
+func (n classNode) pos() pos {
+	return n.tok.pos
+}
+
 type identifierNode struct {
 	payload string
 	tok     *token
@@ -387,6 +427,125 @@ func (p *parser) readUntilTokenKind(kind tokKind) []token {
 		tokens = append(tokens, p.next())
 	}
 	return tokens
+}
+
+func (p *parser) restore(index int, minPrecLen int) {
+	p.index = index
+	p.minBinaryPrec = p.minBinaryPrec[:minPrecLen]
+}
+
+func (p *parser) tryParseClassParentsClause() ([]astNode, astNode, bool, error) {
+	startIndex := p.index
+	startMinPrecLen := len(p.minBinaryPrec)
+
+	restore := func() {
+		p.restore(startIndex, startMinPrecLen)
+	}
+
+	if p.isEOF() || p.peek().kind != leftParen {
+		return nil, nil, false, nil
+	}
+
+	p.pushMinPrec(0)
+	popped := false
+	pop := func() {
+		if !popped {
+			p.popMinPrec()
+			popped = true
+		}
+	}
+
+	p.next() // eat the leftParen
+
+	parents := []astNode{}
+	for !p.isEOF() && p.peek().kind != rightParen {
+		parent, err := p.parseNode()
+		if err != nil {
+			pop()
+			restore()
+			return nil, nil, false, nil
+		}
+		if _, err := p.expect(comma); err != nil {
+			pop()
+			restore()
+			return nil, nil, false, nil
+		}
+
+		parents = append(parents, parent)
+	}
+
+	if _, err := p.expect(rightParen); err != nil {
+		pop()
+		restore()
+		return nil, nil, false, nil
+	}
+	if _, err := p.expect(branchArrow); err != nil {
+		pop()
+		restore()
+		return nil, nil, false, nil
+	}
+
+	body, err := p.parseNode()
+	if err != nil {
+		pop()
+		restore()
+		return nil, nil, false, nil
+	}
+
+	pop()
+	return parents, body, true, nil
+}
+
+func (p *parser) tryParseInheritedClassBody() ([]astNode, []astNode, astNode, bool, error) {
+	startIndex := p.index
+	startMinPrecLen := len(p.minBinaryPrec)
+
+	restore := func() {
+		p.restore(startIndex, startMinPrecLen)
+	}
+
+	if p.isEOF() || p.peek().kind != leftBrace {
+		return nil, nil, nil, false, nil
+	}
+
+	if _, err := p.expect(leftBrace); err != nil {
+		restore()
+		return nil, nil, nil, false, nil
+	}
+
+	staticExprs := []astNode{}
+	for !p.isEOF() && p.peek().kind != rightBrace {
+		parents, body, ok, err := p.tryParseClassParentsClause()
+		if err != nil {
+			restore()
+			return nil, nil, nil, false, err
+		}
+		if ok {
+			if p.peek().kind == comma {
+				p.next()
+			}
+			if _, err := p.expect(rightBrace); err != nil {
+				restore()
+				return nil, nil, nil, false, nil
+			}
+			return staticExprs, parents, body, true, nil
+		}
+
+		expr, err := p.parseNode()
+		if err != nil {
+			restore()
+			return nil, nil, nil, false, nil
+		}
+		if _, err := p.expect(comma); err != nil {
+			restore()
+			return nil, nil, nil, false, nil
+		}
+
+		staticExprs = append(staticExprs, expr)
+	}
+
+	restore()
+	return nil, nil, nil, false, nil
 }
 
 // concrete astNode parse functions
@@ -760,6 +919,24 @@ func (p *parser) parseUnit() (astNode, error) {
 			}
 		}
 
+		if p.peek().kind == leftBrace {
+			staticExprs, parents, body, ok, err := p.tryParseInheritedClassBody()
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return classNode{
+					name:        nameTok.payload,
+					args:        args,
+					restArg:     restArg,
+					body:        body,
+					staticExprs: staticExprs,
+					parents:     parents,
+					tok:         &tok,
+				}, nil
+			}
+		}
+
 		body, err := p.parseNode()
 		if err != nil {
 			return nil, err
@@ -771,20 +948,12 @@ func (p *parser) parseUnit() (astNode, error) {
 			body = blockNode{exprs: []astNode{}, tok: objBody.tok}
 		}
 
-		return assignmentNode{
-			isLocal: true,
-			left: identifierNode{
-				payload: nameTok.payload,
-				tok:     &nameTok,
-			},
-			right: fnNode{
-				name:    nameTok.payload,
-				args:    args,
-				restArg: restArg,
-				body:    body,
-				tok:     &tok,
-			},
-			tok: &tok,
+		return classNode{
+			name:    nameTok.payload,
+			args:    args,
+			restArg: restArg,
+			body:    body,
+			tok:     &tok,
 		}, nil
 	case underscore:
 		return emptyNode{tok: &tok}, nil
