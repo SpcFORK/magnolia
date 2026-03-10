@@ -1,0 +1,51 @@
+// oak shell -- lightweight virtual shell with VFS support
+
+{
+	default: default
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+cli := import('cli')
+shell := import('shell')
+
+Cli := cli.parse()
+
+// Check if we should use the packed VFS
+vfs := ___packed_vfs() |> default(?)
+
+// Create shell instance
+sh := shell.createShell(vfs)
+
+// Show VFS status on startup
+if vfs {
+	? -> printf('[Using system filesystem]\n')
+	_ -> printf('[Using virtual filesystem]\n')
+}
+
+// Check for script execution mode
+if Cli.opts.c {
+	// Execute command from -c flag
+	? -> ?
+	_ -> {
+		exit(sh.exec(Cli.opts.c))
+	}
+}
+
+// Check for script file
+if len(Cli.args) > 0 {
+	true -> {
+		fs := import('fs')
+		scriptPath := Cli.args.0
+		script := fs.readFile(scriptPath)
+		if script {
+			? -> {
+				printf('shell: cannot read script file: {{ 0 }}\n', scriptPath)
+				exit(1)
+			}
+			_ -> exit(sh.batch(script))
+		}
+	}
+	// Interactive mode
+	_ -> sh.repl()
+}

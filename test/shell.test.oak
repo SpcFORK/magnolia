@@ -1,0 +1,197 @@
+// shell.test.oak - tests for the virtual shell
+
+{
+	assert: assert
+	println: println
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+shell := import('shell')
+Virtual := import('Virtual')
+
+fn testBasicCommands() {
+	println('Testing basic shell commands...')
+	
+	// Create a VFS for testing
+	vfs := Virtual.createVirtualFS({
+		'/home/test.txt': 'Hello, World!'
+		'/home/data.json': '{"version": "1.0"}'
+		'/etc/config.conf': 'debug=true'
+	})
+	
+	sh := shell.createShell(vfs)
+	
+	// Test pwd
+	assert(sh.getCurrentDir() = '/', 'Initial directory should be /')
+	
+	// Test cd
+	sh.exec('cd /home')
+	assert(sh.getCurrentDir() = '/home', 'cd should change directory')
+	
+	// Test cd with relative path
+	sh.exec('cd ..')
+	assert(sh.getCurrentDir() = '/', 'cd .. should go to parent')
+	
+	// Test cd with ../
+	sh.exec('cd home')
+	sh.exec('cd ../etc')
+	assert(sh.getCurrentDir() = '/etc', 'cd ../etc should work')
+	
+	println('✓ Basic commands work')
+}
+
+fn testFileOperations() {
+	println('Testing file operations...')
+	
+	vfs := Virtual.createVirtualFS({
+		'/test.txt': 'original content'
+	})
+	
+	sh := shell.createShell(vfs)
+	
+	// Test touch
+	sh.exec('touch /new.txt')
+	assert(vfs.exists?('/new.txt'), 'touch should create file')
+	
+	// Test cp
+	sh.exec('cp /test.txt /copy.txt')
+	assert(vfs.readFile('/copy.txt') = 'original content', 'cp should copy content')
+	
+	// Test mv
+	sh.exec('mv /copy.txt /renamed.txt')
+	assert(vfs.exists?('/renamed.txt'), 'mv should create destination')
+	assert(!vfs.exists?('/copy.txt'), 'mv should remove source')
+	
+	// Test rm
+	sh.exec('rm /renamed.txt')
+	assert(!vfs.exists?('/renamed.txt'), 'rm should delete file')
+	
+	println('✓ File operations work')
+}
+
+fn testEnvironment() {
+	println('Testing environment variables...')
+	
+	sh := shell.createShell()
+	
+	// Test export
+	sh.exec('export TEST_VAR=hello')
+	env := sh.getEnv()
+	assert(env.TEST_VAR = 'hello', 'export should set variable')
+	
+	// Test export with equals in value
+	sh.exec('export TEST_VAR2=key=value')
+	env := sh.getEnv()
+	assert(env.TEST_VAR2 = 'key=value', 'export should handle = in value')
+	
+	println('✓ Environment variables work')
+}
+
+fn testBatchMode() {
+	println('Testing batch mode...')
+	
+	vfs := Virtual.createVirtualFS({})
+	sh := shell.createShell(vfs)
+	
+	script := '
+# Test script
+cd /
+touch test1.txt
+touch test2.txt
+echo Script executed
+'
+	
+	result := sh.batch(script)
+	assert(result = 0, 'batch should return 0 on success')
+	assert(vfs.exists?('/test1.txt'), 'batch should execute commands')
+	assert(vfs.exists?('/test2.txt'), 'batch should execute multiple commands')
+	
+	println('✓ Batch mode works')
+}
+
+fn testPathNormalization() {
+	println('Testing path normalization...')
+	
+	sh := shell.createShell()
+	
+	// Test basic paths
+	sh.exec('cd /home/user')
+	assert(sh.getCurrentDir() = '/home/user', 'absolute path should work')
+	
+	// Test relative path
+	sh.exec('cd docs')
+	assert(sh.getCurrentDir() = '/home/user/docs', 'relative path should append')
+	
+	// Test ./
+	sh.exec('cd ./subdir')
+	assert(sh.getCurrentDir() = '/home/user/docs/subdir', './ should work')
+	
+	// Test multiple ../
+	sh.exec('cd ../../other')
+	assert(sh.getCurrentDir() = '/home/other', 'multiple ../ should work')
+	
+	println('✓ Path normalization works')
+}
+
+fn testCommandParsing() {
+	println('Testing command parsing...')
+	
+	vfs := Virtual.createVirtualFS({})
+	sh := shell.createShell(vfs)
+	
+	// Test empty line
+	result := sh.exec('')
+	assert(result = 0, 'empty line should return 0')
+	
+	// Test comment
+	result := sh.exec('# this is a comment')
+	assert(result = 0, 'comment should return 0')
+	
+	// Test unknown command
+	result := sh.exec('unknown_command')
+	assert(result = 127, 'unknown command should return 127')
+	
+	// Test command with multiple spaces
+	sh.exec('touch    /file.txt')
+	assert(vfs.exists?('/file.txt'), 'multiple spaces should be handled')
+	
+	println('✓ Command parsing works')
+}
+
+fn testErrorHandling() {
+	println('Testing error handling...')
+	
+	vfs := Virtual.createVirtualFS({})
+	sh := shell.createShell(vfs)
+	
+	// Test cat on nonexistent file
+	result := sh.exec('cat /nonexistent.txt')
+	assert(result = 1, 'cat on nonexistent should return error')
+	
+	// Test cp with missing args
+	result := sh.exec('cp /source.txt')
+	assert(result = 1, 'cp with missing args should return error')
+	
+	// Test mv with missing args
+	result := sh.exec('mv /source.txt')
+	assert(result = 1, 'mv with missing args should return error')
+	
+	println('✓ Error handling works')
+}
+
+fn runTests() {
+	println('\n=== Running Shell Tests ===\n')
+	
+	testBasicCommands()
+	testFileOperations()
+	testEnvironment()
+	testBatchMode()
+	testPathNormalization()
+	testCommandParsing()
+	testErrorHandling()
+	
+	println('\n=== All Shell Tests Passed ===\n')
+}
+
+runTests()

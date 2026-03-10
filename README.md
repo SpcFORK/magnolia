@@ -309,9 +309,3 @@ To try Magnolia by building from source, clone the repository and run `make inst
 The Magnolia repository so far as two kinds of tests: unit tests and generative/fuzz tests. **Unit tests** are just what they sound like -- tests validated with assertions -- and are built on the `libtest` Magnolia library with the exception of Go tests in `eval_test.go`. **Generative tests** include fuzz tests, and are tests that run some pre-defined behavior of functions through a much larger body of procedurally generated set of inputs, for validating behavior that's difficult to validate manually like correctness of parsers and `libdatetime`'s date/time conversion algorithms.
 
 Both sets of tests are written and run entirely in the "userland" of Magnolia, without invoking the interpreter separately. Unit tests live in `./test` and are run with `./test/main.oak`; generative tests are in `test/generative`, and can be run manually.
-
-## Acknowledgments
-
-Magnolia is built on top of [Oak](https://oaklang.org/) by [Linus Lee](https://thesephist.com/). Oak provides the solid foundation of the language, including its elegant syntax, core runtime, and standard library. Magnolia extends Oak with additional features for modern development workflows while preserving the simplicity and expressiveness that makes Oak special.
-
-For more information about Oak, visit [oaklang.org](https://oaklang.org/) or the [Oak GitHub repository](https://github.com/thesephist/oak).

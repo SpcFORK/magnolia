@@ -1,0 +1,486 @@
+// libshell - lightweight virtual shell for environments without a shell
+// Provides common shell operations with virtual filesystem support
+
+{
+	default: default
+	slice: slice
+	clone: clone
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	append: append
+	entries: entries
+	contains?: contains?
+	merge: merge
+	keys: keys
+	compact: compact
+} := import('std')
+{
+	join: join
+	split: split
+	trim: trim
+	trimStart: trimStart
+	trimEnd: trimEnd
+	replace: replace
+	contains?: strContains?
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+} := import('str')
+{
+	printf: printf
+	format: format
+} := import('fmt')
+path := import('path')
+fs := import('fs')
+
+// normalizePath resolves relative paths and handles special cases
+fn normalizePath(currentDir, targetPath) {
+	p := if startsWith?(targetPath, '/') {
+		true -> targetPath
+		_ -> if startsWith?(targetPath, './') {
+			true -> currentDir << '/' << slice(targetPath, 2, len(targetPath))
+			_ -> if startsWith?(targetPath, '../') {
+				true -> {
+					parts := split(currentDir, '/')
+					upCount := 0
+					fn countUp(i) if i < len(targetPath) - 2 {
+						true -> if slice(targetPath, i, i + 3) = '../' {
+							true -> {
+								upCount <- upCount + 1
+								countUp(i + 3)
+							}
+							_ -> i
+						}
+						_ -> i
+					}
+					rest := countUp(0)
+					parentParts := slice(parts, 0, len(parts) - upCount)
+					parentPath := join(parentParts, '/')
+					if rest < len(targetPath) {
+						true -> parentPath << '/' << slice(targetPath, rest, len(targetPath))
+						_ -> parentPath
+					}
+				}
+				_ -> currentDir << '/' << targetPath
+			}
+		}
+	}
+	// normalize double slashes
+	replace(p, '//', '/')
+}
+
+// createShell creates a new shell environment
+fn createShell(vfs?) {
+	currentDir := '/'
+	env := {
+		PATH: '/bin:/usr/bin'
+		HOME: '/home'
+		PWD: '/'
+	}
+	
+	// determine which filesystem to use
+	filesystem := vfs |> default(fs)
+	
+	// Built-in commands
+	fn cmd_pwd(args) {
+		printf('{{ 0 }}\n', currentDir)
+		0
+	}
+	
+	fn cmd_cd(args) if len(args) {
+		0 -> {
+			currentDir <- env.HOME
+			env.PWD <- currentDir
+			0
+		}
+		_ -> {
+			newDir := normalizePath(currentDir, args.0)
+			// Check if directory exists (or assume it does for VFS)
+			if vfs != ? {
+				// For VFS, we allow any path
+				true -> {
+					currentDir <- newDir
+					env.PWD <- currentDir
+					0
+				}
+			} |> default(
+				// For real FS, check if it exists
+				if fs.statFile(newDir) {
+					? -> {
+						printf('cd: no such directory: {{ 0 }}\n', args.0)
+						1
+					}
+					_ -> {
+						currentDir <- newDir
+						env.PWD <- currentDir
+						0
+					}
+				}
+			)
+		}
+	}
+	
+	fn cmd_ls(args) {
+		target := if len(args) > 0 {
+			true -> normalizePath(currentDir, args.0)
+			_ -> currentDir
+		}
+		
+		files := if vfs != ? {
+			// VFS: list all files and filter by path prefix
+			true -> {
+				allFiles := vfs.listFiles()
+				prefix := if target = '/' {
+					true -> ''
+					_ -> target << '/'
+				}
+				allFiles |> filter(fn(f) if prefix = '' {
+					true -> true
+					_ -> startsWith?(f, prefix)
+				}) |> map(fn(f) if prefix = '' {
+					true -> f
+					_ -> slice(f, len(prefix), len(f))
+				}) |> filter(fn(f) !strContains?(f, '/'))
+			}
+			// Real FS: use actual directory listing
+			_ -> {
+				stat := fs.statFile(target)
+				if stat {
+					? -> []
+					_ -> if stat.dir? {
+						true -> fs.listFiles(target)
+						_ -> [path.base(target)]
+					}
+				}
+			}
+		}
+		
+		each(files, fn(f) printf('{{ 0 }}\n', f))
+		0
+	}
+	
+	fn cmd_cat(args) if len(args) {
+		0 -> {
+			printf('cat: missing file argument\n')
+			1
+		}
+		_ -> {
+			fn printFile(filepath, idx) {
+				fullPath := normalizePath(currentDir, filepath)
+				content := filesystem.readFile(fullPath)
+				if content {
+					? -> {
+						printf('cat: cannot read {{ 0 }}: No such file\n', filepath)
+						1
+					}
+					_ -> {
+						printf('{{ 0 }}', content)
+						0
+					}
+				}
+			}
+			
+			results := args |> map(printFile)
+			if contains?(results, 1) {
+				true -> 1
+				_ -> 0
+			}
+		}
+	}
+	
+	fn cmd_echo(args) {
+		printf('{{ 0 }}\n', join(args, ' '))
+		0
+	}
+	
+	fn cmd_mkdir(args) if len(args) {
+		0 -> {
+			printf('mkdir: missing directory argument\n')
+			1
+		}
+		_ -> if vfs != ? {
+			// For VFS, create a placeholder file to represent the directory
+			true -> {
+				each(args, fn(dir) {
+					fullPath := normalizePath(currentDir, dir)
+					// VFS doesn't have real directories, so we just note it
+					printf('mkdir: VFS directory marker: {{ 0 }}\n', fullPath)
+				})
+				0
+			}
+			// For real FS
+			_ -> {
+				each(args, fn(dir) {
+					fullPath := normalizePath(currentDir, dir)
+					result := fs.makeDir(fullPath)
+					if result = ? {
+						true -> printf('mkdir: cannot create directory {{ 0 }}\n', dir)
+					}
+				})
+				0
+			}
+		}
+	}
+	
+	fn cmd_rm(args) {
+		recursive? := false
+		files := []
+		
+		// Parse flags
+		each(args, fn(arg) if arg {
+			'-r', '-rf' -> recursive? <- true
+			_ -> files <- append(files, arg)
+		})
+		
+		if len(files) {
+			0 -> {
+				printf('rm: missing file argument\n')
+				1
+			}
+			_ -> {
+				each(files, fn(file) {
+					fullPath := normalizePath(currentDir, file)
+					if vfs != ? {
+						// VFS delete
+						true -> {
+							result := vfs.deleteFile(fullPath)
+							if result = ? {
+								true -> printf('rm: cannot remove {{ 0 }}\n', file)
+							}
+						}
+						// Real FS delete
+						_ -> {
+							result := fs.removeFile(fullPath)
+							if result = ? {
+								true -> printf('rm: cannot remove {{ 0 }}\n', file)
+							}
+						}
+					}
+				})
+				0
+			}
+		}
+	}
+	
+	fn cmd_mv(args) if len(args) {
+		2 -> {
+			src := normalizePath(currentDir, args.0)
+			dst := normalizePath(currentDir, args.1)
+			
+			if vfs != ? {
+				// VFS move (read, write, delete)
+				true -> {
+					content := vfs.readFile(src)
+					if content {
+						? -> {
+							printf('mv: cannot read {{ 0 }}\n', args.0)
+							1
+						}
+						_ -> {
+							vfs.writeFile(dst, content)
+							vfs.deleteFile(src)
+							0
+						}
+					}
+				}
+				// Real FS move
+				_ -> {
+					result := fs.renameFile(src, dst)
+					if result {
+						? -> {
+							printf('mv: cannot move {{ 0 }} to {{ 1 }}\n', args.0, args.1)
+							1
+						}
+						_ -> 0
+					}
+				}
+			}
+		}
+		_ -> {
+			printf('mv: requires source and destination\n')
+			1
+		}
+	}
+	
+	fn cmd_cp(args) if len(args) {
+		2 -> {
+			src := normalizePath(currentDir, args.0)
+			dst := normalizePath(currentDir, args.1)
+			
+			content := filesystem.readFile(src)
+			if content {
+				? -> {
+					printf('cp: cannot read {{ 0 }}\n', args.0)
+					1
+				}
+				_ -> {
+					filesystem.writeFile(dst, content)
+					0
+				}
+			}
+		}
+		_ -> {
+			printf('cp: requires source and destination\n')
+			1
+		}
+	}
+	
+	fn cmd_touch(args) if len(args) {
+		0 -> {
+			printf('touch: missing file argument\n')
+			1
+		}
+		_ -> {
+			each(args, fn(file) {
+				fullPath := normalizePath(currentDir, file)
+				// Create empty file if it doesn't exist
+				if !filesystem.exists?(fullPath) {
+					true -> filesystem.writeFile(fullPath, '')
+				}
+			})
+			0
+		}
+	}
+	
+	fn cmd_env(args) {
+		entries(env) |> each(fn(entry) {
+			printf('{{ 0 }}={{ 1 }}\n', entry.0, entry.1)
+		})
+		0
+	}
+	
+	fn cmd_export(args) if len(args) {
+		0 -> {
+			cmd_env([])
+		}
+		_ -> {
+			each(args, fn(arg) {
+				parts := split(arg, '=')
+				if len(parts) >= 2 {
+					true -> env.(parts.0) <- join(slice(parts, 1, len(parts)), '=')
+					_ -> printf('export: invalid syntax: {{ 0 }}\n', arg)
+				}
+			})
+			0
+		}
+	}
+	
+	fn cmd_help(args) {
+		printf('Available commands:\n')
+		printf('  pwd              - print working directory\n')
+		printf('  cd [dir]         - change directory\n')
+		printf('  ls [dir]         - list files\n')
+		printf('  cat <file>...    - print file contents\n')
+		printf('  echo <text>...   - print text\n')
+		printf('  mkdir <dir>...   - create directory\n')
+		printf('  rm [-r] <file>   - remove file\n')
+		printf('  mv <src> <dst>   - move/rename file\n')
+		printf('  cp <src> <dst>   - copy file\n')
+		printf('  touch <file>...  - create empty file\n')
+		printf('  env              - show environment variables\n')
+		printf('  export VAR=val   - set environment variable\n')
+		printf('  help             - show this help\n')
+		printf('  exit             - exit shell\n')
+		0
+	}
+	
+	builtins := {
+		pwd: cmd_pwd
+		cd: cmd_cd
+		ls: cmd_ls
+		cat: cmd_cat
+		echo: cmd_echo
+		mkdir: cmd_mkdir
+		rm: cmd_rm
+		mv: cmd_mv
+		cp: cmd_cp
+		touch: cmd_touch
+		env: cmd_env
+		export: cmd_export
+		help: cmd_help
+	}
+	
+	// Execute a single command
+	fn exec(cmdline) {
+		line := trim(cmdline)
+		if line = '' | startsWith?(line, '#') {
+			true -> 0 // empty or comment
+			_ -> {
+				// Simple tokenization (doesn't handle quotes yet)
+				tokens := split(line, ' ') |> filter(fn(t) t != '')
+				if len(tokens) {
+					0 -> 0
+					_ -> {
+						cmd := tokens.0
+						args := slice(tokens, 1, len(tokens))
+						
+						// Check for exit
+						if cmd = 'exit' {
+							true -> :exit
+							_ -> {
+								// Execute builtin or report error
+								handler := builtins.(cmd)
+								if handler {
+									? -> {
+										printf('{{ 0 }}: command not found\n', cmd)
+										127
+									}
+									_ -> handler(args)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	// REPL - read-eval-print loop
+	fn repl() {
+		printf('Oak Shell v0.1 (type "help" for commands, "exit" to quit)\n')
+		
+		fn loop() {
+			printf('{{ 0 }}> ', currentDir)
+			line := input()
+			
+			if line {
+				? -> :exit // EOF
+				_ -> {
+					result := exec(line)
+					if result {
+						:exit -> :exit
+						_ -> loop()
+					}
+				}
+			}
+		}
+		
+		loop()
+	}
+	
+	// Batch mode - execute commands from string
+	fn batch(script) {
+		lines := split(script, '\n')
+		fn runLine(idx) if idx < len(lines) {
+			true -> {
+				result := exec(lines.(idx))
+				if result {
+					:exit -> 0
+					_ -> runLine(idx + 1)
+				}
+			}
+			_ -> 0
+		}
+		runLine(0)
+	}
+	
+	{
+		exec: exec
+		repl: repl
+		batch: batch
+		getCurrentDir: fn() currentDir
+		getEnv: fn() clone(env)
+		setEnv: fn(key, val) env.(key) <- val
+	}
+}

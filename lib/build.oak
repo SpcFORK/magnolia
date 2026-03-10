@@ -12,6 +12,7 @@
 	contains?: contains?
 	merge: merge
 	once: once
+	keys: keys
 } := import('std')
 {
 	join: join
@@ -25,6 +26,7 @@
 	readFile: readFile
 	writeFile: writeFile
 	statFile: statFile
+	listFiles: listFiles
 } := import('fs')
 {
 	printf: printf
@@ -34,10 +36,14 @@
 	dir: dir
 	resolve: resolve
 } := import('path')
+{
+	encode: encodeJSON
+} := import('json')
 syntax := import('syntax')
 bundleUtils := import('bundle-utils')
 transform := import('ast-transform')
 transpile := import('transpile')
+packModule := import('pack')
 
 Log := printf
 Abort := fn(msg) {
@@ -50,6 +56,8 @@ Web? := false
 Wasm? := false
 Output := ?
 Includes := []
+IncludeVFS := ?
+VFSFiles := {}
 AbsoluteEntry := ?
 
 fn requireOpt(flag, value) if value {
@@ -86,6 +94,7 @@ fn configure(config) {
 	Wasm? <- config.wasm? = true
 	Output <- config.output
 	Includes <- parseIncludes(config.includes)
+	IncludeVFS <- config.includeVFS
 
 	requireOpt('entry', Entry)
 	requireOpt('output', Output)
@@ -94,6 +103,9 @@ fn configure(config) {
 
 	// absolute path to the entrypoint module
 	AbsoluteEntry <- resolve(Entry)
+	
+	// Collect VFS files if specified
+	VFSFiles <- packModule.collectVFSFiles(IncludeVFS, Log)
 	
 	// configure transpile middleware
 	transpile.configure({
@@ -709,7 +721,16 @@ fn renderOakBundle(bundleNode) {
 		}
 	}
 
-	'// oak build' << OakNativeRuntime << renderNode(bundleNode)
+	vfsInit := if len(VFSFiles |> keys()) {
+		0 -> ''
+		_ -> '
+// Embedded Virtual FS
+Virtual := import(\'Virtual\')
+__Oak_VFS := Virtual.createVirtualFS(' << encodeJSON(VFSFiles) << ')
+'
+	}
+
+	'// oak build' << OakNativeRuntime << vfsInit << renderNode(bundleNode)
 }
 
 // renderJSNodes renders Oak AST nodes to JavaScript program text.
@@ -905,7 +926,23 @@ fn renderJSBundle(bundleNode) {
 		)
 	}
 
-	'/* oak build --web */' << OakJSRuntime << renderNode(bundleNode)
+	vfsInit := if len(VFSFiles |> keys()) {
+		0 -> ''
+		_ -> '
+// Embedded Virtual FS
+const __Oak_VFS_Data = ' << encodeJSON(VFSFiles) << ';
+let __Oak_VFS = null;
+function __oak_get_vfs() {
+	if (!__Oak_VFS) {
+		const Virtual = __oak_module_import(\'Virtual\');
+		__Oak_VFS = Virtual.createVirtualFS(__Oak_VFS_Data);
+	}
+	return __Oak_VFS;
+}
+'
+	}
+
+	'/* oak build --web */' << OakJSRuntime << vfsInit << renderNode(bundleNode)
 }
 
 // renderWasmBundle renders Oak AST nodes to WebAssembly text format

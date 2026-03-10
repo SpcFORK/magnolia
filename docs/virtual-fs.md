@@ -120,6 +120,97 @@ Get all files as an object (for serialization).
 allFiles := vfs.getFiles()
 ```
 
+## File Bundling
+
+The VFS supports embedding files directly into Oak bundles and packed executables using the `--includeVFS` flag.
+
+### Using `--includeVFS` with `oak build`
+
+Bundle files into an Oak script or JavaScript bundle:
+
+```bash
+# Bundle a single file
+oak build --entry app.oak --output bundle.oak --includeVFS data.txt
+
+# Bundle multiple files (comma-separated)
+oak build --entry app.oak --output bundle.oak --includeVFS config.json,data.txt
+
+# Bundle with custom target names (using target:source syntax)
+oak build --entry app.oak --output bundle.oak --includeVFS config:config.json,readme:README.md
+
+# Bundle entire directories (recursively includes all files)
+oak build --entry app.oak --output bundle.oak --includeVFS data:./data-dir
+```
+
+When files are bundled with `oak build`, they are available via the global `__Oak_VFS` variable:
+
+```oak
+// Access bundled files
+if __Oak_VFS? {
+    true -> {
+        content := __Oak_VFS.readFile('data.txt')
+        // Use the content...
+    }
+    _ -> println('No VFS data bundled')
+}
+```
+
+### Using `--includeVFS` with `oak pack`
+
+Embed files into standalone executables:
+
+```bash
+# Pack with embedded files
+oak pack --entry app.oak --output app --includeVFS config.json,assets:./assets
+
+# The packed executable will contain the embedded files
+./app
+```
+
+Files are embedded in the executable and automatically available at runtime.
+
+### Spec Format
+
+The `--includeVFS` flag accepts specifications in the following formats:
+
+- **Simple file**: `file.txt` - bundles `file.txt` as `file.txt` in the VFS
+- **Target:source**: `config:myconfig.json` - bundles `myconfig.json` as `config` in the VFS
+- **Directory**: `assets:./assets-dir` - recursively bundles all files from `assets-dir` directory with the prefix `assets/`
+- **Multiple specs**: Comma-separated list like `file1.txt,config:file2.json`
+
+### Example
+
+Create a simple app that reads bundled configuration:
+
+```oak
+// app.oak
+{
+    println: println
+} := import('std')
+
+if __Oak_VFS? {
+    true -> {
+        config := __Oak_VFS.readFile('config.json')
+        println('Config: ' << config)
+    }
+}
+```
+
+Bundle it with a config file:
+
+```bash
+oak build --entry app.oak --output app.bundle.oak --includeVFS config.json
+oak app.bundle.oak
+```
+
+Pack it as an executable:
+
+```bash
+oak pack --entry app.oak --output myapp --includeVFS config.json
+./myapp
+```
+```
+
 #### `setFiles(newFiles)`
 
 Replace all files in the VFS.

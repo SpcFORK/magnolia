@@ -53,66 +53,59 @@ fn collectVFSFiles(includeSpecs, log) {
 			specs := if type(includeSpecs) {
 				:string -> includeSpecs |> split(',')
 				:list -> includeSpecs
-	IncludeVFS := config.includeVFS |> default(config.includes)
-	Web? := config.web? = true
-	Wasm? := config.wasm? = true
-	Interp := config.interp |> default(___runtime_proc().exe)
-	OakExe := config.oakExe |> default(___runtime_proc().exe)
-	ExecFn := config.exec |> default(exec)
-
-	requireOpt('entry', Entry, Abort)
-	requireOpt('output', Output, Abort)
-	if Web? | Wasm? -> Abort('[oak pack] --web and --wasm are unsupported for pack targets.')
-	if Interp {
-		?, '', true -> Abort('[oak pack] Invalid --interp specified.')
-	}
-	if statFile(Entry) = ? -> Abort(format('[oak pack] {{0}} does not exist.', Entry))
-
-	// Collect VFS files if specified
-	vfsFiles := collectVFSFiles(IncludeVFS, Log
-					resolvedPath := resolve(sourcePath)
-					
-					// Check if path is a file or directory
-					if stat := statFile(resolvedPath) {
-						? -> log(format('[oak pack] Warning: {{0}} not found, skipping', sourcePath))
-						_ -> if stat.dir? {
-							true -> {
-								// Recursively collect all files in directory
-								log(format('[oak pack] Collecting files from {{0}}...', sourcePath))
-								fn walkDir(path, prefix) {
-									with listFiles(path) fn(entries) if entries {
-										? -> ?
-										_ -> entries |> each(fn(entry) {
-											fullPath := path + '/' + entry.name
-											relPath := if prefix {
-												'' -> entry.name
-												_ -> prefix + '/' + entry.name
-											}
-											
-											if entry.dir? {
-												true -> walkDir(fullPath, relPath)
-												_ -> with readFile(fullPath) fn(content) if content {
-													? -> log(format('[oak pack] Warning: Could not read {{0}}', fullPath))
-													_ -> {
-														vfsPath := targetName + '/' + relPath
-														vfsFiles.(vfsPath) := content
-														log(format('[oak pack] Added {{0}} to VFS', vfsPath))
-													}
+				_ -> [includeSpecs]
+			}
+			
+			specs |> each(fn(spec) {
+				// Parse spec as "target:source" or just "source"
+				parts := spec |> split(':')
+				[targetName, sourcePath] := if len(parts) {
+					1 -> [parts.0, parts.0]
+					_ -> [parts.0, parts.1]
+				}
+				
+				resolvedPath := resolve(sourcePath)
+				
+				// Check if path is a file or directory
+				if stat := statFile(resolvedPath) {
+					? -> log(format('[oak pack] Warning: {{0}} not found, skipping', sourcePath))
+					_ -> if stat.dir? {
+						true -> {
+							// Recursively collect all files in directory
+							log(format('[oak pack] Collecting files from {{0}}...', sourcePath))
+							fn walkDir(path, prefix) {
+								with listFiles(path) fn(entries) if entries {
+									? -> ?
+									_ -> entries |> each(fn(entry) {
+										fullPath := path + '/' + entry.name
+										relPath := if prefix {
+											'' -> entry.name
+											_ -> prefix + '/' + entry.name
+										}
+										
+										if entry.dir? {
+											true -> walkDir(fullPath, relPath)
+											_ -> with readFile(fullPath) fn(content) if content {
+												? -> log(format('[oak pack] Warning: Could not read {{0}}', fullPath))
+												_ -> {
+													vfsPath := targetName + '/' + relPath
+													vfsFiles.(vfsPath) := content
+													log(format('[oak pack] Added {{0}} to VFS', vfsPath))
 												}
 											}
-										})
-									}
+										}
+									})
 								}
-								walkDir(resolvedPath, '')
 							}
-							_ -> {
-								// Single file
-								with readFile(resolvedPath) fn(content) if content {
-									? -> log(format('[oak pack] Warning: Could not read {{0}}', sourcePath))
-									_ -> {
-										vfsFiles.(targetName) := content
-										log(format('[oak pack] Added {{0}} to VFS', targetName))
-									}
+							walkDir(resolvedPath, '')
+						}
+						_ -> {
+							// Single file
+							with readFile(resolvedPath) fn(content) if content {
+								? -> log(format('[oak pack] Warning: Could not read {{0}}', sourcePath))
+								_ -> {
+									vfsFiles.(targetName) := content
+									log(format('[oak pack] Added {{0}} to VFS', targetName))
 								}
 							}
 						}
@@ -134,6 +127,7 @@ fn run(config) {
 	Entry := config.entry
 	Output := config.output
 	Includes := config.includes
+	IncludeVFS := config.includeVFS
 	Web? := config.web? = true
 	Wasm? := config.wasm? = true
 	Interp := config.interp |> default(___runtime_proc().exe)
@@ -148,6 +142,9 @@ fn run(config) {
 	}
 	if statFile(Entry) = ? -> Abort(format('[oak pack] {{0}} does not exist.', Entry))
 
+	// Collect VFS files if specified
+	vfsFiles := collectVFSFiles(IncludeVFS, Log)
+
 	with readFile(Interp) fn(packFile) if packFile {
 		? -> Log('[oak pack] Could not read oak executable.')
 		_ -> with ExecFn(
@@ -158,10 +155,13 @@ fn run(config) {
 			''
 		) fn(evt) if {
 			evt.type = :error -> Log('[oak pack] Could not bundle files.')
-			ev// Pack bundle with VFS if files were collected
+			_ -> with readFile(Output) fn(oakBundleFile) if oakBundleFile {
+				? -> Log('[oak pack] Could not read bundle file.')
+				_ -> {
+					// Pack bundle with VFS if files were collected
 					packedBinary := if len(vfsFiles |> keys()) {
 						0 -> {
-							Log('[oak pack] No VFS files collected, using standard pack')
+							Log('[oak pack] No VFS files, using standard pack')
 							packUtils.packBundle(packFile, oakBundleFile)
 						}
 						_ -> {
@@ -170,14 +170,9 @@ fn run(config) {
 						}
 					}
 					
-					with writeFile(Output, packedBinary -> {
-					with writeFile(
-						Output
-						packUtils.packBundle(packFile, oakBundleFile)
-					) fn(res) if res {
+					with writeFile(Output, packedBinary) fn(res) if res {
 						? -> Log('[oak pack] Could not save final pack file.')
 						_ -> with ExecFn('chmod', ['+x', Output], '') fn(evt) if {
-	collectVFSFiles: collectVFSFiles
 							evt.type = :error
 							evt.status != 0 -> Log('[oak pack] Unable to mark binary as executable.')
 							_ -> Log(format('[oak pack] Executable binary saved to {{0}}', Output))
@@ -191,6 +186,7 @@ fn run(config) {
 
 {
 	buildArgs: buildArgs
+	collectVFSFiles: collectVFSFiles
 	run: run
 	transpile: transpile
 }
