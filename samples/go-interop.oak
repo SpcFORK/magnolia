@@ -21,6 +21,9 @@ go(fn(ch) {
 versionEvt := chan_recv(versionCh)
 printf('Go version: {{ 0 }}', versionEvt.data)
 
+// Log info.os and info.arch to demonstrate Go interop with struct fields.
+printf('Runtime info: OS={{ 0 }}, Arch={{ 1 }}', info.os, info.arch)
+
 // Demonstrate safe syscall resolution and invocation via libsys wrapper.
 if info.os = 'windows' {
 	true -> {
@@ -31,6 +34,17 @@ if info.os = 'windows' {
 		}
 	}
 	_ -> println('Skipping Windows syscall example on non-Windows host.')
+}
+
+if info.os = 'linux' {
+	true -> {
+		uidCall := sys.resolveAndCall('libc.so.6', 'getuid')
+		if uidCall.type {
+			:ok -> printf('Current UID: {{ 0 }}', uidCall.r1)
+			_ -> printf('UID syscall failed: {{ 0 }}', uidCall.error)
+		}
+	}
+	_ -> println('Skipping Linux syscall example on non-Linux host.')
 }
 
 // Demonstrate raw memory interop with a byte buffer.
