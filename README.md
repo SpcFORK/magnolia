@@ -396,6 +396,7 @@ For Magnolia-specific features, see:
 - [Virtual File System documentation](docs/virtual-fs.md)
 - [Transpile Middleware documentation](docs/transpile.md)
 - [Code Generation documentation](docs/runtime-codegen.md)
+- [Classes (`cs`) documentation](docs/cs.md)
 - [Syntax and Macros documentation](docs/syntax.md)
 - [Advanced Build Features](docs/build.md)
 - [String manipulation library](docs/str.md)

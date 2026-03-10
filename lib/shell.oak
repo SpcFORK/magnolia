@@ -78,7 +78,7 @@ fn normalizePath(currentDir, targetPath) {
 	replace(p, '//', '/')
 }
 
-// createShell creates a new shell environment with built-in commands.
+// Shell creates a shell environment with built-in commands.
 // Optionally accepts a virtual filesystem implementation.
 //
 // Example:
@@ -86,7 +86,7 @@ fn normalizePath(currentDir, targetPath) {
 //   shell.exec('pwd')              // execute command
 //   shell.exec('cd /home')
 //   shell.env.PWD                  // => '/home'
-fn createShell(virtualFS?) {
+cs Shell(vfs?) {
 	currentDir := '/'
 	env := {
 		PATH: '/bin:/usr/bin'
@@ -95,9 +95,9 @@ fn createShell(virtualFS?) {
 	}
 	
 	// determine which filesystem to use  
-	filesystem := if virtualFS {
+	filesystem := if vfs? {
 		? -> fs
-		_ -> virtualFS
+		_ -> vfs?
 	}
 	
 	// Built-in commands
@@ -115,7 +115,7 @@ fn createShell(virtualFS?) {
 		_ -> {
 			newDir := normalizePath(currentDir, args.0)
 			// Check if directory exists (or assume it does for VFS)
-			if vfs != ? {
+			if vfs? != ? {
 				// For VFS, we allow any path
 				true -> {
 					currentDir <- newDir
@@ -145,10 +145,10 @@ fn createShell(virtualFS?) {
 			_ -> currentDir
 		}
 		
-		files := if vfs != ? {
+		files := if vfs? != ? {
 			// VFS: list all files and filter by path prefix
 			true -> {
-				allFiles := vfs.listFiles()
+				allFiles := vfs?.listFiles()
 				prefix := if target = '/' {
 					true -> ''
 					_ -> target << '/'
@@ -217,7 +217,7 @@ fn createShell(virtualFS?) {
 			printf('mkdir: missing directory argument\n')
 			1
 		}
-		_ -> if vfs != ? {
+		_ -> if vfs? != ? {
 			// For VFS, create a placeholder file to represent the directory
 			true -> {
 				each(args, fn(dir) {
@@ -257,12 +257,12 @@ fn createShell(virtualFS?) {
 				1
 			}
 			_ -> {
-				each(files, fn(file) {
+					each(files, fn(file) {
 					fullPath := normalizePath(currentDir, file)
-					if vfs != ? {
+					if vfs? != ? {
 						// VFS delete
 						true -> {
-							result := vfs.deleteFile(fullPath)
+							result := vfs?.deleteFile(fullPath)
 							if result = ? {
 								true -> printf('rm: cannot remove {{ 0 }}\n', file)
 							}
@@ -286,18 +286,18 @@ fn createShell(virtualFS?) {
 			src := normalizePath(currentDir, args.0)
 			dst := normalizePath(currentDir, args.1)
 			
-			if vfs != ? {
+			if vfs? != ? {
 				// VFS move (read, write, delete)
 				true -> {
-					content := vfs.readFile(src)
+					content := vfs?.readFile(src)
 					if content {
 						? -> {
 							printf('mv: cannot read {{ 0 }}\n', args.0)
 							1
 						}
 						_ -> {
-							vfs.writeFile(dst, content)
-							vfs.deleteFile(src)
+							vfs?.writeFile(dst, content)
+							vfs?.deleteFile(src)
 							0
 						}
 					}
@@ -502,3 +502,6 @@ fn createShell(virtualFS?) {
 		setEnv: fn(key, val) env.(key) <- val
 	}
 }
+
+// createShell is kept as a compatibility wrapper for existing callers.
+fn createShell(vfs?) Shell(vfs?)
