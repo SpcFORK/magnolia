@@ -2,6 +2,7 @@
 
 std := import('std')
 each := std.each
+len := std.len
 
 fn cachedParse(path, text, moduleNodes, log, abort, syntax, format) if cached := moduleNodes.(path) {
 	? -> {
@@ -20,8 +21,24 @@ fn cachedParse(path, text, moduleNodes, log, abort, syntax, format) if cached :=
 }
 
 fn addImportsFromSource(path, file, moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn) {
-	cachedParseFn(path, file) |> with each() fn(node) if node = importAssignmentNode -> {
-		if runtimeLibQ(importName := node.right.args.(0).val) {
+	fn staticImportName(node) if {
+		type(node) != :object -> ?
+		node.type != :assignment -> ?
+		node.local? != true -> ?
+		type(node.right) != :object -> ?
+		node.right.type != :fnCall -> ?
+		type(node.right.function) != :object -> ?
+		node.right.function.type != :identifier -> ?
+		node.right.function.val != 'import' -> ?
+		len(node.right.args) != 1 -> ?
+		type(node.right.args.(0)) != :object -> ?
+		node.right.args.(0).type != :string -> ?
+		_ -> node.right.args.(0).val
+	}
+
+	cachedParseFn(path, file) |> with each() fn(node) if importName := staticImportName(node) {
+		? -> ?
+		_ -> if runtimeLibQ(importName) {
 			true -> if web? -> addImportsFromSource(importName, runtimeLib(importName), moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn)
 			_ -> {
 				importPath := resolve(importName, dir(path)) + '.oak'

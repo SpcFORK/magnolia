@@ -100,9 +100,6 @@ var libbuildincludes string
 //go:embed lib/build-ident.oak
 var libbuildident string
 
-//go:embed lib/build-wasm.oak
-var libbuildwasm string
-
 //go:embed lib/build-ast.oak
 var libbuildast string
 
@@ -168,7 +165,6 @@ var stdlibs = map[string]string{
 	"build":           libbuild,
 	"build-includes":  libbuildincludes,
 	"build-ident":     libbuildident,
-	"build-wasm":      libbuildwasm,
 	"build-ast":       libbuildast,
 	"build-analyze":   libbuildanalyze,
 	"build-render":    libbuildrender,

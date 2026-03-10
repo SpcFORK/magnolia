@@ -1712,6 +1712,41 @@ func TestBuildLibraryParseIncludesFromList(t *testing.T) {
 	))
 }
 
+func TestBuildWebBundleIncludesStaticStdImport(t *testing.T) {
+	expectProgramToReturn(t, `
+		buildImports := import('build-imports')
+		moduleNodes := {}
+		collected := []
+		
+		buildImports.addImportsFromSource(
+			'/entry.oak'
+			''
+			moduleNodes
+			{}
+			false
+			fn(_) false
+			fn(_) ?
+			fn(name, _) '/deps/' + name
+			fn(_) '/root'
+			fn(path) collected << path
+			fn(_, _) [{
+				type: :assignment
+				local?: true
+				left: { type: :identifier, val: 'std' }
+				right: {
+					type: :fnCall
+					function: { type: :identifier, val: 'import' }
+					args: [{ type: :string, val: 'std' }]
+					restArg: ?
+				}
+			}]
+		)
+		collected
+	`, MakeList(
+		MakeString("/deps/std.oak"),
+	))
+}
+
 func TestPackLibraryBuildArgs(t *testing.T) {
 	expectProgramToReturn(t, `
 		pack := import('pack')

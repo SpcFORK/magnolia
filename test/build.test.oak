@@ -1,6 +1,7 @@
 std := import('std')
 str := import('str')
 build := import('build')
+runtimeCodegen := import('runtime-codegen')
 
 fn run(t) {
 	parsed := build.parseIncludes('alpha:./one,beta:./two,third')
@@ -18,4 +19,19 @@ fn run(t) {
 		str.endsWith?(fromList.0.path, '.oak')
 	)
 	'build exports run function' |> t.eq(type(build.run), :function)
+	'runtime-codegen exports wasm renderer' |> t.eq(type(runtimeCodegen.renderWasmBundle), :function)
+
+	wat := runtimeCodegen.renderWasmBundle({}, fn(_) {
+		'line1\nline2\t"q"'
+	})
+	'wasm bundle imports oak.run' |> t.assert(str.contains?(wat, '(import "oak" "run"'))
+	'wasm bundle exports run' |> t.assert(str.contains?(wat, '(export "run")'))
+	'wasm bundle exports main' |> t.assert(str.contains?(wat, '(export "main")'))
+	'wasm bundle exports bundle ptr/len helpers' |> t.assert(
+		str.contains?(wat, '(export "bundle_ptr")') &
+		str.contains?(wat, '(export "bundle_len")')
+	)
+	'wasm data segment escapes control characters' |> t.assert(
+		str.contains?(wat, 'line1\\nline2\\t\\"q\\"')
+	)
 }

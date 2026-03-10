@@ -2,42 +2,73 @@
 
 { OakNativeRuntime: OakNativeRuntime } := import('runtime-native')
 { OakJSRuntime: OakJSRuntime } := import('runtime-js')
+std := import('std')
+map := std.map
+str := import('str')
+join := str.join
 
-// OakWasmRuntime is the runtime code emitted when bundling for WebAssembly
-OakWasmRuntime := '
-;; Oak WebAssembly Runtime
+fn escapeWATString(s) s |> map(fn(c) if c {
+	'\\' -> '\\\\'
+	'"' -> '\\"'
+	'\n' -> '\\n'
+	'\r' -> '\\r'
+	'\f' -> '\\0c'
+	'\t' -> '\\t'
+	_ -> if {
+		codepoint(c) < 32
+		codepoint(c) > 126 -> '\\' << toHex(codepoint(c)) |> padStart(2, '0')
+		_ -> c
+	}
+}) |> join('')
+
+// renderWasmBundle renders Oak AST nodes to WebAssembly text format.
+// It embeds the bundled Oak source in linear memory and expects a host
+// runtime import (`oak.run`) to execute the source.
+fn renderWasmBundle(bundleNode, renderOakBundle) {
+	bundleSource := renderOakBundle(bundleNode)
+	bundleSourceWAT := escapeWATString(bundleSource)
+	bundleSourceLen := len(bundleSource)
+	bundlePtr := 1024
+	pageBytes := 65536
+	bytesRequired := bundlePtr + bundleSourceLen + 1
+	memoryPages := int(bytesRequired / pageBytes)
+	if bytesRequired % pageBytes > 0 -> memoryPages <- memoryPages + 1
+	if memoryPages < 1 -> memoryPages <- 1
+
+	';; oak build --wasm
 (module
-  (import "env" "print" (func $print (param i32)))
-  (import "env" "memory" (memory 1))
-  
-  ;; Global variables
-  (global $stack_ptr (mut i32) (i32.const 0))
-  
-  ;; Helper functions
-  (func $alloc (param $size i32) (result i32)
-    (local $ptr i32)
-    (local.set $ptr (global.get $stack_ptr))
-    (global.set $stack_ptr (i32.add (local.get $ptr) (local.get $size)))
-    (local.get $ptr)
+  (import "oak" "run" (func $__oak_run (param i32 i32) (result i32)))
+	(memory (export "memory") ' << string(memoryPages) << ')
+
+	(global $__oak_bundle_ptr (export "__oak_bundle_ptr") i32 (i32.const ' << string(bundlePtr) << '))
+	(global $__oak_bundle_len (export "__oak_bundle_len") i32 (i32.const ' << string(bundleSourceLen) << '))
+
+	(data (i32.const ' << string(bundlePtr) << ') "' << bundleSourceWAT << '")
+
+	(func $__oak_run_bundle (export "run") (result i32)
+		(call $__oak_run
+			(global.get $__oak_bundle_ptr)
+			(global.get $__oak_bundle_len)
+		)
+	)
+
+	(func (export "bundle_ptr") (result i32)
+		(global.get $__oak_bundle_ptr)
+	)
+
+	(func (export "bundle_len") (result i32)
+		(global.get $__oak_bundle_len)
+	)
+
+  (func (export "main") (result i32)
+		(call $__oak_run_bundle)
   )
-  
-  ;; Main entry point
-  (func $main (export "main")
-    ;; Initialize runtime
-    (call $init_runtime)
-  )
-  
-  (func $init_runtime
-    ;; Initialize Oak runtime state
-  )
-  
-  ;; Oak language primitives would go here
-  ;; This is a minimal placeholder implementation
 )
 '
+}
 
 {
 	OakNativeRuntime: OakNativeRuntime
 	OakJSRuntime: OakJSRuntime
-	OakWasmRuntime: OakWasmRuntime
+	renderWasmBundle: renderWasmBundle
 }

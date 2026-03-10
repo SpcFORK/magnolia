@@ -2,11 +2,9 @@
 
 std := import('std')
 default := std.default
-slice := std.slice
 clone := std.clone
 map := std.map
 each := std.each
-filter := std.filter
 reduce := std.reduce
 append := std.append
 contains? := std.contains?
@@ -16,8 +14,6 @@ keys := std.keys
 
 str := import('str')
 join := str.join
-split := str.split
-replace := str.replace
 startsWith? := str.startsWith?
 
 sort := import('sort')
@@ -27,7 +23,6 @@ fs := import('fs')
 readFile := fs.readFile
 writeFile := fs.writeFile
 statFile := fs.statFile
-listFiles := fs.listFiles
 
 fmt := import('fmt')
 printf := fmt.printf
@@ -47,21 +42,15 @@ transpile := import('transpile')
 packModule := import('pack')
 buildIncludes := import('build-includes')
 buildIdent := import('build-ident')
-buildWasm := import('build-wasm')
 buildAst := import('build-ast')
 buildAnalyze := import('build-analyze')
 buildRender := import('build-render')
 buildConfig := import('build-config')
 buildImports := import('build-imports')
 
-runtimeNative := import('runtime-native')
-OakNativeRuntime := runtimeNative.OakNativeRuntime
-
-runtimeJS := import('runtime-js')
-OakJSRuntime := runtimeJS.OakJSRuntime
-
-Virtual := import('Virtual')
-shell := import('shell')
+runtimeCodegen := import('runtime-codegen')
+OakNativeRuntime := runtimeCodegen.OakNativeRuntime
+OakJSRuntime := runtimeCodegen.OakJSRuntime
 
 Log := printf
 Abort := fn(msg) {
@@ -226,64 +215,20 @@ fn renderJSBundle(bundleNode) {
 	buildRender.renderJSBundle(bundleNode, VFSFiles, encodeJSON, OakJSRuntime, formatIdent, clone)
 }
 
-renderWasmBundle := buildWasm.renderWasmBundle
+fn renderWasmBundle(bundleNode) {
+	runtimeCodegen.renderWasmBundle(
+		bundleNode
+		fn(node) buildRender.renderOakBundle(node, VFSFiles, encodeJSON, OakNativeRuntime, formatIdent, Abort)
+	)
+}
 
 // renderBundle transforms a bundle's AST nodes to compiled program text
 fn renderBundle(bundleNode) {
 	buildRender.renderBundle(bundleNode, Web?, Wasm?, renderOakBundle, renderJSBundle, renderWasmBundle)
 }
 
-fn applyInitialVirtualIO() if Web? | Wasm? {
-	false -> ?
-	_ -> {
-		vfs := Virtual.createVirtualFS({})
-		_ := shell.createShell(vfs)
-
-		readFile <- fn(path, withFile) vfs.readFile(path, withFile)
-		writeFile <- fn(path, file, withResult) vfs.writeFile(path, file, withResult)
-		statFile <- fn(path, withStat) vfs.statFile(path, withStat)
-		listFiles <- fn(path, withFiles) {
-			normalizedPath := path |> replace('\\', '/')
-			prefix := if normalizedPath {
-				'', '/' -> ''
-				_ -> normalizedPath + '/'
-			}
-			entries := vfs.listFiles() |>
-				filter(fn(name) {
-					rel := if prefix = '' {
-						true -> name
-						_ -> if startsWith?(name, prefix) {
-							true -> name |> slice(len(prefix))
-							_ -> ?
-						}
-					}
-					if rel {
-						?, '' -> false
-						_ -> !startsWith?(rel, '/')
-					}
-				}) |>
-				map(fn(name) {
-					rel := if prefix = '' {
-						true -> name
-						_ -> name |> slice(len(prefix))
-					}
-					firstSegment := rel |> split('/') |> default([rel])
-					{
-						name: firstSegment.0
-						dir?: rel |> split('/') |> len() > 1
-					}
-				})
-			if withFiles {
-				? -> entries
-				_ -> withFiles(entries)
-			}
-		}
-	}
-}
-
 fn run(config) {
 	applyConfig(config)
-	applyInitialVirtualIO()
 
 	// clear state for repeated invocations from non-CLI callers
 	ModuleNodes <- {}
