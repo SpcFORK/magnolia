@@ -363,6 +363,13 @@ type engine struct {
 	// file fd -> Go's File map
 	fileMap map[uintptr]*os.File
 	fdLock  sync.Mutex
+	// Go interop channels
+	chanMap    map[int64]chan Value
+	chanLock   sync.Mutex
+	nextChanID int64
+	// Keep Oak values alive after exposing raw addresses into Oak code.
+	pinnedPtrs map[uintptr]Value
+	ptrLock    sync.Mutex
 	// log async error streams through this
 	reportErr func(error)
 }
@@ -381,6 +388,8 @@ func NewContext(rootPath string) Context {
 	eng := engine{
 		importMap: map[string]scope{},
 		fileMap:   map[uintptr]*os.File{},
+		chanMap:   map[int64]chan Value{},
+		pinnedPtrs: map[uintptr]Value{},
 		reportErr: func(err error) {
 			fmt.Println(err)
 		},

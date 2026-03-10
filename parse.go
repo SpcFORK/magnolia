@@ -703,6 +703,80 @@ func (p *parser) parseUnit() (astNode, error) {
 			body:    body,
 			tok:     &tok,
 		}, nil
+	case csKeyword:
+		p.pushMinPrec(0)
+		defer p.popMinPrec()
+
+		nameTok, err := p.expect(identifier)
+		if err != nil {
+			return nil, err
+		}
+
+		args := []string{}
+		var restArg string
+		if p.peek().kind == leftParen {
+			p.next() // eat the leftParen
+			for !p.isEOF() && p.peek().kind != rightParen {
+				arg, err := p.expect(identifier)
+				if err != nil {
+					p.back() // try again
+
+					_, err := p.expect(underscore)
+					if err != nil {
+						return nil, err
+					}
+
+					args = append(args, "")
+
+					if _, err := p.expect(comma); err != nil {
+						return nil, err
+					}
+
+					continue
+				}
+
+				if p.peek().kind == ellipsis {
+					restArg = arg.payload
+					p.next() // eat the ellipsis
+
+					_, err = p.expect(comma)
+					if err != nil {
+						return nil, err
+					}
+					break
+				}
+
+				args = append(args, arg.payload)
+
+				if _, err := p.expect(comma); err != nil {
+					return nil, err
+				}
+			}
+			if _, err := p.expect(rightParen); err != nil {
+				return nil, err
+			}
+		}
+
+		body, err := p.parseNode()
+		if err != nil {
+			return nil, err
+		}
+
+		return assignmentNode{
+			isLocal: true,
+			left: identifierNode{
+				payload: nameTok.payload,
+				tok:     &nameTok,
+			},
+			right: fnNode{
+				name:    nameTok.payload,
+				args:    args,
+				restArg: restArg,
+				body:    body,
+				tok:     &tok,
+			},
+			tok: &tok,
+		}, nil
 	case underscore:
 		return emptyNode{tok: &tok}, nil
 	case identifier:

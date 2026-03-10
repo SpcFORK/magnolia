@@ -1385,11 +1385,27 @@ func TestVirtualSyscallBuiltinsExist(t *testing.T) {
 		Virtual := import('Virtual')
 		vm := Virtual.createStandardVM()
 		[
+			type(vm.globalScope.go)
+			type(vm.globalScope.make_chan)
+			type(vm.globalScope.chan_send)
+			type(vm.globalScope.chan_recv)
+			type(vm.globalScope.bits)
+			type(vm.globalScope.addr)
+			type(vm.globalScope.memread)
+			type(vm.globalScope.memwrite)
 			type(vm.globalScope.utf16)
 			type(vm.globalScope.sysproc)
 			type(vm.globalScope.syscall)
 		]
 	`, MakeList(
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
@@ -1428,4 +1444,112 @@ func TestSyscallCanInvokeResolvedProcOnWindows(t *testing.T) {
 	if pid != IntValue(os.Getpid()) {
 		t.Fatalf("Expected PID %d, got %d", os.Getpid(), pid)
 	}
+}
+
+func TestMakeChanBufferedRoundTrip(t *testing.T) {
+	expectProgramToReturn(t, `
+		ch := make_chan(1)
+		chan_send(ch, 42)
+		chan_recv(ch).data
+	`, IntValue(42))
+}
+
+func TestGoBuiltinCoordinatesOverChannel(t *testing.T) {
+	expectProgramToReturn(t, `
+		ch := make_chan()
+		go(fn {
+			chan_send(ch, :ready)
+		})
+		chan_recv(ch).data
+	`, AtomValue("ready"))
+}
+
+func TestChanRecvAsyncCallback(t *testing.T) {
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+
+	_, err := ctx.Eval(strings.NewReader(`
+		result := ?
+		ch := make_chan()
+		with chan_recv(ch) fn(evt) {
+			result <- evt.data
+		}
+		go(fn {
+			chan_send(ch, 99)
+		})
+	`))
+	if err != nil {
+		t.Fatalf("Did not expect program to exit with error: %s", err.Error())
+	}
+
+	ctx.Wait()
+
+	result, scopeErr := ctx.scope.get("result")
+	if scopeErr != nil {
+		t.Fatalf("Could not read result from scope: %s", scopeErr.Error())
+	}
+
+	if !result.Eq(IntValue(99)) {
+		t.Fatalf("Expected async channel callback to store 99, got %s", result)
+	}
+}
+
+func TestGoRuntimeMetadataBuiltins(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			type(___runtime_go_version())
+			___runtime_sys_info().os
+			___runtime_sys_info().arch
+			type(___runtime_sys_info().cpus)
+		]
+	`, MakeList(
+		AtomValue("string"),
+		MakeString(runtime.GOOS),
+		MakeString(runtime.GOARCH),
+		AtomValue("int"),
+	))
+}
+
+func TestClassConstructorSugar(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Pair(left, right) {
+			{
+				left: left
+				right: right
+			}
+		}
+		Pair(1, 2).left + Pair(1, 2).right
+	`, IntValue(3))
+}
+
+func TestClassConstructorWithoutArgs(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Empty {
+			{}
+		}
+		type(Empty())
+	`, AtomValue("object"))
+}
+
+func TestBitsBuiltinRoundTrip(t *testing.T) {
+	expectProgramToReturn(t, `
+		bits(bits([65, 66, 67]))
+	`, MakeList(
+		IntValue(65),
+		IntValue(66),
+		IntValue(67),
+	))
+}
+
+func TestMemReadWriteViaAddress(t *testing.T) {
+	expectProgramToReturn(t, `
+		buf := bits([65, 66, 67])
+		ptr := addr(buf)
+		memwrite(ptr + 1, bits([90]))
+		bits(memread(ptr, 3))
+	`, MakeList(
+		IntValue(65),
+		IntValue(90),
+		IntValue(67),
+	))
 }

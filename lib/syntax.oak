@@ -241,6 +241,7 @@ fn Tokenizer(source) {
 					'if' -> TokenAt(:ifKeyword, pos)
 					'fn' -> TokenAt(:fnKeyword, pos)
 					'with' -> TokenAt(:withKeyword, pos)
+					'cs' -> TokenAt(:csKeyword, pos)
 					'true' -> TokenAt(:trueLiteral, pos)
 					'false' -> TokenAt(:falseLiteral, pos)
 					_ -> TokenAt(:identifier, pos, payload)
@@ -287,7 +288,7 @@ fn Tokenizer(source) {
 							:plus, :minus, :times, :divide, :modulus, :xor
 							:and, :or, :exclam, :greater, :less, :eq, :geq
 							:leq, :assign, :nonlocalAssign, :dot, :colon
-							:fnKeyword, :ifKeyword, :withKeyword
+							:fnKeyword, :ifKeyword, :withKeyword, :csKeyword
 							:pipeArrow, :branchArrow, :pushArrow -> ?
 							_ -> {
 								nextTok <- Token(:comma)
@@ -505,6 +506,10 @@ fn Parser(tokens) {
 						next()
 						{ type: :atom, tok: tok, val: 'with' }
 					}
+					:csKeyword -> {
+						next()
+						{ type: :atom, tok: tok, val: 'cs' }
+					}
 					:trueLiteral -> {
 						next()
 						{ type: :atom, tok: tok, val: 'true' }
@@ -685,6 +690,84 @@ fn Parser(tokens) {
 											:ellipsis -> {
 												restArg <- arg.val
 												next() // eat the ellipsis
+												with notError(expect(:comma)) fn {
+													sub()
+												}
+											}
+											_ -> {
+												args << arg.val
+												with notError(expect(:comma)) fn {
+													sub()
+												}
+											}
+										}
+									}
+								}
+							}
+							with notError(sub()) fn {
+								with notError(expect(:rightParen)) fn {
+									parseBody()
+								}
+							}
+						}
+						_ -> parseBody()
+					}
+				}
+				:csKeyword -> {
+					pushMinPrec(0)
+
+					nameTok := expect(:identifier)
+					if nameTok.type = :error -> nameTok
+
+					args := []
+					restArg := ''
+
+					fn parseBody with notError(body := parseNode()) fn {
+						popMinPrec()
+
+						{
+							type: :assignment
+							tok: tok
+							isLocal: true
+							left: {
+								type: :identifier
+								tok: nameTok
+								val: nameTok.val
+							}
+							right: {
+								type: :function
+								name: nameTok.val
+								tok: tok
+								args: args
+								restArg: restArg
+								body: body
+							}
+						}
+					}
+
+					if peek().type {
+						:leftParen -> {
+							next() // eat the leftParen
+
+							fn sub if !eof?() -> if peek().type {
+								:rightParen -> ?
+								_ -> {
+									arg := expect(:identifier)
+									if arg.type {
+										:error -> {
+											back()
+
+											with notError(expect(:underscore)) fn {
+												args << '_'
+												with notError(expect(:comma)) fn {
+													sub()
+												}
+											}
+										}
+										_ -> if peek().type {
+											:ellipsis -> {
+												restArg <- arg.val
+												next()
 												with notError(expect(:comma)) fn {
 													sub()
 												}
@@ -1106,6 +1189,7 @@ fn Printer(tokens) {
 		:ifKeyword -> 'if'
 		:fnKeyword -> 'fn'
 		:withKeyword -> 'with'
+		:csKeyword -> 'cs'
 		:underscore -> '_'
 		:identifier -> token.val
 		:trueLiteral -> 'true'
@@ -1310,7 +1394,8 @@ fn Printer(tokens) {
 					connectingToken?(lastType)
 					lastType = :comma
 					lastType = :ifKeyword
-					lastType = :withKeyword -> add(' ' << render(token), 1)
+					lastType = :withKeyword
+					lastType = :csKeyword -> add(' ' << render(token), 1)
 					_ -> add(render(token), 1)
 				}
 				[_, :leftBracket, _]
@@ -1362,6 +1447,7 @@ fn Printer(tokens) {
 				[:minus, _, _] -> if lastLastType {
 					:leftParen, :leftBracket, :leftBrace
 					:ifKeyword
+					:csKeyword
 					:exclam
 					:minus
 					:newline
@@ -1378,6 +1464,7 @@ fn Printer(tokens) {
 				[:colon, :ifKeyword, _]
 				[:colon, :fnKeyword, _]
 				[:colon, :withKeyword, _]
+				[:colon, :csKeyword, _]
 				[:colon, :trueLiteral, _]
 				[:colon, :falseLiteral, _] -> if lastLastType {
 					// if token before colon cannot be end of an object key,
@@ -1386,6 +1473,7 @@ fn Printer(tokens) {
 					:leftParen, :leftBracket, :leftBrace
 					:rightParen, :rightBracket, :rightBrace
 					:ifKeyword
+					:csKeyword
 					:exclam
 					:minus
 					:newline

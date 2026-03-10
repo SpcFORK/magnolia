@@ -75,6 +75,7 @@ const (
 	ifKeyword
 	fnKeyword
 	withKeyword
+	csKeyword
 
 	// identifiers and literals
 	underscore
@@ -169,6 +170,8 @@ func (t token) String() string {
 		return "fn"
 	case withKeyword:
 		return "with"
+	case csKeyword:
+		return "cs"
 	case underscore:
 		return "_"
 	case identifier:
@@ -461,6 +464,8 @@ func (t *tokenizer) nextToken() token {
 			return token{kind: fnKeyword, pos: pos}
 		case "with":
 			return token{kind: withKeyword, pos: pos}
+		case "cs":
+			return token{kind: csKeyword, pos: pos}
 		case "true":
 			return token{kind: trueLiteral, pos: pos}
 		case "false":
@@ -514,7 +519,7 @@ func (t *tokenizer) tokenize() []token {
 				case comma, leftParen, leftBracket, leftBrace, plus, minus,
 					times, divide, modulus, xor, and, or, exclam, greater, less,
 					eq, geq, leq, assign, nonlocalAssign, dot, colon, fnKeyword,
-					ifKeyword, withKeyword, pipeArrow, branchArrow, pushArrow:
+					ifKeyword, withKeyword, csKeyword, pipeArrow, branchArrow, pushArrow:
 					// do nothing
 				default:
 					next = token{

@@ -92,7 +92,14 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("sysproc", c.oakSysProc)
 	c.LoadFunc("syscall", c.oakSyscall)
 	c.LoadFunc("utf16", c.oakUTF16)
+	c.LoadFunc("bits", c.oakBits)
+	c.LoadFunc("addr", c.oakAddr)
+	c.LoadFunc("memread", c.oakMemRead)
+	c.LoadFunc("memwrite", c.oakMemWrite)
 	c.LoadFunc("go", c.oakGo)
+	c.LoadFunc("make_chan", c.oakMakeChan)
+	c.LoadFunc("chan_send", c.oakChanSend)
+	c.LoadFunc("chan_recv", c.oakChanRecv)
 
 	// i/o interfaces
 	c.LoadFunc("input", c.callbackify(c.oakInput))
@@ -149,6 +156,19 @@ var (
 	sysProcMu    sync.Mutex
 	sysProcCache = map[string]uintptr{}
 )
+
+func chanSentObj() ObjectValue {
+	return ObjectValue{
+		"type": AtomValue("sent"),
+	}
+}
+
+func chanDataObj(data Value) ObjectValue {
+	return ObjectValue{
+		"type": AtomValue("data"),
+		"data": data,
+	}
+}
 
 func lookupSysProc(library, name string) (uintptr, error) {
 	if runtime.GOOS != "windows" {
@@ -210,6 +230,44 @@ if ($proc -eq [IntPtr]::Zero) {
 	sysProcCache[cacheKey] = uintptr(addr)
 	sysProcMu.Unlock()
 	return uintptr(addr), nil
+}
+
+func (c *Context) getGoChan(arg Value, fnName string) (chan Value, *runtimeError) {
+	chObj, ok := arg.(ObjectValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("First argument to %s must be a channel, got %s", fnName, arg),
+		}
+	}
+
+	typeVal, ok := chObj["type"].(AtomValue)
+	if !ok || typeVal != AtomValue("channel") {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("First argument to %s must be a channel, got %s", fnName, arg),
+		}
+	}
+
+	id, ok := chObj["id"].(IntValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Channel %s is malformed", arg),
+		}
+	}
+
+	c.eng.chanLock.Lock()
+	ch, ok := c.eng.chanMap[int64(id)]
+	c.eng.chanLock.Unlock()
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Channel %s is not available", arg),
+		}
+	}
+
+	return ch, nil
+}
+
+func rawMemoryRegion(addr uintptr, length int) []byte {
+	return (*[1 << 30]byte)(unsafe.Pointer(addr))[:length:length]
 }
 
 func (c *Context) callbackify(syncFn builtinFn) builtinFn {
@@ -702,6 +760,123 @@ func (c *Context) oakUTF16(args []Value) (Value, *runtimeError) {
 	return &val, nil
 }
 
+func (c *Context) oakBits(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("bits", args, 1); err != nil {
+		return nil, err
+	}
+
+	switch arg := args[0].(type) {
+	case *ListValue:
+		buf := make([]byte, len(*arg))
+		for i, val := range *arg {
+			intVal, ok := val.(IntValue)
+			if !ok || intVal < 0 || intVal > 255 {
+				return nil, &runtimeError{
+					reason: fmt.Sprintf("bits(list) expects byte values 0-255, got %s", val),
+				}
+			}
+			buf[i] = byte(intVal)
+		}
+		bitsVal := StringValue(buf)
+		return &bitsVal, nil
+	case *StringValue:
+		bytes := make(ListValue, len(*arg))
+		for i, b := range *arg {
+			bytes[i] = IntValue(b)
+		}
+		return &bytes, nil
+	default:
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("bits() expects a list of bytes or a byte string, got %s", args[0]),
+		}
+	}
+}
+
+func (c *Context) oakAddr(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("addr", args, 1); err != nil {
+		return nil, err
+	}
+
+	switch arg := args[0].(type) {
+	case *StringValue:
+		if len(*arg) == 0 {
+			return IntValue(0), nil
+		}
+		return IntValue(uintptr(unsafe.Pointer(&(*arg)[0]))), nil
+	default:
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("addr() expects a byte string, got %s", args[0]),
+		}
+	}
+}
+
+func (c *Context) oakMemRead(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("memread", args, 2); err != nil {
+		return nil, err
+	}
+
+	addr, ok1 := args[0].(IntValue)
+	length, ok2 := args[1].(IntValue)
+	if !ok1 || !ok2 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Mismatched types in call memread(%s, %s)", args[0], args[1]),
+		}
+	}
+	if addr < 0 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("memread address must be non-negative, got %d", addr),
+		}
+	}
+	if length < 0 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("memread length must be non-negative, got %d", length),
+		}
+	}
+	if length == 0 {
+		return MakeString(""), nil
+	}
+	if addr == 0 {
+		return nil, &runtimeError{
+			reason: "memread cannot read from null address",
+		}
+	}
+
+	region := rawMemoryRegion(uintptr(addr), int(length))
+	buf := append([]byte(nil), region...)
+	value := StringValue(buf)
+	return &value, nil
+}
+
+func (c *Context) oakMemWrite(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("memwrite", args, 2); err != nil {
+		return nil, err
+	}
+
+	addr, ok1 := args[0].(IntValue)
+	data, ok2 := args[1].(*StringValue)
+	if !ok1 || !ok2 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Mismatched types in call memwrite(%s, %s)", args[0], args[1]),
+		}
+	}
+	if addr < 0 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("memwrite address must be non-negative, got %d", addr),
+		}
+	}
+	if len(*data) == 0 {
+		return IntValue(0), nil
+	}
+	if addr == 0 {
+		return nil, &runtimeError{
+			reason: "memwrite cannot write to null address",
+		}
+	}
+
+	region := rawMemoryRegion(uintptr(addr), len(*data))
+	return IntValue(copy(region, *data)), nil
+}
+
 func (c *Context) oakSyscall(args []Value) (Value, *runtimeError) {
 	if len(args) < 1 {
 		return syscallErrObj("syscall requires at least 1 argument (procedure or address)"), nil
@@ -787,18 +962,22 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	fn, ok := args[0].(FnValue)
-	if !ok {
+	switch args[0].(type) {
+	case FnValue, BuiltinFnValue:
+	default:
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("go argument must be a function, got %s", args[0]),
 		}
 	}
 
+	fn := args[0]
 	fnArgs := args[1:] // remaining arguments
 
 	c.eng.Add(1)
 	go func() {
 		defer c.eng.Done()
+		c.Lock()
+		defer c.Unlock()
 		_, err := c.EvalFnValue(fn, false, fnArgs...)
 		if err != nil {
 			c.eng.reportErr(err)
@@ -808,22 +987,133 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 	return null, nil
 }
 
-func (c *Context) oakMakeChan(_ []Value) (Value, *runtimeError) {
-	return nil, &runtimeError{
-		reason: "make_chan is not implemented",
+func (c *Context) oakMakeChan(args []Value) (Value, *runtimeError) {
+	if len(args) > 1 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("make_chan takes at most 1 argument, got %d", len(args)),
+		}
 	}
+
+	bufSize := IntValue(0)
+	if len(args) == 1 {
+		sizeArg, ok := args[0].(IntValue)
+		if !ok {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Mismatched types in call make_chan(%s)", args[0]),
+			}
+		}
+		if sizeArg < 0 {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("make_chan capacity must be non-negative, got %d", sizeArg),
+			}
+		}
+		bufSize = sizeArg
+	}
+
+	c.eng.chanLock.Lock()
+	id := c.eng.nextChanID
+	c.eng.nextChanID++
+	c.eng.chanMap[id] = make(chan Value, int(bufSize))
+	c.eng.chanLock.Unlock()
+
+	return ObjectValue{
+		"type": AtomValue("channel"),
+		"id":   IntValue(id),
+		"cap":  bufSize,
+	}, nil
 }
 
-func (c *Context) oakChanSend(_ []Value) (Value, *runtimeError) {
-	return nil, &runtimeError{
-		reason: "chan_send is not implemented",
+func (c *Context) oakChanSend(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("chan_send", args, 2); err != nil {
+		return nil, err
 	}
+
+	ch, err := c.getGoChan(args[0], "chan_send")
+	if err != nil {
+		return nil, err
+	}
+
+	value := args[1]
+	if len(args) == 2 {
+		c.Unlock()
+		ch <- value
+		c.Lock()
+		return chanSentObj(), nil
+	}
+
+	if len(args) != 3 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("chan_send takes 2 arguments plus an optional callback, got %d", len(args)),
+		}
+	}
+
+	callback, ok := args[2].(FnValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("chan_send callback must be a function, got %s", args[2]),
+		}
+	}
+
+	c.eng.Add(1)
+	go func() {
+		defer c.eng.Done()
+		ch <- value
+
+		c.Lock()
+		defer c.Unlock()
+		_, err := c.EvalFnValue(callback, false, chanSentObj())
+		if err != nil {
+			c.eng.reportErr(err)
+		}
+	}()
+
+	return null, nil
 }
 
-func (c *Context) oakChanRecv(_ []Value) (Value, *runtimeError) {
-	return nil, &runtimeError{
-		reason: "chan_recv is not implemented",
+func (c *Context) oakChanRecv(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("chan_recv", args, 1); err != nil {
+		return nil, err
 	}
+
+	ch, err := c.getGoChan(args[0], "chan_recv")
+	if err != nil {
+		return nil, err
+	}
+
+	if len(args) == 1 {
+		c.Unlock()
+		value := <-ch
+		c.Lock()
+		return chanDataObj(value), nil
+	}
+
+	if len(args) != 2 {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("chan_recv takes 1 argument plus an optional callback, got %d", len(args)),
+		}
+	}
+
+	callback, ok := args[1].(FnValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("chan_recv callback must be a function, got %s", args[1]),
+		}
+	}
+
+	c.eng.Add(1)
+	go func() {
+		defer c.eng.Done()
+		value := <-ch
+
+		c.Lock()
+		defer c.Unlock()
+		_, err := c.EvalFnValue(callback, false, chanDataObj(value))
+		if err != nil {
+			c.eng.reportErr(err)
+		}
+	}()
+
+	return null, nil
 }
 
 var inputReaderInit sync.Once
