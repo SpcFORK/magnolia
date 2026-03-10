@@ -98,38 +98,43 @@ fn createVM() {
 			closure: clone(sc)
 		}
 		:fnCall -> if node.function.type = :identifier & node.function.val = 'import' {
-			name := node.args.(0).val,
-			source := stdlibs.(name),
-			if source = ? {
-				{
-					type: :error
-					message: 'Module not found: ' + name
-				}
-			} else {
-				parsed := parseSource(source),
-				evalAst(parsed, {})
-			}
-		} else {
-			callee := evalExpr(node.function, sc),
-			args := node.args |> map(fn(arg) evalExpr(arg, sc)),
-			if type(callee) = :object & callee.type = :function {
-				true -> {
-					fnScope := clone(callee.closure)
-					callee.params |> each(fn(param, i) {
-						fnScope.(param) := args.(i) |> default(?)
-					})
-					if callee.restArg {
-						? -> ?
-						_ -> fnScope.(callee.restArg) := 
-							args |> slice(len(callee.params))
+			true -> {
+				arg0 := node.args.(0)
+				name := arg0.val
+				source := stdlibs.(name)
+				if source = ? {
+					true -> {
+						type: :error
+						message: 'Module not found: ' + name
 					}
-					evalExpr(callee.body, fnScope)
+					_ -> {
+						parsed := parseSource(source)
+						evalAst(parsed, {})
+					}
 				}
-				_ -> {
-					// try to call as builtin
-					if type(callee) = :function {
-						true -> callee(args...)
-						_ -> ?
+			}
+			_ -> {
+				callee := evalExpr(node.function, sc)
+				args := node.args |> map(fn(arg) evalExpr(arg, sc))
+				if type(callee) = :object & callee.type = :function {
+					true -> {
+						fnScope := clone(callee.closure)
+						callee.params |> each(fn(param, i) {
+							fnScope.(param) := args.(i) |> default(?)
+						})
+						if callee.restArg {
+							? -> ?
+							_ -> fnScope.(callee.restArg) := 
+								args |> slice(len(callee.params))
+						}
+						evalExpr(callee.body, fnScope)
+					}
+					_ -> {
+						// try to call as builtin
+						if type(callee) = :function {
+							true -> callee(args...)
+							_ -> ?
+						}
 					}
 				}
 			}

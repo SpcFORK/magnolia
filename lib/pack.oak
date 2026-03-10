@@ -5,6 +5,7 @@
 std := import('std')
 default := std.default
 append := std.append
+slice := std.slice
 map := std.map
 each := std.each
 merge := std.merge
@@ -21,9 +22,13 @@ str := import('str')
 join := str.join
 split := str.split
 replace := str.replace
+startsWith? := str.startsWith?
+trimStart := str.trimStart
+trimEnd := str.trimEnd
 path := import('path')
 dir := path.dir
 resolve := path.resolve
+base := path.base
 packUtils := import('pack-utils')
 transpile := import('transpile')
 
@@ -36,6 +41,42 @@ fn buildArgs(entry, output, includes) {
 		?, '', true -> args
 		_ -> args |> append(['--include', includes])
 	}
+}
+
+fn windowsDrivePath?(part) if len(part) > 2 {
+	true -> part.1 = ':' & [part.2 = '/' | part.2 = '\\']
+	_ -> false
+}
+
+fn normalizeVFSTargetName(name) {
+	normalized := name |>
+		replace('\\', '/') |>
+		trimEnd('/') |>
+		trimStart('./')
+	if normalized {
+		'', '.' -> name |> base()
+		_ -> normalized
+	}
+}
+
+fn parseVFSIncludeSpec(spec) {
+	specParts := spec |> split(':')
+	if specParts {
+		[only] -> [only |> normalizeVFSTargetName(), only]
+		_ -> if windowsDrivePath?(spec) {
+			true -> [spec |> normalizeVFSTargetName(), spec]
+			_ -> {
+				targetName := specParts.0 |> normalizeVFSTargetName()
+				sourcePath := specParts |> slice(1) |> join(':')
+				[targetName, sourcePath]
+			}
+		}
+	}
+}
+
+fn joinVFSPath(basePath, relPath) if relPath {
+	'', ? -> basePath
+	_ -> basePath + '/' + relPath
 }
 
 // collectVFSFiles collects files to include in the Virtual FS
@@ -53,11 +94,7 @@ fn collectVFSFiles(includeSpecs, log) {
 			
 			specs |> each(fn(spec) {
 				// Parse spec as "target:source" or just "source"
-				parts := spec |> split(':')
-				[targetName, sourcePath] := if len(parts) {
-					1 -> [parts.0, parts.0]
-					_ -> [parts.0, parts.1]
-				}
+				[targetName, sourcePath] := spec |> parseVFSIncludeSpec()
 				
 				resolvedPath := resolve(sourcePath)
 				
@@ -68,6 +105,7 @@ fn collectVFSFiles(includeSpecs, log) {
 						true -> {
 							// Recursively collect all files in directory
 							log(format('[oak pack] Collecting files from {{0}}...', sourcePath))
+							mountRoot := targetName |> trimEnd('/')
 							fn walkDir(path, prefix) {
 								with listFiles(path) fn(entries) if entries {
 									? -> ?
@@ -83,7 +121,7 @@ fn collectVFSFiles(includeSpecs, log) {
 											_ -> with readFile(fullPath) fn(content) if content {
 												? -> log(format('[oak pack] Warning: Could not read {{0}}', fullPath))
 												_ -> {
-													vfsPath := targetName + '/' + relPath
+													vfsPath := joinVFSPath(mountRoot, relPath)
 													vfsFiles.(vfsPath) := content
 													log(format('[oak pack] Added {{0}} to VFS', vfsPath))
 												}
@@ -110,6 +148,17 @@ fn collectVFSFiles(includeSpecs, log) {
 			vfsFiles
 		}
 	}
+}
+
+Configured := ?
+
+fn configure(config) {
+	Configured <- config
+}
+
+fn pack() if Configured {
+	? -> Abort('[oak pack] No config set. Call configure() first.')
+	_ -> run(Configured)
 }
 
 fn run(config) {
@@ -182,6 +231,8 @@ fn run(config) {
 {
 	buildArgs: buildArgs
 	collectVFSFiles: collectVFSFiles
+	configure: configure
+	pack: pack
 	run: run
 	transpile: transpile
 }

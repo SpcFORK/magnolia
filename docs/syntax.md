@@ -2,13 +2,61 @@
 
 ## Overview
 
-`libsyntax` provides an Oak tokenizer and parser for analyzing Oak source code, enabling syntax highlighting, code analysis, and metaprogramming.
+`libsyntax` provides an Oak tokenizer and parser for analyzing Oak source code, enabling syntax highlighting, code analysis, and AST-level metaprogramming with macros.
 
 ## Import
 
 ```oak
 syntax := import('syntax')
 { Tokenizer: Tokenizer } := import('syntax')
+{ parseWithMacros: parseWithMacros, Macro: Macro } := import('syntax')
+```
+
+## Metaprogramming and Macros
+
+`syntax` now includes AST macro expansion helpers.
+
+### `Macro(expander)`
+
+Wraps a macro expander function.
+
+**Parameters:**
+- `expander(args, callNode, macros)` - Function returning a replacement AST node
+
+**Returns:** Macro descriptor object
+
+### `macro?(value)`
+
+Checks whether a value is a macro descriptor created by `Macro`.
+
+### `expandMacros(ast, macros)`
+
+Recursively walks AST node(s) and expands macro calls.
+
+**Parameters:**
+- `ast` - One AST node or a list of AST nodes
+- `macros` - Object mapping identifier names to `Macro(...)` values
+
+**Returns:** Expanded AST node(s)
+
+### `parseWithMacros(text, macros)`
+
+Parses source and applies macro expansion in one step.
+
+```oak
+syntax := import('syntax')
+
+expanded := syntax.parseWithMacros('inc(2)', {
+    inc: syntax.Macro(fn(args) {
+        type: :binary
+        tok: args.0.tok
+        op: :plus
+        left: args.0
+        right: { type: :int, tok: args.0.tok, val: 1 }
+    })
+})
+
+// expanded.0 is now a :binary node representing 2 + 1
 ```
 
 ## Components
@@ -386,7 +434,6 @@ Each token object contains:
 - No error recovery
 - Position information may be approximate
 - Does not validate syntax correctness beyond tokenization
-- No macro expansion
 - Comments may not preserve all whitespace
 
 ## Related Patterns

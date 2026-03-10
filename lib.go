@@ -183,7 +183,7 @@ func (c *Context) LoadLib(name string) (Value, *runtimeError) {
 	ctx.LoadBuiltins()
 
 	ctx.Unlock()
-	_, err := ctx.Eval(strings.NewReader(program))
+	_, err := ctx.evalGo(strings.NewReader(program))
 	ctx.Lock()
 	if err != nil {
 		if runtimeErr, ok := err.(*runtimeError); ok {
