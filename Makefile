@@ -1,6 +1,6 @@
 RUN = go run -race .
 LDFLAGS = -ldflags="-s -w"
-INCLUDES = std.test:test/std.test,str.test:test/str.test,math.test:test/math.test,sort.test:test/sort.test,random.test:test/random.test,fmt.test:test/fmt.test,json.test:test/json.test,datetime.test:test/datetime.test,path.test:test/path.test,http.test:test/http.test,debug.test:test/debug.test,cli.test:test/cli.test,md.test:test/md.test,crypto.test:test/crypto.test,bmp.test:test/bmp.test,gpu.test:test/gpu.test,syntax.test:test/syntax.test,class.test:test/class.test,go.test:test/go.test,import-ext.test:test/import-ext.test,syscall.test:test/syscall.test,virtual.test:test/virtual.test,pack.test:test/pack.test,transpile.test:test/transpile.test
+INCLUDES = $(shell find test -maxdepth 1 -name '*.test.oak' -type f | sed 's|test/||g; s|\.test\.oak||g' | sed 's/^/&.test:test\/&.test.oak/' | paste -sd ',' -)
 
 all: ci
 
