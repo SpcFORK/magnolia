@@ -1,0 +1,190 @@
+// build-analyze -- static semantic analysis for build
+
+{
+	clone: clone
+	map: map
+	each: each
+	filter: filter
+	append: append
+	merge: merge
+	keys: keys
+} := import('std')
+
+fn analyzeNode(node, web?) {
+	fn analyzeSubexpr(node, ctx, tail?) if node.type {
+		:block -> {
+			blCtx := clone(ctx)
+
+			blCtx.decls := {}
+			blCtx.args := {}
+			node.exprs := node.exprs |> map(fn(n, i) analyzeSubexpr(n, blCtx, i + 1 = len(node.exprs)))
+
+			node.decls := blCtx.decls |> keys() |> with filter() fn(decl) ctx.args.(decl) = ?
+			node
+		}
+		:function -> {
+			if ctx.enclosingFnLit != node -> ctx.enclosingFnLit := _
+
+			fnCtx := clone(ctx)
+
+			if node.name != ? -> fnCtx.enclosingFn := node
+
+			fnCtx.decls := {}
+			fnCtx.args := {}
+			node.args |> with each() fn(arg) fnCtx.args.(arg) := true
+			node.body := analyzeSubexpr(node.body, fnCtx, true)
+
+			node.decls := fnCtx.decls |> keys() |> with filter() fn(decl) fnCtx.args.(decl) = ?
+
+			trampolinedFnName := '__oak_trampolined_' << fnCtx.enclosingFn.name
+			if web? & fnCtx.enclosingFn.recurred? = true -> node <- {
+				type: :function
+				name: node.name
+				tok: node.tok
+				args: node.args |> clone()
+				restArg: node.restArg
+				decls: []
+				body: {
+					type: :block
+					tok: node.tok
+					decls: [trampolinedFnName]
+					exprs: [{
+						type: :assignment
+						tok: node.tok
+						local?: true
+						left: {
+							type: :identifier
+							tok: node.tok
+							val: trampolinedFnName
+						}
+						right: merge({}, node, { name: '' })
+					}, {
+						type: :fnCall
+						tok: node.tok
+						function: {
+							type: :identifier
+							tok: node.tok
+							val: '__oak_resolve_trampoline'
+						}
+						args: [{
+							type: :identifier
+							tok: node.tok
+							val: trampolinedFnName
+						}] |> append(node.args |> with map() fn(arg) {
+							type: :identifier
+							tok: node.tok
+							val: arg
+						})
+						restArg: if node.restArg {
+							'' -> ?
+							_ -> {
+								type: :identifier
+								tok: node.tok
+								val: node.restArg
+							}
+						}
+					}]
+				}
+			}
+
+			if node.name != '' -> ctx.decls.(node.name) := true
+
+			node
+		}
+		:ifExpr -> {
+			node.cond := analyzeSubexpr(node.cond, ctx, false)
+			node.branches := node.branches |> with map() fn(br) analyzeSubexpr(br, ctx, true)
+			node
+		}
+		:ifBranch -> {
+			node.target := analyzeSubexpr(node.target, ctx, false)
+			node.body := analyzeSubexpr(node.body, ctx, true)
+			node
+		}
+		:fnCall -> {
+			node.function := analyzeSubexpr(node.function, ctx, false)
+			node.args := node.args |> with map() fn(a) analyzeSubexpr(a, ctx, false)
+			if node.restArg != ? -> node.restArg := analyzeSubexpr(node.restArg, ctx, false)
+
+			simpleName? := node.function.type = :identifier
+			recursiveCall? := if ctx.enclosingFn {
+				? -> false
+				_ -> node.function.val = ctx.enclosingFn.name
+			}
+
+			if web? & simpleName? & recursiveCall? & tail? {
+				true -> {
+					ctx.enclosingFn.recurred? := true
+					{
+						type: :fnCall
+						tok: node.tok
+						function: {
+							type: :identifier
+							tok: node.tok
+							val: '__oak_trampoline'
+						}
+						args: [{
+							type: :identifier
+							tok: node.tok
+							val: '__oak_trampolined_' << node.function.val
+						}] |> append(node.args)
+						restArg: node.restArg
+					}
+				}
+				_ -> node
+			}
+		}
+		:unary -> node.right := analyzeSubexpr(node.right, ctx, false)
+		:binary, :propertyAccess -> {
+			node.left := analyzeSubexpr(node.left, ctx, false)
+			node.right := analyzeSubexpr(node.right, ctx, false)
+			node
+		}
+		:assignment -> {
+			node.left := analyzeSubexpr(node.left, ctx, false)
+			node.right := analyzeSubexpr(node.right, ctx, false)
+
+			if node.local? -> if node.left.type {
+				:identifier -> ctx.decls.(node.left.val) := true
+				:list -> node.left.elems |> with each() fn(el) if el.type {
+					:identifier -> ctx.decls.(el.val) := true
+				}
+				:object -> node.left.entries |> with each() fn(entry) if entry.val.type {
+					:identifier -> ctx.decls.(entry.val.val) := true
+				}
+			}
+
+			node
+		}
+		:list -> node.elems := node.elems |> with map() fn(el) analyzeSubexpr(el, ctx, false)
+		:object -> node.entries := node.entries |> with map() fn(entry) {
+			key: analyzeSubexpr(entry.key, ctx, false)
+			val: analyzeSubexpr(entry.val, ctx, false)
+		}
+		_ -> node
+	}
+	analyzeSubexpr(node, {
+		decls: {
+			import: true, int: true, float: true, atom: true, string: true
+			codepoint: true, char: true, type: true, len: true, keys: true
+
+			args: true, env: true, time: true, nanotime: true, rand: true
+			srand: true, wait: true, exit: true, exec: true
+
+			input: true, print: true, ls: true, rm: true, mkdir: true
+			stat: true, open: true, close: true, read: true, write: true
+			listen: true, req: true
+
+			sin: true, cos: true, tan: true, asin: true, acos: true
+			atan: true, pow: true, log: true
+
+			___runtime_lib: true, ___runtime_lib?: true, ___runtime_gc: true
+			___runtime_mem: true, ___runtime_proc: true
+		}
+		args: {}
+	}, false)
+}
+
+{
+	analyzeNode: analyzeNode
+}

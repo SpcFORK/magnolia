@@ -1,0 +1,193 @@
+// build-ast -- AST wrapping helpers for build
+
+{
+	slice: slice
+	map: map
+	each: each
+	filter: filter
+	append: append
+	contains?: contains?
+} := import('std')
+{
+	sort!: sort!
+} := import('sort')
+{
+	dir: dir
+	resolve: resolve
+} := import('path')
+bundleUtils := import('bundle-utils')
+
+// wrapModule takes the body of a module and wraps it in a closure that returns
+// a global `module` object. It returns a single AST node object representing
+// this closure, to be wrapped further into a bundle AST.
+fn wrapModule(block) {
+	type: :function
+	name: ''
+	tok: { pos: [0, 1, 1], type: :fnKeyword, val: ? }
+	args: []
+	restArg: ''
+	decls: []
+	body: {
+		type: :block
+		tok: { pos: [0, 1, 4], type: :leftBrace, val: ? }
+		decls: block.decls
+		exprs: block.exprs << {
+			type: :object
+			tok: { pos: [0, 1, 6], type: :leftBrace, val: ? }
+			entries: block.decls |> sort!() |> map(fn(exportedName) {
+				key: {
+					type: :identifier
+					tok: {
+						pos: [0, 1, 8]
+						type: :identifier
+						val: exportedName
+					}
+					val: exportedName
+				}
+				val: {
+					type: :identifier
+					tok: {
+						pos: [0, 1, 11]
+						type: :identifier
+						val: exportedName
+					}
+					val: exportedName
+				}
+			})
+		}
+	}
+}
+
+// bundleCommonPrefix preserves the behavior of not stripping the full path when
+// only one module is present in the bundle.
+fn bundleCommonPrefix(paths) if len(paths) < 2 {
+	true -> ''
+	_ -> bundleUtils.commonPrefix(paths)
+}
+
+// wrapBundle takes a list of module AST nodes (closures) and wraps it into a
+// single bundle AST node with an entrypoint.
+fn wrapBundle(modules, entryModuleName, includes, importCallNode) {
+	type: :block
+	tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+	decls: []
+	exprs: {
+		bundledPaths := append(
+			modules |> map(0)
+			includes |> map(:path)
+		) |> filter(fn(path) !___runtime_lib?(path))
+		bundlePrefixLen := bundleCommonPrefix(bundledPaths) |> len()
+
+		fn normalizeModulePath(path) if {
+			___runtime_lib?(path) -> path
+			_ -> path |> slice(bundlePrefixLen)
+		}
+
+		fn normalizeModuleImports!(node, modulePath) if node.type {
+			:block -> if node.decls |> contains?('import') {
+				false -> node.exprs |> each(fn(n) normalizeModuleImports!(n, modulePath))
+			}
+			:function -> if node.decls |> contains?('import') {
+				false -> normalizeModuleImports!(node.body, modulePath)
+			}
+			:ifExpr -> {
+				normalizeModuleImports!(node.cond, modulePath)
+				node.branches |> each(fn(br) normalizeModuleImports!(br, modulePath))
+			}
+			:ifBranch -> {
+				normalizeModuleImports!(node.target, modulePath)
+				normalizeModuleImports!(node.body, modulePath)
+			}
+			:fnCall -> if node {
+				importCallNode -> if !___runtime_lib?(importName := node.args.(0).val) -> {
+					importPath := resolve(importName, dir(modulePath)) + '.oak'
+					node.args.(0).val := normalizeModulePath(importPath)
+				}
+				_ -> {
+					normalizeModuleImports!(node.function, modulePath)
+					node.args |> each(fn(a) normalizeModuleImports!(a, modulePath))
+					if node.restArg != ? -> normalizeModuleImports!(node.restArg, modulePath)
+				}
+			}
+			:unary -> normalizeModuleImports!(node.right, modulePath)
+			:binary, :propertyAccess, :assignment -> {
+				normalizeModuleImports!(node.left, modulePath)
+				normalizeModuleImports!(node.right, modulePath)
+			}
+			:list -> node.elems |> each(fn(el) normalizeModuleImports!(el, modulePath))
+			:object -> node.entries |> with each() fn(entry) {
+				normalizeModuleImports!(entry.key, modulePath)
+				normalizeModuleImports!(entry.val, modulePath)
+			}
+		}
+
+		moduleDefns := modules |> with map() fn(module) {
+			[modulePath, moduleBody] := module
+			moduleName := normalizeModulePath(modulePath)
+			{
+				type: :fnCall
+				tok: { pos: [0, 1, 17], type: :leftParen, val: ? }
+				function: {
+					type: :identifier
+					tok: { pos: [0, 1, 1], type: :identifier, val: '__oak_modularize' }
+					val: '__oak_modularize'
+				}
+				args: [
+					{
+						type: :string
+						val: moduleName
+						tok: { type: :stringLiteral, pos: [0, 1, 18], val: moduleName }
+					}
+					{
+						normalizeModuleImports!(moduleBody, modulePath)
+						moduleBody
+					}
+				]
+				restArg: ?
+			}
+		}
+
+		moduleDefns << {
+			type: :assignment
+			tok: { pos: [0, 1, 0], type: :assign, val: ? }
+			left: { tok: { pos: [0, 1, 0], type: :identifier, val: '__Oak_Import_Aliases' }, type: :identifier, val: '__Oak_Import_Aliases' }
+			local?: false
+			right: {
+				type: :object
+				tok: { pos: [0, 1, 0], type: :leftBrace, val: ? }
+				entries: includes |> with map() fn(spec) {
+					key: {
+						type: :string
+						val: spec.name
+						tok: { pos: [0, 1, 0], type: :stringLiteral, val: spec.name }
+					}
+					val: {
+						type: :string
+						val: normalizeModulePath(spec.path)
+						tok: { pos: [0, 1, 0], type: :stringLiteral, val: normalizeModulePath(spec.path) }
+					}
+				}
+			}
+		} << {
+			type: :fnCall
+			tok: { pos: [0, 1, 0], type: :leftParen, val: ? }
+			function: {
+				type: :identifier
+				tok: { pos: [0, 1, 0], type: :identifier, val: '__oak_module_import' }
+				val: '__oak_module_import'
+			}
+			args: [{
+				type: :string
+				val: normalizeModulePath(entryModuleName)
+				tok: { type: :stringLiteral, pos: [0, 1, 0], val: normalizeModulePath(entryModuleName) }
+			}]
+			restArg: ?
+		}
+	}
+}
+
+{
+	wrapModule: wrapModule
+	bundleCommonPrefix: bundleCommonPrefix
+	wrapBundle: wrapBundle
+}

@@ -1,0 +1,41 @@
+// build-config -- build configuration and validation helpers
+
+fn requireOpt(flag, value, abort, format) if value {
+	?, '', true -> abort(format('[oak build] No --{{0}} specified.', flag))
+}
+
+fn configure(config, state, parseIncludes, statFile, resolve, collectVFSFiles, transpile, each, printf, format) {
+	state.Log <- config.log |> default(printf)
+	state.Abort <- config.abort |> default(fn(msg) {
+		state.Log(msg)
+		exit(1)
+	})
+
+	state.Entry <- config.entry
+	state.Web? <- config.web? = true
+	state.Wasm? <- config.wasm? = true
+	state.Output <- config.output
+	state.Includes <- parseIncludes(config.includes)
+	state.IncludeVFS <- config.includeVFS
+
+	requireOpt('entry', state.Entry, state.Abort, format)
+	requireOpt('output', state.Output, state.Abort, format)
+	if state.Web? & state.Wasm? -> state.Abort('[oak build] --web and --wasm are mutually exclusive build targets.')
+	if statFile(state.Entry) = ? -> state.Abort(format('[oak build] {{0}} does not exist.', state.Entry))
+
+	state.AbsoluteEntry <- resolve(state.Entry)
+	state.VFSFiles <- collectVFSFiles(state.IncludeVFS, state.Log)
+
+	transpile.configure({
+		enabled?: config.transpile? |> default(true)
+		verbose?: config.transpileVerbose? |> default(false)
+		log: state.Log
+	})
+
+	if config.transpilers != ? -> config.transpilers |> each(transpile.registerTranspiler)
+}
+
+{
+	requireOpt: requireOpt
+	configure: configure
+}

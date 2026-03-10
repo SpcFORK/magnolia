@@ -1,0 +1,38 @@
+// build-includes -- include specification parsing helpers
+
+{
+	default: default
+	map: map
+	filter: filter
+} := import('std')
+{
+	split: split
+} := import('str')
+{
+	resolve: resolve
+} := import('path')
+
+fn parseInclude(spec) {
+	parts := spec |> split(':'),
+	if len(parts) {
+		2 -> { name: parts.(0), path: resolve(parts.(1)) + '.oak' }
+		_ -> { name: spec, path: resolve(spec) + '.oak' }
+	}
+}
+
+fn parseIncludes(specs) if type(specs) {
+	:list -> specs |> map(fn(spec) if type(spec) {
+		:object -> spec
+		_ -> parseInclude(spec)
+	})
+	_ -> specs |>
+		default('') |>
+		split(',') |>
+		filter(fn(s) s != '') |>
+		map(parseInclude)
+}
+
+{
+	parseInclude: parseInclude
+	parseIncludes: parseIncludes
+}

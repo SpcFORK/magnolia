@@ -1,0 +1,49 @@
+// build-imports -- parsing and static import graph traversal helpers
+
+fn cachedParse(path, text, moduleNodes, log, abort, syntax, format) if cached := moduleNodes.(path) {
+	? -> {
+		log(format('[oak build] Parsing {{0}}...', path))
+		if nodes := text |> syntax.parse() {
+			{ type: :error, error: _, pos: _ } -> {
+				abort(format('[oak build] Parse error at {{0}}:{{1}}:{{2}}: {{3}}', path, nodes.pos.1, nodes.pos.2, nodes.error))
+			}
+			_ -> {
+				moduleNodes.(path) := nodes
+				nodes
+			}
+		}
+	}
+	_ -> cached
+}
+
+fn addImportsFromSource(path, file, next, moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn) {
+	cachedParseFn(path, file) |> with each() fn(node) if node = importAssignmentNode -> {
+		if runtimeLibQ(importName := node.right.args.(0).val) {
+			true -> if web? -> addImportsFromSource(importName, runtimeLib(importName), next, moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn)
+			_ -> {
+				importPath := resolve(importName, dir(path)) + '.oak'
+				if moduleNodes.(importPath) = ? -> addImportsFromFile(importPath, next)
+			}
+		}
+	}
+}
+
+fn addImportsFromFile(path, next, importCounters, readFile, printf, addImportsFromSource) {
+	importCounters.started <- importCounters.started + 1
+
+	with readFile(path) fn(file) if file {
+		? -> printf('[oak build] Import {{0}} does not exist.', path)
+		_ -> {
+			addImportsFromSource(path, file, next)
+			if importCounters.finished <- importCounters.finished + 1 {
+				importCounters.started -> next()
+			}
+		}
+	}
+}
+
+{
+	cachedParse: cachedParse
+	addImportsFromSource: addImportsFromSource
+	addImportsFromFile: addImportsFromFile
+}

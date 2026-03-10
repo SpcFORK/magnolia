@@ -466,6 +466,7 @@ func (c *Context) ChildContext(rootPath string) Context {
 			parent: nil,
 			vars:   map[string]Value{},
 		},
+		vm: c.vm,
 	}
 }
 
@@ -477,11 +478,12 @@ func (c *Context) subScope(parent *scope) {
 }
 
 func (c *Context) Lock() {
-	c.eng.Lock()
+	// Context evaluation currently runs on a single goroutine in CLI/test flows.
+	// A non-reentrant mutex here can deadlock nested eval/import paths.
 }
 
 func (c *Context) Unlock() {
-	c.eng.Unlock()
+	// See Lock(): intentionally a no-op to prevent nested self-deadlocks.
 }
 
 func (c *Context) Wait() {
@@ -545,44 +547,7 @@ func (c *Context) evalGo(programReader io.Reader) (Value, error) {
 func (c *Context) Eval(programReader io.Reader) (Value, error) {
 	c.Lock()
 	defer c.Unlock()
-
-	programBytes, err := io.ReadAll(programReader)
-	if err != nil {
-		return nil, err
-	}
-
-	program := string(programBytes)
-
-	if c.vm == nil {
-		vmCode := "Virtual := import('Virtual'); Virtual.createStandardVM()"
-		val, err := c.evalGoUnlocked(strings.NewReader(vmCode))
-		if err != nil {
-			return nil, err
-		}
-		c.vm = val
-	}
-
-	vmObj := c.vm.(ObjectValue)
-	runFn, ok := vmObj["run"]
-	if !ok {
-		return nil, fmt.Errorf("vm has no run function")
-	}
-
-	scope := ObjectValue{}
-	val, runtimeErr := c.EvalFnValue(runFn, false, MakeString(program), scope)
-	if runtimeErr != nil {
-		return nil, runtimeErr
-	}
-
-	if obj, ok := val.(ObjectValue); ok {
-		if t, ok := obj["type"]; ok && t.Eq(AtomValue("error")) {
-			if msg, ok := obj["message"]; ok {
-				return nil, fmt.Errorf("Oak error: %s", msg.String())
-			}
-		}
-	}
-
-	return val, nil
+	return c.evalGoUnlocked(programReader)
 }
 
 func normalizeCallArgs(paramCount int, args []Value) []Value {

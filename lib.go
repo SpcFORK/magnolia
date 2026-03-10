@@ -76,30 +76,90 @@ var libasttransform string
 //go:embed lib/shell.oak
 var libshell string
 
+//go:embed lib/transpile.oak
+var libtranspile string
+
+//go:embed lib/pack.oak
+var libpack string
+
+//go:embed lib/build.oak
+var libbuild string
+
+//go:embed lib/build-includes.oak
+var libbuildincludes string
+
+//go:embed lib/build-ident.oak
+var libbuildident string
+
+//go:embed lib/build-wasm.oak
+var libbuildwasm string
+
+//go:embed lib/build-ast.oak
+var libbuildast string
+
+//go:embed lib/build-analyze.oak
+var libbuildanalyze string
+
+//go:embed lib/build-render.oak
+var libbuildrender string
+
+//go:embed lib/build-config.oak
+var libbuildconfig string
+
+//go:embed lib/build-imports.oak
+var libbuildimports string
+
+//go:embed lib/runtime-native.oak
+var libruntimenative string
+
+//go:embed lib/runtime-js.oak
+var libruntimejs string
+
+//go:embed lib/runtime-codegen.oak
+var libruntimecodegen string
+
+//go:embed lib/codegen-common.oak
+var libcodegencommon string
+
 var stdlibs = map[string]string{
-	"std":           libstd,
-	"str":           libstr,
-	"math":          libmath,
-	"sort":          libsort,
-	"random":        librandom,
-	"fs":            libfs,
-	"fmt":           libfmt,
-	"json":          libjson,
-	"datetime":      libdatetime,
-	"path":          libpath,
-	"http":          libhttp,
-	"test":          libtest,
-	"debug":         libdebug,
-	"cli":           libcli,
-	"md":            libmd,
-	"crypto":        libcrypto,
-	"gpu":           libgpu,
-	"syntax":        libsyntax,
-	"Virtual":       libvirtual,
-	"pack-utils":    libpackutils,
-	"bundle-utils":  libbundleutils,
-	"ast-transform": libasttransform,
-	"shell":         libshell,
+	"std":             libstd,
+	"str":             libstr,
+	"math":            libmath,
+	"sort":            libsort,
+	"random":          librandom,
+	"fs":              libfs,
+	"fmt":             libfmt,
+	"json":            libjson,
+	"datetime":        libdatetime,
+	"path":            libpath,
+	"http":            libhttp,
+	"test":            libtest,
+	"debug":           libdebug,
+	"cli":             libcli,
+	"md":              libmd,
+	"crypto":          libcrypto,
+	"gpu":             libgpu,
+	"syntax":          libsyntax,
+	"Virtual":         libvirtual,
+	"pack-utils":      libpackutils,
+	"bundle-utils":    libbundleutils,
+	"ast-transform":   libasttransform,
+	"shell":           libshell,
+	"transpile":       libtranspile,
+	"pack":            libpack,
+	"build":           libbuild,
+	"build-includes":  libbuildincludes,
+	"build-ident":     libbuildident,
+	"build-wasm":      libbuildwasm,
+	"build-ast":       libbuildast,
+	"build-analyze":   libbuildanalyze,
+	"build-render":    libbuildrender,
+	"build-config":    libbuildconfig,
+	"build-imports":   libbuildimports,
+	"runtime-native":  libruntimenative,
+	"runtime-js":      libruntimejs,
+	"runtime-codegen": libruntimecodegen,
+	"codegen-common":  libcodegencommon,
 }
 
 func isStdLib(name string) bool {

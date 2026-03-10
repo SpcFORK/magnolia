@@ -1,0 +1,277 @@
+// build-render -- Oak and JavaScript bundle rendering helpers
+
+{
+	map: map
+	reduce: reduce
+	append: append
+	keys: keys
+	len: len
+} := import('std')
+{
+	join: join
+	replace: replace
+} := import('str')
+{
+	sort!: sort!
+} := import('sort')
+{
+	format: format
+} := import('fmt')
+
+fn renderOakBundle(bundleNode, vfsFiles, encodeJSON, oakNativeRuntime, formatIdent, abort) {
+	fn renderNode(node) if node.type {
+		:null -> '?'
+		:empty -> '_'
+		:string -> '\'' << node.val |> replace('\\', '\\\\') |> replace('\'', '\\\'') << '\''
+		:int, :float -> node.tok.val
+		:bool -> string(node.val)
+		:identifier -> formatIdent(node.val)
+		:atom -> ':' << node.val
+		:list -> '[' << node.elems |> map(renderNode) |> join(',') << ']'
+		:object -> '{' << node.entries |> map(fn(entry) {
+			renderNode(entry.key) << ':' << renderNode(entry.val)
+		}) |> join(',') << '}'
+		:unary -> if node.op {
+			:minus -> '-' << renderNode(node.right)
+			:exclam -> '!' << renderNode(node.right)
+		}
+		:binary -> renderNode(node.left) << if node.op {
+			:plus -> '+'
+			:minus -> '-'
+			:times -> '*'
+			:divide -> '/'
+			:modulus -> '%'
+			:and -> '&'
+			:xor -> '^'
+			:or -> '|'
+			:eq -> '='
+			:neq -> ' !='
+			:greater -> '>'
+			:less -> '<'
+			:geq -> '>='
+			:leq -> '<='
+			:pushArrow -> '<<'
+		} << renderNode(node.right)
+		:assignment -> renderNode(node.left) << if node.local? {
+			true -> ':='
+			_ -> '<-'
+		} << renderNode(node.right)
+		:propertyAccess -> renderNode(node.left) << '.' << renderNode(node.right)
+		:ifExpr -> 'if ' << renderNode(node.cond) << '{' << node.branches |> map(fn(br) {
+			renderNode(br.target) << '->' << renderNode(br.body)
+		}) |> join(',') << '}'
+		:block -> '(' << if len(node.exprs) {
+			0 -> '?'
+			_ -> node.exprs |> map(renderNode) |> join(',')
+		} << ')'
+		:function -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(formatIdent) |> join(',')
+				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
+			} << ')'
+			if node.name {
+				'' -> 'fn' << args << renderNode(node.body)
+				_ -> 'fn ' << formatIdent(node.name) << args << renderNode(node.body)
+			}
+		}
+		:fnCall -> '{{0}}({{1}})' |> format(
+			renderNode(node.function)
+			if node.restArg {
+				? -> node.args |> map(renderNode) |> join(',')
+				_ -> node.args |> map(renderNode) |> append([renderNode(node.restArg) << '...']) |> join(',')
+			}
+		)
+		_ -> abort('[oak build] Unexpected AST node type ' << string(node.type))
+	}
+
+	vfsInit := if len(vfsFiles |> keys()) {
+		0 -> ''
+		_ -> '
+// Embedded Virtual FS
+Virtual := import(\'Virtual\')
+__Oak_VFS := Virtual.createVirtualFS(' << encodeJSON(vfsFiles) << ')
+'
+	}
+
+	'// oak build' << oakNativeRuntime << vfsInit << renderNode(bundleNode)
+}
+
+fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, clone) {
+	fn renderAsObjectKey(node) if node.type {
+		:string, :int, :float -> renderNode(node)
+		_ -> '__oak_obj_key({{0}})' |> format(renderNode(node))
+	}
+
+	fn renderAssignTarget(node) if node.type {
+		:empty -> '__oak_empty_assgn_tgt'
+		:identifier -> formatIdent(node.val)
+		:propertyAccess -> if node.right.type {
+			:identifier -> '({{0}}.{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			_ -> '({{0}}[{{1}}])' |> format(renderNode(node.left), renderAsObjectKey(node.right))
+		}
+		:list -> '[' << node.elems |> map(fn(n) renderAssignTarget(n) << '=null') |> join(',') << ']'
+		:object -> '{' << node.entries |> map(fn(entry) {
+			{ key: k, val: v } := entry
+			if k.type = :identifier & v.type = :identifier & k.val = v.val {
+				true -> formatIdent(k.val)
+				_ -> if k.type {
+					:identifier, :empty, :int, :float -> renderNode(k)
+					_ -> '[' << renderAsObjectKey(k) << ']'
+				} << ':' << renderAssignTarget(v) << '=null'
+			}
+		}) |> join(',') << '}'
+	}
+
+	fn renderNode(node) if node.type {
+		:null -> 'null'
+		:empty -> '__Oak_Empty'
+		:string -> '__Oak_String(\'' + node.val |> map(fn(c) if c {
+			'\\' -> '\\\\'
+			'\'' -> '\\\''
+			'\n' -> '\\n'
+			'\r' -> '\\r'
+			'\f' -> '\\f'
+			'\t' -> '\\t'
+			_ -> c
+		}) + '\')'
+		:int, :float, :bool -> string(node.val)
+		:identifier -> formatIdent(node.val)
+		:atom -> 'Symbol.for(\'' << node.val << '\')'
+		:list -> '[' << node.elems |> map(renderNode) |> join(',') << ']'
+		:object -> '({' << node.entries |> map(fn(entry) {
+			{ key: k, val: v } := entry
+			if k.type = :identifier & v.type = :identifier & k.val = v.val {
+				true -> formatIdent(k.val)
+				_ -> if k.type {
+					:identifier, :empty, :int, :float -> renderNode(k)
+					_ -> '[' << renderAsObjectKey(k) << ']'
+				} << ':' << renderNode(v)
+			}
+		}) |> join(',') << '})'
+		:unary -> if node.op {
+			:minus -> '-' << renderNode(node.right)
+			:exclam -> '!' << renderNode(node.right)
+		}
+		:binary -> if node.op {
+			:plus -> '__as_oak_string({{0}}+{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:minus -> '({{0}}-{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:times -> '({{0}}*{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:divide -> '({{0}}/{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:modulus -> '({{0}}%{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:and -> '(__oak_left=>__oak_left===false?false:__oak_and(__oak_left,{{1}}))({{0}})' |> format(renderNode(node.left), renderNode(node.right))
+			:xor -> '__oak_xor({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:or -> '(__oak_left=>__oak_left===true?true:__oak_or(__oak_left,{{1}}))({{0}})' |> format(renderNode(node.left), renderNode(node.right))
+			:eq -> '__oak_eq({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:neq -> '!__oak_eq({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:greater -> '({{0}}>{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:less -> '({{0}}<{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:geq -> '({{0}}>={{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:leq -> '({{0}}<={{1}})' |> format(renderNode(node.left), renderNode(node.right))
+			:pushArrow -> '__oak_push({{0}},{{1}})' |> format(renderNode(node.left), renderNode(node.right))
+		}
+		:assignment -> if node.left.type {
+			:propertyAccess -> {
+				tmpDfn := clone(node.left)
+				tmpDfn.left := {
+					type: :identifier
+					tok: node.tok
+					val: '__oak_assgn_tgt'
+				}
+				'((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign({{2}},__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete {{1}}:{{1}}=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string({{0}}),{{3}})' |> format(
+					renderNode(node.left.left)
+					renderAssignTarget(tmpDfn)
+					renderNode(node.left.right)
+					renderNode(node.right)
+				)
+			}
+			_ -> '(' << renderAssignTarget(node.left) << '=' << renderNode(node.right) << ')'
+		}
+		:propertyAccess -> if node.right.type {
+			:identifier -> '({{0}}.{{1}}??null)' |> format(renderNode(node.left), renderNode(node.right))
+			_ -> '__oak_acc({{0}},{{1}})' |> format(renderNode(node.left), renderAsObjectKey(node.right))
+		}
+		:ifExpr -> '((__oak_cond)=>{{1}})({{0}})' |> format(
+			renderNode(node.cond)
+			if len(node.branches) {
+				0 -> 'null'
+				_ -> node.branches |> reduce('', fn(branches, br, i) {
+					last? := i + 1 = len(node.branches)
+					if {
+						br.target.type = :empty & last? -> branches << renderNode(br.body)
+						_ -> {
+							branches << '__oak_eq(__oak_cond,{{0}})?{{1}}:' |> format(
+								renderNode(br.target)
+								renderNode(br.body)
+							)
+							if last? -> branches << 'null'
+							branches
+						}
+					}
+				})
+			}
+		)
+		:block -> if len(node.exprs) {
+			0 -> 'null'
+			_ -> if len(node.decls) {
+				0 -> '({{0}})' |> format(node.exprs |> map(renderNode) |> join(','))
+				_ -> '(({{0}})=>({{1}}))()' |> format(
+					node.decls |> sort!() |> map(formatIdent) |> join(',')
+					node.exprs |> map(renderNode) |> join(',')
+				)
+			}
+		}
+		:function -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(fn(a, i) formatIdent(a, i) << '=null') |> join(',')
+				_ -> node.args |> map(fn(a, i) formatIdent(a, i) << '=null') |> append(['...' << formatIdent(node.restArg)]) |> join(',')
+			} << ')'
+			decls := node.decls |> sort!() |> map(fn(decl) 'let ' << formatIdent(decl) << ';') |> join()
+			if node.name {
+				'' -> 'function _' << args << '{' << decls << 'return ' << renderNode(node.body) << '}'
+				_ -> formatIdent(node.name) << '=function ' << formatIdent(node.name) << args << '{' << decls << 'return ' << renderNode(node.body) << '}'
+			}
+		}
+		:fnCall -> '{{0}}({{1}})' |> format(
+			if {
+				node.function.type = :function -> '(' << renderNode(node.function) << ')'
+				node.function.type = :propertyAccess & node.function.right.type = :identifier ->
+					'({{0}}.{{1}})' |> format(renderNode(node.function.left), renderNode(node.function.right))
+				_ -> renderNode(node.function)
+			}
+			if node.restArg {
+				? -> node.args |> map(renderNode) |> join(',')
+				_ -> node.args |> map(renderNode) |> append(['...' << renderNode(node.restArg)]) |> join(',')
+			}
+		)
+	}
+
+	vfsInit := if len(vfsFiles |> keys()) {
+		0 -> ''
+		_ -> '
+// Embedded Virtual FS
+const __Oak_VFS_Data = ' << encodeJSON(vfsFiles) << ';
+let __Oak_VFS = null;
+function __oak_get_vfs() {
+	if (!__Oak_VFS) {
+		const Virtual = __oak_module_import(\'Virtual\');
+		__Oak_VFS = Virtual.createVirtualFS(__Oak_VFS_Data);
+	}
+	return __Oak_VFS;
+}
+'
+	}
+
+	'/* oak build --web */' << oakJSRuntime << vfsInit << renderNode(bundleNode)
+}
+
+fn renderBundle(bundleNode, web?, wasm?, renderOak, renderJS, renderWasm) if {
+	web? -> renderJS(bundleNode)
+	wasm? -> renderWasm(bundleNode)
+	_ -> renderOak(bundleNode)
+}
+
+{
+	renderOakBundle: renderOakBundle
+	renderJSBundle: renderJSBundle
+	renderBundle: renderBundle
+}
