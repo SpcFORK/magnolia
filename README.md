@@ -240,42 +240,43 @@ This match expression, combined with safe tail recursion, makes Magnolia Turing-
 Magnolia also provides **class syntax sugar** for creating constructor functions with the `cs` keyword. Classes are syntactic sugar that make it easier to create objects with shared state and methods.
 
 ```js
-// Basic class with constructor parameters
-cs Person(name, age) {
+// Class without parameters
+cs Empty {
+    {}
+}
+type(Empty()) // :object
+
+// Class constructor parameters are captured in body
+cs Pair(left, right) {
     {
-        name: name
-        age: age
-        greet: fn() 'Hello, I am ' + name
+        left: left
+        right: right
     }
 }
-
-person := Person('Alice', 30)
-person.greet() // 'Hello, I am Alice'
+Pair(1, 2).right // 2
 
 // Class methods can close over constructor state
 cs Counter(start) {
     {
         value: start
-        increment: fn() start <- start + 1
-        get: fn() start
+        add: fn(delta) start + delta
     }
 }
-
-counter := Counter(0)
-counter.increment()
-counter.get() // 1
+Counter(4).add(3) // 7
 
 // Classes support variadic parameters
-cs List(items...,) {
-    {
-        items: items
-        length: len(items)
-    }
+cs Bag(items...,) {
+    items
 }
-
-list := List(1, 2, 3, 4)
-list.length // 4
+len(Bag(1, 2, 3)) // 3
 ```
+
+Key features of classes:
+- **Constructor sugar**: Classes without parameters act as simple constructor functions that return objects
+- **Parameter capture**: Constructor parameters are available in the class body and can be used to initialize object properties
+- **Closure over state**: Methods defined in the class body can close over constructor parameters
+- **Variadic support**: Classes support variadic parameters using the `...` syntax
+- **Return value**: Classes with an empty block body (`{}`) return `?` (null), while classes with an object expression return that object
 
 Under the hood, classes are simply functions that return objects, but the `cs` syntax provides a cleaner way to define object constructors with shared behavior.
 

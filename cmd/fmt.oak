@@ -1,24 +1,13 @@
 // oak fmt -- code formatter
 
 {
-	slice: slice
 	each: each
-	filter: filter
 } := import('std')
-{
-	split: split
-	trim: trim
-	endsWith?: endsWith?
-} := import('str')
-{
-	readFile: readFile
-	writeFile: writeFile
-} := import('fs')
 {
 	printf: printf
 } := import('fmt')
 cli := import('cli')
-syntax := import('syntax')
+syntaxfmt := import('syntaxfmt')
 
 Cli := cli.parse()
 
@@ -29,13 +18,13 @@ Diff? := Cli.opts.diff != ?
 Args := if Cli.opts.changes != ? {
 	// get list of files from git diff
 	true -> {
-		evt := exec('git', ['diff', '--name-only'], '')
-		if evt.type {
-			:error -> {
-				printf('[oak fmt] Could not get git diff:\n\t{{ 0 }}', evt.error)
+		result := syntaxfmt.getChangedOakFiles()
+		if result.ok {
+			true -> result.files
+			_ -> {
+				printf('[oak fmt] Could not get git diff:\n\t{{ 0 }}', result.error)
 				[]
 			}
-			_ -> evt.stdout |> trim() |> split('\n') |> with filter() fn(path) path |> endsWith?('.oak')
 		}
 	}
 	_ -> if Cli.verb {
@@ -44,23 +33,27 @@ Args := if Cli.opts.changes != ? {
 	}
 }
 
-Args |> with each() fn(path) with readFile(path) fn(file) if file {
-	? -> printf('[oak fmt] Could not read file {{ 0 }}', path)
-	_ -> if {
-		Fix? -> with writeFile(path, file |> syntax.print(file)) fn(res) if res {
-			? -> printf('[oak fmt] Could not write file {{ 0 }}', path)
-			_ -> printf('[oak fmt] Fixed {{ 0 }}', path)
+Args |> with each() fn(path) if {
+	Fix? -> {
+		result := syntaxfmt.formatFileInPlace(path)
+		if result.ok {
+			true -> printf('[oak fmt] Fixed {{ 0 }}', path)
+			_ -> printf('[oak fmt] Could not format {{ 0 }}: {{ 1 }}', path, result.error)
 		}
-		Diff? -> with exec(
-			'diff'
-			[path, '-']
-			file |> syntax.print()
-		) fn(evt) if evt.type {
-			:error -> printf('[oak fmt] Error while diffing {{ 0 }}:\n\t{{ 1 }}'
-				path, evt.error)
-			_ -> print(evt.stdout)
+	}
+	Diff? -> {
+		result := syntaxfmt.formatFileWithDiff(path)
+		if result.ok {
+			true -> print(result.diff)
+			_ -> printf('[oak fmt] Error while diffing {{ 0 }}:\n\t{{ 1 }}', path, result.error)
 		}
-		_ -> file |> syntax.print() |> print()
+	}
+	_ -> {
+		result := syntaxfmt.formatFile(path)
+		if result.ok {
+			true -> print(result.content)
+			_ -> printf('[oak fmt] Could not read file {{ 0 }}', path)
+		}
 	}
 }
 

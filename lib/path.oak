@@ -15,9 +15,17 @@
 } := import('str')
 
 // abs? reports whether a path is absolute
+//
+// Example:
+//   abs?('/usr/local')  // => true
+//   abs?('local/bin')   // => false
 fn abs?(path) path.0 = '/'
 
 // rel? reports whether a path is relative
+//
+// Example:
+//   rel?('local/bin')   // => true
+//   rel?('/usr/local')  // => false
 fn rel?(path) path.0 != '/'
 
 // internal helper, returns the last occurrence of '/' in a string or 0 if it
@@ -35,6 +43,10 @@ fn _lastSlash(path) if path {
 
 // dir returns the portion of the a path that represents the directory
 // containing it. In effect, this is all but the last part of a path.
+//
+// Example:
+//   dir('/usr/local/bin')  // => '/usr/local'
+//   dir('folder/file.txt') // => 'folder'
 fn dir(path) {
 	path := path |> trimEnd('/')
 	path |> slice(0, _lastSlash(path))
@@ -42,12 +54,19 @@ fn dir(path) {
 
 // base returns the last element of a path, which is typically the file or
 // directory referred to by the path.
+//
+// Example:
+//   base('/usr/local/bin')  // => 'bin'
+//   base('folder/file.txt') // => 'file.txt'
 fn base(path) {
 	path := path |> trimEnd('/')
 	path |> slice(_lastSlash(path) + 1)
 }
 
 // cut returns a [dir, base] pair representing both parts of a path
+//
+// Example:
+//   cut('/usr/local/bin')  // => ['/usr/local', 'bin']
 fn cut(path) {
 	path := path |> trimEnd('/')
 	lastSlash := _lastSlash(path)
@@ -63,6 +82,10 @@ fn cut(path) {
 // 2. Remove '.'
 // 3. Remove '..' and the (parent) directory right before it, if such parent
 //    directory is in the path
+//
+// Example:
+//   clean('/usr/./local/../bin')  // => '/usr/bin'
+//   clean('a//b/./c')             // => 'a/b/c'
 fn clean(path) {
 	rooted := path.0 = '/'
 	cleaned := path |>
@@ -84,6 +107,10 @@ fn clean(path) {
 }
 
 // join joins multiple paths together into a single valid cleaned path
+//
+// Example:
+//   join('/usr', 'local', 'bin')  // => '/usr/local/bin'
+//   join('a', 'b', 'c')           // => 'a/b/c'
 fn join(parts...) parts |> reduce('', fn(base, path) if base {
 	// if we simply return `path`, path will be used as `base` next iteration
 	// which might mutate `path`.
@@ -93,6 +120,10 @@ fn join(parts...) parts |> reduce('', fn(base, path) if base {
 
 // split returns a list of each element of the path, ignoring the trailing
 // slash. If the path is absolute, the first item is an empty string.
+//
+// Example:
+//   split('/usr/local/bin')  // => ['usr', 'local', 'bin']
+//   split('folder/file')     // => ['folder', 'file']
 fn split(path) if path |> trimEnd('/') {
 	'' -> []
 	_ -> path |> strSplit('/') |> filter(fn(s) s != '')
@@ -101,6 +132,10 @@ fn split(path) if path |> trimEnd('/') {
 // resolve takes a path and returns an equivalent cleaned, absolute path, using
 // the given base path as the root, or using the current working directory if
 // no base path is given.
+//
+// Example:
+//   resolve('local/bin', '/usr')  // => '/usr/local/bin'
+//   resolve('/usr/bin')           // => '/usr/bin'
 fn resolve(path, base) if abs?(path) {
 	true -> clean(path)
 	_ -> join(base |> default(env().PWD), path)
