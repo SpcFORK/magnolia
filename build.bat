@@ -33,6 +33,10 @@ if not exist "%LOGO_PNG%" (
     exit /b 1
 )
 
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+"Compress-Archive -Path './build/magnolia' -DestinationPath './build/magnolia.zip' -Force"
+if errorlevel 1 exit /b 1
+
 echo Creating icon from %LOGO_PNG%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 "Add-Type -AssemblyName System.Drawing; ^
@@ -111,6 +115,10 @@ if errorlevel 1 (
     if exist "%SYSO_FILE%" del "%SYSO_FILE%"
     exit /b 1
 )
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+"Compress-Archive -Path './build/magnolia.exe' -DestinationPath './build/magnolia-exe.zip' -Force"
+if errorlevel 1 exit /b 1
 
 if exist "%SYSO_FILE%" del "%SYSO_FILE%"
 
