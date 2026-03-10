@@ -55,6 +55,9 @@ var libmd string
 //go:embed lib/crypto.oak
 var libcrypto string
 
+//go:embed lib/gpu.oak
+var libgpu string
+
 //go:embed lib/syntax.oak
 var libsyntax string
 
@@ -71,27 +74,28 @@ var libbundleutils string
 var libasttransform string
 
 var stdlibs = map[string]string{
-	"std":            libstd,
-	"str":            libstr,
-	"math":           libmath,
-	"sort":           libsort,
-	"random":         librandom,
-	"fs":             libfs,
-	"fmt":            libfmt,
-	"json":           libjson,
-	"datetime":       libdatetime,
-	"path":           libpath,
-	"http":           libhttp,
-	"test":           libtest,
-	"debug":          libdebug,
-	"cli":            libcli,
-	"md":             libmd,
-	"crypto":         libcrypto,
-	"syntax":         libsyntax,
-	"Virtual":        libvirtual,
-	"pack-utils":     libpackutils,
-	"bundle-utils":   libbundleutils,
-	"ast-transform":  libasttransform,
+	"std":           libstd,
+	"str":           libstr,
+	"math":          libmath,
+	"sort":          libsort,
+	"random":        librandom,
+	"fs":            libfs,
+	"fmt":           libfmt,
+	"json":          libjson,
+	"datetime":      libdatetime,
+	"path":          libpath,
+	"http":          libhttp,
+	"test":          libtest,
+	"debug":         libdebug,
+	"cli":           libcli,
+	"md":            libmd,
+	"crypto":        libcrypto,
+	"gpu":           libgpu,
+	"syntax":        libsyntax,
+	"Virtual":       libvirtual,
+	"pack-utils":    libpackutils,
+	"bundle-utils":  libbundleutils,
+	"ast-transform": libasttransform,
 }
 
 func isStdLib(name string) bool {

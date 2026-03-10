@@ -37,6 +37,7 @@
 syntax := import('syntax')
 bundleUtils := import('bundle-utils')
 transform := import('ast-transform')
+transpile := import('transpile')
 
 Log := printf
 Abort := fn(msg) {
@@ -93,6 +94,16 @@ fn configure(config) {
 
 	// absolute path to the entrypoint module
 	AbsoluteEntry <- resolve(Entry)
+	
+	// configure transpile middleware
+	transpile.configure({
+		enabled?: config.transpile? |> default(true)
+		verbose?: config.transpileVerbose? |> default(false)
+		log: Log
+	})
+	
+	// register custom transpilers if provided
+	if config.transpilers != ? -> config.transpilers |> each(transpile.registerTranspiler)
 }
 
 // a { string: [Node] } that maps absolute paths of imported modules to their
@@ -923,6 +934,7 @@ fn run(config) {
 	ModuleNodes <- {}
 	startedImport <- 0
 	finishedImport <- 0
+	transpile.clearTranspilers()
 
 	// Start from entrypoint and explicit includes, collect all static imports
 	Log(format('[oak build] Bundling with entrypoint {{0}}', Entry))
@@ -932,7 +944,7 @@ fn run(config) {
 		BundleFile := ModuleNodes |>
 			keys() |>
 			sort!() |>
-			map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> analyzeNode() |> wrapModule()]) |>
+			map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()]) |>
 			wrapBundle(AbsoluteEntry) |>
 			renderBundle()
 
@@ -1441,4 +1453,5 @@ OakWasmRuntime := '
 	parseInclude: parseInclude
 	parseIncludes: parseIncludes
 	run: run
+	transpile: transpile
 }

@@ -1,0 +1,90 @@
+// libgpu provides low-level helpers for writing GPU interop code in Oak.
+//
+// The API intentionally mirrors Oak's native syscall bridge so programs can
+// resolve and call GPU driver procedures directly.
+
+{
+	map: map
+} := import('std')
+
+fn cudaLibraries() if ___runtime_sys_info().os {
+	'windows' -> ['nvcuda.dll', 'cudart64_12.dll', 'cudart64_11.dll']
+	'linux' -> ['libcuda.so.1', 'libcudart.so']
+	'darwin' -> []
+	_ -> []
+}
+
+fn openclLibraries() if ___runtime_sys_info().os {
+	'windows' -> ['OpenCL.dll']
+	'linux' -> ['libOpenCL.so.1', 'libOpenCL.so']
+	'darwin' -> ['/System/Library/Frameworks/OpenCL.framework/OpenCL']
+	_ -> []
+}
+
+fn backends() [
+	{name: 'cuda', libraries: cudaLibraries(), probe: 'cuInit'}
+	{name: 'opencl', libraries: openclLibraries(), probe: 'clGetPlatformIDs'}
+]
+
+fn _resolveFirst(libraries, symbol, i) if i {
+	len(libraries) -> {
+		{
+			type: :error
+			error: 'Could not resolve procedure ' + symbol + ' from any candidate library'
+			libraries: libraries
+		}
+	}
+	_ -> {
+		proc := sysproc(libraries.(i), symbol)
+		if proc.type {
+			:proc -> proc
+			_ -> _resolveFirst(libraries, symbol, i + 1)
+		}
+	}
+}
+
+fn resolve(library, symbol) sysproc(library, symbol)
+
+fn call(procOrAddress, args...) syscall(procOrAddress, args...)
+
+fn cuda(symbol) _resolveFirst(cudaLibraries(), symbol, 0)
+
+fn opencl(symbol) _resolveFirst(openclLibraries(), symbol, 0)
+
+fn _scanBackend(backend) {
+	proc := _resolveFirst(backend.libraries, backend.probe, 0)
+	if proc.type {
+		:proc -> {
+			{
+				name: backend.name
+				available: true
+				library: proc.library
+				probe: backend.probe
+				address: proc.addr
+			}
+		}
+		_ -> {
+			{
+				name: backend.name
+				available: false
+				library: ?
+				probe: backend.probe
+				error: proc.error
+			}
+		}
+	}
+}
+
+fn scan() map(backends(), _scanBackend)
+
+fn available() {
+	results := scan()
+	fn sub(acc, i) if i {
+		len(results) -> acc
+		_ -> if results.(i).available {
+			true -> sub(acc << results.(i), i + 1)
+			_ -> sub(acc, i + 1)
+		}
+	}
+	sub([], 0)
+}

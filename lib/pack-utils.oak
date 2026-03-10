@@ -2,10 +2,19 @@
 
 {
 	default: default
+	map: map
+	each: each
+	entries: entries
+	slice: slice
 } := import('std')
 {
 	padStart: padStart
+	replace: replace
 } := import('str')
+{
+	encode: encodeJSON
+	decode: decodeJSON
+} := import('json')
 
 // Magic bytes appended to packed executable files to identify Oak bundles
 // "oak " (3 bytes) + date 1998-10-15 encoded as \x19\x98\x10\x15 = 8 bytes total
@@ -30,9 +39,88 @@ fn packBundle(executable, oakBundle) {
 	executable << oakBundle << bundleSizeString << MagicBytes
 }
 
+// VFS Magic bytes to identify Virtual FS data in packed binaries
+// "vfs " (3 bytes) + \x01\x00\x00\x00 = 8 bytes total
+VFSMagicBytes := 'vfs \x01\x00\x00\x00'
+
+// MaxVFSSizeLen is the number of bytes used to store the length of the VFS data
+MaxVFSSizeLen := 24
+
+// encodeVFSSize encodes the size of VFS data as a padded string
+fn encodeVFSSize(vfsSize) {
+	string(vfsSize) |> padStart(MaxVFSSizeLen, ' ')
+}
+
+// serializeVFS converts a VFS files object into a JSON string
+fn serializeVFS(vfsFiles) {
+	if vfsFiles {
+		? -> ''
+		_ -> encodeJSON(vfsFiles)
+	}
+}
+
+// deserializeVFS converts a JSON string back into a VFS files object
+fn deserializeVFS(vfsData) {
+	if vfsData {
+		?, '' -> {}
+		_ -> decodeJSON(vfsData) |> default({})
+	}
+}
+
+// packBundleWithVFS combines executable, Oak bundle, VFS data, and metadata
+// into a final packed binary format
+fn packBundleWithVFS(executable, oakBundle, vfsFiles) {
+	vfsData := serializeVFS(vfsFiles)
+	vfsSizeString := encodeVFSSize(len(vfsData))
+	bundleSizeString := encodeBundleSize(len(oakBundle))
+	
+	// Format: [executable][oakBundle][bundleSize][magic][vfsData][vfsSize][vfsMagic]
+	executable <<
+		oakBundle <<
+		bundleSizeString <<
+		MagicBytes <<
+		vfsData <<
+		vfsSizeString <<
+		VFSMagicBytes
+}
+
+// extractVFSFromPacked extracts VFS data from a packed binary
+fn extractVFSFromPacked(packedData) {
+	dataLen := len(packedData)
+	
+	// Check for VFS magic bytes at the end
+	magicStart := dataLen - len(VFSMagicBytes)
+	if packedData |> slice(magicStart) != VFSMagicBytes {
+		true -> {}
+		_ -> {
+			// Extract VFS size
+			vfsSizeStart := magicStart - MaxVFSSizeLen
+			vfsSizeStr := packedData |> slice(vfsSizeStart, magicStart)
+			vfsSize := int(vfsSizeStr |> replace(' ', '')) |> default(0)
+			
+			if vfsSize {
+				0 -> {}
+				_ -> {
+					// Extract VFS data
+					vfsStart := vfsSizeStart - vfsSize
+					vfsData := packedData |> slice(vfsStart, vfsSizeStart)
+					deserializeVFS(vfsData)
+				}
+			}
+		}
+	}
+}
+
 {
 	MagicBytes: MagicBytes
 	MaxBundleSizeLen: MaxBundleSizeLen
 	encodeBundleSize: encodeBundleSize
 	packBundle: packBundle
+	VFSMagicBytes: VFSMagicBytes
+	MaxVFSSizeLen: MaxVFSSizeLen
+	encodeVFSSize: encodeVFSSize
+	serializeVFS: serializeVFS
+	deserializeVFS: deserializeVFS
+	packBundleWithVFS: packBundleWithVFS
+	extractVFSFromPacked: extractVFSFromPacked
 }

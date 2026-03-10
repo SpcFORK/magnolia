@@ -1,0 +1,190 @@
+// Simple examples demonstrating the Oak threading library
+
+{
+	println: println
+	range: range
+	each: each
+	map: map
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+thread := import('thread')
+
+// Example 1: Basic threading with spawn
+fn example1 {
+	println('\n=== Example 1: Basic Threading ===')
+	
+	ch := thread.makeChannel()
+	
+	thread.spawn(fn(msg, replyCh) {
+		println('Worker thread says: ' << msg)
+		thread.send(replyCh, 'Work completed!')
+	}, 'Processing...', ch)
+	
+	result := thread.recv(ch)
+	println('Main thread received: ' << result.data)
+}
+
+// Example 2: Parallel computation
+fn example2 {
+	println('\n=== Example 2: Parallel Map ===')
+	
+	numbers := [1, 2, 3, 4, 5]
+	println('Input: ' << string(numbers))
+	
+	squares := thread.pmap(numbers, fn(x) x * x)
+	println('Squares: ' << string(squares))
+}
+
+// Example 3: Worker pool
+fn example3 {
+	println('\n=== Example 3: Worker Pool ===')
+	
+	pool := thread.Pool(3)
+	println('Created pool with 3 workers')
+	
+	resultCh := thread.makeChannel()
+	
+	// Submit 6 tasks
+	range(6) |> each(fn(i) {
+		pool.submit(fn() {
+			printf('Processing task {{ 0 }}', i)
+			wait(0.1)
+			thread.send(resultCh, i)
+		})
+	})
+	
+	// Collect results
+	range(6) |> each(fn(_) {
+		result := thread.recv(resultCh)
+		printf('Task {{ 0 }} completed', result.data)
+	})
+	
+	pool.close()
+	pool.wait()
+	println('All tasks finished')
+}
+
+// Example 4: WaitGroup synchronization
+fn example4 {
+	println('\n=== Example 4: WaitGroup ===')
+	
+	wg := thread.WaitGroup()
+	numTasks := 3
+	
+	wg.add(numTasks)
+	
+	range(numTasks) |> each(fn(i) {
+		thread.spawn(fn(id, waitGroup) {
+			printf('Task {{ 0 }} starting', id)
+			wait(0.1)
+			printf('Task {{ 0 }} done', id)
+			waitGroup.done()
+		}, i, wg)
+	})
+	
+	println('Waiting for all tasks...')
+	wg.wait()
+	println('All tasks completed!')
+}
+
+// Example 5: Mutex for critical section
+fn example5 {
+	println('\n=== Example 5: Mutex ===')
+	
+	m := thread.Mutex()
+	counter := 0
+	wg := thread.WaitGroup()
+	
+	wg.add(5)
+	
+	range(5) |> each(fn(i) {
+		thread.spawn(fn(id, mutex, waitGroup) {
+			mutex.lock()
+			counter := counter + 1
+			printf('Thread {{ 0 }}: counter = {{ 1 }}', id, counter)
+			mutex.unlock()
+			waitGroup.done()
+		}, i, m, wg)
+	})
+	
+	wg.wait()
+	printf('Final counter value: {{ 0 }}', counter)
+}
+
+// Example 6: Future for async computation
+fn example6 {
+	println('\n=== Example 6: Future ===')
+	
+	println('Creating future computation...')
+	
+	f := thread.Future(fn() {
+		println('  Computing in background...')
+		wait(0.2)
+		42
+	})
+	
+	println('Doing other work...')
+	wait(0.1)
+	
+	println('Waiting for result...')
+	result := f.get()
+	printf('Future result: {{ 0 }}', result)
+}
+
+// Example 7: Race - first to finish wins
+fn example7 {
+	println('\n=== Example 7: Race ===')
+	
+	winner := thread.race([
+		fn() {
+			println('  Competitor 1 starting (slow)')
+			wait(0.3)
+			'Competitor 1'
+		}
+		fn() {
+			println('  Competitor 2 starting (fast)')
+			wait(0.1)
+			'Competitor 2'
+		}
+		fn() {
+			println('  Competitor 3 starting (medium)')
+			wait(0.2)
+			'Competitor 3'
+		}
+	])
+	
+	println('Winner: ' << winner)
+}
+
+// Run all examples
+println('========================================')
+println('Oak Threading Library Examples')
+println('========================================')
+
+example1()
+wait(0.2)
+
+example2()
+wait(0.2)
+
+example3()
+wait(0.5)
+
+example4()
+wait(0.5)
+
+example5()
+wait(0.3)
+
+example6()
+wait(0.5)
+
+example7()
+wait(0.5)
+
+println('\n========================================')
+println('Examples completed!')
+println('========================================')

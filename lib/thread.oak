@@ -20,7 +20,7 @@
 // Example:
 //   spawn(fn() println('Hello from thread!'))
 //   spawn(fn(x) println(x), 'Message')
-fn spawn(fn, args...) go(fn, args...)
+fn spawn(fnToRun, args...) go(fnToRun, args...)
 
 // makeChannel creates a new channel with optional buffer size.
 // If no size is given, creates an unbuffered channel (size = 0).
@@ -98,7 +98,7 @@ fn Semaphore(n) {
 	ch := make_chan(n)
 	
 	// Fill the semaphore with n tokens
-	range(n) |> each(fn() chan_send(ch, true))
+	range(n) |> each(fn(_) chan_send(ch, true))
 
 	{
 		// acquire obtains a token from the semaphore, blocking if none available
@@ -121,11 +121,11 @@ fn Semaphore(n) {
 //   spawn(fn() { doWork(), wg.done() })
 //   wg.wait()
 fn WaitGroup {
-	doneCh := make_chan()
 	countCh := make_chan()
+	waiters := []
 
 	// Background goroutine to manage the counter
-	spawn(fn() {
+	go(fn() {
 		count := 0
 		fn loop {
 			msg := chan_recv(countCh)
@@ -138,10 +138,10 @@ fn WaitGroup {
 				:done -> {
 					count := count - 1
 					if count <= 0 -> {
-						// Signal all waiters
-						if msg.reply {
-							? -> ?
-							_ -> chan_send(msg.reply, true)
+						// Signal waiter if one exists
+						if len(waiters) > 0 -> {
+							chan_send(waiters.0, true)
+							waiters := slice(waiters, 1, len(waiters))
 						}
 					}
 					loop()
@@ -150,7 +150,7 @@ fn WaitGroup {
 					true -> chan_send(msg.reply, true)
 					_ -> {
 						// Store reply channel for when count reaches 0
-						loop()
+						waiters := append(waiters, msg.reply)
 					}
 				}
 			}
@@ -168,7 +168,6 @@ fn WaitGroup {
 		// done decrements the WaitGroup counter by 1
 		done: fn() chan_send(countCh, {
 			type: :done
-			reply: ?
 		})
 
 		// wait blocks until the WaitGroup counter is zero
@@ -188,11 +187,11 @@ fn WaitGroup {
 //   f := Future(fn() expensiveComputation())
 //   // do other work...
 //   result := f.get()
-fn Future(fn) {
+fn Future(fnToRun) {
 	resultCh := make_chan(1)
 	
-	spawn(fn() {
-		result := fn()
+	go(fn() {
+		result := fnToRun()
 		chan_send(resultCh, {
 			type: :success
 			value: result
@@ -225,11 +224,9 @@ fn Future(fn) {
 fn Pool(numWorkers) {
 	taskCh := make_chan(numWorkers * 2)
 	doneCh := make_chan()
-	closeCh := make_chan()
-	activeWorkers := 0
 
 	// Spawn worker goroutines
-	range(numWorkers) |> each(fn() spawn(fn() {
+	range(numWorkers) |> each(fn(_) go(fn() {
 		fn workerLoop {
 			task := chan_recv(taskCh)
 			if task.type {
@@ -252,18 +249,18 @@ fn Pool(numWorkers) {
 
 	{
 		// submit adds a task to the pool
-		submit: fn(fn) chan_send(taskCh, {
+		submit: fn(taskFn) chan_send(taskCh, {
 			type: :task
-			fn: fn
+			fn: taskFn
 		})
 
 		// close signals the pool to stop accepting new tasks and shut down
-		close: fn() range(numWorkers) |> each(fn() chan_send(taskCh, {
+		close: fn() range(numWorkers) |> each(fn(_) chan_send(taskCh, {
 			type: :close
 		}))
 
 		// wait blocks until all workers have finished
-		wait: fn() range(numWorkers) |> each(fn() chan_recv(doneCh))
+		wait: fn() range(numWorkers) |> each(fn(_) chan_recv(doneCh))
 
 		// size returns the number of workers in the pool
 		size: fn() numWorkers
@@ -282,6 +279,7 @@ fn parallel(fns) {
 	resultCh := make_chan(len(fns))
 	
 	fns |> each(fn(fnItem, i) spawn(fn() {
+		result := fnItem()go(fn() {
 		result := fnItem()
 		chan_send(resultCh, {
 			index: i
@@ -291,8 +289,7 @@ fn parallel(fns) {
 
 	// Collect results
 	results := []
-	range(len(fns)) |> each(fn() {
-		item := chan_recv(resultCh)
+	range(len(fns)) |> each(fn(_)
 		results.(item.index) := item.value
 	})
 
@@ -303,20 +300,20 @@ fn parallel(fns) {
 // the results in order.
 // Usage:
 //   squares := pmap([1, 2, 3, 4], fn(x) x * x)  // [1, 4, 9, 16]
-fn pmap(list, fn) {
-	fns := list |> map(fn(item) fn() fn(item))
+fn pmap(list, fnToRun) {
+	fns := list |> map(fn(item) fn() fnToRun(item))
 	parallel(fns)
 }
 
 // pmapConcurrent is like pmap but limits concurrency to n goroutines.
 // Usage:
 //   results := pmapConcurrent([1, 2, 3, 4], fn(x) x * x, 2)
-fn pmapConcurrent(list, fn, maxConcurrent) {
+fn pmapConcurrent(list, fnToRun, maxConcurrent) {
 	pool := Pool(maxConcurrent)
 	resultCh := make_chan(len(list))
 	
 	list |> each(fn(item, i) pool.submit(fn() {
-		result := fn(item)
+		result := fnToRun(item)
 		chan_send(resultCh, {
 			index: i
 			value: result
@@ -327,7 +324,7 @@ fn pmapConcurrent(list, fn, maxConcurrent) {
 
 	// Collect results
 	results := []
-	range(len(list)) |> each(fn() {
+	range(len(list)) |> each(fn(_) {
 		item := chan_recv(resultCh)
 		results.(item.index) := item.value
 	})
@@ -346,7 +343,7 @@ fn pmapConcurrent(list, fn, maxConcurrent) {
 fn race(fns) {
 	resultCh := make_chan(len(fns))
 	
-	fns |> each(fn(fnItem) spawn(fn() {
+	fns |> each(fn(fnItem) go(fn() {
 		result := fnItem()
 		chan_send(resultCh, result)
 	}))
@@ -371,12 +368,12 @@ fn pipeline(input, stages...) {
 			channels := [make_chan()] // input channel
 			
 			// Create a channel for each stage
-			range(len(stages)) |> each(fn() {
+			range(len(stages)) |> each(fn(_) {
 				channels << make_chan()
 			})
 
 			// Start each stage
-			stages |> each(fn(stageFn, i) spawn(fn() {
+			stages |> each(fn(stageFn, i) go(fn() {
 				fn stageLoop {
 					data := chan_recv(channels.(i))
 					if data.type {
@@ -418,9 +415,9 @@ fn pipeline(input, stages...) {
 // Success is determined by the function returning a non-null value.
 // Usage:
 //   result := retry(fn() unstableOperation(), 3)
-fn retry(fn, maxAttempts) {
+fn retry(fnToRun, maxAttempts) {
 	fn attempt(n) if n > 0 -> {
-		result := fn()
+		result := fnToRun()
 		if result {
 			? -> attempt(n - 1)
 			_ -> result
@@ -435,16 +432,16 @@ fn retry(fn, maxAttempts) {
 // Usage:
 //   debouncedFn := debounce(fn() println('Called!'), 0.5)
 fn debounce(fn, waitTime) {
+	timerCh := maToRun, waitTime) {
 	timerCh := make_chan()
 	
-	spawn(fn() {
+	go(fn() {
 		fn loop {
 			msg := chan_recv(timerCh)
 			if msg.type {
 				:call -> {
 					wait(waitTime)
-					fn()
-					loop()
+					fnToRuoop()
 				}
 			}
 		}
@@ -462,6 +459,7 @@ fn debounce(fn, waitTime) {
 // Usage:
 //   throttledFn := throttle(fn() println('Called!'), 1)
 fn throttle(fn, waitTime) {
+	lastCall := 0ToRun, waitTime) {
 	lastCall := 0
 	mutex := Mutex()
 
@@ -471,7 +469,6 @@ fn throttle(fn, waitTime) {
 		if now - lastCall >= waitTime -> {
 			lastCall := now
 			mutex.unlock()
-			fn(args...)
-		} |> _ -> mutex.unlock()
+			fnToRu|> _ -> mutex.unlock()
 	}
 }

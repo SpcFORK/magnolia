@@ -1,0 +1,172 @@
+// transpile -- middleware for AST transpilation and transformation
+
+{
+	map: map
+	each: each
+	clone: clone
+	merge: merge
+	filter: filter
+} := import('std')
+{
+	printf: printf
+	format: format
+} := import('fmt')
+transform := import('ast-transform')
+
+// TranspileRegistry holds all registered transpilers
+TranspileRegistry := []
+
+// TranspileConfig holds configuration for the transpilation process
+TranspileConfig := {
+	enabled?: true
+	verbose?: false
+	log: printf
+}
+
+// configure sets up the transpilation middleware
+fn configure(config) {
+	TranspileConfig <- merge(TranspileConfig, config)
+}
+
+// registerTranspiler adds a new transpiler to the registry
+// A transpiler is a function that takes an AST node and returns a transformed AST node
+fn registerTranspiler(transpiler) {
+	TranspileRegistry <- TranspileRegistry |> clone() << transpiler
+}
+
+// clearTranspilers removes all registered transpilers
+fn clearTranspilers() {
+	TranspileRegistry <- []
+}
+
+// applyTranspiler applies a single transpiler function to an AST node
+fn applyTranspiler(node, transpiler) if type(transpiler) {
+	:function -> transpiler(node)
+	_ -> node
+}
+
+// transpileNode applies all registered transpilers to an AST node
+// This is the main middleware function that should be called during build
+fn transpileNode(node) if TranspileConfig.enabled? {
+	false -> node
+	_ -> {
+		if TranspileConfig.verbose? -> TranspileConfig.log(
+			format('[transpile] Applying {{0}} transpiler(s)...', len(TranspileRegistry))
+		)
+		
+		// Apply each transpiler in sequence
+		TranspileRegistry |> with reduce(node) fn(currentNode, transpiler, i) {
+			if TranspileConfig.verbose? -> TranspileConfig.log(
+				format('[transpile] Applying transpiler #{{0}}', i + 1)
+			)
+			applyTranspiler(currentNode, transpiler)
+		}
+	}
+}
+
+// walkNode recursively walks an AST node and applies a transformation function
+// This is a utility for building custom transpilers
+fn walkNode(node, visitor) if node.type {
+	:block -> {
+		node.exprs := node.exprs |> map(fn(expr) walkNode(expr, visitor))
+		visitor(node)
+	}
+	:function -> {
+		node.body := walkNode(node.body, visitor)
+		visitor(node)
+	}
+	:ifExpr -> {
+		node.cond := walkNode(node.cond, visitor)
+		node.branches := node.branches |> map(fn(br) walkNode(br, visitor))
+		visitor(node)
+	}
+	:ifBranch -> {
+		node.target := walkNode(node.target, visitor)
+		node.body := walkNode(node.body, visitor)
+		visitor(node)
+	}
+	:fnCall -> {
+		node.function := walkNode(node.function, visitor)
+		node.args := node.args |> map(fn(arg) walkNode(arg, visitor))
+		if node.restArg != ? -> node.restArg := walkNode(node.restArg, visitor)
+		visitor(node)
+	}
+	:unary -> {
+		node.right := walkNode(node.right, visitor)
+		visitor(node)
+	}
+	:binary, :propertyAccess, :assignment -> {
+		node.left := walkNode(node.left, visitor)
+		node.right := walkNode(node.right, visitor)
+		visitor(node)
+	}
+	:list -> {
+		node.elems := node.elems |> map(fn(elem) walkNode(elem, visitor))
+		visitor(node)
+	}
+	:object -> {
+		node.entries := node.entries |> map(fn(entry) {
+			key: walkNode(entry.key, visitor)
+			val: walkNode(entry.val, visitor)
+		})
+		visitor(node)
+	}
+	// For leaf nodes and unknown types, just apply visitor
+	_ -> visitor(node)
+}
+
+// Example transpilers
+
+// optimizeConstants is an example transpiler that folds constant expressions
+fn optimizeConstants(node) if node.type {
+	:binary -> if {
+		node.op = :plus & node.left.type = :int & node.right.type = :int -> {
+			type: :int
+			tok: node.tok
+			val: node.left.val + node.right.val
+		}
+		node.op = :minus & node.left.type = :int & node.right.type = :int -> {
+			type: :int
+			tok: node.tok
+			val: node.left.val - node.right.val
+		}
+		node.op = :times & node.left.type = :int & node.right.type = :int -> {
+			type: :int
+			tok: node.tok
+			val: node.left.val * node.right.val
+		}
+		_ -> node
+	}
+	_ -> node
+}
+
+// removeDebugCalls is an example transpiler that removes debug statements
+fn removeDebugCalls(node) if node.type {
+	:block -> {
+		node.exprs := node.exprs |> filter(fn(expr) if expr.type {
+			:fnCall -> if expr.function.type {
+				:identifier -> expr.function.val != 'debug'
+				_ -> true
+			}
+			_ -> true
+		})
+		node
+	}
+	_ -> node
+}
+
+// createTranspiler is a helper to create a transpiler from a visitor function
+// The visitor function is called for each node in the AST
+fn createTranspiler(visitor) fn(node) walkNode(node, visitor)
+
+{
+	configure: configure
+	registerTranspiler: registerTranspiler
+	clearTranspilers: clearTranspilers
+	transpileNode: transpileNode
+	walkNode: walkNode
+	createTranspiler: createTranspiler
+	// Export example transpilers
+	optimizeConstants: optimizeConstants
+	removeDebugCalls: removeDebugCalls
+}

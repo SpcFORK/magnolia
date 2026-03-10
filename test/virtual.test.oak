@@ -150,6 +150,110 @@ fn run(t) {
 			ctx.evalExpr('twice(4 + 1)')
 			10
 		)
+	}
+
+	{
+		vfs := Virtual.createVirtualFS({})
+
+		'createVirtualFS creates VFS object' |> t.eq(
+			type(vfs)
+			:object
+		)
+
+		'VFS initially has no files' |> t.eq(
+			len(vfs.listFiles())
+			0
+		)
+
+		'VFS writeFile stores content' |> t.eq(
+			{
+				vfs.writeFile('test.txt', 'Hello World')
+				vfs.readFile('test.txt')
+			}
+			'Hello World'
+		)
+
+		'VFS readFile returns null for missing files' |> t.eq(
+			vfs.readFile('missing.txt')
+			?
+		)
+
+		'VFS exists? checks file existence' |> t.eq(
+			{
+				vfs.writeFile('exists.txt', 'content')
+				vfs.exists?('exists.txt')
+			}
+			true
+		)
+
+		'VFS statFile returns file info' |> t.eq(
+			{
+				vfs.writeFile('stats.txt', 'test')
+				stat := vfs.statFile('stats.txt')
+				stat.size
+			}
+			4
+		)
+
+		'VFS normalizes paths with backslashes' |> t.eq(
+			{
+				vfs.writeFile('path\\to\\file.txt', 'data')
+				vfs.readFile('path/to/file.txt')
+			}
+			'data'
+		)
+
+		'VFS deleteFile removes files' |> t.eq(
+			{
+				vfs.writeFile('delete.txt', 'remove me')
+				vfs.deleteFile('delete.txt')
+				vfs.exists?('delete.txt')
+			}
+			false
+		)
+
+		'VFS getFiles returns all files' |> t.eq(
+			{
+				vfs.writeFile('a.txt', 'A')
+				vfs.writeFile('b.txt', 'B')
+				files := vfs.getFiles()
+				type(files)
+			}
+			:object
+		)
+
+		'VFS setFiles replaces all files' |> t.eq(
+			{
+				vfs.setFiles({ 'new.txt': 'new content' })
+				vfs.readFile('new.txt')
+			}
+			'new content'
+		)
+	}
+
+	{
+		vfs := Virtual.createVirtualFS({
+			'initial.txt': 'initial data'
+			'dir/file.txt': 'nested file'
+		})
+
+		'VFS can be initialized with files' |> t.eq(
+			vfs.readFile('initial.txt')
+			'initial data'
+		)
+
+		'VFS handles nested paths' |> t.eq(
+			vfs.readFile('dir/file.txt')
+			'nested file'
+		)
+
+		'VFS listFiles shows all files' |> t.eq(
+			len(vfs.listFiles())
+			2
+		)
+	}
+			10
+		)
 
 		'macros can expand nested macro calls' |> t.eq(
 			{

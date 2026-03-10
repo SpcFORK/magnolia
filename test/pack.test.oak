@@ -1,4 +1,8 @@
 pack := import('pack')
+packUtils := import('pack-utils')
+{
+	slice: slice
+} := import('std')
 
 fn run(t) {
 	'build args without include' |> t.eq(
@@ -10,4 +14,59 @@ fn run(t) {
 		['build', '--entry', 'main.oak', '--output', 'bundle.oak', '--include', 'dyn:./dyn']
 	)
 	'pack exports run function' |> t.eq(type(pack.run), :function)
+	'pack exports collectVFSFiles function' |> t.eq(type(pack.collectVFSFiles), :function)
+	
+	{
+		'packUtils serializeVFS empty object' |> t.eq(
+			packUtils.serializeVFS({})
+			'{}'
+		)
+		
+		'packUtils serializeVFS with files' |> t.eq(
+			{
+				result := packUtils.serializeVFS({ 'file.txt': 'content' })
+				type(result)
+			}
+			:string
+		)
+		
+		'packUtils deserializeVFS empty string' |> t.eq(
+			packUtils.deserializeVFS('')
+			{}
+		)
+		
+		'packUtils deserializeVFS with data' |> t.eq(
+			{
+				vfs := packUtils.deserializeVFS('{"test.txt":"data"}')
+				vfs.('test.txt')
+			}
+			'data'
+		)
+		
+		'packUtils roundtrip serialize/deserialize' |> t.eq(
+			{
+				original := { 'a.txt': 'A', 'b.txt': 'B' }
+				serialized := packUtils.serializeVFS(original)
+				deserialized := packUtils.deserializeVFS(serialized)
+				deserialized.('a.txt')
+			}
+			'A'
+		)
+		
+		'packUtils encodeVFSSize pads correctly' |> t.eq(
+			{
+				encoded := packUtils.encodeVFSSize(123)
+				len(encoded)
+			}
+			packUtils.MaxVFSSizeLen
+		)
+		
+		'packUtils packBundleWithVFS includes VFS magic' |> t.eq(
+			{
+				packed := packUtils.packBundleWithVFS('exe', 'bundle', { 'f.txt': 'data' })
+				packed |> slice(len(packed) - len(packUtils.VFSMagicBytes))
+			}
+			packUtils.VFSMagicBytes
+		)
+	}
 }
