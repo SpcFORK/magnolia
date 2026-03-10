@@ -17,6 +17,7 @@
 	every: every
 	filter: filter
 	contains?: contains?
+	keys: keys
 } := import('std')
 {
 	split: split
@@ -92,19 +93,25 @@ cs Suite(title) {
 	fn same?(a, b) {
 		ta := type(a)
 		tb := type(b)
-		if ta {
-			tb -> if ta {
-				:list -> len(a) = len(b) & a |> every(fn(_, i) same?(a.(i), b.(i)))
-				:object -> {
-					aKeys := keys(a)
-					bKeys := keys(b)
-					len(aKeys) = len(bKeys) &
-						aKeys |> every(fn(k) bKeys |> contains?(k)) &
-						aKeys |> every(fn(k) same?(a.(k), b.(k)))
+		if ta = :empty | tb = :empty {
+			true -> true
+			_ -> if ta = :list & tb = :list {
+				true -> {
+					sameLen? := len(a) = len(b)
+					elemsMatch? := a |> every(fn(_, i) same?(a.(i), b.(i)))
+					sameLen? & elemsMatch?
 				}
-				_ -> a = b
+				_ -> if ta = :object & tb = :object {
+					true -> {
+						aKeys := keys(a)
+						bKeys := keys(b)
+						hasAllKeys? := bKeys |> every(fn(k) aKeys |> contains?(k))
+						valsMatch? := bKeys |> every(fn(k) same?(a.(k), b.(k)))
+						hasAllKeys? & valsMatch?
+					}
+					_ -> a = b
+				}
 			}
-			_ -> false
 		}
 	}
 

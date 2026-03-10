@@ -44,38 +44,41 @@ fs := import('fs')
 //   normalizePath('/home/user', './docs')      // => '/home/user/docs'
 //   normalizePath('/home/user', '../other')    // => '/home/other'
 fn normalizePath(currentDir, targetPath) {
-	p := if startsWith?(targetPath, '/') {
-		true -> targetPath
-		_ -> if startsWith?(targetPath, './') {
-			true -> currentDir << '/' << slice(targetPath, 2, len(targetPath))
-			_ -> if startsWith?(targetPath, '../') {
-				true -> {
-					parts := split(currentDir, '/')
-					upCount := 0
-					fn countUp(i) if i < len(targetPath) - 2 {
-						true -> if slice(targetPath, i, i + 3) = '../' {
-							true -> {
-								upCount <- upCount + 1
-								countUp(i + 3)
-							}
-							_ -> i
-						}
-						_ -> i
-					}
-					rest := countUp(0)
-					parentParts := slice(parts, 0, len(parts) - upCount)
-					parentPath := join(parentParts, '/')
-					if rest < len(targetPath) {
-						true -> parentPath << '/' << slice(targetPath, rest, len(targetPath))
-						_ -> parentPath
-					}
+	fn popDir(p) {
+		d := path.dir(p)
+		if d {
+			'' -> '/'
+			_ -> d
+		}
+	}
+	if startsWith?(targetPath, '/') {
+		true -> path.resolve(targetPath, '/')
+		_ -> {
+			base := if currentDir {
+				'' -> '/'
+				_ -> currentDir
+			}
+			rest := if startsWith?(targetPath, './') {
+				true -> slice(targetPath, 2, len(targetPath))
+				_ -> targetPath
+			}
+			if rest = '..' | startsWith?(rest, '../') {
+				true -> base <- popDir(base)
+			}
+			fn consumeUps(basePath, relPath) if relPath {
+				'..' -> [popDir(basePath), '']
+				_ -> if startsWith?(relPath, '../') {
+					true -> consumeUps(popDir(basePath), slice(relPath, 3, len(relPath)))
+					_ -> [basePath, relPath]
 				}
-				_ -> currentDir << '/' << targetPath
+			}
+			[nextBase, tail] := consumeUps(base, rest)
+			if tail {
+				'' -> nextBase
+				_ -> path.join(nextBase, tail)
 			}
 		}
 	}
-	// normalize double slashes
-	replace(p, '//', '/')
 }
 
 // Shell creates a shell environment with built-in commands.
@@ -114,28 +117,9 @@ cs Shell(vfs?) {
 		}
 		_ -> {
 			newDir := normalizePath(currentDir, args.0)
-			// Check if directory exists (or assume it does for VFS)
-			if vfs? != ? {
-				// For VFS, we allow any path
-				true -> {
-					currentDir <- newDir
-					env.PWD <- currentDir
-					0
-				}
-			} |> default(
-				// For real FS, check if it exists
-				if fs.statFile(newDir) {
-					? -> {
-						printf('cd: no such directory: {{ 0 }}\n', args.0)
-						1
-					}
-					_ -> {
-						currentDir <- newDir
-						env.PWD <- currentDir
-						0
-					}
-				}
-			)
+			currentDir <- newDir
+			env.PWD <- currentDir
+			0
 		}
 	}
 	
@@ -243,12 +227,12 @@ cs Shell(vfs?) {
 	
 	fn cmd_rm(args) {
 		recursive? := false
-		files := []
-		
-		// Parse flags
-		each(args, fn(arg) if arg {
-			'-r', '-rf' -> recursive? <- true
-			_ -> files <- append(files, arg)
+		files := args |> filter(fn(arg) if arg {
+			'-r', '-rf' -> {
+				recursive? <- true
+				false
+			}
+			_ -> true
 		})
 		
 		if len(files) {
@@ -259,20 +243,10 @@ cs Shell(vfs?) {
 			_ -> {
 					each(files, fn(file) {
 					fullPath := normalizePath(currentDir, file)
-					if vfs? != ? {
-						// VFS delete
-						true -> {
-							result := vfs?.deleteFile(fullPath)
-							if result = ? {
-								true -> printf('rm: cannot remove {{ 0 }}\n', file)
-							}
-						}
-						// Real FS delete
-						_ -> {
-							result := fs.removeFile(fullPath)
-							if result = ? {
-								true -> printf('rm: cannot remove {{ 0 }}\n', file)
-							}
+					if filesystem.deleteFile {
+						? -> printf('rm: cannot remove {{ 0 }}\n', file)
+						_ -> if filesystem.deleteFile(fullPath) != true {
+							true -> printf('rm: cannot remove {{ 0 }}\n', file)
 						}
 					}
 				})
