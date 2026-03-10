@@ -237,6 +237,48 @@ fn pluralize(word, count) if count {
 
 This match expression, combined with safe tail recursion, makes Magnolia Turing-complete.
 
+Magnolia also provides **class syntax sugar** for creating constructor functions with the `cs` keyword. Classes are syntactic sugar that make it easier to create objects with shared state and methods.
+
+```js
+// Basic class with constructor parameters
+cs Person(name, age) {
+    {
+        name: name
+        age: age
+        greet: fn() 'Hello, I am ' + name
+    }
+}
+
+person := Person('Alice', 30)
+person.greet() // 'Hello, I am Alice'
+
+// Class methods can close over constructor state
+cs Counter(start) {
+    {
+        value: start
+        increment: fn() start <- start + 1
+        get: fn() start
+    }
+}
+
+counter := Counter(0)
+counter.increment()
+counter.get() // 1
+
+// Classes support variadic parameters
+cs List(items...,) {
+    {
+        items: items
+        length: len(items)
+    }
+}
+
+list := List(1, 2, 3, 4)
+list.length // 4
+```
+
+Under the hood, classes are simply functions that return objects, but the `cs` syntax provides a cleaner way to define object constructors with shared behavior.
+
 Lastly, because callback-based asynchronous concurrency is common in Magnolia, there's special syntax sugar, the `with` expression, to help. The `with` syntax sugar de-sugars like this.
 
 ```js

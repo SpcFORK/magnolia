@@ -73,6 +73,9 @@ var libbundleutils string
 //go:embed lib/ast-transform.oak
 var libasttransform string
 
+//go:embed lib/shell.oak
+var libshell string
+
 var stdlibs = map[string]string{
 	"std":           libstd,
 	"str":           libstr,
@@ -96,6 +99,7 @@ var stdlibs = map[string]string{
 	"pack-utils":    libpackutils,
 	"bundle-utils":  libbundleutils,
 	"ast-transform": libasttransform,
+	"shell":         libshell,
 }
 
 func isStdLib(name string) bool {
