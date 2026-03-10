@@ -424,6 +424,8 @@ type Context struct {
 	// directory containing the root file of this context, used for loading
 	// other modules with relative paths / URLs
 	rootPath string
+	// current file name being executed (for error reporting)
+	currentFile string
 	// top level ("global") scope of this context
 	scope
 	// cached Oak VM for evaluation
@@ -526,7 +528,11 @@ func (c *Context) evalGo(programReader io.Reader) (Value, error) {
 		return nil, err
 	}
 
-	tokenizer := newTokenizer(string(program))
+	fileName := c.currentFile
+	if fileName == "" {
+		fileName = "(input)"
+	}
+	tokenizer := newTokenizer(string(program), fileName)
 	tokens := tokenizer.tokenize()
 
 	parser := newParser(tokens)

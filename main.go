@@ -15,10 +15,5 @@ func main() {
 		return
 	}
 
-	if isStdinReadable() {
-		runStdin()
-		return
-	}
-
 	runRepl()
 }

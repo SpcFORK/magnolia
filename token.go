@@ -192,11 +192,11 @@ func (t token) String() string {
 	}
 }
 
-func newTokenizer(sourceString string) tokenizer {
+func newTokenizer(sourceString string, fileName string) tokenizer {
 	return tokenizer{
 		source:   []rune(sourceString),
 		index:    0,
-		fileName: "(input)",
+		fileName: fileName,
 		line:     1,
 		col:      0,
 	}

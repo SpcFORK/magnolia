@@ -69,9 +69,12 @@ func performCommandIfExists(command string) bool {
 	ctx := NewContextWithCwd()
 	defer ctx.Wait()
 	ctx.LoadBuiltins()
+	ctx.currentFile = "(" + command + ")"
 
 	if _, err := ctx.Eval(strings.NewReader(commandProgram)); err != nil {
-		fmt.Println(err)
+		config := DefaultErrorConfig()
+		config.ShowContext = false
+		DisplayError(err, config)
 		os.Exit(1)
 	}
 
@@ -149,22 +152,24 @@ func runFile(filePath string) {
 	defer file.Close()
 
 	ctx := NewContext(path.Dir(filePath))
+	ctx.currentFile = filePath
 	defer ctx.Wait()
 	ctx.LoadBuiltins()
 
 	if _, err = ctx.Eval(file); err != nil {
-		fmt.Println(err)
+		DisplayError(err, DefaultErrorConfig())
 		os.Exit(1)
 	}
 }
 
 func runStdin() {
 	ctx := NewContextWithCwd()
+	ctx.currentFile = "(stdin)"
 	defer ctx.Wait()
 	ctx.LoadBuiltins()
 
 	if _, err := ctx.Eval(os.Stdin); err != nil {
-		fmt.Println(err)
+		DisplayError(err, DefaultErrorConfig())
 		os.Exit(1)
 	}
 }
@@ -201,9 +206,12 @@ func runRepl() {
 			continue
 		}
 
+		ctx.currentFile = "(repl)"
 		val, err := ctx.Eval(strings.NewReader(line))
 		if err != nil {
-			fmt.Println(err)
+			config := DefaultErrorConfig()
+			config.ShowContext = false // Don't show context for REPL
+			DisplayError(err, config)
 			continue
 		}
 		fmt.Println(val)
@@ -225,6 +233,7 @@ func runEval() {
 		ctx.scope.put("stdin", &allInputValue)
 	}
 
+	ctx.currentFile = "(eval)"
 	prog := strings.Join(os.Args[2:], " ")
 	if val, err := ctx.Eval(strings.NewReader(prog)); err == nil {
 		if stringVal, ok := val.(*StringValue); ok {
@@ -233,7 +242,9 @@ func runEval() {
 			fmt.Println(val)
 		}
 	} else {
-		fmt.Println(err)
+		config := DefaultErrorConfig()
+		config.ShowContext = false
+		DisplayError(err, config)
 		os.Exit(1)
 	}
 }

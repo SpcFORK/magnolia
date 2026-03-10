@@ -180,6 +180,7 @@ func (c *Context) LoadLib(name string) (Value, *runtimeError) {
 	}
 
 	ctx := c.ChildContext(c.rootPath)
+	ctx.currentFile = "(lib:" + name + ")"
 	ctx.LoadBuiltins()
 
 	ctx.Unlock()

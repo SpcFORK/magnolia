@@ -84,6 +84,30 @@ go run . <file-or-command>
 
 Magnolia extends Oak with powerful new features for modern development:
 
+### 🎨 Enhanced Error Display
+
+Beautiful, color-coded error messages with source code context to help you quickly identify and fix issues:
+
+```
+╭─ Runtime Error ───────────────────────────────────────────
+│
+│ File: test.oak
+│ Position: [4:8]
+│
+│ Division by zero
+│
+│ Context:
+│    2 │ x := 10
+│    3 │ y := 20
+│    4 │ z := x / 0
+│      │        ^
+│    5 │ 
+│    6 │ println(z)
+╰───────────────────────────────────────────────────────────
+```
+
+See [error-display.md](docs/error-display.md) for more details.
+
 ### 🔧 Transpile Middleware
 
 A plugin architecture for AST transformations during the build process. Write custom transpilers to transform your code at compile-time:
