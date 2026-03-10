@@ -45,15 +45,15 @@ test-wasm:
 
 # build for a specific GOOS target
 build-%:
-	GOOS=$* go build ${LDFLAGS} -o oak-$* .
+	GOOS=$* go build ${LDFLAGS} -o magnolia-$* .
 
 # build for all OS targets
 build: build-linux build-darwin build-windows build-openbsd
 
 # build Oak sources for the website
 site:
-	oak build --entry www/src/app.js.oak --output www/static/js/bundle.js --web
-	oak build --entry www/src/highlight.js.oak --output www/static/js/highlight.js --web
+	magnolia build --entry www/src/app.js.oak --output www/static/js/bundle.js --web
+	magnolia build --entry www/src/highlight.js.oak --output www/static/js/highlight.js --web
 
 # build Oak source for the website on file change, using entr
 site-w:
@@ -61,12 +61,12 @@ site-w:
 
 # generate static site pages
 site-gen:
-	oak www/src/gen.oak
+	magnolia www/src/gen.oak
 
-# install as "oak" binary
+# install as "magnolia" binary
 install:
 	cp tools/oak.vim ~/.vim/syntax/oak.vim
-	go build ${LDFLAGS} -o ${GOPATH}/bin/oak
+	go build ${LDFLAGS} -o ${GOPATH}/bin/magnolia
 
 # ci in travis
 ci: tests test-oak test-bundle test-pack
