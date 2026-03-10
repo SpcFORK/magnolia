@@ -64,6 +64,9 @@ var libbmp string
 //go:embed lib/gpu.oak
 var libgpu string
 
+//go:embed lib/gpus.oak
+var libgpus string
+
 //go:embed lib/syntax.oak
 var libsyntax string
 
@@ -153,6 +156,7 @@ var stdlibs = map[string]string{
 	"bitwise":         libbitwise,
 	"bmp":             libbmp,
 	"gpu":             libgpu,
+	"gpus":            libgpus,
 	"syntax":          libsyntax,
 	"Virtual":         libvirtual,
 	"VirtualToken":    libvirtualtoken,
@@ -196,6 +200,7 @@ var stdlibAutoLoadOrder = []string{
 	"md",
 	"crypto",
 	"gpu",
+	"gpus",
 	"syntax",
 	"Virtual",
 	"shell",

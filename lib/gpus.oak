@@ -1,0 +1,123 @@
+// libgpus provides a backend-agnostic middleware layer over libgpu.
+//
+// It chooses the first available backend from a preferred order and exposes
+// helpers to resolve and call GPU symbols without backend-specific branching.
+
+{
+	default: default
+} := import('std')
+
+gpu := import('gpu')
+
+_defaultOrder := ['cuda', 'opencl']
+
+fn _normalizeOrder(order) if type(default(order, _defaultOrder)) {
+	:string -> [default(order, _defaultOrder)]
+	_ -> default(order, _defaultOrder)
+}
+
+fn _findBackend(backends, name, i) if i {
+	len(backends) -> ?
+	_ -> if backends.(i).name = name {
+		true -> backends.(i)
+		_ -> _findBackend(backends, name, i + 1)
+	}
+}
+
+fn select(order) {
+	order := _normalizeOrder(order)
+	available := gpu.available()
+
+	fn sub(i) if i {
+		len(order) -> if len(available) {
+			0 -> {
+				{
+					type: :error
+					error: 'No GPU backend is available on this system'
+					order: order
+					scan: gpu.scan()
+				}
+			}
+			_ -> {
+				{
+					type: :ok
+					backend: available.0
+					fallback: true
+					order: order
+				}
+			}
+		}
+		_ -> {
+			matched := _findBackend(available, order.(i), 0)
+			if matched {
+				? -> sub(i + 1)
+				_ -> {
+					{
+						type: :ok
+						backend: matched
+						fallback: false
+						order: order
+					}
+				}
+			}
+		}
+	}
+
+	sub(0)
+}
+
+fn _resolveWithBackend(backendName, symbol) if backendName {
+	'cuda' -> gpu.cuda(symbol)
+	'opencl' -> gpu.opencl(symbol)
+	_ -> {
+		{
+			type: :error
+			error: 'Unsupported GPU backend: ' + string(backendName)
+			backend: backendName
+			symbol: symbol
+		}
+	}
+}
+
+fn resolve(symbol, order) {
+	chosen := select(order)
+	if chosen.type {
+		:error -> chosen
+		_ -> {
+			resolved := _resolveWithBackend(chosen.backend.name, symbol)
+			if resolved.type {
+				:proc -> {
+					{
+						type: :ok
+						backend: chosen.backend
+						proc: resolved
+						symbol: symbol
+					}
+				}
+				_ -> {
+					{
+						type: :error
+						error: default(resolved.error, 'Could not resolve GPU symbol')
+						backend: chosen.backend
+						symbol: symbol
+						detail: resolved
+					}
+				}
+			}
+		}
+	}
+}
+
+fn call(procOrAddress, args...) gpu.call(procOrAddress, args...)
+
+fn invoke(symbol, args...) {
+	resolved := resolve(symbol)
+	if resolved.type {
+		:ok -> call(resolved.proc, args...)
+		_ -> resolved
+	}
+}
+
+fn scan() gpu.scan()
+
+fn available() gpu.available()
