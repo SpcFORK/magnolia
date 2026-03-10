@@ -309,31 +309,50 @@ fn _hdr(attrs) {
 cs Server {
 	router := Router()
 
+	fn _serveRequest(evt) {
+		{ method: method, url: url } := evt.req
+		printf('{{ 0 }}: {{ 1 }}', method, url)
+
+		with router.match(url)(evt.req) fn(resp) {
+			resp.headers := _hdr(resp.headers |> default({}))
+			evt.end(resp)
+		}
+	}
+
+	fn _listen(port, threaded?) {
+		listen('0.0.0.0:' + string(port), fn(evt) if evt.type {
+			:error -> {
+				printf('Server error: {{ 0 }}', evt.error)
+			}
+			_ -> if threaded? {
+				true -> go(fn() _serveRequest(evt))
+				_ -> _serveRequest(evt)
+			}
+		})
+	}
+
 	fn start(port) {
 		router.catch(fn(params) fn(req, end) end({
 			status: 404
 			body: 'not found'
 		}))
 
-		listen('0.0.0.0:' + string(port), fn(evt) if evt.type {
-			:error -> {
-				printf('Server error: {{ 0 }}', evt.error)
-			}
-			_ -> {
-				{ method: method, url: url } := evt.req
-				printf('{{ 0 }}: {{ 1 }}', method, url)
+		_listen(port, false)
+	}
 
-				with router.match(url)(evt.req) fn(resp) {
-					resp.headers := _hdr(resp.headers |> default({}))
-					evt.end(resp)
-				}
-			}
-		})
+	fn startThreaded(port) {
+		router.catch(fn(params) fn(req, end) end({
+			status: 404
+			body: 'not found'
+		}))
+
+		_listen(port, true)
 	}
 
 	{
 		route: router.add
 		start: start
+		startThreaded: startThreaded
 	}
 }
 

@@ -23,6 +23,8 @@ import (
 	"time"
 	utf16pkg "unicode/utf16"
 	"unsafe"
+
+	"github.com/gorilla/websocket"
 )
 
 func (c *Context) requireArgLen(fnName string, args []Value, count int) *runtimeError {
@@ -116,6 +118,11 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("write", c.callbackify(c.oakWrite))
 	c.LoadFunc("listen", c.oakListen)
 	c.LoadFunc("req", c.callbackify(c.oakReq))
+	c.LoadFunc("ws_dial", c.callbackify(c.oakWSDial))
+	c.LoadFunc("ws_send", c.callbackify(c.oakWSSend))
+	c.LoadFunc("ws_recv", c.callbackify(c.oakWSRecv))
+	c.LoadFunc("ws_close", c.callbackify(c.oakWSClose))
+	c.LoadFunc("ws_listen", c.oakWSListen)
 
 	// math
 	c.LoadFunc("sin", c.oakSin)
@@ -157,6 +164,9 @@ func syscallErrObj(message string) ObjectValue {
 var (
 	sysProcMu    sync.Mutex
 	sysProcCache = map[string]uintptr{}
+	wsConnMu     sync.Mutex
+	wsConnMap    = map[int64]*websocket.Conn{}
+	wsNextConnID int64
 )
 
 func chanSentObj() ObjectValue {
@@ -170,6 +180,87 @@ func chanDataObj(data Value) ObjectValue {
 		"type": AtomValue("data"),
 		"data": data,
 	}
+}
+
+func websocketObj(id int64) ObjectValue {
+	return ObjectValue{
+		"type": AtomValue("websocket"),
+		"id":   IntValue(id),
+	}
+}
+
+func websocketEvent(messageType int, data []byte) ObjectValue {
+	return ObjectValue{
+		"type":   AtomValue("message"),
+		"opcode": IntValue(messageType),
+		"data":   MakeString(string(data)),
+	}
+}
+
+func websocketClosedEvent(code int, reason string) ObjectValue {
+	return ObjectValue{
+		"type":   AtomValue("closed"),
+		"code":   IntValue(code),
+		"reason": MakeString(reason),
+	}
+}
+
+func makeHeaderObject(headers http.Header) ObjectValue {
+	out := ObjectValue{}
+	for key, values := range headers {
+		out[key] = MakeString(strings.Join(values, ","))
+	}
+	return out
+}
+
+func (c *Context) getWebsocket(arg Value, fnName string) (*websocket.Conn, int64, *runtimeError) {
+	wsObj, ok := arg.(ObjectValue)
+	if !ok {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("First argument to %s must be a websocket, got %s", fnName, arg),
+		}
+	}
+
+	typeVal, ok := wsObj["type"].(AtomValue)
+	if !ok || typeVal != AtomValue("websocket") {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("First argument to %s must be a websocket, got %s", fnName, arg),
+		}
+	}
+
+	id, ok := wsObj["id"].(IntValue)
+	if !ok {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("Websocket %s is malformed", arg),
+		}
+	}
+
+	wsConnMu.Lock()
+	conn, ok := wsConnMap[int64(id)]
+	wsConnMu.Unlock()
+	if !ok {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("Websocket %s is not available", arg),
+		}
+	}
+
+	return conn, int64(id), nil
+}
+
+func storeWebsocket(conn *websocket.Conn) ObjectValue {
+	wsConnMu.Lock()
+	id := wsNextConnID
+	wsNextConnID++
+	wsConnMap[id] = conn
+	wsConnMu.Unlock()
+
+	return websocketObj(id)
+}
+
+func removeWebsocket(id int64) {
+	wsConnMu.Lock()
+	delete(wsConnMap, id)
+	wsConnMu.Unlock()
 }
 
 func lookupSysProc(library, name string) (uintptr, error) {
@@ -1834,6 +1925,279 @@ func (c *Context) oakReq(args []Value) (Value, *runtimeError) {
 			"headers": respHeaders,
 			"body":    respBody,
 		},
+	}, nil
+}
+
+func (c *Context) oakWSDial(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("ws_dial", args, 1); err != nil {
+		return nil, err
+	}
+
+	urlVal, ok := args[0].(*StringValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Mismatched types in call ws_dial(%s)", args[0]),
+		}
+	}
+
+	requestHeaders := http.Header{}
+	if len(args) >= 2 {
+		headersObj, ok := args[1].(ObjectValue)
+		if !ok {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Second argument to ws_dial must be an object, got %s", args[1]),
+			}
+		}
+
+		for key, value := range headersObj {
+			valStr, ok := value.(*StringValue)
+			if !ok {
+				return nil, &runtimeError{
+					reason: fmt.Sprintf("Header value %s for key %s must be a string", value, key),
+				}
+			}
+			requestHeaders.Set(key, valStr.stringContent())
+		}
+	}
+
+	dialer := websocket.Dialer{}
+	conn, resp, err := dialer.Dial(urlVal.stringContent(), requestHeaders)
+	if err != nil {
+		status := IntValue(0)
+		headers := ObjectValue{}
+		if resp != nil {
+			status = IntValue(resp.StatusCode)
+			headers = makeHeaderObject(resp.Header)
+			_ = resp.Body.Close()
+		}
+
+		return ObjectValue{
+			"type":    AtomValue("error"),
+			"error":   MakeString(err.Error()),
+			"status":  status,
+			"headers": headers,
+		}, nil
+	}
+
+	status := IntValue(101)
+	respHeaders := ObjectValue{}
+	if resp != nil {
+		status = IntValue(resp.StatusCode)
+		respHeaders = makeHeaderObject(resp.Header)
+		_ = resp.Body.Close()
+	}
+
+	return ObjectValue{
+		"type":    AtomValue("ok"),
+		"socket":  storeWebsocket(conn),
+		"status":  status,
+		"headers": respHeaders,
+	}, nil
+}
+
+func (c *Context) oakWSSend(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("ws_send", args, 2); err != nil {
+		return nil, err
+	}
+
+	conn, _, err := c.getWebsocket(args[0], "ws_send")
+	if err != nil {
+		return nil, err
+	}
+
+	data, ok := args[1].(*StringValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Second argument to ws_send must be a string, got %s", args[1]),
+		}
+	}
+
+	messageType := websocket.TextMessage
+	if len(args) >= 3 {
+		opcode, ok := args[2].(IntValue)
+		if !ok {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Third argument to ws_send must be an int opcode, got %s", args[2]),
+			}
+		}
+		messageType = int(opcode)
+	}
+
+	c.Unlock()
+	writeErr := conn.WriteMessage(messageType, []byte(data.stringContent()))
+	c.Lock()
+	if writeErr != nil {
+		return errObj(fmt.Sprintf("Could not write websocket message: %s", writeErr.Error())), nil
+	}
+
+	return ObjectValue{
+		"type": AtomValue("sent"),
+	}, nil
+}
+
+func (c *Context) oakWSRecv(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("ws_recv", args, 1); err != nil {
+		return nil, err
+	}
+
+	conn, id, err := c.getWebsocket(args[0], "ws_recv")
+	if err != nil {
+		return nil, err
+	}
+
+	c.Unlock()
+	messageType, payload, readErr := conn.ReadMessage()
+	c.Lock()
+	if readErr != nil {
+		if closeErr, ok := readErr.(*websocket.CloseError); ok {
+			removeWebsocket(id)
+			return websocketClosedEvent(closeErr.Code, closeErr.Text), nil
+		}
+
+		if websocket.IsUnexpectedCloseError(readErr) || readErr == io.EOF {
+			removeWebsocket(id)
+		}
+
+		return errObj(fmt.Sprintf("Could not read websocket message: %s", readErr.Error())), nil
+	}
+
+	return websocketEvent(messageType, payload), nil
+}
+
+func (c *Context) oakWSClose(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("ws_close", args, 1); err != nil {
+		return nil, err
+	}
+
+	conn, id, err := c.getWebsocket(args[0], "ws_close")
+	if err != nil {
+		return nil, err
+	}
+
+	closeCode := websocket.CloseNormalClosure
+	closeText := ""
+	if len(args) >= 2 {
+		code, ok := args[1].(IntValue)
+		if !ok {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Second argument to ws_close must be an int close code, got %s", args[1]),
+			}
+		}
+		closeCode = int(code)
+	}
+	if len(args) >= 3 {
+		reason, ok := args[2].(*StringValue)
+		if !ok {
+			return nil, &runtimeError{
+				reason: fmt.Sprintf("Third argument to ws_close must be a string reason, got %s", args[2]),
+			}
+		}
+		closeText = reason.stringContent()
+	}
+
+	frame := websocket.FormatCloseMessage(closeCode, closeText)
+	c.Unlock()
+	_ = conn.WriteControl(websocket.CloseMessage, frame, time.Now().Add(2*time.Second))
+	closeErr := conn.Close()
+	c.Lock()
+
+	removeWebsocket(id)
+	if closeErr != nil {
+		return errObj(fmt.Sprintf("Could not close websocket: %s", closeErr.Error())), nil
+	}
+
+	return websocketClosedEvent(closeCode, closeText), nil
+}
+
+func (ctx *Context) oakWSListen(args []Value) (Value, *runtimeError) {
+	if err := ctx.requireArgLen("ws_listen", args, 3); err != nil {
+		return nil, err
+	}
+
+	host, okHost := args[0].(*StringValue)
+	pathVal, okPath := args[1].(*StringValue)
+	cb, okCb := args[2].(FnValue)
+	if !okHost || !okPath || !okCb {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("Mismatched types in call ws_listen(%s, %s, %s)", args[0], args[1], args[2]),
+		}
+	}
+
+	sendErr := func(msg string) {
+		ctx.Lock()
+		defer ctx.Unlock()
+
+		_, err2 := ctx.EvalFnValue(cb, false, errObj(msg))
+		if err2 != nil {
+			ctx.eng.reportErr(err2)
+		}
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(_ *http.Request) bool {
+			return true
+		},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathVal.stringContent(), func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			sendErr(fmt.Sprintf("Could not upgrade websocket connection: %s", err.Error()))
+			return
+		}
+
+		socket := storeWebsocket(conn)
+		headers := makeHeaderObject(r.Header)
+
+		ctx.Lock()
+		defer ctx.Unlock()
+
+		_, cbErr := ctx.EvalFnValue(cb, false, ObjectValue{
+			"type":   AtomValue("connect"),
+			"socket": socket,
+			"req": ObjectValue{
+				"method":  MakeString(r.Method),
+				"url":     MakeString(r.URL.String()),
+				"headers": headers,
+			},
+		})
+		if cbErr != nil {
+			ctx.eng.reportErr(cbErr)
+		}
+	})
+
+	server := &http.Server{
+		Addr:    host.stringContent(),
+		Handler: mux,
+	}
+
+	ctx.eng.Add(1)
+	go func() {
+		defer ctx.eng.Done()
+		err := server.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			sendErr(fmt.Sprintf("Error starting websocket server in ws_listen(): %s", err.Error()))
+		}
+	}()
+
+	closer := func(_ []Value) (Value, *runtimeError) {
+		ctx.eng.Add(1)
+		go func() {
+			defer ctx.eng.Done()
+
+			err := server.Shutdown(context.Background())
+			if err != nil {
+				sendErr(fmt.Sprintf("Could not close websocket server in ws_listen/close: %s", err.Error()))
+			}
+		}()
+
+		return null, nil
+	}
+
+	return BuiltinFnValue{
+		name: "close",
+		fn:   closer,
 	}, nil
 }
 

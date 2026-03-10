@@ -1825,10 +1825,13 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 			type(___stdlibs())
 			type(___stdlibs().std)
 			type(___stdlibs().sys)
+			type(___stdlibs().websocket)
 			type(___runtime_lib('std'))
 			type(___runtime_lib('sys'))
+			type(___runtime_lib('websocket'))
 			___runtime_lib?('std')
 			___runtime_lib?('sys')
+			___runtime_lib?('websocket')
 			type(___runtime_lib('definitely_missing_lib'))
 			type(___runtime_gc())
 			type(___runtime_mem().heap)
@@ -1842,6 +1845,9 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 		AtomValue("string"),
 		AtomValue("string"),
 		AtomValue("string"),
+		AtomValue("string"),
+		AtomValue("string"),
+		oakTrue,
 		oakTrue,
 		oakTrue,
 		AtomValue("null"),
@@ -1869,8 +1875,18 @@ func TestBuiltinPresenceForRemainingIoAndProcessFeatures(t *testing.T) {
 			type(write)
 			type(listen)
 			type(req)
+			type(ws_dial)
+			type(ws_send)
+			type(ws_recv)
+			type(ws_close)
+			type(ws_listen)
 		]
 	`, MakeList(
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),

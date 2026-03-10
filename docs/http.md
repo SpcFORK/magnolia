@@ -27,6 +27,7 @@ Creates an HTTP server application with routing capabilities.
 
 - `route(pattern, handler)` - Add a route handler for a path pattern
 - `start(port)` - Start the server on the specified port
+- `startThreaded(port)` - Start the server on the specified port and handle each request in a separate Oak thread
 
 ```oak
 { Server: Server } := import('http')
@@ -46,6 +47,10 @@ server.route('/users/:id', fn(params) fn(req, end) end({
 
 // Start server on port 8080
 server.start(8080)
+
+// Or start with threaded request handling
+// (each request is processed in a separate Oak thread)
+server.startThreaded(8080)
 ```
 
 ## Router API

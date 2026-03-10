@@ -127,6 +127,9 @@ var libcodegencommon string
 //go:embed lib/sys.oak
 var libsys string
 
+//go:embed lib/websocket.oak
+var libwebsocket string
+
 var stdlibs = map[string]string{
 	"std":             libstd,
 	"str":             libstr,
@@ -168,6 +171,7 @@ var stdlibs = map[string]string{
 	"runtime-codegen": libruntimecodegen,
 	"codegen-common":  libcodegencommon,
 	"sys":             libsys,
+	"websocket":       libwebsocket,
 }
 
 var stdlibAutoLoadOrder = []string{
