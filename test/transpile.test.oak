@@ -1,4 +1,5 @@
 transpile := import('transpile')
+contains? := import('std').contains?
 
 fn Token(type, val) {
 	type: type
@@ -140,10 +141,41 @@ fn run(t) {
 			{
 				node := {
 					type: :binary
+					op: :branchArrow
+					tok: Token(:branchArrow, ?).tok
+					left: Int(8)
+					right: Int(2)
+				}
+				transpile.optimizeConstants(node)
+			}
+			{
+				type: :binary
+				op: :branchArrow
+				tok: Token(:branchArrow, ?).tok
+				left: Int(8)
+				right: Int(2)
+			}
+		)
+
+		'optimizeConstants folds integer division when exact' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :divide
+				tok: Token(:divide, ?).tok
+				left: Int(8)
+				right: Int(2)
+			})
+			Int(4)
+		)
+
+		'optimizeConstants keeps divide-by-zero unchanged' |> t.eq(
+			{
+				node := {
+					type: :binary
 					op: :divide
 					tok: Token(:divide, ?).tok
 					left: Int(8)
-					right: Int(2)
+					right: Int(0)
 				}
 				transpile.optimizeConstants(node)
 			}
@@ -152,8 +184,41 @@ fn run(t) {
 				op: :divide
 				tok: Token(:divide, ?).tok
 				left: Int(8)
-				right: Int(2)
+				right: Int(0)
 			}
+		)
+
+		'optimizeConstants folds integer power' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :power
+				tok: Token(:times, ?).tok
+				left: Int(2)
+				right: Int(5)
+			})
+			Int(32)
+		)
+
+		'optimizeConstants folds integer bitwise and' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :and
+				tok: Token(:and, ?).tok
+				left: Int(14)
+				right: Int(11)
+			})
+			Int(10)
+		)
+
+		'optimizeConstants folds numeric comparisons' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :geq
+				tok: Token(:geq, ?).tok
+				left: Int(6)
+				right: Int(3)
+			})
+			Token(:bool, true)
 		)
 	}
 

@@ -161,6 +161,46 @@ gpu.call(cudaInit, 0)
 clGetPlatforms := gpu.opencl('clGetPlatformIDs')
 ```
 
+### ⚙️ Code Generation and Runtime Evaluation
+
+A runtime code generation library for dynamic code synthesis and evaluation:
+
+```js
+codegen := import('runtime-codegen')
+
+// Generate code templates dynamically
+template := codegen.template('fn add(a, b) a + b')
+
+// Create custom code generators
+generator := codegen.createGenerator(fn(type) 
+    'fn process_' + type + '(x) x'
+)
+
+// Evaluate generated code at runtime
+code := generator('string')
+fn := codegen.eval(code)
+```
+
+### ✨ AST Macros and Metaprogramming
+
+The syntax library now supports AST macros for powerful compile-time code transformations:
+
+```js
+syntax := import('syntax')
+
+// Define macro expanders
+myMacro := syntax.Macro(fn(node) {
+    // Transform AST nodes
+    node
+})
+
+// Parse code with macro expansion
+ast := syntax.parseWithMacros('(my-macro 1 2 3)', [myMacro])
+
+// Recursively expand macros in AST
+expanded := syntax.expandMacros(ast, [myMacro])
+```
+
 ## Overview
 
 Magnolia has 7 primitive and 3 complex types.
@@ -217,7 +257,26 @@ Besides the normal set of arithmetic operators, Magnolia has a few strange opera
     n // 30
     m // 20
     ```
-- The **push operator** `<<` pushes values onto the end of a string or a list, mutating it, and returns the changed string or list.
+- **Arithmetic operators**: `+`, `-`, `*`, `/`, `%` for basic math, and `**` for exponentiation.
+
+    ```js
+    2 + 3       // 5
+    10 / 3      // 3.333...
+    2 ** 8      // 256 (2 to the power of 8)
+    ```
+
+- **Bitwise operators** for low-level bit manipulation: `&` (AND), `|` (OR), `^` (XOR), `~` (NOT), `<<` (left shift), and `>>` (right shift).
+
+    ```js
+    0xFF & 0x0F        // 15
+    0x01 | 0x02        // 3
+    5 ^ 3              // 6
+    ~10                // -11
+    4 << 2             // 16 (multiply by 2^2)
+    16 >> 2            // 4 (divide by 2^2)
+    ```
+
+- The **push operator** `<<` (in list/string context) pushes values onto the end of a string or a list, mutating it, and returns the changed string or list.
 
     ```js
     str := 'Hello '
@@ -312,6 +371,10 @@ For a more detailed description of the language, see the [work-in-progress langu
 For Magnolia-specific features, see:
 - [Virtual File System documentation](docs/virtual-fs.md)
 - [Transpile Middleware documentation](docs/transpile.md)
+- [Code Generation documentation](docs/runtime-codegen.md)
+- [Syntax and Macros documentation](docs/syntax.md)
+- [Advanced Build Features](docs/build.md)
+- [String manipulation library](docs/str.md)
 - Example programs in [samples/](samples/) including threading, transpilation, and VFS examples
 
 ### Builds and deployment
@@ -360,6 +423,22 @@ Magnolia (ab)uses GNU Make to run development workflows and tasks.
 - `make site-gen` rebuilds the statically generated parts of the Magnolia website, like the standard library documentation
 
 To try Magnolia by building from source, clone the repository and run `make install` (or simply `go build .`).
+
+## Known Limitations
+
+Magnolia is under active development. Some features are experimental or have known limitations:
+
+- **Bitwise right shift operator (`>>`)**: The right shift operator has a known syntax conflict with template syntax and is not fully functional. Users experiencing issues should use alternative approaches or workarounds.
+
+- **Virtual (self-hosting) interpreter**: The Virtual library provides a self-hosted Oak interpreter written in Magnolia itself, enabling dynamic code evaluation at runtime. This feature is still being stabilized and may not support all language features yet.
+
+- **Channel operations and async communication**: Low-level channel primitives for asynchronous communication are under development. Some edge cases in async patterns may not be fully supported.
+
+- **Class inheritance**: While classes with constructors and static members are supported, multiple inheritance syntax is still being refined.
+
+- **Memory operations**: Low-level memory read/write primitives (`memread`, `memwrite`) are exposed for systems programming but require careful usage.
+
+For the latest updates and progress on these features, please check the [GitHub issues](https://github.com/SpcFORK/magnolia/issues) and [documentation](docs/).
 
 ## Unit and generative tests
 

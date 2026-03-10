@@ -414,7 +414,12 @@ func (t *tokenizer) nextToken() token {
 		}
 		return token{kind: greater, pos: t.currentPos()}
 	case '=':
-		return token{kind: eq, pos: t.currentPos()}
+		if !t.isEOF() && t.peek() == '=' {
+			pos := t.currentPos()
+			t.next() // consume the second '='
+			return token{kind: eq, pos: pos}
+		}
+		return token{kind: assign, pos: t.currentPos()}
 	case '\'':
 		pos := t.currentPos()
 		payloadBuilder := strings.Builder{}

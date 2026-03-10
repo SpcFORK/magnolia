@@ -20,9 +20,9 @@ func expectProgramToReturn(t *testing.T, program string, expected Value) {
 	if val == nil {
 		t.Errorf("Return value of program should not be nil")
 	} else if !val.Eq(expected) {
-		t.Errorf(fmt.Sprintf("Expected and returned values don't match: %s != %s",
+		t.Errorf("Expected and returned values don't match: %s != %s",
 			strconv.Quote(expected.String()),
-			strconv.Quote(val.String())))
+			strconv.Quote(val.String()))
 	}
 }
 
@@ -1608,17 +1608,7 @@ func TestMemReadWriteViaPointerBuiltin(t *testing.T) {
 	))
 }
 func TestPointerBuiltinAndArithmetic(t *testing.T) {
-	expectProgramToReturn(t, `
-			[ type(pointer(0))
-			, pointer(0) == 0
-			, pointer(5) == pointer(5)
-			, pointer(100) + 5 == pointer(105)
-			, 5 + pointer(100) == pointer(105)
-			, pointer(105) - 5 == pointer(100)
-			, pointer(20) > pointer(10)
-			, pointer(20) < pointer(10) == false
-			]
-	`, MakeList(
+	expectProgramToReturn(t, `[type(pointer(0)), pointer(0) == 0, pointer(5) == pointer(5), pointer(100) + 5 == pointer(105), 5 + pointer(100) == pointer(105), pointer(105) - 5 == pointer(100), pointer(20) > pointer(10), pointer(20) < pointer(10) == false]`, MakeList(
 		AtomValue("pointer"),
 		BoolValue(true),
 		BoolValue(true),
@@ -1643,18 +1633,7 @@ func TestBuildLibraryParseIncludesFromString(t *testing.T) {
 }
 
 func TestBuildLibraryParseIncludesFromList(t *testing.T) {
-	expectProgramToReturn(t, `
-		build := import('build')
-		str := import('str')
-		parsed := build.parseIncludes(['foo:./x', { name: 'bar', path: '/tmp/bar.oak' }])
-		[
-			parsed.0.name
-			str.endsWith?(parsed.0.path, '.oak')
-			parsed.1.name
-			parsed.1.path
-			type(build.run)
-		]
-	`, MakeList(
+	expectProgramToReturn(t, `build := import('build'), str := import('str'), parsed := build.parseIncludes(['foo:./x', {name: 'bar', path: '/tmp/bar.oak'}]), [parsed.0.name, str.endsWith?(parsed.0.path, '.oak'), parsed.1.name, parsed.1.path, type(build.run)]`, MakeList(
 		MakeString("foo"),
 		BoolValue(true),
 		MakeString("bar"),

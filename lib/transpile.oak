@@ -6,6 +6,7 @@ each := std.each
 clone := std.clone
 merge := std.merge
 filter := std.filter
+reduce := std.reduce
 fmt := import('fmt')
 printf := fmt.printf
 format := fmt.format
@@ -117,23 +118,87 @@ fn walkNode(node, visitor) if node.type {
 
 // optimizeConstants is an example transpiler that folds constant expressions
 fn optimizeConstants(node) if node.type {
-	:binary -> if {
-		node.op = :plus & node.left.type = :int & node.right.type = :int -> {
+	:binary -> {
+		fn intNode(value) {
 			type: :int
-			tok: node.tok
-			val: node.left.val + node.right.val
+			tok: {
+				pos: node.tok.pos
+				type: :int
+				val: value
+			}
+			val: value
 		}
-		node.op = :minus & node.left.type = :int & node.right.type = :int -> {
-			type: :int
-			tok: node.tok
-			val: node.left.val - node.right.val
+
+		fn floatNode(value) {
+			type: :float
+			tok: {
+				pos: node.tok.pos
+				type: :float
+				val: value
+			}
+			val: value
 		}
-		node.op = :times & node.left.type = :int & node.right.type = :int -> {
-			type: :int
-			tok: node.tok
-			val: node.left.val * node.right.val
+
+		fn boolNode(value) {
+			type: :bool
+			tok: {
+				pos: node.tok.pos
+				type: :bool
+				val: value
+			}
+			val: value
 		}
-		_ -> node
+
+		fn literalNumber?(n) n.type = :int | n.type = :float
+		fn literalInt?(n) n.type = :int
+
+		if literalNumber?(node.left) & literalNumber?(node.right) {
+			true -> {
+				l := node.left.val
+				r := node.right.val
+				li := node.left.type = :int
+				ri := node.right.type = :int
+
+				if {
+					node.op = :plus & li & ri -> intNode(l + r)
+					node.op = :minus & li & ri -> intNode(l - r)
+					node.op = :times & li & ri -> intNode(l * r)
+					node.op = :divide & ri & r = 0 -> node
+					node.op = :divide & !ri & r = 0 -> node
+					node.op = :divide & li & ri -> {
+						q := l / r
+						if q * r = l {
+							true -> intNode(q)
+							_ -> floatNode(float(l) / float(r))
+						}
+					}
+					node.op = :divide -> floatNode(float(l) / float(r))
+					node.op = :modulus & ri & r = 0 -> node
+					node.op = :modulus & !ri & r = 0 -> node
+					node.op = :modulus & li & ri -> intNode(l % r)
+					node.op = :modulus -> floatNode(l % r)
+					node.op = :power & li & ri & r >= 0 -> {
+						powv := l ** r
+						if powv = int(powv) {
+							true -> intNode(powv)
+							_ -> floatNode(powv)
+						}
+					}
+					node.op = :power -> floatNode(l ** r)
+					node.op = :and & li & ri -> intNode(l & r)
+					node.op = :or & li & ri -> intNode(l | r)
+					node.op = :xor & li & ri -> intNode(l ^ r)
+					node.op = :greater -> boolNode(l > r)
+					node.op = :less -> boolNode(l < r)
+					node.op = :geq -> boolNode(l >= r)
+					node.op = :leq -> boolNode(l <= r)
+					node.op = :eq -> boolNode(l = r)
+					node.op = :neq -> boolNode(l != r)
+					_ -> node
+				}
+			}
+			_ -> node
+		}
 	}
 	_ -> node
 }

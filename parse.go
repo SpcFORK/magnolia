@@ -729,11 +729,24 @@ func (p *parser) parseUnit() (astNode, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := p.expect(comma); err != nil {
-				return nil, err
-			}
 
 			itemNodes = append(itemNodes, node)
+
+			// Comma is optional but if present, consume it
+			// This allows both [a, b] and [a, b,]
+			if !p.isEOF() && p.peek().kind == comma {
+				p.next() // consume the comma
+				// If comma is followed by right bracket, that's ok (trailing comma)
+				if p.isEOF() || p.peek().kind == rightBracket {
+					break
+				}
+			} else if !p.isEOF() && p.peek().kind != rightBracket {
+				// If no comma and not at end, this is an error
+				return nil, parseError{
+					reason: fmt.Sprintf("Unexpected token %s, expected comma or ]", p.peek()),
+					pos:    p.peek().pos,
+				}
+			}
 		}
 		if _, err := p.expect(rightBracket); err != nil {
 			return nil, err

@@ -1,6 +1,6 @@
-module github.com/thesephist/oak
+module github.com/spcfork/magnolia
 
-go 1.16
+go 1.26
 
 require (
 	github.com/chzyer/readline v1.5.1
