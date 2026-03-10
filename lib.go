@@ -58,6 +58,9 @@ var libcrypto string
 //go:embed lib/bitwise.oak
 var libbitwise string
 
+//go:embed lib/bmp.oak
+var libbmp string
+
 //go:embed lib/gpu.oak
 var libgpu string
 
@@ -148,6 +151,7 @@ var stdlibs = map[string]string{
 	"md":              libmd,
 	"crypto":          libcrypto,
 	"bitwise":         libbitwise,
+	"bmp":             libbmp,
 	"gpu":             libgpu,
 	"syntax":          libsyntax,
 	"Virtual":         libvirtual,

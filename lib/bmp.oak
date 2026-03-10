@@ -1,0 +1,98 @@
+// libbmp provides helpers to encode a 24-bit BMP image from raw pixel data.
+
+{
+	map: map
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// bytes converts a list of byte integers into a binary string.
+fn bytes(parts) parts |> map(fn(n) char(n % 256)) |> join('')
+
+// intToBytes converts an integer to little-endian bytes with fixed width.
+fn intToBytes(n, width) {
+	fn sub(i, p, acc) if i {
+		width -> acc
+		_ -> sub(i + 1, int(p / 256), acc << (p % 256))
+	}
+	sub(0, n, [])
+}
+
+// hexsplit returns a 4-byte little-endian representation of n.
+fn hexsplit(n) intToBytes(n, 4)
+
+fn pixelBytes(pixel) if type(pixel) {
+	:string -> pixel
+	:list -> bytes(pixel)
+	:int -> bytes(intToBytes(pixel, 3))
+	_ -> ''
+}
+
+// bmp encodes a 24-bit bitmap file and returns the full file buffer.
+// pixels are expected row-major and each pixel may be:
+// - a 3-byte string
+// - a [b, g, r] byte list
+// - a 24-bit integer in little-endian byte order
+fn bmp(width, height, pixels) {
+	buf := ''
+	last := {off: 0}
+
+	fn appd(part) {
+		buf.(last.off) := part
+		last.off <- len(buf)
+	}
+
+	padding := if (3 * width) % 4 {
+		0 -> ''
+		1 -> bytes([0, 0, 0])
+		2 -> bytes([0, 0])
+		3 -> bytes([0])
+	}
+
+	fn wrow(y) {
+		offset := width * y
+		fn sub(x) if x {
+			width -> ?
+			_ -> {
+				appd(pixelBytes(pixels.(offset + x)))
+				sub(x + 1)
+			}
+		}
+		sub(0)
+		appd(padding)
+	}
+
+	fn wpixels {
+		fn sub(y) if y {
+			height -> ?
+			_ -> {
+				wrow(y)
+				sub(y + 1)
+			}
+		}
+		sub(0)
+	}
+
+	// BMP header (BITMAPINFOHEADER)
+	appd('BM')
+	appd(bytes(hexsplit(54 + (width * 3 + len(padding)) * height)))
+	appd(bytes([0, 0, 0, 0]))
+	appd(bytes([54, 0, 0, 0]))
+
+	// DIB header
+	appd(bytes([40, 0, 0, 0]))
+	appd(bytes(hexsplit(width)))
+	appd(bytes(hexsplit(height)))
+	appd(bytes([1, 0]))
+	appd(bytes([24, 0]))
+	appd(bytes([0, 0, 0, 0]))
+	appd(bytes([16, 0, 0, 0]))
+	appd(bytes(hexsplit(2835)))
+	appd(bytes(hexsplit(2835)))
+	appd(bytes([0, 0, 0, 0]))
+	appd(bytes([0, 0, 0, 0]))
+
+	wpixels()
+	buf
+}

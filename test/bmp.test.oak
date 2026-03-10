@@ -1,0 +1,52 @@
+bmp := import('bmp')
+{
+	slice: slice
+	reduce: reduce
+} := import('std')
+
+fn bytesOf(s) s |> reduce([], fn(acc, c) acc << codepoint(c))
+
+fn run(t) {
+	'hexsplit encodes little-endian 4-byte int' |> t.eq(
+		bmp.hexsplit(257)
+		[1, 1, 0, 0]
+	)
+
+	image := bmp.bmp(1, 1, [[255, 0, 0]])
+
+	'bmp writes expected file size for 1x1' |> t.eq(
+		len(image)
+		58
+	)
+
+	'bmp starts with BM signature' |> t.eq(
+		image |> slice(0, 2)
+		'BM'
+	)
+
+	'bmp writes expected file size bytes in header' |> t.eq(
+		image |> slice(2, 6) |> bytesOf()
+		[58, 0, 0, 0]
+	)
+
+	'bmp writes expected pixel data offset' |> t.eq(
+		image |> slice(10, 14) |> bytesOf()
+		[54, 0, 0, 0]
+	)
+
+	'bmp writes expected dimensions' |> t.eq(
+		[
+			image |> slice(18, 22) |> bytesOf()
+			image |> slice(22, 26) |> bytesOf()
+		]
+		[
+			[1, 0, 0, 0]
+			[1, 0, 0, 0]
+		]
+	)
+
+	'bmp writes pixel bytes and row padding' |> t.eq(
+		image |> slice(54, 58) |> bytesOf()
+		[255, 0, 0, 0]
+	)
+}
