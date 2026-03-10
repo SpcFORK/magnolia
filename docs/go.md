@@ -191,5 +191,5 @@ See `samples/go-interop.oak` for a runnable example that combines:
 - [Language spec](./spec.md)
 - [GPU interop library](./gpu.md)
 - [Thread library](./thread.md)
-- [Bitwise and pointer helpers](../lib/bitwise.oak)
+- [Bitwise and pointer helpers](./bitwise.md)
 - [Safer syscall wrappers](../lib/sys.oak)

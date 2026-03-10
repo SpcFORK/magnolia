@@ -271,7 +271,7 @@ expanded := syntax.expandMacros(ast, [myMacro])
 
 ## Overview
 
-Magnolia has 7 primitive and 3 complex types.
+Magnolia has 8 primitive and 3 complex types.
 
 ```js
 ?        // null, also "()"
@@ -281,6 +281,7 @@ _        // "empty" value, equal to anything
 true     // booleans
 'hello'  // strings
 :error   // atoms
+pointer(0) // pointers
 
 [1, :number]    // list
 { a: 'hello' }  // objects
@@ -441,11 +442,12 @@ For Magnolia-specific features, see:
 - [Transpile Middleware documentation](docs/transpile.md)
 - [Code Generation documentation](docs/runtime-codegen.md)
 - [Go Runtime and System Interop documentation](docs/go.md)
+- [Bitwise and pointer helper documentation](docs/bitwise.md)
 - [Classes (`cs`) documentation](docs/cs.md)
 - [Syntax and Macros documentation](docs/syntax.md)
 - [Advanced Build Features](docs/build.md)
 - [String manipulation library](docs/str.md)
-- Example programs in [samples/](samples/) including threading, transpilation, and VFS examples
+- Example programs in [samples/](samples/) including threading, transpilation, VFS, and pointer/bitwise examples
 
 ### Builds and deployment
 
@@ -504,6 +506,8 @@ To try Magnolia by building from source, clone the repository and run `make inst
 Magnolia is under active development. Some features are experimental or have known limitations:
 
 - **Bitwise right shift operator (`>>`)**: The right shift operator has a known syntax conflict with template syntax and is not fully functional. Users experiencing issues should use alternative approaches or workarounds.
+
+    Recommended workaround: use `bitwise.shr(value, by)` from `import('bitwise')`.
 
 - **Virtual (self-hosting) interpreter**: The Virtual library provides a self-hosted Oak interpreter written in Magnolia itself, enabling dynamic code evaluation at runtime. This feature is still being stabilized and may not support all language features yet.
 
