@@ -147,8 +147,14 @@ func displaySourceContext(fileName string, line, col int, config ErrorDisplayCon
 	fmt.Fprintf(os.Stderr, "│ %s\n", applyColor(colorCyan, "Context:"))
 
 	// Calculate the range of lines to show
-	startLine := max(1, line-config.ContextLines)
-	endLine := min(len(lines), line+config.ContextLines)
+	startLine := 1
+	if line-config.ContextLines > 1 {
+		startLine = line - config.ContextLines
+	}
+	endLine := len(lines)
+	if line+config.ContextLines < len(lines) {
+		endLine = line + config.ContextLines
+	}
 
 	// Display context lines
 	for i := startLine; i <= endLine; i++ {
@@ -172,21 +178,6 @@ func displaySourceContext(fileName string, line, col int, config ErrorDisplayCon
 				lines[i-1])
 		}
 	}
-}
-
-// Helper functions for min/max
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // FormatError returns a formatted error string (without printing)
