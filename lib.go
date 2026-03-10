@@ -124,6 +124,9 @@ var libruntimecodegen string
 //go:embed lib/codegen-common.oak
 var libcodegencommon string
 
+//go:embed lib/sys.oak
+var libsys string
+
 var stdlibs = map[string]string{
 	"std":             libstd,
 	"str":             libstr,
@@ -164,6 +167,7 @@ var stdlibs = map[string]string{
 	"runtime-js":      libruntimejs,
 	"runtime-codegen": libruntimecodegen,
 	"codegen-common":  libcodegencommon,
+	"sys":             libsys,
 }
 
 var stdlibAutoLoadOrder = []string{

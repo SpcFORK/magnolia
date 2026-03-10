@@ -1,0 +1,106 @@
+// libsys provides safer wrappers around low-level system interop built-ins.
+//
+// It keeps `sysproc`/`syscall` usage explicit while normalizing error handling
+// so application code can branch on a consistent result shape.
+
+{
+	default: default
+} := import('std')
+
+fn _isObject?(v) type(v) = :object
+
+// ok? reports whether a syscall-style result is successful.
+fn ok?(result) _isObject?(result) & result.type = :ok
+
+// error? reports whether a syscall-style result is an error.
+fn error?(result) _isObject?(result) & result.type = :error
+
+// resolve resolves a procedure and wraps it into a normalized result object.
+//
+// Success: {type: :ok, proc: <proc>, library: <string>, symbol: <string>}
+// Error:   {type: :error, error: <string>, library: <string>, symbol: <string>, detail: <value>}
+fn resolve(library, symbol) {
+	proc := sysproc(library, symbol)
+	if _isObject?(proc) {
+		true -> if proc.type {
+			:proc -> {
+				{
+					type: :ok
+					proc: proc
+					library: library
+					symbol: symbol
+				}
+			}
+			:error -> {
+				{
+					type: :error
+					error: default(proc.error, 'Could not resolve procedure')
+					library: library
+					symbol: symbol
+					detail: proc
+				}
+			}
+			_ -> {
+				{
+					type: :error
+					error: 'Unexpected sysproc result type'
+					library: library
+					symbol: symbol
+					detail: proc
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'sysproc returned a non-object result'
+				library: library
+				symbol: symbol
+				detail: proc
+			}
+		}
+	}
+}
+
+// call invokes a target procedure/address and normalizes malformed payloads.
+//
+// Success: {type: :ok, r1: <int>, r2: <int>}
+// Error:   {type: :error, error: <string>, detail?: <value>}
+fn call(target, args...) {
+	result := syscall(target, args...)
+	if _isObject?(result) {
+		true -> if result.type {
+			:ok -> result
+			:error -> result
+			_ -> {
+				{
+					type: :error
+					error: 'Unexpected syscall result type'
+					detail: result
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'syscall returned a non-object result'
+				detail: result
+			}
+		}
+	}
+}
+
+// resolveAndCall resolves a procedure and invokes it when successful.
+fn resolveAndCall(library, symbol, args...) {
+	resolved := resolve(library, symbol)
+	if resolved.type {
+		:ok -> call(resolved.proc, args...)
+		_ -> resolved
+	}
+}
+
+// valueOr returns `result.r1` when successful, otherwise fallback.
+fn valueOr(result, fallback) if ok?(result) {
+	true -> result.r1
+	_ -> fallback
+}

@@ -185,6 +185,25 @@ gpu.call(cudaInit, 0)
 clGetPlatforms := gpu.opencl('clGetPlatformIDs')
 ```
 
+### 🔩 Go Runtime and System Interop
+
+Built-ins for low-level host interop, including goroutines/channels, runtime metadata, foreign procedure calls, and raw memory access:
+
+```js
+info := ___runtime_sys_info()
+println(info.os + '/' + info.arch)
+
+ch := make_chan(1)
+go(fn {
+    chan_send(ch, ___runtime_go_version())
+})
+
+evt := chan_recv(ch)
+println(evt.data)
+```
+
+See [docs/go.md](docs/go.md) for complete usage and safety notes.
+
 ### ⚙️ Code Generation and Runtime Evaluation
 
 A runtime code generation library for dynamic code synthesis and evaluation:
@@ -396,6 +415,7 @@ For Magnolia-specific features, see:
 - [Virtual File System documentation](docs/virtual-fs.md)
 - [Transpile Middleware documentation](docs/transpile.md)
 - [Code Generation documentation](docs/runtime-codegen.md)
+- [Go Runtime and System Interop documentation](docs/go.md)
 - [Classes (`cs`) documentation](docs/cs.md)
 - [Syntax and Macros documentation](docs/syntax.md)
 - [Advanced Build Features](docs/build.md)

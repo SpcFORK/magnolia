@@ -1,0 +1,40 @@
+// Go runtime and system interop sample.
+
+{
+	println: println
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+sys := import('sys')
+
+info := ___runtime_sys_info()
+printf('Host runtime: {{ 0 }}/{{ 1 }} (cpus={{ 2 }})', info.os, info.arch, info.cpus)
+
+// Use goroutine + channel built-ins to pass the Go version back to main flow.
+versionCh := make_chan(1)
+go(fn(ch) {
+	chan_send(ch, ___runtime_go_version())
+}, versionCh)
+
+versionEvt := chan_recv(versionCh)
+printf('Go version: {{ 0 }}', versionEvt.data)
+
+// Demonstrate safe syscall resolution and invocation via libsys wrapper.
+if info.os = 'windows' {
+	true -> {
+		pidCall := sys.resolveAndCall('kernel32.dll', 'GetCurrentProcessId')
+		if pidCall.type {
+			:ok -> printf('Current PID: {{ 0 }}', pidCall.r1)
+			_ -> printf('PID syscall failed: {{ 0 }}', pidCall.error)
+		}
+	}
+	_ -> println('Skipping Windows syscall example on non-Windows host.')
+}
+
+// Demonstrate raw memory interop with a byte buffer.
+buf := bits([65, 66, 67])
+ptr := addr(buf)
+memwrite(ptr + 1, bits([90]))
+printf('Buffer after memwrite: {{ 0 }}', bits(memread(ptr, 3)))

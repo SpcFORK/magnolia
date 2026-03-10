@@ -1824,8 +1824,11 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 		[
 			type(___stdlibs())
 			type(___stdlibs().std)
+			type(___stdlibs().sys)
 			type(___runtime_lib('std'))
+			type(___runtime_lib('sys'))
 			___runtime_lib?('std')
+			___runtime_lib?('sys')
 			type(___runtime_lib('definitely_missing_lib'))
 			type(___runtime_gc())
 			type(___runtime_mem().heap)
@@ -1837,6 +1840,9 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 		AtomValue("object"),
 		AtomValue("string"),
 		AtomValue("string"),
+		AtomValue("string"),
+		AtomValue("string"),
+		oakTrue,
 		oakTrue,
 		AtomValue("null"),
 		AtomValue("null"),

@@ -115,6 +115,23 @@ block
 - `memread(address, length)`: Reads memory at the specified address.
 - `memwrite(address, bits)`: Writes bits to memory at the specified address.
 
+### System Interop Result Shapes
+
+- `sysproc(library, name)` result:
+  - success: `{type: :proc, library: string, name: string, addr: pointer}`
+  - error: `{type: :error, error: string, library: string, name: string}`
+- `syscall(procOrAddress, args...)` result:
+  - success: `{type: :ok, r1: int, r2: int}`
+  - error: `{type: :error, error: string}`
+- `chan_recv(ch, callback?)` synchronous return:
+  - event: `{data: any, ok: bool}`
+
+### System Interop Notes
+
+- `sysproc`/`syscall` behavior depends on host OS and available native libraries.
+- Memory APIs (`memread`, `memwrite`) are unsafe by design and can crash the process on invalid addresses.
+- Prefer wrapping interop calls in higher-level modules such as `gpu` or `sys` for safer application code.
+
 ## I/O Interfaces
 
 - `input()`: Reads input from the standard input.
