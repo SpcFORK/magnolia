@@ -1606,10 +1606,10 @@ func TestMemReadWriteViaPointerBuiltin(t *testing.T) {
 			memwrite(ptr + 1, bits([90]))
 			bits(memread(ptr, 3))
 		`, MakeList(
-			IntValue(65),
-			IntValue(90),
-			IntValue(67),
-		))
+		IntValue(65),
+		IntValue(90),
+		IntValue(67),
+	))
 }
 func TestPointerBuiltinAndArithmetic(t *testing.T) {
 	expectProgramToReturn(t, `

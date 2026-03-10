@@ -1,92 +1,19 @@
-// oak pack -- distribute Oak programs as stand-alone binaries
+// oak pack -- CLI adapter
 
 {
 	default: default
-	append: append
 } := import('std')
-{
-	printf: printf
-} := import('fmt')
-{
-	readFile: readFile
-	writeFile: writeFile
-	statFile: statFile
-} := import('fs')
 cli := import('cli')
-packUtils := import('pack-utils')
+pack := import('pack')
 
 Cli := cli.parse()
 
-// much of these options are inherited from `oak build`
-Entry := Cli.opts.entry
-Output := Cli.opts.output |> default(Cli.opts.o)
-Includes := Cli.opts.include
-Web? := Cli.opts.web != ?
-Wasm? := Cli.opts.wasm != ?
-Interp := Cli.opts.interp |>
-	// NOTE: we can't simply default to Cli.exe because we need an absolute,
-	// fully resolved path to be able to read from this file later.
-	default(___runtime_proc().exe) |>
-	default(Cli.exe)
-
-fn requireOpt(flag, value) if value {
-	?, '', true -> {
-		printf('[oak pack] No --{{0}} specified.', flag)
-		exit(1)
-	}
-}
-fn buildArgs(entry, output, includes) {
-	args := ['build', '--entry', entry, '--output', output]
-	if includes {
-		?, '', true -> args
-		_ -> args |> append(['--include', includes])
-	}
-}
-
-requireOpt('entry', Entry)
-requireOpt('output', Output)
-if Web? | Wasm? -> {
-	printf('[oak pack] --web and --wasm are unsupported for pack targets.')
-	exit(1)
-}
-if Interp {
-	?, '', true -> {
-		printf('[oak pack] Invalid --interp specified.')
-		exit(1)
-	}
-}
-if statFile(Entry) = ? -> {
-	printf('[oak pack] {{0}} does not exist.', Entry)
-	exit(1)
-}
-
-with readFile(Interp) fn(packFile) if packFile {
-	? -> printf('[oak pack] Could not read oak executable.')
-	_ -> with exec(
-		Cli.exe
-		// We use Output as a temporary output file before writing the true
-		// packed binary out to the same location in the filesystem.
-		buildArgs(Entry, Output, Includes)
-		''
-	) fn(evt) if {
-		evt.type = :error -> printf('[oak pack] Could not bundle files.')
-		evt.status != 0 -> printf('[oak pack] Bundling failed:\n' + evt.stdout)
-		_ -> with readFile(Output) fn(oakBundleFile) if oakBundleFile {
-			? -> printf('[oak pack] Could not read Oak bundle')
-			_ -> {
-				with writeFile(
-					Output
-					packUtils.packBundle(packFile, oakBundleFile)
-				) fn(res) if res {
-					? -> printf('[oak pack] Could not save final pack file.')
-					_ -> with exec('chmod', ['+x', Output], '') fn(evt) if {
-						evt.type = :error
-						evt.status != 0 -> printf('[oak pack] Unable to mark binary as executable.')
-						_ -> printf('[oak pack] Executable binary saved to {{0}}', Output)
-					}
-				}
-			}
-		}
-	}
-}
-
+pack.run({
+	entry: Cli.opts.entry
+	output: Cli.opts.output |> default(Cli.opts.o)
+	includes: Cli.opts.include
+	web?: Cli.opts.web != ?
+	wasm?: Cli.opts.wasm != ?
+	interp: Cli.opts.interp
+	oakExe: Cli.exe
+})

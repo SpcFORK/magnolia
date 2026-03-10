@@ -34,46 +34,66 @@
 	dir: dir
 	resolve: resolve
 } := import('path')
-cli := import('cli')
 syntax := import('syntax')
 bundleUtils := import('bundle-utils')
 transform := import('ast-transform')
 
-Cli := cli.parse()
+Log := printf
+Abort := fn(msg) {
+	Log(msg)
+	exit(1)
+}
 
-Entry := Cli.opts.entry
-Web? := Cli.opts.web != ?
-Wasm? := Cli.opts.wasm != ?
-Output := Cli.opts.output |> default(Cli.opts.o)
+Entry := ?
+Web? := false
+Wasm? := false
+Output := ?
+Includes := []
+AbsoluteEntry := ?
+
 fn requireOpt(flag, value) if value {
 	?, '', true -> {
-		printf('[oak build] No --{{0}} specified.', flag)
-		exit(1)
+		Abort(format('[oak build] No --{{0}} specified.', flag))
 	}
 }
 fn parseInclude(spec) if [name, path] := spec |> split(':') {
 	[_, _] -> { name: name, path: resolve(path) + '.oak' }
 	_ -> { name: spec, path: resolve(spec) + '.oak' }
 }
-Includes := Cli.opts.include |>
-	default('') |>
-	split(',') |>
-	filter(fn(s) s != '') |>
-	map(parseInclude)
 
-requireOpt('entry', Entry)
-requireOpt('output', Output)
-if Web? & Wasm? -> {
-	printf('[oak build] --web and --wasm are mutually exclusive build targets.')
-	exit(1)
-}
-if statFile(Entry) = ? -> {
-	printf('[oak build] {{0}} does not exist.', Entry)
-	exit(1)
+fn parseIncludes(specs) if type(specs) {
+	:list -> specs |> map(fn(spec) if type(spec) {
+		:object -> spec
+		_ -> parseInclude(spec)
+	})
+	_ -> specs |>
+		default('') |>
+		split(',') |>
+		filter(fn(s) s != '') |>
+		map(parseInclude)
 }
 
-// absolute path to the entrypoint module
-AbsoluteEntry := resolve(Entry)
+fn configure(config) {
+	Log <- config.log |> default(printf)
+	Abort <- config.abort |> default(fn(msg) {
+		Log(msg)
+		exit(1)
+	})
+
+	Entry <- config.entry
+	Web? <- config.web? = true
+	Wasm? <- config.wasm? = true
+	Output <- config.output
+	Includes <- parseIncludes(config.includes)
+
+	requireOpt('entry', Entry)
+	requireOpt('output', Output)
+	if Web? & Wasm? -> Abort('[oak build] --web and --wasm are mutually exclusive build targets.')
+	if statFile(Entry) = ? -> Abort(format('[oak build] {{0}} does not exist.', Entry))
+
+	// absolute path to the entrypoint module
+	AbsoluteEntry <- resolve(Entry)
+}
 
 // a { string: [Node] } that maps absolute paths of imported modules to their
 // fully parsed AST. We cache it here because we need to potentially astgen
@@ -109,12 +129,11 @@ ImportAssignmentNode := {
 // guaranteed to be cached.
 fn cachedParse(path, text) if cached := ModuleNodes.(path) {
 	? -> {
-		printf('[oak build] Parsing {{0}}...', path)
+		Log(format('[oak build] Parsing {{0}}...', path))
 		if nodes := text |> syntax.parse() {
 			{ type: :error, error: _, pos: _ } -> {
-				printf('[oak build] Parse error at {{0}}:{{1}}:{{2}}: {{3}}'
-					path, nodes.pos.1, nodes.pos.2, nodes.error)
-				exit(1)
+				Abort(format('[oak build] Parse error at {{0}}:{{1}}:{{2}}: {{3}}'
+					path, nodes.pos.1, nodes.pos.2, nodes.error))
 			}
 			_ -> {
 				ModuleNodes.(path) := nodes
@@ -675,8 +694,7 @@ fn renderOakBundle(bundleNode) {
 			}
 		)
 		_ -> {
-			printf('[oak build] Unexpected AST node type ' << string(node.type))
-			exit(1)
+			Abort('[oak build] Unexpected AST node type ' << string(node.type))
 		}
 	}
 
@@ -898,28 +916,37 @@ fn renderBundle(bundleNode) if {
 	_ -> renderOakBundle(bundleNode)
 }
 
-// Start from entrypoint and explicit includes, collect all static imports
-printf('[oak build] Bundling with entrypoint {{0}}', Entry)
-postImport := with once() fn {
-	// compile the import map into a bundle with an entrypoint and render to
-	// bundle program text
-	BundleFile := ModuleNodes |>
-		keys() |>
-		sort!() |>
-		map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> analyzeNode() |> wrapModule()]) |>
-		wrapBundle(AbsoluteEntry) |>
-		renderBundle()
+fn run(config) {
+	configure(config)
 
-	with writeFile(Output, BundleFile) fn(res) if res {
-		? -> printf('[oak build] Could not write bundle to {{0}}', Output)
-		_ -> printf('[oak build] Bundle written to {{0}}', Output)
+	// clear state for repeated invocations from non-CLI callers
+	ModuleNodes <- {}
+	startedImport <- 0
+	finishedImport <- 0
+
+	// Start from entrypoint and explicit includes, collect all static imports
+	Log(format('[oak build] Bundling with entrypoint {{0}}', Entry))
+	postImport := with once() fn {
+		// compile the import map into a bundle with an entrypoint and render to
+		// bundle program text
+		BundleFile := ModuleNodes |>
+			keys() |>
+			sort!() |>
+			map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> analyzeNode() |> wrapModule()]) |>
+			wrapBundle(AbsoluteEntry) |>
+			renderBundle()
+
+		with writeFile(Output, BundleFile) fn(res) if res {
+			? -> Log(format('[oak build] Could not write bundle to {{0}}', Output))
+			_ -> Log(format('[oak build] Bundle written to {{0}}', Output))
+		}
 	}
+	Includes |> with each() fn(spec) if ___runtime_lib?(spec.name) {
+		true -> if Web? -> addImportsFromSource(spec.name, ___runtime_lib(spec.name))
+		_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path, postImport)
+	}
+	addImportsFromFile(AbsoluteEntry, postImport)
 }
-Includes |> with each() fn(spec) if ___runtime_lib?(spec.name) {
-	true -> if Web? -> addImportsFromSource(spec.name, ___runtime_lib(spec.name))
-	_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path, postImport)
-}
-addImportsFromFile(AbsoluteEntry, postImport)
 
 
 // constants and runtime
@@ -1409,3 +1436,9 @@ OakWasmRuntime := '
   )
 )
 '
+
+{
+	parseInclude: parseInclude
+	parseIncludes: parseIncludes
+	run: run
+}

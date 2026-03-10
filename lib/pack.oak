@@ -1,4 +1,4 @@
-// oak pack -- distribute Oak programs as stand-alone binaries
+// pack -- distribute Oak programs as stand-alone binaries
 
 {
 	default: default
@@ -6,34 +6,17 @@
 } := import('std')
 {
 	printf: printf
+	format: format
 } := import('fmt')
 {
 	readFile: readFile
 	writeFile: writeFile
 	statFile: statFile
 } := import('fs')
-cli := import('cli')
 packUtils := import('pack-utils')
 
-Cli := cli.parse()
-
-// much of these options are inherited from `oak build`
-Entry := Cli.opts.entry
-Output := Cli.opts.output |> default(Cli.opts.o)
-Includes := Cli.opts.include
-Web? := Cli.opts.web != ?
-Wasm? := Cli.opts.wasm != ?
-Interp := Cli.opts.interp |>
-	// NOTE: we can't simply default to Cli.exe because we need an absolute,
-	// fully resolved path to be able to read from this file later.
-	default(___runtime_proc().exe) |>
-	default(Cli.exe)
-
-fn requireOpt(flag, value) if value {
-	?, '', true -> {
-		printf('[oak pack] No --{{0}} specified.', flag)
-		exit(1)
-	}
+fn requireOpt(flag, value, abort) if value {
+	?, '', true -> abort(format('[oak pack] No --{{0}} specified.', flag))
 }
 fn buildArgs(entry, output, includes) {
 	args := ['build', '--entry', entry, '--output', output]
@@ -43,50 +26,63 @@ fn buildArgs(entry, output, includes) {
 	}
 }
 
-requireOpt('entry', Entry)
-requireOpt('output', Output)
-if Web? | Wasm? -> {
-	printf('[oak pack] --web and --wasm are unsupported for pack targets.')
-	exit(1)
-}
-if Interp {
-	?, '', true -> {
-		printf('[oak pack] Invalid --interp specified.')
+fn run(config) {
+	Log := config.log |> default(printf)
+	Abort := config.abort |> default(fn(msg) {
+		Log(msg)
 		exit(1)
-	}
-}
-if statFile(Entry) = ? -> {
-	printf('[oak pack] {{0}} does not exist.', Entry)
-	exit(1)
-}
+	})
 
-with readFile(Interp) fn(packFile) if packFile {
-	? -> printf('[oak pack] Could not read oak executable.')
-	_ -> with exec(
-		Cli.exe
-		// We use Output as a temporary output file before writing the true
-		// packed binary out to the same location in the filesystem.
-		buildArgs(Entry, Output, Includes)
-		''
-	) fn(evt) if {
-		evt.type = :error -> printf('[oak pack] Could not bundle files.')
-		evt.status != 0 -> printf('[oak pack] Bundling failed:\n' + evt.stdout)
-		_ -> with readFile(Output) fn(oakBundleFile) if oakBundleFile {
-			? -> printf('[oak pack] Could not read Oak bundle')
-			_ -> {
-				with writeFile(
-					Output
-					packUtils.packBundle(packFile, oakBundleFile)
-				) fn(res) if res {
-					? -> printf('[oak pack] Could not save final pack file.')
-					_ -> with exec('chmod', ['+x', Output], '') fn(evt) if {
-						evt.type = :error
-						evt.status != 0 -> printf('[oak pack] Unable to mark binary as executable.')
-						_ -> printf('[oak pack] Executable binary saved to {{0}}', Output)
+	Entry := config.entry
+	Output := config.output
+	Includes := config.includes
+	Web? := config.web? = true
+	Wasm? := config.wasm? = true
+	Interp := config.interp |> default(___runtime_proc().exe)
+	OakExe := config.oakExe |> default(___runtime_proc().exe)
+	ExecFn := config.exec |> default(exec)
+
+	requireOpt('entry', Entry, Abort)
+	requireOpt('output', Output, Abort)
+	if Web? | Wasm? -> Abort('[oak pack] --web and --wasm are unsupported for pack targets.')
+	if Interp {
+		?, '', true -> Abort('[oak pack] Invalid --interp specified.')
+	}
+	if statFile(Entry) = ? -> Abort(format('[oak pack] {{0}} does not exist.', Entry))
+
+	with readFile(Interp) fn(packFile) if packFile {
+		? -> Log('[oak pack] Could not read oak executable.')
+		_ -> with ExecFn(
+			OakExe
+			// We use Output as a temporary output file before writing the true
+			// packed binary out to the same location in the filesystem.
+			buildArgs(Entry, Output, Includes)
+			''
+		) fn(evt) if {
+			evt.type = :error -> Log('[oak pack] Could not bundle files.')
+			evt.status != 0 -> Log('[oak pack] Bundling failed:\n' + evt.stdout)
+			_ -> with readFile(Output) fn(oakBundleFile) if oakBundleFile {
+				? -> Log('[oak pack] Could not read Oak bundle')
+				_ -> {
+					with writeFile(
+						Output
+						packUtils.packBundle(packFile, oakBundleFile)
+					) fn(res) if res {
+						? -> Log('[oak pack] Could not save final pack file.')
+						_ -> with ExecFn('chmod', ['+x', Output], '') fn(evt) if {
+							evt.type = :error
+							evt.status != 0 -> Log('[oak pack] Unable to mark binary as executable.')
+							_ -> Log(format('[oak pack] Executable binary saved to {{0}}', Output))
+						}
 					}
 				}
 			}
 		}
 	}
+}
+
+{
+	buildArgs: buildArgs
+	run: run
 }
 
