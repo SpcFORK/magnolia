@@ -265,6 +265,7 @@ function type(x) {
 	} else if (Array.isArray(x)) {
 		return Symbol.for(\'list\');
 	} else if (typeof x === \'object\') {
+		if (x != null && x.__oak_chan === true) return Symbol.for(\'channel\');
 		return Symbol.for(\'object\');
 	}
 	throw new Error(\'type() called on unknown type \' + x.toString());
@@ -425,6 +426,62 @@ function memwrite(p, data) {
 	return bytes.length;
 }
 
+function go(fn, ...args) {
+	try {
+		__oak_resolve_trampoline(fn, ...args);
+	} catch (_) {}
+	return null;
+}
+
+function make_chan(size) {
+	const cap = int(size) ?? 0;
+	return {
+		type: Symbol.for("channel"),
+		__oak_chan: true,
+		cap: cap < 0 ? 0 : cap,
+		queue: [],
+		receivers: [],
+	};
+}
+
+function chan_send(ch, value, cb) {
+	if (ch == null || ch.__oak_chan !== true) {
+		return __oak_io_error("chan_send() expects a channel");
+	}
+	if (ch.receivers.length > 0) {
+		const recvCb = ch.receivers.shift();
+		recvCb({ type: Symbol.for("data"), data: value });
+	} else {
+		ch.queue.push(value);
+	}
+	if (typeof cb === "function") cb({ type: Symbol.for("end") });
+	return { type: Symbol.for("end") };
+}
+
+function chan_recv(ch, cb) {
+	if (ch == null || ch.__oak_chan !== true) {
+		const evt = __oak_io_error("chan_recv() expects a channel");
+		if (typeof cb === "function") {
+			cb(evt);
+			return null;
+		}
+		return evt;
+	}
+	if (ch.queue.length > 0) {
+		const evt = { type: Symbol.for("data"), data: ch.queue.shift() };
+		if (typeof cb === "function") {
+			cb(evt);
+			return null;
+		}
+		return evt;
+	}
+	if (typeof cb === "function") {
+		ch.receivers.push(cb);
+		return null;
+	}
+	return __oak_io_error("chan_recv() would block on empty channel");
+}
+
 let __Oak_FS;
 let __Oak_Path;
 let __Oak_ChildProc;
@@ -492,6 +549,33 @@ function exec(path, args = [], stdin = "") {
 		}
 	}
 	return __oak_io_error("exec() unavailable in this runtime");
+}
+
+function sysproc(library, name) {
+	const lib = __oak_to_string_value(library);
+	const proc = __oak_to_string_value(name);
+	return __oak_io_error(`Could not resolve procedure ${lib}!${proc}: sysproc() unavailable in this runtime`);
+}
+
+function syscall(target, ...args) {
+	if (target == null) return __oak_io_error("syscall() missing target");
+	return __oak_io_error("syscall() unavailable in this runtime");
+}
+
+function utf16(x) {
+	x = __as_oak_string(x);
+	if (!__is_oak_string(x)) {
+		throw new Error("utf16() expects a string");
+	}
+	const raw = x.valueOf();
+	let out = "";
+	for (let i = 0; i < raw.length; i++) {
+		const code = raw.charCodeAt(i);
+		out += String.fromCharCode(code & 0xff);
+		out += String.fromCharCode((code >> 8) & 0xff);
+	}
+	out += "\x00\x00";
+	return __as_oak_string(out);
 }
 
 // I/O
@@ -752,9 +836,22 @@ function ___runtime_lib__oak_qm() {
 	const alias = (__Oak_Import_Aliases || {})[name];
 	return alias != null && __Oak_Modules[alias] != null;
 }
+function ___stdlibs() {
+	const out = {};
+	for (const key of Object.getOwnPropertyNames(__Oak_Modules)) {
+		const module = __Oak_Modules[key];
+		if (typeof module === "function") {
+			out[key] = __as_oak_string(module.toString());
+		}
+	}
+	return out;
+}
 function ___runtime_gc() {
 	if (__Is_Oak_Node && typeof global === "object" && typeof global.gc === "function") global.gc();
 	return null;
+}
+function ___runtime_go_version() {
+	return __as_oak_string("js");
 }
 function ___runtime_mem() {
 	if (__Is_Oak_Node && typeof process.memoryUsage === "function") {
@@ -836,9 +933,6 @@ function ___runtime_sys_info() {
 	};
 }
 function ___packed_vfs() {
-	if (typeof __oak_get_vfs === \'function\') {
-		return __oak_get_vfs();
-	}
 	if (typeof __Oak_VFS !== \'undefined\') {
 		return __Oak_VFS;
 	}
