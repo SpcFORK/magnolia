@@ -19,7 +19,62 @@ if not exist "%LOGO_PNG%" (
 )
 
 echo Creating icon from %LOGO_PNG%...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName PresentationCore; $pngPath = (Resolve-Path '%LOGO_PNG%').Path; $icoPath = (Resolve-Path './build').Path + '\\magnolia.ico'; $uri = New-Object System.Uri($pngPath); $bmp = New-Object System.Windows.Media.Imaging.BitmapImage; $bmp.BeginInit(); $bmp.UriSource = $uri; $bmp.DecodePixelWidth = 256; $bmp.DecodePixelHeight = 256; $bmp.EndInit(); $frame = [System.Windows.Media.Imaging.BitmapFrame]::Create($bmp); $encoder = New-Object System.Windows.Media.Imaging.IconBitmapEncoder; $encoder.Frames.Add($frame); $fs = [System.IO.File]::Open($icoPath, [System.IO.FileMode]::Create); try { $encoder.Save($fs) } finally { $fs.Dispose() }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+"Add-Type -AssemblyName System.Drawing; ^
+$pngPath = '%LOGO_PNG%'; ^
+$icoPath = '%ICON_PATH%'; ^
+$src = [System.Drawing.Image]::FromFile($pngPath); ^
+try { ^
+    $bmp = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb); ^
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp); ^
+    try { ^
+        $gfx.Clear([System.Drawing.Color]::Transparent); ^
+        $gfx.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality; ^
+        $gfx.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; ^
+        $gfx.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality; ^
+        $gfx.DrawImage($src, 0, 0, 256, 256); ^
+    } finally { ^
+        $gfx.Dispose(); ^
+    }; ^
+    $ms = [System.IO.MemoryStream]::new(); ^
+    try { ^
+        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Bmp); ^
+        $bmpBytes = $ms.ToArray(); ^
+        $dib = [byte[]]::new($bmpBytes.Length - 14); ^
+        [Array]::Copy($bmpBytes, 14, $dib, 0, $dib.Length); ^
+        $height2 = [BitConverter]::GetBytes([int]($bmp.Height * 2)); ^
+        [Array]::Copy($height2, 0, $dib, 8, 4); ^
+        $maskRowBytes = [int]([Math]::Ceiling($bmp.Width / 32.0) * 4); ^
+        $maskSize = $maskRowBytes * $bmp.Height; ^
+        $mask = [byte[]]::new($maskSize); ^
+        $imageSize = $dib.Length + $mask.Length; ^
+        $fs = [System.IO.File]::Open($icoPath, [System.IO.FileMode]::Create); ^
+        $bw = [System.IO.BinaryWriter]::new($fs); ^
+        try { ^
+            $bw.Write([UInt16]0); ^
+            $bw.Write([UInt16]1); ^
+            $bw.Write([UInt16]1); ^
+            $bw.Write([byte]0); ^
+            $bw.Write([byte]0); ^
+            $bw.Write([byte]0); ^
+            $bw.Write([byte]0); ^
+            $bw.Write([UInt16]1); ^
+            $bw.Write([UInt16]32); ^
+            $bw.Write([UInt32]$imageSize); ^
+            $bw.Write([UInt32]22); ^
+            $bw.Write($dib); ^
+            $bw.Write($mask); ^
+        } finally { ^
+            $bw.Dispose(); ^
+            $fs.Dispose(); ^
+        } ^
+    } finally { ^
+        $ms.Dispose(); ^
+    }; ^
+    $bmp.Dispose(); ^
+} finally { ^
+    $src.Dispose(); ^
+}"
 if errorlevel 1 exit /b 1
 
 if exist "%SYSO_FILE%" del "%SYSO_FILE%"
