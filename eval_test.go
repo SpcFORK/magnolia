@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1704,6 +1705,48 @@ func TestPackLibraryBuildArgs(t *testing.T) {
 		),
 		AtomValue("function"),
 	))
+}
+
+func TestImportSupportsAlternativeModuleExtensions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "mod_ok.ok"), []byte("value := 11"), 0o644); err != nil {
+		t.Fatalf("Could not write .ok module: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "mod_mag.mag"), []byte("value := 12"), 0o644); err != nil {
+		t.Fatalf("Could not write .mag module: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "mod_mg.mg"), []byte("value := 13"), 0o644); err != nil {
+		t.Fatalf("Could not write .mg module: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "explicit.ok"), []byte("value := 14"), 0o644); err != nil {
+		t.Fatalf("Could not write explicit .ok module: %s", err)
+	}
+
+	ctx := NewContext(tmpDir)
+	ctx.LoadBuiltins()
+
+	val, err := ctx.Eval(strings.NewReader(`
+		[
+			import('mod_ok').value
+			import('mod_mag').value
+			import('mod_mg').value
+			import('explicit.ok').value
+		]
+	`))
+	if err != nil {
+		t.Fatalf("Did not expect program to exit with error: %s", err.Error())
+	}
+
+	expected := MakeList(
+		IntValue(11),
+		IntValue(12),
+		IntValue(13),
+		IntValue(14),
+	)
+	if val == nil || !val.Eq(expected) {
+		t.Fatalf("Expected %s, got %v", expected, val)
+	}
 }
 
 func TestTrigAndPowLogBuiltins(t *testing.T) {

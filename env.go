@@ -360,7 +360,7 @@ func (c *Context) getGoChan(arg Value, fnName string) (chan Value, *runtimeError
 }
 
 func rawMemoryRegion(addr uintptr, length int) []byte {
-	return (*[1 << 30]byte)(unsafe.Pointer(addr))[:length:length]
+	return unsafe.Slice((*byte)(unsafe.Pointer(addr)), length)
 }
 
 func (c *Context) callbackify(syncFn builtinFn) builtinFn {
@@ -429,15 +429,43 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 		return c.LoadLib(pathStr)
 	}
 
-	filePath := pathStr + ".oak"
-	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(c.rootPath, filePath)
+	supportedExts := []string{".oak", ".ok", ".mag", ".mg"}
+	candidatePaths := make([]string, 0, len(supportedExts))
+	inputExt := filepath.Ext(pathStr)
+	if inputExt != "" {
+		for _, ext := range supportedExts {
+			if strings.EqualFold(inputExt, ext) {
+				candidatePaths = append(candidatePaths, pathStr)
+				break
+			}
+		}
+	}
+	if len(candidatePaths) == 0 {
+		for _, ext := range supportedExts {
+			candidatePaths = append(candidatePaths, pathStr+ext)
+		}
 	}
 
-	file, err := os.Open(filePath)
-	if err != nil {
+	var (
+		file     *os.File
+		err      error
+		filePath string
+	)
+	for _, candidate := range candidatePaths {
+		resolved := candidate
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(c.rootPath, resolved)
+		}
+
+		file, err = os.Open(resolved)
+		if err == nil {
+			filePath = resolved
+			break
+		}
+	}
+	if file == nil {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("Could not open %s, %s", filePath, err.Error()),
+			reason: fmt.Sprintf("Could not open %s (%s)", pathStr, strings.Join(supportedExts, ", ")),
 		}
 	}
 	defer file.Close()
