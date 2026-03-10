@@ -1633,3 +1633,240 @@ func TestPointerBuiltinAndArithmetic(t *testing.T) {
 		BoolValue(true),
 	))
 }
+
+func TestBuildLibraryParseIncludesFromString(t *testing.T) {
+	expectProgramToReturn(t, `
+		std := import('std')
+		build := import('build')
+		build.parseIncludes('alpha:./one,beta:./two,third') |> std.map(:name)
+	`, MakeList(
+		MakeString("alpha"),
+		MakeString("beta"),
+		MakeString("third"),
+	))
+}
+
+func TestBuildLibraryParseIncludesFromList(t *testing.T) {
+	expectProgramToReturn(t, `
+		build := import('build')
+		str := import('str')
+		parsed := build.parseIncludes(['foo:./x', { name: 'bar', path: '/tmp/bar.oak' }])
+		[
+			parsed.0.name
+			str.endsWith?(parsed.0.path, '.oak')
+			parsed.1.name
+			parsed.1.path
+			type(build.run)
+		]
+	`, MakeList(
+		MakeString("foo"),
+		BoolValue(true),
+		MakeString("bar"),
+		MakeString("/tmp/bar.oak"),
+		AtomValue("function"),
+	))
+}
+
+func TestPackLibraryBuildArgs(t *testing.T) {
+	expectProgramToReturn(t, `
+		pack := import('pack')
+		[
+			pack.buildArgs('main.oak', 'bundle.oak', ?)
+			pack.buildArgs('main.oak', 'bundle.oak', 'dyn:./dyn')
+			type(pack.run)
+		]
+	`, MakeList(
+		MakeList(
+			MakeString("build"),
+			MakeString("--entry"),
+			MakeString("main.oak"),
+			MakeString("--output"),
+			MakeString("bundle.oak"),
+		),
+		MakeList(
+			MakeString("build"),
+			MakeString("--entry"),
+			MakeString("main.oak"),
+			MakeString("--output"),
+			MakeString("bundle.oak"),
+			MakeString("--include"),
+			MakeString("dyn:./dyn"),
+		),
+		AtomValue("function"),
+	))
+}
+
+func TestTrigAndPowLogBuiltins(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			sin(0)
+			cos(0)
+			tan(0)
+			atan(0)
+			pow(2, 3)
+			log(2, 8)
+		]
+	`, MakeList(
+		FloatValue(0),
+		FloatValue(1),
+		FloatValue(0),
+		FloatValue(0),
+		FloatValue(8),
+		FloatValue(3),
+	))
+}
+
+func TestAsinAndAcosBuiltins(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			asin(0)
+			acos(1)
+		]
+	`, MakeList(
+		FloatValue(0),
+		FloatValue(0),
+	))
+}
+
+func TestMathBuiltinDomainErrors(t *testing.T) {
+	expectProgramToError(t, `asin(2)`)
+	expectProgramToError(t, `acos(-2)`)
+	expectProgramToError(t, `pow(0, 0)`)
+	expectProgramToError(t, `pow(-1, 0.5)`)
+	expectProgramToError(t, `log(0, 10)`)
+	expectProgramToError(t, `log(2, 0)`)
+}
+
+func TestProcessTimeAndRandomBuiltins(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			type(args())
+			len(args()) > 0
+			type(env())
+			type(time())
+			type(nanotime())
+			type(rand())
+			len(srand(8))
+			rand() >= 0 & rand() < 1
+		]
+	`, MakeList(
+		AtomValue("list"),
+		oakTrue,
+		AtomValue("object"),
+		AtomValue("float"),
+		AtomValue("int"),
+		AtomValue("float"),
+		IntValue(8),
+		oakTrue,
+	))
+}
+
+func TestPrintBuiltinWritesAndReturnsCount(t *testing.T) {
+	expectProgramToReturn(t, `print('oak')`, IntValue(3))
+}
+
+func TestWaitBuiltinAsyncCallback(t *testing.T) {
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+
+	_, err := ctx.Eval(strings.NewReader(`
+		done := false
+		with wait(0) fn(_) {
+			done <- true
+		}
+	`))
+	if err != nil {
+		t.Fatalf("Did not expect program to exit with error: %s", err.Error())
+	}
+
+	ctx.Wait()
+
+	done, scopeErr := ctx.scope.get("done")
+	if scopeErr != nil {
+		t.Fatalf("Could not read done from scope: %s", scopeErr.Error())
+	}
+
+	if !done.Eq(oakTrue) {
+		t.Fatalf("Expected async wait callback to set done to true, got %s", done)
+	}
+}
+
+func TestAtomAndCharBuiltins(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			atom('xyz')
+			atom(10)
+			char(65)
+			char(-10)
+			char(300)
+		]
+	`, MakeList(
+		AtomValue("xyz"),
+		AtomValue("10"),
+		MakeString("A"),
+		MakeString("\x00"),
+		MakeString("\xff"),
+	))
+}
+
+func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			type(___stdlibs())
+			type(___stdlibs().std)
+			type(___runtime_lib('std'))
+			___runtime_lib?('std')
+			type(___runtime_lib('definitely_missing_lib'))
+			type(___runtime_gc())
+			type(___runtime_mem().heap)
+			type(___runtime_mem().allocs)
+			type(___runtime_proc().pid)
+			(type(___runtime_proc().exe) = :string) | (type(___runtime_proc().exe) = :null)
+		]
+	`, MakeList(
+		AtomValue("object"),
+		AtomValue("string"),
+		AtomValue("string"),
+		oakTrue,
+		AtomValue("null"),
+		AtomValue("null"),
+		AtomValue("int"),
+		AtomValue("int"),
+		AtomValue("int"),
+		oakTrue,
+	))
+}
+
+func TestBuiltinPresenceForRemainingIoAndProcessFeatures(t *testing.T) {
+	expectProgramToReturn(t, `
+		[
+			type(input)
+			type(exit)
+			type(exec)
+			type(ls)
+			type(rm)
+			type(mkdir)
+			type(stat)
+			type(open)
+			type(close)
+			type(read)
+			type(write)
+			type(listen)
+			type(req)
+		]
+	`, MakeList(
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+	))
+}

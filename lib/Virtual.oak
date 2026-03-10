@@ -470,8 +470,118 @@ fn createVirtualContext(initialScope) {
 	ctx
 }
 
+// VirtualFS provides an in-memory file system for packed binaries
+// This allows bundled programs to access files across platforms
+fn createVirtualFS(initialFiles) {
+	files := initialFiles |> default({})
+	
+	// Normalize path separators to forward slashes
+	fn normalizePath(path) path |>
+		replace('\\', '/') |>
+		replace('//', '/')
+	
+	// Check if a file exists in the VFS
+	fn exists?(path) {
+		normalizedPath := normalizePath(path)
+		files.(normalizedPath) != ?
+	}
+	
+	// Read file contents from the VFS
+	fn readFile(path, withFile) {
+		normalizedPath := normalizePath(path)
+		content := files.(normalizedPath)
+		if withFile {
+			? -> content
+			_ -> withFile(content)
+		}
+	}
+	
+	// Write file contents to the VFS
+	fn writeFile(path, content, withResult) {
+		normalizedPath := normalizePath(path)
+		files.(normalizedPath) := content
+		if withResult {
+			? -> true
+			_ -> withResult(true)
+		}
+	}
+	
+	// Get file stats (just basic info for VFS)
+	fn statFile(path, withStat) {
+		normalizedPath := normalizePath(path)
+		if content := files.(normalizedPath) {
+			? -> result := ?
+			_ -> result := {
+				name: normalizedPath
+				size: len(content)
+				dir?: false
+				mod: 0
+			}
+		}
+		if withStat {
+			? -> result
+			_ -> withStat(result)
+		}
+	}
+	
+	// List all files in the VFS
+	fn listFiles(withList) {
+		fileList := files |> keys()
+		if withList {
+			? -> fileList
+			_ -> withList(fileList)
+		}
+	}
+	
+	// Delete a file from the VFS
+	fn deleteFile(path, withResult) {
+		normalizedPath := normalizePath(path)
+		if files.(normalizedPath) != ? {
+			true -> {
+				files.(normalizedPath) := ?
+				result := true
+			}
+			_ -> result := false
+		}
+		if withResult {
+			? -> result
+			_ -> withResult(result)
+		}
+	}
+	
+	// Get all files (for serialization/packing)
+	fn getFiles() files |> clone()
+	
+	// Set all files (for deserialization/unpacking)
+	fn setFiles(newFiles) {
+		files <- newFiles |> clone()
+	}
+	
+	{
+		files: files
+		exists?: exists?
+		readFile: readFile
+		writeFile: writeFile
+		statFile: statFile
+		listFiles: listFiles
+		deleteFile: deleteFile
+		getFiles: getFiles
+		setFiles: setFiles
+	}
+}
+
+// createVirtualFSWithFS creates a VirtualFS initialized with files from the real FS
+fn createVirtualFSWithFS(basePath, patterns) {
+	vfs := createVirtualFS({})
+	// This would require real FS integration
+	// For now, return empty VFS
+	vfs
+}
+
 {
 	createVM: createVM
 	createStandardVM: createStandardVM
 	createVirtualContext: createVirtualContext
+	createVirtualFS: createVirtualFS
+	createVirtualFSWithFS: createVirtualFSWithFS
 }

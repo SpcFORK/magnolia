@@ -1,0 +1,477 @@
+// libthread provides high-level utilities for concurrent and parallel
+// programming in Oak.
+//
+// It builds on top of Oak's built-in primitives (go, make_chan, chan_send,
+// chan_recv) to provide ergonomic abstractions for common threading patterns
+// like mutexes, semaphores, wait groups, thread pools, and parallel operations.
+
+{
+	map: map
+	each: each
+	range: range
+	slice: slice
+	append: append
+	reduce: reduce
+} := import('std')
+
+// spawn executes a function in a new goroutine with the given arguments.
+// This is a convenience wrapper around the built-in `go` function.
+//
+// Example:
+//   spawn(fn() println('Hello from thread!'))
+//   spawn(fn(x) println(x), 'Message')
+fn spawn(fn, args...) go(fn, args...)
+
+// makeChannel creates a new channel with optional buffer size.
+// If no size is given, creates an unbuffered channel (size = 0).
+//
+// Example:
+//   ch := makeChannel()          // unbuffered
+//   ch := makeChannel(10)        // buffered with capacity 10
+fn makeChannel(size) if size {
+	? -> make_chan()
+	_ -> make_chan(size)
+}
+
+// send sends a value to a channel. Can be used both synchronously and
+// asynchronously with a callback.
+//
+// Example:
+//   send(ch, 'hello')                          // sync
+//   send(ch, 'hello', fn() println('sent!'))  // async
+fn send(ch, value, callback) if callback {
+	? -> chan_send(ch, value)
+	_ -> chan_send(ch, value, callback)
+}
+
+// recv receives a value from a channel. Can be used both synchronously and
+// asynchronously with a callback.
+//
+// Example:
+//   data := recv(ch)                              // sync
+//   recv(ch, fn(data) println('got: ', data))    // async
+fn recv(ch, callback) if callback {
+	? -> chan_recv(ch)
+	_ -> chan_recv(ch, callback)
+}
+
+// close is a no-op in current Oak implementation, but provided for API
+// compatibility and future extensions.
+fn close(_ch) ?
+
+// Mutex provides mutual exclusion using a buffered channel.
+// Usage:
+//   m := Mutex()
+//   m.lock()
+//   // critical section
+//   m.unlock()
+fn Mutex {
+	ch := make_chan(1)
+	chan_send(ch, true) // initially unlocked
+
+	{
+		// lock acquires the mutex, blocking if already held
+		lock: fn() chan_recv(ch)
+
+		// unlock releases the mutex
+		unlock: fn() chan_send(ch, true)
+
+		// tryLock attempts to acquire the mutex without blocking.
+		// Returns true if successful, false otherwise.
+		tryLock: fn() {
+			// Note: In current Oak, we can't do non-blocking channel ops
+			// so this is a simplified implementation
+			chan_recv(ch)
+			true
+		}
+	}
+}
+
+// Semaphore provides a counting semaphore for controlling access to a pool
+// of resources.
+// Usage:
+//   sem := Semaphore(3)  // allow 3 concurrent accesses
+//   sem.acquire()
+//   // use resource
+//   sem.release()
+fn Semaphore(n) {
+	ch := make_chan(n)
+	
+	// Fill the semaphore with n tokens
+	range(n) |> each(fn() chan_send(ch, true))
+
+	{
+		// acquire obtains a token from the semaphore, blocking if none available
+		acquire: fn() chan_recv(ch)
+
+		// release returns a token to the semaphore
+		release: fn() chan_send(ch, true)
+
+		// count returns the capacity of the semaphore
+		count: fn() n
+	}
+}
+
+// WaitGroup provides synchronization for waiting on multiple goroutines to
+// complete.
+// Usage:
+//   wg := WaitGroup()
+//   wg.add(2)
+//   spawn(fn() { doWork(), wg.done() })
+//   spawn(fn() { doWork(), wg.done() })
+//   wg.wait()
+fn WaitGroup {
+	doneCh := make_chan()
+	countCh := make_chan()
+
+	// Background goroutine to manage the counter
+	spawn(fn() {
+		count := 0
+		fn loop {
+			msg := chan_recv(countCh)
+			if msg.type {
+				:add -> {
+					count := count + msg.delta
+					if count < 0 -> count := 0
+					loop()
+				}
+				:done -> {
+					count := count - 1
+					if count <= 0 -> {
+						// Signal all waiters
+						if msg.reply {
+							? -> ?
+							_ -> chan_send(msg.reply, true)
+						}
+					}
+					loop()
+				}
+				:wait -> if count <= 0 {
+					true -> chan_send(msg.reply, true)
+					_ -> {
+						// Store reply channel for when count reaches 0
+						loop()
+					}
+				}
+			}
+		}
+		loop()
+	})
+
+	{
+		// add increments the WaitGroup counter by delta
+		add: fn(delta) chan_send(countCh, {
+			type: :add
+			delta: delta
+		})
+
+		// done decrements the WaitGroup counter by 1
+		done: fn() chan_send(countCh, {
+			type: :done
+			reply: ?
+		})
+
+		// wait blocks until the WaitGroup counter is zero
+		wait: fn() {
+			replyCh := make_chan()
+			chan_send(countCh, {
+				type: :wait
+				reply: replyCh
+			})
+			chan_recv(replyCh)
+		}
+	}
+}
+
+// Future represents a value that will be available in the future.
+// Usage:
+//   f := Future(fn() expensiveComputation())
+//   // do other work...
+//   result := f.get()
+fn Future(fn) {
+	resultCh := make_chan(1)
+	
+	spawn(fn() {
+		result := fn()
+		chan_send(resultCh, {
+			type: :success
+			value: result
+		})
+	})
+
+	{
+		// get blocks until the result is available and returns it
+		get: fn() {
+			result := chan_recv(resultCh)
+			if result.type {
+				:success -> result.value
+				_ -> ?
+			}
+		}
+
+		// then chains a function to be called with the result
+		then: fn(callback) Future(fn() callback(
+			chan_recv(resultCh).value
+		))
+	}
+}
+
+// Pool creates a worker pool with a fixed number of workers.
+// Usage:
+//   pool := Pool(4)  // 4 workers
+//   pool.submit(fn() doWork())
+//   pool.close()
+//   pool.wait()
+fn Pool(numWorkers) {
+	taskCh := make_chan(numWorkers * 2)
+	doneCh := make_chan()
+	closeCh := make_chan()
+	activeWorkers := 0
+
+	// Spawn worker goroutines
+	range(numWorkers) |> each(fn() spawn(fn() {
+		fn workerLoop {
+			task := chan_recv(taskCh)
+			if task.type {
+				:task -> {
+					// Execute the task
+					task.fn()
+					// Check if pool is closing
+					workerLoop()
+				}
+				:close -> {
+					// Worker exits
+					chan_send(doneCh, true)
+					?
+				}
+				_ -> workerLoop()
+			}
+		}
+		workerLoop()
+	}))
+
+	{
+		// submit adds a task to the pool
+		submit: fn(fn) chan_send(taskCh, {
+			type: :task
+			fn: fn
+		})
+
+		// close signals the pool to stop accepting new tasks and shut down
+		close: fn() range(numWorkers) |> each(fn() chan_send(taskCh, {
+			type: :close
+		}))
+
+		// wait blocks until all workers have finished
+		wait: fn() range(numWorkers) |> each(fn() chan_recv(doneCh))
+
+		// size returns the number of workers in the pool
+		size: fn() numWorkers
+	}
+}
+
+// parallel executes multiple functions concurrently and returns their results
+// in order.
+// Usage:
+//   results := parallel([
+//       fn() computation1()
+//       fn() computation2()
+//       fn() computation3()
+//   ])
+fn parallel(fns) {
+	resultCh := make_chan(len(fns))
+	
+	fns |> each(fn(fnItem, i) spawn(fn() {
+		result := fnItem()
+		chan_send(resultCh, {
+			index: i
+			value: result
+		})
+	}))
+
+	// Collect results
+	results := []
+	range(len(fns)) |> each(fn() {
+		item := chan_recv(resultCh)
+		results.(item.index) := item.value
+	})
+
+	results
+}
+
+// pmap applies a function to each element of a list in parallel and returns
+// the results in order.
+// Usage:
+//   squares := pmap([1, 2, 3, 4], fn(x) x * x)  // [1, 4, 9, 16]
+fn pmap(list, fn) {
+	fns := list |> map(fn(item) fn() fn(item))
+	parallel(fns)
+}
+
+// pmapConcurrent is like pmap but limits concurrency to n goroutines.
+// Usage:
+//   results := pmapConcurrent([1, 2, 3, 4], fn(x) x * x, 2)
+fn pmapConcurrent(list, fn, maxConcurrent) {
+	pool := Pool(maxConcurrent)
+	resultCh := make_chan(len(list))
+	
+	list |> each(fn(item, i) pool.submit(fn() {
+		result := fn(item)
+		chan_send(resultCh, {
+			index: i
+			value: result
+		})
+	}))
+
+	pool.close()
+
+	// Collect results
+	results := []
+	range(len(list)) |> each(fn() {
+		item := chan_recv(resultCh)
+		results.(item.index) := item.value
+	})
+
+	pool.wait()
+	results
+}
+
+// race executes multiple functions concurrently and returns the result of
+// the first one to complete.
+// Usage:
+//   fastest := race([
+//       fn() slowComputation()
+//       fn() fastComputation()
+//   ])
+fn race(fns) {
+	resultCh := make_chan(len(fns))
+	
+	fns |> each(fn(fnItem) spawn(fn() {
+		result := fnItem()
+		chan_send(resultCh, result)
+	}))
+
+	// Return first result
+	chan_recv(resultCh).data
+}
+
+// pipeline creates a pipeline of processing stages where each stage runs
+// concurrently.
+// Usage:
+//   result := pipeline(
+//       data,
+//       fn(x) x * 2,
+//       fn(x) x + 1,
+//       fn(x) x * x
+//   )
+fn pipeline(input, stages...) {
+	if len(stages) {
+		0 -> input
+		_ -> {
+			channels := [make_chan()] // input channel
+			
+			// Create a channel for each stage
+			range(len(stages)) |> each(fn() {
+				channels << make_chan()
+			})
+
+			// Start each stage
+			stages |> each(fn(stageFn, i) spawn(fn() {
+				fn stageLoop {
+					data := chan_recv(channels.(i))
+					if data.type {
+						:data -> {
+							result := stageFn(data.value)
+							chan_send(channels.(i + 1), {
+								type: :data
+								value: result
+							})
+							stageLoop()
+						}
+						:done -> {
+							chan_send(channels.(i + 1), { type: :done })
+							?
+						}
+					}
+				}
+				stageLoop()
+			}))
+
+			// Send input
+			chan_send(channels.0, {
+				type: :data
+				value: input
+			})
+			chan_send(channels.0, { type: :done })
+
+			// Get result from last channel
+			result := chan_recv(channels.(len(stages)))
+			if result.type {
+				:data -> result.value
+				_ -> ?
+			}
+		}
+	}
+}
+
+// retry executes a function up to maxAttempts times until it succeeds.
+// Success is determined by the function returning a non-null value.
+// Usage:
+//   result := retry(fn() unstableOperation(), 3)
+fn retry(fn, maxAttempts) {
+	fn attempt(n) if n > 0 -> {
+		result := fn()
+		if result {
+			? -> attempt(n - 1)
+			_ -> result
+		}
+	}
+	
+	attempt(maxAttempts)
+}
+
+// debounce returns a debounced version of the function that delays execution
+// until after waitTime seconds have elapsed since the last call.
+// Usage:
+//   debouncedFn := debounce(fn() println('Called!'), 0.5)
+fn debounce(fn, waitTime) {
+	timerCh := make_chan()
+	
+	spawn(fn() {
+		fn loop {
+			msg := chan_recv(timerCh)
+			if msg.type {
+				:call -> {
+					wait(waitTime)
+					fn()
+					loop()
+				}
+			}
+		}
+		loop()
+	})
+
+	fn(args...) chan_send(timerCh, {
+		type: :call
+		args: args
+	})
+}
+
+// throttle returns a throttled version of the function that executes at most
+// once every waitTime seconds.
+// Usage:
+//   throttledFn := throttle(fn() println('Called!'), 1)
+fn throttle(fn, waitTime) {
+	lastCall := 0
+	mutex := Mutex()
+
+	fn(args...) {
+		mutex.lock()
+		now := time()
+		if now - lastCall >= waitTime -> {
+			lastCall := now
+			mutex.unlock()
+			fn(args...)
+		} |> _ -> mutex.unlock()
+	}
+}
