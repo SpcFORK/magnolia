@@ -7,6 +7,7 @@
 It is intended for:
 
 - resolving and calling `kernel32.dll` / `ntdll.dll` / `psapi.dll` exports
+- resolving and calling GUI/system DLL exports like `user32.dll` / `gdi32.dll`
 - querying process and module handles
 - basic virtual memory and remote process memory APIs
 
@@ -25,6 +26,11 @@ windows := import('windows')
 - `Kernel32`
 - `Ntdll`
 - `Psapi`
+- `User32`
+- `Gdi32`
+- `Advapi32`
+- `Shell32`
+- `Ole32`
 
 ### Process access flags
 
@@ -56,6 +62,18 @@ windows := import('windows')
 
 - `FORMAT_MESSAGE_IGNORE_INSERTS`
 - `FORMAT_MESSAGE_FROM_SYSTEM`
+
+### Window class/style/message constants
+
+- `CS_VREDRAW`, `CS_HREDRAW`
+- `WS_OVERLAPPED`, `WS_CAPTION`, `WS_SYSMENU`, `WS_THICKFRAME`
+- `WS_MINIMIZEBOX`, `WS_MAXIMIZEBOX`, `WS_VISIBLE`, `WS_OVERLAPPEDWINDOW`
+- `CW_USEDEFAULT`
+- `WM_CREATE`, `WM_DESTROY`, `WM_PAINT`, `WM_CLOSE`, `WM_QUIT`, `WM_COMMAND`
+- `SW_HIDE`, `SW_SHOW`
+- `PM_NOREMOVE`, `PM_REMOVE`
+- `MB_OK`, `MB_ICONERROR`, `MB_ICONWARNING`, `MB_ICONINFORMATION`
+- `IDC_ARROW`, `IDI_APPLICATION`
 
 ## Helpers
 
@@ -90,6 +108,89 @@ Calls a resolved proc or address through `sys.call`.
 ### `psapi(symbol, args...)`
 
 Resolve + call convenience wrappers for each library.
+
+### `loadDll(library)`
+
+Loads a DLL by name/path using `LoadLibraryW` and memoizes the module handle.
+
+Returns:
+
+- `{type: :ok, handle: <int>, library: <string>}` on success
+- `{type: :error, ...}` on failure
+
+### `resolveInLoaded(library, symbol)`
+
+Ensures a DLL is loaded, then resolves a symbol via `GetProcAddress`.
+
+Returns:
+
+- `{type: :ok, proc: <int>, handle: <int>, library: <string>, symbol: <string>}`
+- `{type: :error, ...}`
+
+### `callIn(library, symbol, args...)`
+
+Load + resolve + call helper for arbitrary DLLs.
+
+### `user32(symbol, args...)`
+### `gdi32(symbol, args...)`
+### `advapi32(symbol, args...)`
+### `shell32(symbol, args...)`
+### `ole32(symbol, args...)`
+
+Convenience wrappers that route through `callIn(...)`.
+
+## Windowing APIs (user32)
+
+### `registerClassEx(wndClassExPtr)`
+
+Calls `RegisterClassExW`.
+
+### `createWindowEx(exStyle, className, windowName, style, x, y, width, height, parent, menu, instance, param)`
+
+Calls `CreateWindowExW` with UTF-16 conversion for class and window names.
+
+### `defWindowProc(hwnd, msg, wParam, lParam)`
+### `showWindow(hwnd, cmdShow)`
+### `updateWindow(hwnd)`
+### `destroyWindow(hwnd)`
+### `postQuitMessage(exitCode)`
+
+Core window lifecycle helpers.
+
+### `getMessage(msgPtr, hwnd, msgFilterMin, msgFilterMax)`
+### `peekMessage(msgPtr, hwnd, msgFilterMin, msgFilterMax, removeMsg)`
+### `translateMessage(msgPtr)`
+### `dispatchMessage(msgPtr)`
+### `isWindow(hwnd)`
+### `waitMessage()`
+
+Message-loop helpers. `msgPtr` should point to a `MSG`-compatible buffer.
+
+### `messageBox(hwnd, text, caption, msgType)`
+### `setWindowText(hwnd, text)`
+### `loadCursor(instance, cursorId)`
+### `loadIcon(instance, iconId)`
+
+Common Win32 UI helper calls.
+
+### `beginPaint(hwnd, paintStructPtr)`
+### `endPaint(hwnd, paintStructPtr)`
+### `getDC(hwnd)`
+### `releaseDC(hwnd, hdc)`
+
+Painting and DC access helpers.
+
+## Basic GDI APIs (gdi32)
+
+### `getStockObject(objectIndex)`
+### `selectObject(hdc, gdiObject)`
+### `textOut(hdc, x, y, text)`
+### `rectangle(hdc, left, top, right, bottom)`
+### `ellipse(hdc, left, top, right, bottom)`
+### `createSolidBrush(colorRef)`
+### `deleteObject(gdiObject)`
+
+Thin wrappers for common drawing primitives.
 
 ## Process and Module APIs
 
@@ -186,6 +287,56 @@ if windows.isWindows?() {
     _ -> println('windows library is inactive on this host')
 }
 ```
+
+### Window Creation Example
+
+See [samples/windows-window.oak](../samples/windows-window.oak) for a runnable
+window sample.
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        hwnd := windows.createWindowEx(
+            0
+            'STATIC'
+            'Magnolia Win32 Window'
+            windows.WS_OVERLAPPEDWINDOW | windows.WS_VISIBLE
+            windows.CW_USEDEFAULT
+            windows.CW_USEDEFAULT
+            800
+            480
+            0
+            0
+            windows.imageBase()
+            0
+        )
+
+        if hwnd.type = :ok & hwnd.r1 > 0 -> {
+            windows.showWindow(hwnd.r1, windows.SW_SHOW)
+            windows.updateWindow(hwnd.r1)
+        }
+    }
+}
+```
+
+### Drawing Example (Immediate GDI)
+
+See [samples/windows-draw.oak](../samples/windows-draw.oak) for a runnable
+example that:
+
+- creates a visible top-level window
+- draws text + simple shapes using `getDC`, `textOut`, `rectangle`, and `ellipse`
+- enters the `GetMessage`/`DispatchMessage` loop
+
+## Current Limitation
+
+`registerClassEx(...)` is available, but Magnolia currently does not expose a
+native callback bridge for passing an Oak function as `WNDPROC`.
+
+That means custom message handling (for example explicit `WM_PAINT` handlers)
+still requires runtime support beyond the current `sysproc/syscall` surface.
 
 ## Notes
 

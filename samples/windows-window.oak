@@ -1,0 +1,98 @@
+// Minimal Win32 window sample using windows stdlib wrappers.
+//
+// This sample avoids callback registration and uses the built-in STATIC
+// class so it can create a visible top-level window with a normal message loop.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+fn zeros(n, acc) if n {
+	0 -> acc
+	_ -> zeros(n - 1, acc << 0)
+}
+
+fn ok?(res) res.type = :ok | res.type = :success
+
+fn callOk?(res) ok?(res) | (res.type = :error & res.r1 > 0)
+
+fn noMessage?(res) {
+	(ok?(res) & res.r1 = 0) |
+	(res.type = :error & res.errno = 1400)
+}
+
+fn runMessageLoop(msgPtr) {
+	msg := windows.getMessage(msgPtr, 0, 0, 0)
+	if callOk?(msg) | noMessage?(msg) {
+		true -> if msg.r1 > 0 {
+			true -> {
+				windows.translateMessage(msgPtr)
+				windows.dispatchMessage(msgPtr)
+				runMessageLoop(msgPtr)
+			}
+			_ -> 0
+		}
+		_ -> msg
+	}
+}
+
+println('== Windows Window Sample ==')
+
+if windows.isWindows?() {
+	true -> {
+		lock_thread()
+		hwnd := windows.createWindowEx(
+			0
+			'STATIC'
+			'Magnolia Win32 Window'
+			windows.WS_OVERLAPPEDWINDOW | windows.WS_VISIBLE
+			windows.CW_USEDEFAULT
+			windows.CW_USEDEFAULT
+			800
+			480
+			0
+			0
+			windows.imageBase()
+			0
+		)
+
+		if hwnd.type {
+			:ok -> {
+				if hwnd.r1 > 0 {
+					true -> {
+						windows.showWindow(hwnd.r1, windows.SW_SHOW)
+						windows.updateWindow(hwnd.r1)
+						printf('Window handle: {{ 0 }}', hwnd.r1)
+
+						msgBuf := bits(zeros(48, []))
+						loopResult := runMessageLoop(addr(msgBuf))
+						printf('Message loop ended with: {{ 0 }}', string(loopResult))
+					}
+					_ -> {
+						println('CreateWindowExW returned null handle.')
+						println('Last error: ' + string(windows.lastErrorMessage()))
+					}
+				}
+			}
+			_ -> {
+				println('CreateWindowExW call failed.')
+				println(string(hwnd))
+				if hwnd.detail {
+					true -> if hwnd.detail.errno {
+						? -> ?
+						_ -> println('Errno message: ' + string(windows.formatMessage(hwnd.detail.errno)))
+					}
+				}
+				println('Last error: ' + string(windows.lastErrorMessage()))
+			}
+		}
+		unlock_thread()
+	}
+	_ -> println('Not on Windows; skipping Win32 sample.')
+}
