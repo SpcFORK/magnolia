@@ -8,7 +8,9 @@ It supports:
 
 - resolving symbols from `libc` / `libdl`
 - process and runtime helpers (`getpid`, `getppid`, `sysconf`)
+- errno and strerror helpers
 - virtual memory wrappers (`mmap`, `munmap`, `mprotect`)
+- convenience page allocation wrappers
 - dynamic loader wrappers (`dlopen`, `dlsym`, `dlclose`)
 
 All public calls are OS-gated and return structured error objects on non-Linux hosts.
@@ -70,6 +72,11 @@ Returns true when the host OS is Linux.
 
 Appends a null terminator to `s` for C-style API calls.
 
+### `readU32(address)` / `writeU32(address, value)`
+### `readU64(address)` / `writeU64(address, value)`
+
+Little-endian typed integer helpers built on top of `memread`/`memwrite`.
+
 ## Resolution and Dispatch
 
 ### `resolve(symbol)`
@@ -103,6 +110,18 @@ Calls `getppid` (`-1` on non-Linux).
 
 Calls `sysconf(_SC_PAGESIZE)` (`-1` on non-Linux).
 
+### `errno()`
+
+Returns the current thread-local errno value (`-1` on non-Linux or lookup failure).
+
+### `strerror(errorCode)`
+
+Returns a best-effort error string for a numeric errno code (or `?` on failure).
+
+### `lastErrorMessage()`
+
+Convenience helper for `strerror(errno())`.
+
 ## Virtual Memory APIs
 
 ### `mmap(addr, length, prot, flags, fd, offset)`
@@ -110,6 +129,21 @@ Calls `sysconf(_SC_PAGESIZE)` (`-1` on non-Linux).
 ### `mprotect(addr, length, prot)`
 
 Thin wrappers over libc memory APIs.
+
+### `allocPages(size, prot?)`
+
+Convenience wrapper over `mmap` with anonymous private mapping.
+
+- defaults `prot` to `PROT_READ | PROT_WRITE` when omitted
+- uses `MAP_PRIVATE | MAP_ANONYMOUS`
+
+### `freePages(address, size)`
+
+Convenience wrapper over `munmap`.
+
+### `protectPages(address, size, prot)`
+
+Convenience wrapper over `mprotect`.
 
 ## Dynamic Loader APIs
 
@@ -130,6 +164,7 @@ if linux.isLinux?() {
         pagesize := linux.pageSize()
         println('PID: ' + string(pid))
         println('Page size: ' + string(pagesize))
+        println('ENOENT text: ' + string(linux.strerror(2)))
     }
     _ -> println('linux library is inactive on this host')
 }

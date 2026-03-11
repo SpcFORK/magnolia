@@ -145,6 +145,9 @@ var libcodegencommon string
 //go:embed lib/sys.oak
 var libsys string
 
+//go:embed lib/writes.oak
+var libwrites string
+
 //go:embed lib/windows.oak
 var libwindows string
 
@@ -201,6 +204,7 @@ var stdlibs = map[string]string{
 	"runtime-codegen": libruntimecodegen,
 	"codegen-common":  libcodegencommon,
 	"sys":             libsys,
+	"writes":          libwrites,
 	"windows":         libwindows,
 	"linux":           liblinux,
 	"Linux":           liblinux,

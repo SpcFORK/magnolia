@@ -52,6 +52,11 @@ windows := import('windows')
 - `PAGE_EXECUTE_READ`
 - `PAGE_EXECUTE_READWRITE`
 
+### FormatMessage flags
+
+- `FORMAT_MESSAGE_IGNORE_INSERTS`
+- `FORMAT_MESSAGE_FROM_SYSTEM`
+
 ## Helpers
 
 ### `isWindows?()`
@@ -91,6 +96,16 @@ Resolve + call convenience wrappers for each library.
 ### `getLastError()`
 
 Returns Win32 `GetLastError()` value (or `-1` on non-Windows).
+
+### `formatMessage(errorCode)`
+
+Best-effort user-readable message for a Win32 error code via `FormatMessageW`.
+
+Returns a string on success and `?` on failure/non-Windows hosts.
+
+### `lastErrorMessage()`
+
+Convenience helper for `formatMessage(getLastError())`.
 
 ### `currentProcessId()`
 
@@ -138,11 +153,22 @@ Wrap `OpenProcess` and `CloseHandle`.
 
 Wrap virtual memory management APIs.
 
+### `virtualAllocEx(process, baseAddress, size, allocationType, protection)`
+### `virtualFreeEx(process, address, size, freeType)`
+### `virtualQueryEx(process, address, mbiBufferPtr, mbiSize)`
+
+Remote-process variants of virtual memory management/query APIs.
+
 ### `readProcessMemory(process, address, outBufferPtr, size, bytesReadOutPtr)`
 ### `writeProcessMemory(process, address, inBufferPtr, size, bytesWrittenOutPtr)`
 ### `virtualQuery(address, mbiBufferPtr, mbiSize)`
 
 Wrap process memory and memory region query APIs.
+
+### `readU32(address)` / `writeU32(address, value)`
+### `readU64(address)` / `writeU64(address, value)`
+
+Little-endian typed integer helpers built on top of `memread`/`memwrite`.
 
 ## Example
 
@@ -155,6 +181,7 @@ if windows.isWindows?() {
         base := windows.imageBase()
         println('PID: ' + string(pid))
         println('Image base: ' + string(base))
+        println('Error 2 text: ' + string(windows.formatMessage(2)))
     }
     _ -> println('windows library is inactive on this host')
 }

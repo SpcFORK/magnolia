@@ -1,0 +1,39 @@
+writes := import('writes')
+
+fn run(t) {
+	{
+		'writes exports expected function types' |> t.eq(
+			[
+				type(writes.readU32)
+				type(writes.writeU32)
+				type(writes.readU64)
+				type(writes.writeU64)
+			]
+			[:function, :function, :function, :function]
+		)
+
+		'writes little-endian read/write for u32 and u64' |> t.eq(
+			{
+				buf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+				p := addr(buf)
+				writes.writeU32(p, 305419896) // 0x12345678
+				writes.writeU64(p, 72623859790382856) // 0x0102030405060708
+				[
+					writes.readU32(p)
+					writes.readU64(p)
+				]
+			}
+			[84281096, 72623859790382856]
+		)
+
+		'writes writes expected byte layout for u32' |> t.eq(
+			{
+				buf := bits([0, 0, 0, 0])
+				p := addr(buf)
+				writes.writeU32(p, 305419896) // 0x12345678
+				bits(memread(p, 4))
+			}
+			[120, 86, 52, 18]
+		)
+	}
+}

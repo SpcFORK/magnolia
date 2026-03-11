@@ -10,29 +10,52 @@ fn run(t) {
 				type(windows.PROCESS_VM_READ)
 				type(windows.MEM_COMMIT)
 				type(windows.PAGE_READWRITE)
+				type(windows.FORMAT_MESSAGE_FROM_SYSTEM)
 				type(windows.wstr('oak'))
 				type(windows.cstr('oak'))
+				type(windows.formatMessage)
+				type(windows.virtualAllocEx)
+				type(windows.virtualQueryEx)
+				type(windows.readU32)
+				type(windows.writeU64)
 				len(windows.cstr('oak')) = 4
 			]
-			[:string, :string, :string, :int, :int, :int, :string, :string, true]
+			[:string, :string, :string, :int, :int, :int, :int, :string, :string, :function, :function, :function, :function, :function, true]
+		)
+
+		'typed memory helpers read and write little-endian integers safely' |> t.eq(
+			{
+				buf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+				p := addr(buf)
+				windows.writeU32(p, 305419896) // 0x12345678
+				windows.writeU64(p, 72623859790382856) // 0x0102030405060708
+				[
+					windows.readU32(p)
+					windows.readU64(p)
+				]
+			}
+			[84281096, 72623859790382856]
 		)
 
 		'windows wrapper basic behavior is OS-aware and safe' |> t.eq(
 			{
 				os := ___runtime_sys_info().os
 				pidCall := windows.kernel32('GetCurrentProcessId')
+				msg := windows.formatMessage(2)
 				if os {
 					'windows' -> {
 						windows.isWindows?() &
 						((pidCall.type = :ok) | (pidCall.type = :success)) &
 						(windows.currentProcessId() > 0) &
-						(windows.imageBase() > 0)
+						(windows.imageBase() > 0) &
+						((type(msg) = :string) | (type(msg) = :null))
 					}
 					_ -> {
 						(!windows.isWindows?()) &
 						(pidCall.type = :error) &
 						(windows.currentProcessId() = -1) &
-						(windows.imageBase() = 0)
+						(windows.imageBase() = 0) &
+						(type(msg) = :null)
 					}
 				}
 			}

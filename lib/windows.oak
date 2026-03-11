@@ -4,6 +4,12 @@
 // callsites can compose low-level interop without repeating resolution logic.
 
 sys := import('sys')
+{
+	readU32: readU32
+	writeU32: writeU32
+	readU64: readU64
+	writeU64: writeU64
+} := import('writes')
 
 Kernel32 := 'kernel32.dll'
 Ntdll := 'ntdll.dll'
@@ -31,6 +37,25 @@ PAGE_READWRITE := 4
 PAGE_EXECUTE := 16
 PAGE_EXECUTE_READ := 32
 PAGE_EXECUTE_READWRITE := 64
+
+// FormatMessage flags
+FORMAT_MESSAGE_IGNORE_INSERTS := 512
+FORMAT_MESSAGE_FROM_SYSTEM := 4096
+
+fn _utf16leToString(buf) {
+	bytes := bits(buf)
+	fn sub(i, out) if i + 1 < len(bytes) {
+		true -> {
+			cp := bytes.(i) + bytes.(i + 1) * 256
+			if cp = 0 {
+				true -> out
+				_ -> sub(i + 2, out + char(cp))
+			}
+		}
+		_ -> out
+	}
+	sub(0, '')
+}
 
 // UTF-16 helper for Win32 *W APIs.
 fn wstr(s) utf16(s)
@@ -80,6 +105,38 @@ fn psapi(symbol, args...) if isWindows?() {
 fn getLastError() if isWindows?() {
 	true -> sys.valueOr(kernel32('GetLastError'), 0)
 	_ -> -1
+}
+
+// Returns a best-effort user-readable message from a Win32 error code.
+fn formatMessage(errorCode) if isWindows?() {
+	true -> {
+		wideChars := 1024
+		fn zeros(n, acc) if n {
+			0 -> acc
+			_ -> zeros(n - 1, acc << 0)
+		}
+		buf := bits(zeros(wideChars * 2, []))
+		res := kernel32(
+			'FormatMessageW'
+			FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS
+			?
+			errorCode
+			0
+			addr(buf)
+			wideChars
+			?
+		)
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> _utf16leToString(memread(addr(buf), res.r1 * 2))
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
+fn lastErrorMessage() if isWindows?() {
+	true -> formatMessage(getLastError())
+	_ -> ?
 }
 
 fn currentProcessId() if isWindows?() {
@@ -137,9 +194,19 @@ fn virtualAlloc(baseAddress, size, allocationType, protection) if isWindows?() {
 	_ -> _platformError('virtualAlloc')
 }
 
+fn virtualAllocEx(process, baseAddress, size, allocationType, protection) if isWindows?() {
+	true -> kernel32('VirtualAllocEx', process, baseAddress, size, allocationType, protection)
+	_ -> _platformError('virtualAllocEx')
+}
+
 fn virtualFree(address, size, freeType) if isWindows?() {
 	true -> kernel32('VirtualFree', address, size, freeType)
 	_ -> _platformError('virtualFree')
+}
+
+fn virtualFreeEx(process, address, size, freeType) if isWindows?() {
+	true -> kernel32('VirtualFreeEx', process, address, size, freeType)
+	_ -> _platformError('virtualFreeEx')
 }
 
 // `oldProtectOutPtr` should point to a writable 4-byte integer buffer.
@@ -164,4 +231,9 @@ fn writeProcessMemory(process, address, inBufferPtr, size, bytesWrittenOutPtr) i
 fn virtualQuery(address, mbiBufferPtr, mbiSize) if isWindows?() {
 	true -> kernel32('VirtualQuery', address, mbiBufferPtr, mbiSize)
 	_ -> _platformError('virtualQuery')
+}
+
+fn virtualQueryEx(process, address, mbiBufferPtr, mbiSize) if isWindows?() {
+	true -> kernel32('VirtualQueryEx', process, address, mbiBufferPtr, mbiSize)
+	_ -> _platformError('virtualQueryEx')
 }

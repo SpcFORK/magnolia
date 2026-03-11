@@ -11,29 +11,53 @@ fn run(t) {
 				type(linux.O_RDONLY)
 				type(linux.RTLD_NOW)
 				type(linux.cstr('oak'))
+				type(linux.errno)
+				type(linux.strerror)
+				type(linux.allocPages)
+				type(linux.readU64)
 				len(linux.cstr('oak')) = 4
 			]
-			[:list, :list, :int, :int, :int, :int, :string, true]
+			[:list, :list, :int, :int, :int, :int, :string, :function, :function, :function, :function, true]
+		)
+
+		'linux typed memory helpers read and write little-endian integers safely' |> t.eq(
+			{
+				buf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+				p := addr(buf)
+				linux.writeU32(p, 305419896) // 0x12345678
+				linux.writeU64(p, 72623859790382856) // 0x0102030405060708
+				[
+					linux.readU32(p)
+					linux.readU64(p)
+				]
+			}
+			[84281096, 72623859790382856]
 		)
 
 		'linux wrapper basic behavior is OS-aware and safe' |> t.eq(
 			{
 				os := ___runtime_sys_info().os
 				pidCall := linux.libc('getpid')
+				errNo := linux.errno()
+				errText := linux.strerror(2)
 				if os {
 					'linux' -> {
 						linux.isLinux?() &
 						((pidCall.type = :ok) | (pidCall.type = :success)) &
 						(linux.currentProcessId() > 0) &
 						(linux.parentProcessId() > 0) &
-						(linux.pageSize() > 0)
+						(linux.pageSize() > 0) &
+						(errNo >= 0) &
+						(type(errText) = :string)
 					}
 					_ -> {
 						(!linux.isLinux?()) &
 						(pidCall.type = :error) &
 						(linux.currentProcessId() = -1) &
 						(linux.parentProcessId() = -1) &
-						(linux.pageSize() = -1)
+						(linux.pageSize() = -1) &
+						(errNo = -1) &
+						(type(errText) = :null)
 					}
 				}
 			}

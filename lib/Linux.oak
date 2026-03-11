@@ -3,6 +3,12 @@
 // It wraps common libc/libdl calls using libsys for consistent result shapes.
 
 sys := import('sys')
+{
+	readU32: readU32
+	writeU32: writeU32
+	readU64: readU64
+	writeU64: writeU64
+} := import('writes')
 
 LibC := ['libc.so.6', 'libc.so']
 LibDL := ['libdl.so.2', 'libdl.so']
@@ -38,6 +44,20 @@ _SC_PAGESIZE := 30
 fn isLinux? ___runtime_sys_info().os = 'linux'
 
 fn cstr(s) s + char(0)
+
+fn _readCString(ptr, maxLen) {
+	fn sub(i, out) if i {
+		maxLen -> out
+		_ -> {
+			b := (bits(memread(pointer(ptr) + i, 1))).0
+			if b = 0 {
+				true -> out
+				_ -> sub(i + 1, out + char(b))
+			}
+		}
+	}
+	sub(0, '')
+}
 
 fn _platformError(apiName) {
 	{
@@ -109,6 +129,39 @@ fn pageSize() if isLinux?() {
 	_ -> -1
 }
 
+fn errno() if isLinux?() {
+	true -> {
+		loc := libc('__errno_location')
+		if sys.ok?(loc) & loc.r1 > 0 {
+			true -> readU32(loc.r1)
+			_ -> -1
+		}
+	}
+	_ -> -1
+}
+
+fn strerror(errorCode) if isLinux?() {
+	true -> {
+		msgPtr := libc('strerror', errorCode)
+		if sys.ok?(msgPtr) & msgPtr.r1 > 0 {
+			true -> _readCString(msgPtr.r1, 1024)
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
+fn lastErrorMessage() if isLinux?() {
+	true -> {
+		err := errno()
+		if err >= 0 {
+			true -> strerror(err)
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
 fn mmap(addr, length, prot, flags, fd, offset) if isLinux?() {
 	true -> libc('mmap', addr, length, prot, flags, fd, offset)
 	_ -> _platformError('mmap')
@@ -122,6 +175,31 @@ fn munmap(addr, length) if isLinux?() {
 fn mprotect(addr, length, prot) if isLinux?() {
 	true -> libc('mprotect', addr, length, prot)
 	_ -> _platformError('mprotect')
+}
+
+fn allocPages(size, prot) if isLinux?() {
+	true -> mmap(
+		?
+		size
+		if prot {
+			? -> PROT_READ | PROT_WRITE
+			_ -> prot
+		}
+		MAP_PRIVATE | MAP_ANONYMOUS
+		-1
+		0
+	)
+	_ -> _platformError('allocPages')
+}
+
+fn freePages(address, size) if isLinux?() {
+	true -> munmap(address, size)
+	_ -> _platformError('freePages')
+}
+
+fn protectPages(address, size, prot) if isLinux?() {
+	true -> mprotect(address, size, prot)
+	_ -> _platformError('protectPages')
 }
 
 fn dlopen(path, flags) if isLinux?() {
