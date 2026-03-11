@@ -282,6 +282,16 @@ Camera fields:
 - `fov` (degrees)
 - `mode` (`'perspective'` or `'orthographic'`)
 - `orthoScale` (orthographic zoom scale)
+- `renderScale` (default `1`; lower values render into a centered smaller viewport for speed)
+- `backfaceCulling` (default `true`)
+- `sortFaces` (default `true`; set `false` for faster but less correct painter ordering)
+- `faceStride` (default `1`; render every Nth solid face for speed on heavy meshes)
+
+Lighting fields (for solid rendering):
+
+- `x`, `y`, `z` (light direction)
+- `ambient` (default `0.22`)
+- `diffuse` (default `0.78`)
 
 ### `Renderer3D(window, options?)`
 
@@ -296,6 +306,7 @@ Options:
 Returns object methods:
 
 - `setCamera(camera)`
+- `setLight(light)`
 - `setProjection(mode, orthoScale?)`
 - `clear()`
 - `renderMeshSolid(mesh, transform?, color?)`

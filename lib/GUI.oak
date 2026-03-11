@@ -942,17 +942,27 @@ fn _projectPoint(window, p, camera) {
 	camZ := _default(cam.z, 5)
 	fov := _default(cam.fov, 90)
 	mode := _default(cam.mode, 'perspective')
+	renderScaleRaw := _default(cam.renderScale, 1)
+	renderScale := if renderScaleRaw < 0.35 {
+		true -> 0.35
+		_ -> if renderScaleRaw > 1 {
+			true -> 1
+			_ -> renderScaleRaw
+		}
+	}
 
 	z := p.z + camZ
 	if mode = 'orthographic' {
 		true -> {
-			halfW := window.width / 2
-			halfH := window.height / 2
+			halfW := window.width * renderScale / 2
+			halfH := window.height * renderScale / 2
+			offX := (window.width - window.width * renderScale) / 2
+			offY := (window.height - window.height * renderScale) / 2
 			orthoScale := _default(cam.orthoScale, 4)
 			scale := halfW / orthoScale
 			{
-				x: int(halfW + p.x * scale)
-				y: int(halfH - p.y * scale)
+				x: int(offX + halfW + p.x * scale)
+				y: int(offY + halfH - p.y * scale)
 				z: z
 			}
 		}
@@ -960,12 +970,14 @@ fn _projectPoint(window, p, camera) {
 			if z <= 0.05 {
 				true -> ?
 				_ -> {
-					halfW := window.width / 2
-					halfH := window.height / 2
+					halfW := window.width * renderScale / 2
+					halfH := window.height * renderScale / 2
+					offX := (window.width - window.width * renderScale) / 2
+					offY := (window.height - window.height * renderScale) / 2
 					focal := halfW / tan(degToRad(fov / 2))
 					{
-						x: int(halfW + (p.x * focal) / z)
-						y: int(halfH - (p.y * focal) / z)
+						x: int(offX + halfW + (p.x * focal) / z)
+						y: int(offY + halfH - (p.y * focal) / z)
 						z: z
 					}
 				}
@@ -977,6 +989,58 @@ fn _projectPoint(window, p, camera) {
 fn _transformVertices(vertices, transform, i, out) if i {
 	len(vertices) -> out
 	_ -> _transformVertices(vertices, transform, i + 1, out << _transformPoint(vertices.(i), transform))
+}
+
+fn _projectVertices(window, vertices, camera) {
+	cam := _default(camera, {})
+	camZ := _default(cam.z, 5)
+	fov := _default(cam.fov, 90)
+	mode := _default(cam.mode, 'perspective')
+	renderScaleRaw := _default(cam.renderScale, 1)
+	renderScale := if renderScaleRaw < 0.35 {
+		true -> 0.35
+		_ -> if renderScaleRaw > 1 {
+			true -> 1
+			_ -> renderScaleRaw
+		}
+	}
+	renderW := window.width * renderScale
+	renderH := window.height * renderScale
+	halfW := renderW / 2
+	halfH := renderH / 2
+	offX := (window.width - renderW) / 2
+	offY := (window.height - renderH) / 2
+	orthoScale := _default(cam.orthoScale, 4)
+	orthoFactor := halfW / orthoScale
+	focal := halfW / tan(degToRad(fov / 2))
+
+	fn projectOne(p) {
+		z := p.z + camZ
+		if mode = 'orthographic' {
+			true -> {
+				x: int(offX + halfW + p.x * orthoFactor)
+				y: int(offY + halfH - p.y * orthoFactor)
+				z: z
+			}
+			_ -> {
+				if z <= 0.05 {
+					true -> ?
+					_ -> {
+						x: int(offX + halfW + (p.x * focal) / z)
+						y: int(offY + halfH - (p.y * focal) / z)
+						z: z
+					}
+				}
+			}
+		}
+	}
+
+	fn sub(i, out) if i {
+		len(vertices) -> out
+		_ -> sub(i + 1, out << projectOne(vertices.(i)))
+	}
+
+	sub(0, [])
 }
 
 fn drawLine(window, x1, y1, x2, y2, color) if window.type {
@@ -1165,7 +1229,7 @@ fn _insertDepthSorted(tris, tri, i, out) if i {
 					len(tris) -> acc
 					_ -> sub(j + 1, acc << tris.(j))
 				}
-				out << tri << cur << tail(i + 1, [])
+				tail(i + 1, out << tri << cur)
 			}
 		}
 	}
@@ -1176,14 +1240,86 @@ fn _sortDepth(tris, i, sorted) if i {
 	_ -> _sortDepth(tris, i + 1, _insertDepthSorted(sorted, tris.(i), 0, []))
 }
 
-fn drawMeshSolid(window, mesh, transform, camera, color) {
+fn _clamp(v, minV, maxV) if v < minV {
+	true -> minV
+	_ -> if v > maxV {
+		true -> maxV
+		_ -> v
+	}
+}
+
+fn _vecSub(a, b) Vec3(a.x - b.x, a.y - b.y, a.z - b.z)
+
+fn _vecCross(a, b) Vec3(
+	a.y * b.z - a.z * b.y
+	a.z * b.x - a.x * b.z
+	a.x * b.y - a.y * b.x
+)
+
+fn _vecDot(a, b) a.x * b.x + a.y * b.y + a.z * b.z
+
+fn _vecLen(v) pow(v.x * v.x + v.y * v.y + v.z * v.z, 0.5)
+
+fn _vecNormalize(v) {
+	l := _vecLen(v)
+	if l <= 0.000001 {
+		true -> Vec3(0, 0, 1)
+		_ -> Vec3(v.x / l, v.y / l, v.z / l)
+	}
+}
+
+fn _colorR(c) c & 255
+fn _colorG(c) (c >> 8) & 255
+fn _colorB(c) (c >> 16) & 255
+
+fn _shadeColor(color, intensity) {
+	i := _clamp(intensity, 0, 1)
+	r := int(_colorR(color) * i)
+	g := int(_colorG(color) * i)
+	b := int(_colorB(color) * i)
+	rgb(_clamp(r, 0, 255), _clamp(g, 0, 255), _clamp(b, 0, 255))
+}
+
+fn _faceShadeFast(nx, ny, nz, ldx, ldy, ldz, amb, diff) {
+	nlen := pow(nx * nx + ny * ny + nz * nz, 0.5)
+	if nlen <= 0.000001 {
+		true -> amb
+		_ -> {
+			ndotl := ((nx / nlen) * (0 - ldx)) + ((ny / nlen) * (0 - ldy)) + ((nz / nlen) * (0 - ldz))
+			amb + diff * _clamp(ndotl, 0, 1)
+		}
+	}
+}
+
+fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
+
+fn drawMeshSolid(window, mesh, transform, camera, color, light) {
 	verts := _transformVertices(mesh.vertices, transform, 0, [])
+	pverts := _projectVertices(window, verts, camera)
 	faces := _default(mesh.faces, [])
 	faceColors := _default(mesh.faceColors, [])
+	cam := _default(camera, {})
+	backfaceCulling := _default(cam.backfaceCulling, true)
+	sortFaces := _default(cam.sortFaces, true)
+	faceStrideRaw := int(_default(cam.faceStride, 1))
+	faceStride := if faceStrideRaw < 1 {
+		true -> 1
+		_ -> faceStrideRaw
+	}
+	camZ := _default(cam.z, 5)
+	camPosZ := 0 - camZ
+	lightObj := _default(light, {})
+	lightDir := _vecNormalize(Vec3(_default(lightObj.x, 0.35), _default(lightObj.y, 0.75), _default(lightObj.z, -1)))
+	ldx := lightDir.x
+	ldy := lightDir.y
+	ldz := lightDir.z
+	amb := _clamp(_default(lightObj.ambient, 0.22), 0, 1)
+	diff := _clamp(_default(lightObj.diffuse, 0.78), 0, 1)
 
 	fn collect(i, acc) if i {
 		len(faces) -> acc
 		_ -> {
+			nextI := i + faceStride
 			f := faces.(i)
 			pa3 := verts.(f.0)
 			pb3 := verts.(f.1)
@@ -1193,20 +1329,25 @@ fn drawMeshSolid(window, mesh, transform, camera, color) {
 				_ -> ?
 			}
 
-			pa := _projectPoint(window, pa3, camera)
-			pb := _projectPoint(window, pb3, camera)
-			pc := _projectPoint(window, pc3, camera)
-			pd := if pd3 {
-				? -> ?
-				_ -> _projectPoint(window, pd3, camera)
-			}
+			nx := (pb3.y - pa3.y) * (pc3.z - pa3.z) - (pb3.z - pa3.z) * (pc3.y - pa3.y)
+			ny := (pb3.z - pa3.z) * (pc3.x - pa3.x) - (pb3.x - pa3.x) * (pc3.z - pa3.z)
+			nz := (pb3.x - pa3.x) * (pc3.y - pa3.y) - (pb3.y - pa3.y) * (pc3.x - pa3.x)
 
-			faceColor := if i < len(faceColors) {
-				true -> faceColors.(i)
-				_ -> _default(color, rgb(150, 200, 255))
+			cx := (pa3.x + pb3.x + pc3.x + if pd3 {
+				? -> 0
+				_ -> pd3.x
+			}) / if pd3 {
+				? -> 3
+				_ -> 4
 			}
-
-			depth := (pa3.z + pb3.z + pc3.z + if pd3 {
+			cy := (pa3.y + pb3.y + pc3.y + if pd3 {
+				? -> 0
+				_ -> pd3.y
+			}) / if pd3 {
+				? -> 3
+				_ -> 4
+			}
+			cz := (pa3.z + pb3.z + pc3.z + if pd3 {
 				? -> 0
 				_ -> pd3.z
 			}) / if pd3 {
@@ -1214,32 +1355,58 @@ fn drawMeshSolid(window, mesh, transform, camera, color) {
 				_ -> 4
 			}
 
-			if [pa, pb, pc] {
-				[?, _, _] -> collect(i + 1, acc)
-				[_, ?, _] -> collect(i + 1, acc)
-				[_, _, ?] -> collect(i + 1, acc)
+			toCamX := 0 - cx
+			toCamY := 0 - cy
+			toCamZ := camPosZ - cz
+			front3D := (nx * toCamX + ny * toCamY + nz * toCamZ) > 0
+
+			if backfaceCulling & (!front3D) {
+				true -> collect(nextI, acc)
 				_ -> {
-					triA := {
-						type: :tri
-						depth: depth
-						a: pa
-						b: pb
-						c: pc
-						color: faceColor
+					pa := pverts.(f.0)
+					pb := pverts.(f.1)
+					pc := pverts.(f.2)
+					pd := if pd3 {
+						? -> ?
+						_ -> pverts.(f.3)
 					}
-					if [pd3, pd] {
-						[?, _] -> collect(i + 1, acc << triA)
-						[_, ?] -> collect(i + 1, acc << triA)
+
+					faceColor := if i < len(faceColors) {
+						true -> faceColors.(i)
+						_ -> _default(color, rgb(150, 200, 255))
+					}
+					litColor := _shadeColor(faceColor, _faceShadeFast(nx, ny, nz, ldx, ldy, ldz, amb, diff))
+
+					depth := cz
+
+					if [pa, pb, pc] {
+						[?, _, _] -> collect(nextI, acc)
+						[_, ?, _] -> collect(nextI, acc)
+						[_, _, ?] -> collect(nextI, acc)
 						_ -> {
-							triB := {
+							triA := {
 								type: :tri
 								depth: depth
 								a: pa
-								b: pc
-								c: pd
-								color: faceColor
+								b: pb
+								c: pc
+								color: litColor
 							}
-							collect(i + 1, acc << triA << triB)
+							if [pd3, pd] {
+								[?, _] -> collect(nextI, acc << triA)
+								[_, ?] -> collect(nextI, acc << triA)
+								_ -> {
+									triB := {
+										type: :tri
+										depth: depth
+										a: pa
+										b: pc
+										c: pd
+										color: litColor
+									}
+									collect(nextI, acc << triA << triB)
+								}
+							}
 						}
 					}
 				}
@@ -1247,7 +1414,11 @@ fn drawMeshSolid(window, mesh, transform, camera, color) {
 		}
 	}
 
-	tris := _sortDepth(collect(0, []), 0, [])
+	trisRaw := collect(0, [])
+	tris := if sortFaces {
+		true -> _sortDepth(trisRaw, 0, [])
+		_ -> trisRaw
+	}
 
 	fn draw(i, drawn) if i {
 		len(tris) -> {
@@ -1507,6 +1678,7 @@ fn VoxelGrid(options) {
 
 fn drawMeshWireframe(window, mesh, transform, camera, color) {
 	verts := _transformVertices(mesh.vertices, transform, 0, [])
+	pverts := _projectVertices(window, verts, camera)
 	edges := mesh.edges
 
 	fn sub(i, drawn) if i {
@@ -1518,8 +1690,8 @@ fn drawMeshWireframe(window, mesh, transform, camera, color) {
 		}
 		_ -> {
 			edge := edges.(i)
-			pa := _projectPoint(window, verts.(edge.0), camera)
-			pb := _projectPoint(window, verts.(edge.1), camera)
+			pa := pverts.(edge.0)
+			pb := pverts.(edge.1)
 			if [pa, pb] {
 				[?, _] -> sub(i + 1, drawn)
 				[_, ?] -> sub(i + 1, drawn)
@@ -1540,25 +1712,40 @@ fn Renderer3D(window, options) {
 		z: 5
 		fov: 90
 		mode: 'perspective'
+		renderScale: 1
+		backfaceCulling: true
+		sortFaces: true
 	})
 	background := _default(opts.background, rgb(8, 14, 22))
 	lineColor := _default(opts.lineColor, rgb(96, 190, 255))
+	light := _default(opts.light, {
+		x: 0.35
+		y: 0.75
+		z: -1
+		ambient: 0.22
+		diffuse: 0.78
+	})
 
 	{
 		window: window
 		camera: camera
 		background: background
 		lineColor: lineColor
+		light: light
 		setCamera: fn(nextCamera) camera <- _default(nextCamera, camera)
+		setLight: fn(nextLight) light <- _default(nextLight, light)
 		setProjection: fn(mode, orthoScale) camera <- {
 			z: _default(camera.z, 5)
 			fov: _default(camera.fov, 90)
 			mode: _default(mode, _default(camera.mode, 'perspective'))
 			orthoScale: _default(orthoScale, _default(camera.orthoScale, 4))
+			renderScale: _default(camera.renderScale, 1)
+			backfaceCulling: _default(camera.backfaceCulling, true)
+			sortFaces: _default(camera.sortFaces, true)
 		}
 		clear: fn() fillRect(window, 0, 0, window.width, window.height, background)
-		renderMeshSolid: fn(mesh, transform, color) drawMeshSolid(window, mesh, transform, camera, _default(color, lineColor))
-		renderCubeSolid: fn(size, transform, color) drawMeshSolid(window, CubeMesh(size), transform, camera, _default(color, lineColor))
+		renderMeshSolid: fn(mesh, transform, color) drawMeshSolid(window, mesh, transform, camera, _default(color, lineColor), light)
+		renderCubeSolid: fn(size, transform, color) drawMeshSolid(window, CubeMesh(size), transform, camera, _default(color, lineColor), light)
 		renderMesh: fn(mesh, transform, color) drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
 		renderCube: fn(size, transform, color) drawMeshWireframe(window, CubeMesh(size), transform, camera, _default(color, lineColor))
 		renderGrid: fn(size, step, transform, color) drawMeshWireframe(window, GridMesh(size, step), transform, camera, _default(color, lineColor))
