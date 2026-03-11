@@ -1,15 +1,11 @@
-// GUI 3D sample with adaptive quality for integrated graphics.
+// GUI 3D sample: rotating wireframe cube.
 
 {
 	println: println
 	string: string
-	time: time
 } := import('std')
 
 gui := import('GUI')
-
-// Set to: 'auto', 'high', 'balanced', or 'performance'.
-qualityMode := 'auto'
 
 window := gui.createWindow('Magnolia GUI 3D', 960, 640, {
 	frameMs: 16
@@ -26,10 +22,6 @@ if window.type {
 			camera: {
 				z: 6
 				fov: 88
-				backfaceCulling: true
-				sortFaces: false
-				faceStride: 2
-				renderScale: 0.92
 			}
 			light: {
 				x: 0.4
@@ -46,7 +38,6 @@ if window.type {
 		solidCube := gui.CubeMesh(1.8)
 		gridMesh := gui.GridMesh(12, 1)
 		axesMesh := gui.AxesMesh(2.6)
-
 		vox := gui.VoxelGrid({voxelSize: 0.55})
 		vox.set(-2, -1, 0, true)
 		vox.set(-1, -1, 0, true)
@@ -56,128 +47,10 @@ if window.type {
 		vox.set(0, 0, 0, true)
 		vox.set(0, 1, 0, true)
 		voxMesh := vox.toMesh()
-
-		voxLow := gui.VoxelGrid({voxelSize: 0.7})
-		voxLow.set(-1, -1, 0, true)
-		voxLow.set(0, -1, 0, true)
-		voxLow.set(1, -1, 0, true)
-		voxLow.set(0, 0, 0, true)
-		voxLowMesh := voxLow.toMesh()
-
 		state := {
 			angle: 0
 			ortho: false
-			frame: 0
-			fps: 60
-			fpsAvg: 60
-			framesInWindow: 0
-			windowStart: time()
-			lastTune: time()
-			lowHits: 0
-			highHits: 0
-			quality: 1
-			appliedQuality: -1
-			appliedOrtho: ?
-		}
-
-		fn qualityLabel(q) if q {
-			2 -> 'high'
-			1 -> 'balanced'
-			_ -> 'performance'
-		}
-
-		fn cameraPreset(q, ortho) {
-			{
-				z: 6
-				fov: 88
-				mode: if ortho {
-					true -> 'orthographic'
-					_ -> 'perspective'
-				}
-				orthoScale: 4.5
-				backfaceCulling: true
-				sortFaces: if q {
-					2 -> true
-					_ -> false
-				}
-				faceStride: if q {
-					2 -> 1
-					1 -> 2
-					_ -> 3
-				}
-				renderScale: if q {
-					2 -> 1
-					1 -> 0.92
-					_ -> 0.82
-				}
-			}
-		}
-
-		fn maybeApplyCamera() if [state.appliedQuality = state.quality, state.appliedOrtho = state.ortho] {
-			[true, true] -> {type: :ok}
-			_ -> {
-				renderer.setCamera(cameraPreset(state.quality, state.ortho))
-				state.appliedQuality <- state.quality
-				state.appliedOrtho <- state.ortho
-				{type: :ok}
-			}
-		}
-
-		fn tuneQuality() if qualityMode {
-			'high' -> state.quality <- 2
-			'balanced' -> state.quality <- 1
-			'performance' -> state.quality <- 0
-			_ -> {
-				now := time()
-				state.framesInWindow <- state.framesInWindow + 1
-				delta := now - state.windowStart
-				if delta >= 1 {
-					true -> {
-						state.fps <- state.framesInWindow / delta
-						state.fpsAvg <- state.fpsAvg * 0.8 + state.fps * 0.2
-						state.framesInWindow <- 0
-						state.windowStart <- now
-
-						if state.fpsAvg < 51 {
-							true -> {
-								state.lowHits <- state.lowHits + 1
-								state.highHits <- 0
-							}
-							_ -> if state.fpsAvg > 58 {
-								true -> {
-									state.highHits <- state.highHits + 1
-									state.lowHits <- 0
-								}
-								_ -> {
-									state.lowHits <- 0
-									state.highHits <- 0
-								}
-							}
-						}
-
-						if now - state.lastTune >= 3 {
-							true -> {
-								if state.lowHits >= 2 & state.quality > 0 {
-									true -> {
-										state.quality <- state.quality - 1
-										state.lastTune <- now
-										state.lowHits <- 0
-										state.highHits <- 0
-									}
-									_ -> if state.highHits >= 4 & state.quality < 2 {
-										true -> {
-											state.quality <- state.quality + 1
-											state.lastTune <- now
-											state.lowHits <- 0
-											state.highHits <- 0
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
+			mode: 'perspective'
 		}
 
 		gui.run(window, fn(_win, evt) {
@@ -187,63 +60,52 @@ if window.type {
 				}
 			}
 		}, fn(win) {
-			state.frame <- state.frame + 1
 			state.angle <- state.angle + 0.9
 			if state.angle > 360 {
 				true -> state.angle <- state.angle - 360
 			}
 
-			tuneQuality()
-			maybeApplyCamera()
-
-			if [state.quality = 2, state.frame % 2 = 0] {
-				[true, _] -> renderer.setLight({
-					x: 0.2 + sin(gui.degToRad(state.angle)) * 0.7
-					y: 0.65
-					z: -1
-					ambient: 0.2
-					diffuse: 0.8
-				})
-				[_, true] -> renderer.setLight({
-					x: 0.2 + sin(gui.degToRad(state.angle)) * 0.45
-					y: 0.65
-					z: -1
-					ambient: 0.24
-					diffuse: 0.72
-				})
+			if state.ortho {
+				true -> if state.mode = 'orthographic' {
+					true -> 0
+					_ -> {
+						renderer.setProjection('orthographic', 4.5)
+						state.mode <- 'orthographic'
+					}
+				}
+				_ -> if state.mode = 'perspective' {
+					true -> 0
+					_ -> {
+						renderer.setProjection('perspective', 4.5)
+						state.mode <- 'perspective'
+					}
+				}
 			}
+			renderer.setLight({
+				x: 0.2 + sin(gui.degToRad(state.angle)) * 0.7
+				y: 0.65
+				z: -1
+				ambient: 0.2
+				diffuse: 0.8
+			})
 
 			gui.beginFrame(win)
 			renderer.clear()
-
-			if state.quality > 0 {
-				true -> {
-					renderer.renderMesh(gridMesh, {ty: -2}, gui.rgb(40, 70, 110))
-					renderer.renderMesh(axesMesh, {ty: -1.2})
-				}
-			}
-
-			if state.quality = 0 {
-				true -> renderer.renderMesh(solidCube, {
-					rx: state.angle * 0.4
-					ry: state.angle * 0.6
-					rz: state.angle * 0.25
-					tx: 0
-					ty: 0.2
-					tz: 0.6
-					scale: 1
-				}, gui.rgb(128, 188, 255))
-				_ -> renderer.renderMeshSolid(solidCube, {
-					rx: state.angle * 0.4
-					ry: state.angle * 0.6
-					rz: state.angle * 0.25
-					tx: 0
-					ty: 0.2
-					tz: 0.6
-					scale: 1
-				})
-			}
-
+			renderer.renderMesh(gridMesh, {
+				ty: -2
+			}, gui.rgb(40, 70, 110))
+			renderer.renderMesh(axesMesh, {
+				ty: -1.2
+			})
+			renderer.renderMeshSolid(solidCube, {
+				rx: state.angle * 0.4
+				ry: state.angle * 0.6
+				rz: state.angle * 0.25
+				tx: 0
+				ty: 0.2
+				tz: 0.6
+				scale: 1
+			})
 			renderer.renderMesh(cube, {
 				rx: state.angle * 0.8
 				ry: state.angle
@@ -252,22 +114,12 @@ if window.type {
 				tz: 0
 				scale: 1.25
 			})
-
-			if state.quality = 0 {
-				true -> renderer.renderMesh(voxLowMesh, {
-					ry: state.angle * 0.6
-					tx: -1.8
-					ty: -0.4
-					tz: 0
-				})
-				_ -> renderer.renderMesh(voxMesh, {
-					ry: state.angle * 0.65
-					tx: -1.8
-					ty: -0.4
-					tz: 0
-				})
-			}
-
+			renderer.renderMesh(voxMesh, {
+				ry: state.angle * 0.65
+				tx: -1.8
+				ty: -0.4
+				tz: 0
+			}, gui.rgb(120, 190, 255))
 			gui.drawText(win, 16, 28, 'Magnolia GUI 3D Renderer')
 			gui.drawText(win, 16, 50, 'angle: ' + string(state.angle))
 			gui.drawText(win, 16, 72, 'features: solid + wireframe + voxels + grid + axes')
@@ -275,8 +127,6 @@ if window.type {
 				true -> 'orthographic'
 				_ -> 'perspective'
 			})
-			gui.drawText(win, 16, 116, 'quality: ' + qualityLabel(state.quality) + ' (' + qualityMode + ')' + '  fps~' + string(state.fpsAvg))
-
 			gui.endFrame(win)
 		})
 

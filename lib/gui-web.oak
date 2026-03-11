@@ -1,0 +1,265 @@
+// gui-web contains Canvas/WebGL middleware state and command queue helpers.
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _isFn?(value) type(value) = :function
+
+fn _err(message, detail) {
+	{
+		type: :error
+		error: message
+		detail: detail
+	}
+}
+
+fn _nextResourceId(webgl) {
+	next := webgl.nextId
+	webgl.nextId <- next + 1
+	next
+}
+
+fn _webRecord(window, op) {
+	window.messages <- window.messages << op
+	if type(window.webgl) = :object {
+		true -> window.webgl.commands <- window.webgl.commands << op
+	}
+	if _isFn?(window.webBridge) {
+		true -> window.webBridge(op)
+	}
+	op
+}
+
+fn createWindowState(title, width, height, frameMs, updateOnDispatch, options) {
+	opts := _default(options, {})
+	webBridge := _default(opts.webBridge, ?)
+	canvasId := _default(opts.canvasId, 'magnolia-gui-canvas')
+	contextName := _default(opts.context, 'webgl')
+	contextAttrs := _default(opts.contextAttrs, {
+		alpha: true
+		antialias: true
+		depth: true
+		stencil: false
+		premultipliedAlpha: true
+		preserveDrawingBuffer: false
+	})
+
+	{
+		type: :ok
+		backend: :web
+		title: title
+		width: width
+		height: height
+		frameMs: frameMs
+		updateOnDispatch: updateOnDispatch
+		closed: false
+		messages: []
+		webBridge: webBridge
+		canvas: {
+			id: canvasId
+			width: width
+			height: height
+			dpr: 1
+		}
+		webgl: {
+			version: contextName
+			contextAttrs: contextAttrs
+			clearColor: [0, 0, 0, 1]
+			viewport: [0, 0, width, height]
+			nextId: 1
+			shaders: []
+			programs: []
+			buffers: []
+			activeProgram: ?
+			commands: []
+		}
+	}
+}
+
+fn createCanvas(window, id, options) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			canvasOptions := _default(options, {})
+			window.canvas <- {
+				id: _default(id, window.canvas.id)
+				width: _default(canvasOptions.width, window.width)
+				height: _default(canvasOptions.height, window.height)
+				dpr: _default(canvasOptions.dpr, window.canvas.dpr)
+			}
+			_webRecord(window, {
+				type: :canvas_create
+				id: window.canvas.id
+				width: window.canvas.width
+				height: window.canvas.height
+				dpr: window.canvas.dpr
+			})
+			window
+		}
+		_ -> _err('createCanvas is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn initWebGL(window, contextName, attrs) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.version <- _default(contextName, window.webgl.version)
+			window.webgl.contextAttrs <- _default(attrs, window.webgl.contextAttrs)
+			_webRecord(window, {
+				type: :webgl_init
+				canvasId: window.canvas.id
+				context: window.webgl.version
+				attrs: window.webgl.contextAttrs
+			})
+			{
+				type: :ok
+				context: window.webgl.version
+			}
+		}
+		_ -> _err('initWebGL is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglCreateShader(window, shaderType, source) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			shaderId := _nextResourceId(window.webgl)
+			shader := {
+				id: shaderId
+				type: shaderType
+				source: source
+			}
+			window.webgl.shaders <- window.webgl.shaders << shader
+			_webRecord(window, {
+				type: :webgl_create_shader
+				shader: shader
+			})
+			{
+				type: :ok
+				shader: shader
+			}
+		}
+		_ -> _err('webglCreateShader is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglCreateProgram(window, vertexShader, fragmentShader) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			programId := _nextResourceId(window.webgl)
+			program := {
+				id: programId
+				vertex: vertexShader
+				fragment: fragmentShader
+			}
+			window.webgl.programs <- window.webgl.programs << program
+			_webRecord(window, {
+				type: :webgl_create_program
+				program: program
+			})
+			{
+				type: :ok
+				program: program
+			}
+		}
+		_ -> _err('webglCreateProgram is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglUseProgram(window, program) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.activeProgram <- program
+			_webRecord(window, {
+				type: :webgl_use_program
+				program: program
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglUseProgram is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglClearColor(window, r, g, b, a) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.clearColor <- [r, g, b, a]
+			_webRecord(window, {
+				type: :webgl_clear_color
+				color: window.webgl.clearColor
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglClearColor is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglViewport(window, x, y, width, height) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.viewport <- [x, y, width, height]
+			_webRecord(window, {
+				type: :webgl_viewport
+				viewport: window.webgl.viewport
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglViewport is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglClear(window, mask, colorBufferBit) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			useMask := _default(mask, colorBufferBit)
+			_webRecord(window, {
+				type: :webgl_clear
+				mask: useMask
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglClear is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglDrawArrays(window, mode, first, count, trianglesMode) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			_webRecord(window, {
+				type: :webgl_draw_arrays
+				mode: _default(mode, trianglesMode)
+				first: _default(first, 0)
+				count: count
+				program: window.webgl.activeProgram
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglDrawArrays is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglFlush(window) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			_webRecord(window, {
+				type: :webgl_flush
+			})
+			{
+				type: :ok
+				commands: window.webgl.commands
+			}
+		}
+		_ -> _err('webglFlush is only available on web backend', window.backend)
+	}
+	_ -> window
+}

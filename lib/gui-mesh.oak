@@ -1,0 +1,265 @@
+// gui-mesh contains reusable 3D mesh/voxel builders used by GUI.
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn Vec3(x, y, z) {
+	{
+		x: x
+		y: y
+		z: z
+	}
+}
+
+fn Mesh(vertices, edges) {
+	{
+		vertices: _default(vertices, [])
+		edges: _default(edges, [])
+	}
+}
+
+fn GridMesh(size, step) {
+	half := _default(size, 10) / 2
+	s := _default(step, 1)
+
+	fn subX(x, vertices, edges) if x > half {
+		true -> Mesh(vertices, edges)
+		_ -> {
+			i := len(vertices)
+			v0 := Vec3(x, 0, 0 - half)
+			v1 := Vec3(x, 0, half)
+			subX(x + s, vertices << v0 << v1, edges << [i, i + 1])
+		}
+	}
+
+	fn subZ(z, mesh) if z > half {
+		true -> mesh
+		_ -> {
+			i := len(mesh.vertices)
+			v0 := Vec3(0 - half, 0, z)
+			v1 := Vec3(half, 0, z)
+			subZ(z + s, {
+				vertices: mesh.vertices << v0 << v1
+				edges: mesh.edges << [i, i + 1]
+			})
+		}
+	}
+
+	subZ(0 - half, subX(0 - half, [], []))
+}
+
+fn AxesMesh(length) {
+	l := _default(length, 3)
+	Mesh(
+		[
+			Vec3(0, 0, 0)
+			Vec3(l, 0, 0)
+			Vec3(0, l, 0)
+			Vec3(0, 0, l)
+		]
+		[
+			[0, 1]
+			[0, 2]
+			[0, 3]
+		]
+	)
+}
+
+fn _vecKey(v) string(v.x) + ',' + string(v.y) + ',' + string(v.z)
+
+fn _edgeKey(a, b) if a < b {
+	true -> string(a) + '|' + string(b)
+	_ -> string(b) + '|' + string(a)
+}
+
+fn _addVertex(vertices, indexByKey, v) {
+	key := _vecKey(v)
+	if existing := indexByKey.(key) {
+		? -> {
+			idx := len(vertices)
+			indexByKey.(key) <- idx
+			{
+				vertices: vertices << v
+				indexByKey: indexByKey
+				idx: idx
+			}
+		}
+		_ -> {
+			{
+				vertices: vertices
+				indexByKey: indexByKey
+				idx: existing
+			}
+		}
+	}
+}
+
+fn _addEdge(edges, edgeSet, a, b) {
+	k := _edgeKey(a, b)
+	if edgeSet.(k) {
+		? -> {
+			edgeSet.(k) <- true
+			{
+				edges: edges << [a, b]
+				edgeSet: edgeSet
+			}
+		}
+		_ -> {
+			{
+				edges: edges
+				edgeSet: edgeSet
+			}
+		}
+	}
+}
+
+fn _voxelMeshSub(voxels, voxelSize, i, vertices, indexByKey, edges, edgeSet) if i {
+	len(voxels) -> Mesh(vertices, edges)
+	_ -> {
+		v := voxels.(i)
+		hs := voxelSize / 2
+		x := _default(v.x, 0)
+		y := _default(v.y, 0)
+		z := _default(v.z, 0)
+
+		cubeVerts := [
+			Vec3(x - hs, y - hs, z - hs)
+			Vec3(x + hs, y - hs, z - hs)
+			Vec3(x + hs, y + hs, z - hs)
+			Vec3(x - hs, y + hs, z - hs)
+			Vec3(x - hs, y - hs, z + hs)
+			Vec3(x + hs, y - hs, z + hs)
+			Vec3(x + hs, y + hs, z + hs)
+			Vec3(x - hs, y + hs, z + hs)
+		]
+
+		edgePairs := [
+			[0, 1]
+			[1, 2]
+			[2, 3]
+			[3, 0]
+			[4, 5]
+			[5, 6]
+			[6, 7]
+			[7, 4]
+			[0, 4]
+			[1, 5]
+			[2, 6]
+			[3, 7]
+		]
+
+		fn addVertsSub(j, vv, map, outIdx) if j {
+			len(cubeVerts) -> {
+				{
+					vertices: vv
+					indexByKey: map
+					indices: outIdx
+				}
+			}
+			_ -> {
+				added := _addVertex(vv, map, cubeVerts.(j))
+				addVertsSub(j + 1, added.vertices, added.indexByKey, outIdx << added.idx)
+			}
+		}
+
+		addedVerts := addVertsSub(0, vertices, indexByKey, [])
+
+		fn addEdgesSub(j, ee, set) if j {
+			len(edgePairs) -> {
+				{
+					edges: ee
+					edgeSet: set
+				}
+			}
+			_ -> {
+				ep := edgePairs.(j)
+				step := _addEdge(ee, set, addedVerts.indices.(ep.0), addedVerts.indices.(ep.1))
+				addEdgesSub(j + 1, step.edges, step.edgeSet)
+			}
+		}
+
+		addedEdges := addEdgesSub(0, edges, edgeSet)
+
+		_voxelMeshSub(
+			voxels
+			voxelSize
+			i + 1
+			addedVerts.vertices
+			addedVerts.indexByKey
+			addedEdges.edges
+			addedEdges.edgeSet
+		)
+	}
+}
+
+fn VoxelMesh(voxels, voxelSize) _voxelMeshSub(_default(voxels, []), _default(voxelSize, 1), 0, [], {}, [], {})
+
+fn VoxelGrid(options) {
+	opts := _default(options, {})
+	voxelSize := _default(opts.voxelSize, 1)
+	voxels := _default(opts.voxels, [])
+	meshDirty := true
+	meshCache := ?
+
+	fn indexOf(x, y, z, i) if i {
+		len(voxels) -> -1
+		_ -> {
+			v := voxels.(i)
+			if [v.x = x, v.y = y, v.z = z] {
+				[true, true, true] -> i
+				_ -> indexOf(x, y, z, i + 1)
+			}
+		}
+	}
+
+	fn setVoxel(x, y, z, value) {
+		i := indexOf(x, y, z, 0)
+		fn withoutIndex(j, out) if j {
+			len(voxels) -> out
+			_ -> if j = i {
+				true -> withoutIndex(j + 1, out)
+				_ -> withoutIndex(j + 1, out << voxels.(j))
+			}
+		}
+		if value {
+			false -> if i >= 0 {
+				true -> {
+					voxels <- withoutIndex(0, [])
+					meshDirty <- true
+				}
+			}
+			_ -> if i >= 0 {
+				true -> 0
+				_ -> {
+					voxels <- voxels << {
+						x: x
+						y: y
+						z: z
+					}
+					meshDirty <- true
+				}
+			}
+		}
+	}
+
+	{
+		voxelSize: voxelSize
+		voxels: fn() voxels
+		set: fn(x, y, z, value) setVoxel(x, y, z, _default(value, true))
+		get: fn(x, y, z) indexOf(x, y, z, 0) >= 0
+		clear: fn() {
+			voxels <- []
+			meshDirty <- true
+		}
+		toMesh: fn() if meshDirty {
+			true -> {
+				meshCache <- VoxelMesh(voxels, voxelSize)
+				meshDirty <- false
+				meshCache
+			}
+			_ -> meshCache
+		}
+	}
+}

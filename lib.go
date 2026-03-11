@@ -160,6 +160,21 @@ var libwebsocket string
 //go:embed lib/GUI.oak
 var libgui string
 
+//go:embed lib/gui-mesh.oak
+var libguimesh string
+
+//go:embed lib/gui-render.oak
+var libguirender string
+
+//go:embed lib/gui-3dmath.oak
+var libgui3dmath string
+
+//go:embed lib/gui-raster.oak
+var libguiraster string
+
+//go:embed lib/gui-web.oak
+var libguiweb string
+
 var stdlibs = map[string]string{
 	"std":             libstd,
 	"str":             libstr,
@@ -212,6 +227,11 @@ var stdlibs = map[string]string{
 	"linux":           liblinux,
 	"Linux":           liblinux,
 	"websocket":       libwebsocket,
+	"gui-mesh":        libguimesh,
+	"gui-render":      libguirender,
+	"gui-3dmath":      libgui3dmath,
+	"gui-raster":      libguiraster,
+	"gui-web":         libguiweb,
 	"GUI":             libgui,
 	"gui":             libgui,
 }

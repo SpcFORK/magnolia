@@ -7,6 +7,11 @@
 
 windows := import('windows')
 linux := import('linux')
+guiMesh := import('gui-mesh')
+guiRender := import('gui-render')
+gui3dmath := import('gui-3dmath')
+guiRaster := import('gui-raster')
+guiWeb := import('gui-web')
 
 fn backend() if ___runtime_sys_info().os {
 	'windows' -> :windows
@@ -33,25 +38,6 @@ fn _err(message, detail) {
 fn _default(value, fallback) if value {
 	? -> fallback
 	_ -> value
-}
-
-fn _isFn?(value) type(value) = :function
-
-fn _nextResourceId(webgl) {
-	next := webgl.nextId
-	webgl.nextId <- next + 1
-	next
-}
-
-fn _webRecord(window, op) {
-	window.messages <- window.messages << op
-	if type(window.webgl) = :object {
-		true -> window.webgl.commands <- window.webgl.commands << op
-	}
-	if _isFn?(window.webBridge) {
-		true -> window.webBridge(op)
-	}
-	op
 }
 
 fn rgb(r, g, b) r | (g << 8) | (b << 16)
@@ -306,48 +292,7 @@ fn createWindow(title, width, height, options) {
 			}
 		}
 		:web -> {
-			webBridge := _default(opts.webBridge, ?)
-			canvasId := _default(opts.canvasId, 'magnolia-gui-canvas')
-			contextName := _default(opts.context, 'webgl')
-			contextAttrs := _default(opts.contextAttrs, {
-				alpha: true
-				antialias: true
-				depth: true
-				stencil: false
-				premultipliedAlpha: true
-				preserveDrawingBuffer: false
-			})
-
-			{
-				type: :ok
-				backend: :web
-				title: resolvedTitle
-				width: resolvedWidth
-				height: resolvedHeight
-				frameMs: frameMs
-				updateOnDispatch: updateOnDispatch
-				closed: false
-				messages: []
-				webBridge: webBridge
-				canvas: {
-					id: canvasId
-					width: resolvedWidth
-					height: resolvedHeight
-					dpr: 1
-				}
-				webgl: {
-					version: contextName
-					contextAttrs: contextAttrs
-					clearColor: [0, 0, 0, 1]
-					viewport: [0, 0, resolvedWidth, resolvedHeight]
-					nextId: 1
-					shaders: []
-					programs: []
-					buffers: []
-					activeProgram: ?
-					commands: []
-				}
-			}
+			guiWeb.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch, opts)
 		}
 		_ -> _err('Unsupported runtime for GUI window middleware', ___runtime_sys_info())
 	}
@@ -400,191 +345,25 @@ fn show(window) if window.type {
 	_ -> window
 }
 
-fn createCanvas(window, id, options) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			canvasOptions := _default(options, {})
-			window.canvas <- {
-				id: _default(id, window.canvas.id)
-				width: _default(canvasOptions.width, window.width)
-				height: _default(canvasOptions.height, window.height)
-				dpr: _default(canvasOptions.dpr, window.canvas.dpr)
-			}
-			_webRecord(window, {
-				type: :canvas_create
-				id: window.canvas.id
-				width: window.canvas.width
-				height: window.canvas.height
-				dpr: window.canvas.dpr
-			})
-			window
-		}
-		_ -> _err('createCanvas is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn createCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
 
-fn initWebGL(window, contextName, attrs) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			window.webgl.version <- _default(contextName, window.webgl.version)
-			window.webgl.contextAttrs <- _default(attrs, window.webgl.contextAttrs)
-			_webRecord(window, {
-				type: :webgl_init
-				canvasId: window.canvas.id
-				context: window.webgl.version
-				attrs: window.webgl.contextAttrs
-			})
-			{
-				type: :ok
-				context: window.webgl.version
-			}
-		}
-		_ -> _err('initWebGL is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn initWebGL(window, contextName, attrs) guiWeb.initWebGL(window, contextName, attrs)
 
-fn webglCreateShader(window, shaderType, source) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			shaderId := _nextResourceId(window.webgl)
-			shader := {
-				id: shaderId
-				type: shaderType
-				source: source
-			}
-			window.webgl.shaders <- window.webgl.shaders << shader
-			_webRecord(window, {
-				type: :webgl_create_shader
-				shader: shader
-			})
-			{
-				type: :ok
-				shader: shader
-			}
-		}
-		_ -> _err('webglCreateShader is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglCreateShader(window, shaderType, source) guiWeb.webglCreateShader(window, shaderType, source)
 
-fn webglCreateProgram(window, vertexShader, fragmentShader) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			programId := _nextResourceId(window.webgl)
-			program := {
-				id: programId
-				vertex: vertexShader
-				fragment: fragmentShader
-			}
-			window.webgl.programs <- window.webgl.programs << program
-			_webRecord(window, {
-				type: :webgl_create_program
-				program: program
-			})
-			{
-				type: :ok
-				program: program
-			}
-		}
-		_ -> _err('webglCreateProgram is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglCreateProgram(window, vertexShader, fragmentShader) guiWeb.webglCreateProgram(window, vertexShader, fragmentShader)
 
-fn webglUseProgram(window, program) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			window.webgl.activeProgram <- program
-			_webRecord(window, {
-				type: :webgl_use_program
-				program: program
-			})
-			{type: :ok}
-		}
-		_ -> _err('webglUseProgram is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglUseProgram(window, program) guiWeb.webglUseProgram(window, program)
 
-fn webglClearColor(window, r, g, b, a) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			window.webgl.clearColor <- [r, g, b, a]
-			_webRecord(window, {
-				type: :webgl_clear_color
-				color: window.webgl.clearColor
-			})
-			{type: :ok}
-		}
-		_ -> _err('webglClearColor is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglClearColor(window, r, g, b, a) guiWeb.webglClearColor(window, r, g, b, a)
 
-fn webglViewport(window, x, y, width, height) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			window.webgl.viewport <- [x, y, width, height]
-			_webRecord(window, {
-				type: :webgl_viewport
-				viewport: window.webgl.viewport
-			})
-			{type: :ok}
-		}
-		_ -> _err('webglViewport is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglViewport(window, x, y, width, height) guiWeb.webglViewport(window, x, y, width, height)
 
-fn webglClear(window, mask) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			useMask := _default(mask, GL_COLOR_BUFFER_BIT)
-			_webRecord(window, {
-				type: :webgl_clear
-				mask: useMask
-			})
-			{type: :ok}
-		}
-		_ -> _err('webglClear is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglClear(window, mask) guiWeb.webglClear(window, mask, GL_COLOR_BUFFER_BIT)
 
-fn webglDrawArrays(window, mode, first, count) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			_webRecord(window, {
-				type: :webgl_draw_arrays
-				mode: _default(mode, GL_TRIANGLES)
-				first: _default(first, 0)
-				count: count
-				program: window.webgl.activeProgram
-			})
-			{type: :ok}
-		}
-		_ -> _err('webglDrawArrays is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglDrawArrays(window, mode, first, count) guiWeb.webglDrawArrays(window, mode, first, count, GL_TRIANGLES)
 
-fn webglFlush(window) if window.type {
-	:ok -> if window.backend {
-		:web -> {
-			_webRecord(window, {
-				type: :webgl_flush
-			})
-			{
-				type: :ok
-				commands: window.webgl.commands
-			}
-		}
-		_ -> _err('webglFlush is only available on web backend', window.backend)
-	}
-	_ -> window
-}
+fn webglFlush(window) guiWeb.webglFlush(window)
 
 fn setTitle(window, title) if window.type {
 	:ok -> if window.backend {
@@ -869,179 +648,15 @@ fn fillRect(window, x, y, width, height, color) if window.type {
 	_ -> window
 }
 
-PI := 3.141592653589793
+fn degToRad(deg) gui3dmath.degToRad(deg)
 
-fn degToRad(deg) deg * PI / 180
+fn Vec3(x, y, z) gui3dmath.Vec3(x, y, z)
 
-fn Vec3(x, y, z) {
-	{
-		x: x
-		y: y
-		z: z
-	}
-}
+fn _transformPoint(v, transform) gui3dmath.transformPoint(v, transform)
 
-fn _rotateX(v, radians) {
-	cr := cos(radians)
-	sr := sin(radians)
-	{
-		x: v.x
-		y: v.y * cr - v.z * sr
-		z: v.y * sr + v.z * cr
-	}
-}
+fn _projectPoint(window, p, camera) gui3dmath.projectPoint(window, p, camera)
 
-fn _rotateY(v, radians) {
-	cr := cos(radians)
-	sr := sin(radians)
-	{
-		x: v.x * cr + v.z * sr
-		y: v.y
-		z: 0 - v.x * sr + v.z * cr
-	}
-}
-
-fn _rotateZ(v, radians) {
-	cr := cos(radians)
-	sr := sin(radians)
-	{
-		x: v.x * cr - v.y * sr
-		y: v.x * sr + v.y * cr
-		z: v.z
-	}
-}
-
-fn _transformPoint(v, transform) {
-	ts := _default(transform, {})
-	scale := _default(ts.scale, 1)
-	tx := _default(ts.tx, 0)
-	ty := _default(ts.ty, 0)
-	tz := _default(ts.tz, 0)
-	rx := degToRad(_default(ts.rx, 0))
-	ry := degToRad(_default(ts.ry, 0))
-	rz := degToRad(_default(ts.rz, 0))
-
-	p0 := {
-		x: v.x * scale
-		y: v.y * scale
-		z: v.z * scale
-	}
-	p1 := _rotateX(p0, rx)
-	p2 := _rotateY(p1, ry)
-	p3 := _rotateZ(p2, rz)
-
-	{
-		x: p3.x + tx
-		y: p3.y + ty
-		z: p3.z + tz
-	}
-}
-
-fn _projectPoint(window, p, camera) {
-	cam := _default(camera, {})
-	camZ := _default(cam.z, 5)
-	fov := _default(cam.fov, 90)
-	mode := _default(cam.mode, 'perspective')
-	renderScaleRaw := _default(cam.renderScale, 1)
-	renderScale := if renderScaleRaw < 0.35 {
-		true -> 0.35
-		_ -> if renderScaleRaw > 1 {
-			true -> 1
-			_ -> renderScaleRaw
-		}
-	}
-
-	z := p.z + camZ
-	if mode = 'orthographic' {
-		true -> {
-			halfW := window.width * renderScale / 2
-			halfH := window.height * renderScale / 2
-			offX := (window.width - window.width * renderScale) / 2
-			offY := (window.height - window.height * renderScale) / 2
-			orthoScale := _default(cam.orthoScale, 4)
-			scale := halfW / orthoScale
-			{
-				x: int(offX + halfW + p.x * scale)
-				y: int(offY + halfH - p.y * scale)
-				z: z
-			}
-		}
-		_ -> {
-			if z <= 0.05 {
-				true -> ?
-				_ -> {
-					halfW := window.width * renderScale / 2
-					halfH := window.height * renderScale / 2
-					offX := (window.width - window.width * renderScale) / 2
-					offY := (window.height - window.height * renderScale) / 2
-					focal := halfW / tan(degToRad(fov / 2))
-					{
-						x: int(offX + halfW + (p.x * focal) / z)
-						y: int(offY + halfH - (p.y * focal) / z)
-						z: z
-					}
-				}
-			}
-		}
-	}
-}
-
-fn _transformVertices(vertices, transform, i, out) if i {
-	len(vertices) -> out
-	_ -> _transformVertices(vertices, transform, i + 1, out << _transformPoint(vertices.(i), transform))
-}
-
-fn _projectVertices(window, vertices, camera) {
-	cam := _default(camera, {})
-	camZ := _default(cam.z, 5)
-	fov := _default(cam.fov, 90)
-	mode := _default(cam.mode, 'perspective')
-	renderScaleRaw := _default(cam.renderScale, 1)
-	renderScale := if renderScaleRaw < 0.35 {
-		true -> 0.35
-		_ -> if renderScaleRaw > 1 {
-			true -> 1
-			_ -> renderScaleRaw
-		}
-	}
-	renderW := window.width * renderScale
-	renderH := window.height * renderScale
-	halfW := renderW / 2
-	halfH := renderH / 2
-	offX := (window.width - renderW) / 2
-	offY := (window.height - renderH) / 2
-	orthoScale := _default(cam.orthoScale, 4)
-	orthoFactor := halfW / orthoScale
-	focal := halfW / tan(degToRad(fov / 2))
-
-	fn projectOne(p) {
-		z := p.z + camZ
-		if mode = 'orthographic' {
-			true -> {
-				x: int(offX + halfW + p.x * orthoFactor)
-				y: int(offY + halfH - p.y * orthoFactor)
-				z: z
-			}
-			_ -> {
-				if z <= 0.05 {
-					true -> ?
-					_ -> {
-						x: int(offX + halfW + (p.x * focal) / z)
-						y: int(offY + halfH - (p.y * focal) / z)
-						z: z
-					}
-				}
-			}
-		}
-	}
-
-	fn sub(i, out) if i {
-		len(vertices) -> out
-		_ -> sub(i + 1, out << projectOne(vertices.(i)))
-	}
-
-	sub(0, [])
-}
+fn _transformVertices(vertices, transform, i, out) gui3dmath.transformVertices(vertices, transform, i, out)
 
 fn drawLine(window, x1, y1, x2, y2, color) if window.type {
 	:ok -> {
@@ -1159,605 +774,51 @@ fn CubeMesh(size) {
 	}
 }
 
-fn _lerpX(pa, pb, y) if pb.y = pa.y {
-	true -> pa.x
-	_ -> pa.x + (y - pa.y) * (pb.x - pa.x) / (pb.y - pa.y)
-}
-
-fn _drawScanline(window, y, xa, xb, color) if xa < xb {
-	true -> drawLine(window, int(xa), y, int(xb), y, color)
-	_ -> drawLine(window, int(xb), y, int(xa), y, color)
-}
-
-fn _fillScan(window, y, maxY, p0, p1, p2, color) if y > maxY {
-	true -> {type: :ok}
-	_ -> {
-		xa := if y <= p1.y {
-			true -> _lerpX(p0, p1, y)
-			_ -> _lerpX(p1, p2, y)
-		}
-		xb := _lerpX(p0, p2, y)
-		_drawScanline(window, y, xa, xb, color)
-		_fillScan(window, y + 1, maxY, p0, p1, p2, color)
-	}
-}
-
-fn _sortTriByY(p0, p1, p2) {
-	a := p0
-	b := p1
-	c := p2
-	if a.y > b.y {
-		true -> {
-			t := a
-			a <- b
-			b <- t
-		}
-	}
-	if b.y > c.y {
-		true -> {
-			t := b
-			b <- c
-			c <- t
-		}
-	}
-	if a.y > b.y {
-		true -> {
-			t := a
-			a <- b
-			b <- t
-		}
-	}
-	[a, b, c]
-}
-
 fn drawTriangleFilled(window, p0, p1, p2, color) {
-	sorted := _sortTriByY(p0, p1, p2)
-	a := sorted.0
-	b := sorted.1
-	c := sorted.2
-	_fillScan(window, int(a.y), int(c.y), a, b, c, color)
+	guiRaster.drawTriangleFilled({
+		drawLine: drawLine
+	}, window, p0, p1, p2, color)
 }
-
-fn _insertDepthSorted(tris, tri, i, out) if i {
-	len(tris) -> out << tri
-	_ -> {
-		cur := tris.(i)
-		if tri.depth > cur.depth {
-			true -> _insertDepthSorted(tris, tri, i + 1, out << cur)
-			_ -> {
-				tail := fn sub(j, acc) if j {
-					len(tris) -> acc
-					_ -> sub(j + 1, acc << tris.(j))
-				}
-				tail(i + 1, out << tri << cur)
-			}
-		}
-	}
-}
-
-fn _sortDepth(tris, i, sorted) if i {
-	len(tris) -> sorted
-	_ -> _sortDepth(tris, i + 1, _insertDepthSorted(sorted, tris.(i), 0, []))
-}
-
-fn _clamp(v, minV, maxV) if v < minV {
-	true -> minV
-	_ -> if v > maxV {
-		true -> maxV
-		_ -> v
-	}
-}
-
-fn _vecSub(a, b) Vec3(a.x - b.x, a.y - b.y, a.z - b.z)
-
-fn _vecCross(a, b) Vec3(
-	a.y * b.z - a.z * b.y
-	a.z * b.x - a.x * b.z
-	a.x * b.y - a.y * b.x
-)
-
-fn _vecDot(a, b) a.x * b.x + a.y * b.y + a.z * b.z
-
-fn _vecLen(v) pow(v.x * v.x + v.y * v.y + v.z * v.z, 0.5)
-
-fn _vecNormalize(v) {
-	l := _vecLen(v)
-	if l <= 0.000001 {
-		true -> Vec3(0, 0, 1)
-		_ -> Vec3(v.x / l, v.y / l, v.z / l)
-	}
-}
-
-fn _colorR(c) c & 255
-fn _colorG(c) (c >> 8) & 255
-fn _colorB(c) (c >> 16) & 255
-
-fn _shadeColor(color, intensity) {
-	i := _clamp(intensity, 0, 1)
-	r := int(_colorR(color) * i)
-	g := int(_colorG(color) * i)
-	b := int(_colorB(color) * i)
-	rgb(_clamp(r, 0, 255), _clamp(g, 0, 255), _clamp(b, 0, 255))
-}
-
-fn _faceShadeFast(nx, ny, nz, ldx, ldy, ldz, amb, diff) {
-	nlen := pow(nx * nx + ny * ny + nz * nz, 0.5)
-	if nlen <= 0.000001 {
-		true -> amb
-		_ -> {
-			ndotl := ((nx / nlen) * (0 - ldx)) + ((ny / nlen) * (0 - ldy)) + ((nz / nlen) * (0 - ldz))
-			amb + diff * _clamp(ndotl, 0, 1)
-		}
-	}
-}
-
-fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
 
 fn drawMeshSolid(window, mesh, transform, camera, color, light) {
-	verts := _transformVertices(mesh.vertices, transform, 0, [])
-	pverts := _projectVertices(window, verts, camera)
-	faces := _default(mesh.faces, [])
-	faceColors := _default(mesh.faceColors, [])
-	cam := _default(camera, {})
-	backfaceCulling := _default(cam.backfaceCulling, true)
-	sortFaces := _default(cam.sortFaces, true)
-	faceStrideRaw := int(_default(cam.faceStride, 1))
-	faceStride := if faceStrideRaw < 1 {
-		true -> 1
-		_ -> faceStrideRaw
-	}
-	camZ := _default(cam.z, 5)
-	camPosZ := 0 - camZ
-	lightObj := _default(light, {})
-	lightDir := _vecNormalize(Vec3(_default(lightObj.x, 0.35), _default(lightObj.y, 0.75), _default(lightObj.z, -1)))
-	ldx := lightDir.x
-	ldy := lightDir.y
-	ldz := lightDir.z
-	amb := _clamp(_default(lightObj.ambient, 0.22), 0, 1)
-	diff := _clamp(_default(lightObj.diffuse, 0.78), 0, 1)
-
-	fn collect(i, acc) if i {
-		len(faces) -> acc
-		_ -> {
-			nextI := i + faceStride
-			f := faces.(i)
-			pa3 := verts.(f.0)
-			pb3 := verts.(f.1)
-			pc3 := verts.(f.2)
-			pd3 := if len(f) > 3 {
-				true -> verts.(f.3)
-				_ -> ?
-			}
-
-			nx := (pb3.y - pa3.y) * (pc3.z - pa3.z) - (pb3.z - pa3.z) * (pc3.y - pa3.y)
-			ny := (pb3.z - pa3.z) * (pc3.x - pa3.x) - (pb3.x - pa3.x) * (pc3.z - pa3.z)
-			nz := (pb3.x - pa3.x) * (pc3.y - pa3.y) - (pb3.y - pa3.y) * (pc3.x - pa3.x)
-
-			cx := (pa3.x + pb3.x + pc3.x + if pd3 {
-				? -> 0
-				_ -> pd3.x
-			}) / if pd3 {
-				? -> 3
-				_ -> 4
-			}
-			cy := (pa3.y + pb3.y + pc3.y + if pd3 {
-				? -> 0
-				_ -> pd3.y
-			}) / if pd3 {
-				? -> 3
-				_ -> 4
-			}
-			cz := (pa3.z + pb3.z + pc3.z + if pd3 {
-				? -> 0
-				_ -> pd3.z
-			}) / if pd3 {
-				? -> 3
-				_ -> 4
-			}
-
-			toCamX := 0 - cx
-			toCamY := 0 - cy
-			toCamZ := camPosZ - cz
-			front3D := (nx * toCamX + ny * toCamY + nz * toCamZ) > 0
-
-			if backfaceCulling & (!front3D) {
-				true -> collect(nextI, acc)
-				_ -> {
-					pa := pverts.(f.0)
-					pb := pverts.(f.1)
-					pc := pverts.(f.2)
-					pd := if pd3 {
-						? -> ?
-						_ -> pverts.(f.3)
-					}
-
-					faceColor := if i < len(faceColors) {
-						true -> faceColors.(i)
-						_ -> _default(color, rgb(150, 200, 255))
-					}
-					litColor := _shadeColor(faceColor, _faceShadeFast(nx, ny, nz, ldx, ldy, ldz, amb, diff))
-
-					depth := cz
-
-					if [pa, pb, pc] {
-						[?, _, _] -> collect(nextI, acc)
-						[_, ?, _] -> collect(nextI, acc)
-						[_, _, ?] -> collect(nextI, acc)
-						_ -> {
-							triA := {
-								type: :tri
-								depth: depth
-								a: pa
-								b: pb
-								c: pc
-								color: litColor
-							}
-							if [pd3, pd] {
-								[?, _] -> collect(nextI, acc << triA)
-								[_, ?] -> collect(nextI, acc << triA)
-								_ -> {
-									triB := {
-										type: :tri
-										depth: depth
-										a: pa
-										b: pc
-										c: pd
-										color: litColor
-									}
-									collect(nextI, acc << triA << triB)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	trisRaw := collect(0, [])
-	tris := if sortFaces {
-		true -> _sortDepth(trisRaw, 0, [])
-		_ -> trisRaw
-	}
-
-	fn draw(i, drawn) if i {
-		len(tris) -> {
-			{
-				type: :ok
-				triangles: drawn
-			}
-		}
-		_ -> {
-			t := tris.(i)
-			drawTriangleFilled(window, t.a, t.b, t.c, t.color)
-			draw(i + 1, drawn + 1)
-		}
-	}
-
-	draw(0, 0)
+	guiRaster.drawMeshSolid({
+		drawLine: drawLine
+		transformVertices: _transformVertices
+		projectPoint: _projectPoint
+		rgb: rgb
+		Vec3: Vec3
+	}, window, mesh, transform, camera, color, light)
 }
 
-fn Mesh(vertices, edges) {
-	{
-		vertices: _default(vertices, [])
-		edges: _default(edges, [])
-	}
-}
+fn Mesh(vertices, edges) guiMesh.Mesh(vertices, edges)
 
-fn GridMesh(size, step) {
-	half := _default(size, 10) / 2
-	s := _default(step, 1)
+fn GridMesh(size, step) guiMesh.GridMesh(size, step)
 
-	fn subX(x, vertices, edges) if x > half {
-		true -> {
-			Mesh(vertices, edges)
-		}
-		_ -> {
-			i := len(vertices)
-			v0 := Vec3(x, 0, 0 - half)
-			v1 := Vec3(x, 0, half)
-			subX(x + s, vertices << v0 << v1, edges << [i, i + 1])
-		}
-	}
+fn AxesMesh(length) guiMesh.AxesMesh(length)
 
-	fn subZ(z, mesh) if z > half {
-		true -> mesh
-		_ -> {
-			i := len(mesh.vertices)
-			v0 := Vec3(0 - half, 0, z)
-			v1 := Vec3(half, 0, z)
-			subZ(z + s, {
-				vertices: mesh.vertices << v0 << v1
-				edges: mesh.edges << [i, i + 1]
-			})
-		}
-	}
+fn VoxelMesh(voxels, voxelSize) guiMesh.VoxelMesh(voxels, voxelSize)
 
-	subZ(0 - half, subX(0 - half, [], []))
-}
-
-fn AxesMesh(length) {
-	l := _default(length, 3)
-	Mesh(
-		[
-			Vec3(0, 0, 0)
-			Vec3(l, 0, 0)
-			Vec3(0, l, 0)
-			Vec3(0, 0, l)
-		]
-		[
-			[0, 1]
-			[0, 2]
-			[0, 3]
-		]
-	)
-}
-
-fn _vecKey(v) string(v.x) + ',' + string(v.y) + ',' + string(v.z)
-
-fn _edgeKey(a, b) if a < b {
-	true -> string(a) + '|' + string(b)
-	_ -> string(b) + '|' + string(a)
-}
-
-fn _addVertex(vertices, indexByKey, v) {
-	key := _vecKey(v)
-	if existing := indexByKey.(key) {
-		? -> {
-			idx := len(vertices)
-			indexByKey.(key) <- idx
-			{
-				vertices: vertices << v
-				indexByKey: indexByKey
-				idx: idx
-			}
-		}
-		_ -> {
-			{
-				vertices: vertices
-				indexByKey: indexByKey
-				idx: existing
-			}
-		}
-	}
-}
-
-fn _addEdge(edges, edgeSet, a, b) {
-	k := _edgeKey(a, b)
-	if edgeSet.(k) {
-		? -> {
-			edgeSet.(k) <- true
-			{
-				edges: edges << [a, b]
-				edgeSet: edgeSet
-			}
-		}
-		_ -> {
-			{
-				edges: edges
-				edgeSet: edgeSet
-			}
-		}
-	}
-}
-
-fn _voxelMeshSub(voxels, voxelSize, i, vertices, indexByKey, edges, edgeSet) if i {
-	len(voxels) -> Mesh(vertices, edges)
-	_ -> {
-		v := voxels.(i)
-		hs := voxelSize / 2
-		x := _default(v.x, 0)
-		y := _default(v.y, 0)
-		z := _default(v.z, 0)
-
-		cubeVerts := [
-			Vec3(x - hs, y - hs, z - hs)
-			Vec3(x + hs, y - hs, z - hs)
-			Vec3(x + hs, y + hs, z - hs)
-			Vec3(x - hs, y + hs, z - hs)
-			Vec3(x - hs, y - hs, z + hs)
-			Vec3(x + hs, y - hs, z + hs)
-			Vec3(x + hs, y + hs, z + hs)
-			Vec3(x - hs, y + hs, z + hs)
-		]
-
-		edgePairs := [
-			[0, 1]
-			[1, 2]
-			[2, 3]
-			[3, 0]
-			[4, 5]
-			[5, 6]
-			[6, 7]
-			[7, 4]
-			[0, 4]
-			[1, 5]
-			[2, 6]
-			[3, 7]
-		]
-
-		fn addVertsSub(j, vv, map, outIdx) if j {
-			len(cubeVerts) -> {
-				{
-					vertices: vv
-					indexByKey: map
-					indices: outIdx
-				}
-			}
-			_ -> {
-				added := _addVertex(vv, map, cubeVerts.(j))
-				addVertsSub(j + 1, added.vertices, added.indexByKey, outIdx << added.idx)
-			}
-		}
-
-		addedVerts := addVertsSub(0, vertices, indexByKey, [])
-
-		fn addEdgesSub(j, ee, set) if j {
-			len(edgePairs) -> {
-				{
-					edges: ee
-					edgeSet: set
-				}
-			}
-			_ -> {
-				ep := edgePairs.(j)
-				step := _addEdge(ee, set, addedVerts.indices.(ep.0), addedVerts.indices.(ep.1))
-				addEdgesSub(j + 1, step.edges, step.edgeSet)
-			}
-		}
-
-		addedEdges := addEdgesSub(0, edges, edgeSet)
-
-		_voxelMeshSub(
-			voxels
-			voxelSize
-			i + 1
-			addedVerts.vertices
-			addedVerts.indexByKey
-			addedEdges.edges
-			addedEdges.edgeSet
-		)
-	}
-}
-
-fn VoxelMesh(voxels, voxelSize) _voxelMeshSub(_default(voxels, []), _default(voxelSize, 1), 0, [], {}, [], {})
-
-fn VoxelGrid(options) {
-	opts := _default(options, {})
-	voxelSize := _default(opts.voxelSize, 1)
-	voxels := _default(opts.voxels, [])
-
-	fn indexOf(x, y, z, i) if i {
-		len(voxels) -> -1
-		_ -> {
-			v := voxels.(i)
-			if [v.x = x, v.y = y, v.z = z] {
-				[true, true, true] -> i
-				_ -> indexOf(x, y, z, i + 1)
-			}
-		}
-	}
-
-	fn setVoxel(x, y, z, value) {
-		i := indexOf(x, y, z, 0)
-		fn withoutIndex(j, out) if j {
-			len(voxels) -> out
-			_ -> if j = i {
-				true -> withoutIndex(j + 1, out)
-				_ -> withoutIndex(j + 1, out << voxels.(j))
-			}
-		}
-		if value {
-			false -> if i >= 0 {
-				true -> voxels <- withoutIndex(0, [])
-			}
-			_ -> if i >= 0 {
-				true -> voxels.(i) <- {
-					x: x
-					y: y
-					z: z
-				}
-				_ -> voxels <- voxels << {
-					x: x
-					y: y
-					z: z
-				}
-			}
-		}
-	}
-
-	{
-		voxelSize: voxelSize
-		voxels: fn() voxels
-		set: fn(x, y, z, value) setVoxel(x, y, z, _default(value, true))
-		get: fn(x, y, z) indexOf(x, y, z, 0) >= 0
-		clear: fn() voxels <- []
-		toMesh: fn() VoxelMesh(voxels, voxelSize)
-	}
-}
+fn VoxelGrid(options) guiMesh.VoxelGrid(options)
 
 fn drawMeshWireframe(window, mesh, transform, camera, color) {
-	verts := _transformVertices(mesh.vertices, transform, 0, [])
-	pverts := _projectVertices(window, verts, camera)
-	edges := mesh.edges
-
-	fn sub(i, drawn) if i {
-		len(edges) -> {
-			{
-				type: :ok
-				lines: drawn
-			}
-		}
-		_ -> {
-			edge := edges.(i)
-			pa := pverts.(edge.0)
-			pb := pverts.(edge.1)
-			if [pa, pb] {
-				[?, _] -> sub(i + 1, drawn)
-				[_, ?] -> sub(i + 1, drawn)
-				_ -> {
-					drawLine(window, pa.x, pa.y, pb.x, pb.y, color)
-					sub(i + 1, drawn + 1)
-				}
-			}
-		}
-	}
-
-	sub(0, 0)
+	guiRaster.drawMeshWireframe({
+		drawLine: drawLine
+		transformVertices: _transformVertices
+		projectPoint: _projectPoint
+	}, window, mesh, transform, camera, color)
 }
 
-fn Renderer3D(window, options) {
-	opts := _default(options, {})
-	camera := _default(opts.camera, {
-		z: 5
-		fov: 90
-		mode: 'perspective'
-		renderScale: 1
-		backfaceCulling: true
-		sortFaces: true
-	})
-	background := _default(opts.background, rgb(8, 14, 22))
-	lineColor := _default(opts.lineColor, rgb(96, 190, 255))
-	light := _default(opts.light, {
-		x: 0.35
-		y: 0.75
-		z: -1
-		ambient: 0.22
-		diffuse: 0.78
-	})
-
-	{
-		window: window
-		camera: camera
-		background: background
-		lineColor: lineColor
-		light: light
-		setCamera: fn(nextCamera) camera <- _default(nextCamera, camera)
-		setLight: fn(nextLight) light <- _default(nextLight, light)
-		setProjection: fn(mode, orthoScale) camera <- {
-			z: _default(camera.z, 5)
-			fov: _default(camera.fov, 90)
-			mode: _default(mode, _default(camera.mode, 'perspective'))
-			orthoScale: _default(orthoScale, _default(camera.orthoScale, 4))
-			renderScale: _default(camera.renderScale, 1)
-			backfaceCulling: _default(camera.backfaceCulling, true)
-			sortFaces: _default(camera.sortFaces, true)
-		}
-		clear: fn() fillRect(window, 0, 0, window.width, window.height, background)
-		renderMeshSolid: fn(mesh, transform, color) drawMeshSolid(window, mesh, transform, camera, _default(color, lineColor), light)
-		renderCubeSolid: fn(size, transform, color) drawMeshSolid(window, CubeMesh(size), transform, camera, _default(color, lineColor), light)
-		renderMesh: fn(mesh, transform, color) drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
-		renderCube: fn(size, transform, color) drawMeshWireframe(window, CubeMesh(size), transform, camera, _default(color, lineColor))
-		renderGrid: fn(size, step, transform, color) drawMeshWireframe(window, GridMesh(size, step), transform, camera, _default(color, lineColor))
-		renderAxes: fn(length, transform) {
-			drawMeshWireframe(window, Mesh([Vec3(0, 0, 0), Vec3(_default(length, 3), 0, 0)], [[0, 1]]), transform, camera, rgb(255, 90, 90))
-			drawMeshWireframe(window, Mesh([Vec3(0, 0, 0), Vec3(0, _default(length, 3), 0)], [[0, 1]]), transform, camera, rgb(120, 255, 140))
-			drawMeshWireframe(window, Mesh([Vec3(0, 0, 0), Vec3(0, 0, _default(length, 3))], [[0, 1]]), transform, camera, rgb(120, 170, 255))
-		}
-		renderVoxels: fn(voxels, voxelSize, transform, color) drawMeshWireframe(window, VoxelMesh(voxels, _default(voxelSize, 1)), transform, camera, _default(color, lineColor))
-		renderVoxelGrid: fn(grid, transform, color) drawMeshWireframe(window, grid.toMesh(), transform, camera, _default(color, lineColor))
-	}
-}
+fn Renderer3D(window, options) guiRender.Renderer3D({
+	rgb: rgb
+	fillRect: fillRect
+	drawMeshSolid: drawMeshSolid
+	drawMeshWireframe: drawMeshWireframe
+	CubeMesh: CubeMesh
+	GridMesh: GridMesh
+	Mesh: Mesh
+	Vec3: Vec3
+	VoxelMesh: VoxelMesh
+}, window, options)
 
 fn poll(window) if window.type {
 	:ok -> if window.backend {

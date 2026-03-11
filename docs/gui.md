@@ -282,10 +282,7 @@ Camera fields:
 - `fov` (degrees)
 - `mode` (`'perspective'` or `'orthographic'`)
 - `orthoScale` (orthographic zoom scale)
-- `renderScale` (default `1`; lower values render into a centered smaller viewport for speed)
 - `backfaceCulling` (default `true`)
-- `sortFaces` (default `true`; set `false` for faster but less correct painter ordering)
-- `faceStride` (default `1`; render every Nth solid face for speed on heavy meshes)
 
 Lighting fields (for solid rendering):
 
@@ -381,3 +378,42 @@ if window.type = :ok & gui.isWeb?() -> {
 - `samples/gui-sample.oak` - cross-platform GUI quickstart
 - `samples/gui-game.oak` - bouncing-box mini game using GUI middleware
 - `samples/gui-3d.oak` - rotating wireframe cube using GUI 3D renderer
+
+## Module Split
+
+- `import('GUI')` remains the primary API and is backward compatible.
+- Mesh and voxel builders are factored into `import('gui-mesh')` internally.
+- The renderer factory is factored into `import('gui-render')` internally.
+- Transform/projection math is factored into `import('gui-3dmath')` internally.
+- Shading, culling, and raster routines are factored into `import('gui-raster')` internally.
+- Web Canvas/WebGL middleware queue logic is factored into `import('gui-web')` internally.
+- Optional direct mesh module imports:
+    - `Mesh(vertices, edges)`
+    - `GridMesh(size, step)`
+    - `AxesMesh(length)`
+    - `VoxelMesh(voxels, voxelSize)`
+    - `VoxelGrid(options)`
+- Optional direct renderer module import:
+    - `Renderer3D(deps, window, options)`
+- Optional direct 3D math module imports:
+    - `degToRad(deg)`
+    - `Vec3(x, y, z)`
+    - `transformPoint(v, transform)`
+    - `projectPoint(window, p, camera)`
+    - `transformVertices(vertices, transform, i, out)`
+- Optional direct raster module imports:
+    - `drawTriangleFilled(deps, window, p0, p1, p2, color)`
+    - `drawMeshSolid(deps, window, mesh, transform, camera, color, light)`
+    - `drawMeshWireframe(deps, window, mesh, transform, camera, color)`
+- Optional direct web module imports:
+    - `createWindowState(title, width, height, frameMs, updateOnDispatch, options)`
+    - `createCanvas(window, id, options)`
+    - `initWebGL(window, contextName, attrs)`
+    - `webglCreateShader(window, shaderType, source)`
+    - `webglCreateProgram(window, vertexShader, fragmentShader)`
+    - `webglUseProgram(window, program)`
+    - `webglClearColor(window, r, g, b, a)`
+    - `webglViewport(window, x, y, width, height)`
+    - `webglClear(window, mask, colorBufferBit)`
+    - `webglDrawArrays(window, mode, first, count, trianglesMode)`
+    - `webglFlush(window)`

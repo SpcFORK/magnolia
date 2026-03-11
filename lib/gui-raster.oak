@@ -1,0 +1,309 @@
+// gui-raster contains scanline fill, shading, culling, and mesh raster routines.
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _pointOutCode(window, p) {
+	left := if p.x < 0 {
+		true -> 1
+		_ -> 0
+	}
+	right := if p.x >= window.width {
+		true -> 2
+		_ -> 0
+	}
+	top := if p.y < 0 {
+		true -> 4
+		_ -> 0
+	}
+	bottom := if p.y >= window.height {
+		true -> 8
+		_ -> 0
+	}
+	left | right | top | bottom
+}
+
+fn _lineVisible?(window, a, b) (_pointOutCode(window, a) & _pointOutCode(window, b)) = 0
+
+fn _min2(a, b) if a < b {
+	true -> a
+	_ -> b
+}
+
+fn _max2(a, b) if a > b {
+	true -> a
+	_ -> b
+}
+
+fn _triVisible?(window, a, b, c) {
+	minX := _min2(a.x, _min2(b.x, c.x))
+	maxX := _max2(a.x, _max2(b.x, c.x))
+	minY := _min2(a.y, _min2(b.y, c.y))
+	maxY := _max2(a.y, _max2(b.y, c.y))
+	(maxX >= 0) & (maxY >= 0) & (minX < window.width) & (minY < window.height)
+}
+
+fn _lerpX(pa, pb, y) if pb.y = pa.y {
+	true -> pa.x
+	_ -> pa.x + (y - pa.y) * (pb.x - pa.x) / (pb.y - pa.y)
+}
+
+fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
+	true -> deps.drawLine(window, int(xa), y, int(xb), y, color)
+	_ -> deps.drawLine(window, int(xb), y, int(xa), y, color)
+}
+
+fn _fillScan(deps, window, y, maxY, p0, p1, p2, color) if y > maxY {
+	true -> {type: :ok}
+	_ -> {
+		xa := if y <= p1.y {
+			true -> _lerpX(p0, p1, y)
+			_ -> _lerpX(p1, p2, y)
+		}
+		xb := _lerpX(p0, p2, y)
+		_drawScanline(deps, window, y, xa, xb, color)
+		_fillScan(deps, window, y + 1, maxY, p0, p1, p2, color)
+	}
+}
+
+fn _sortTriByY(p0, p1, p2) {
+	a := p0
+	b := p1
+	c := p2
+	if a.y > b.y {
+		true -> {
+			t := a
+			a <- b
+			b <- t
+		}
+	}
+	if b.y > c.y {
+		true -> {
+			t := b
+			b <- c
+			c <- t
+		}
+	}
+	if a.y > b.y {
+		true -> {
+			t := a
+			a <- b
+			b <- t
+		}
+	}
+	[a, b, c]
+}
+
+fn drawTriangleFilled(deps, window, p0, p1, p2, color) {
+	sorted := _sortTriByY(p0, p1, p2)
+	a := sorted.0
+	b := sorted.1
+	c := sorted.2
+	_fillScan(deps, window, int(a.y), int(c.y), a, b, c, color)
+}
+
+fn _insertDepthSorted(tris, tri, i, out) if i {
+	len(tris) -> out << tri
+	_ -> {
+		cur := tris.(i)
+		if tri.depth > cur.depth {
+			true -> _insertDepthSorted(tris, tri, i + 1, out << cur)
+			_ -> {
+				tail := fn sub(j, acc) if j {
+					len(tris) -> acc
+					_ -> sub(j + 1, acc << tris.(j))
+				}
+				tail(i + 1, out << tri << cur)
+			}
+		}
+	}
+}
+
+fn _sortDepth(tris, i, sorted) if i {
+	len(tris) -> sorted
+	_ -> _sortDepth(tris, i + 1, _insertDepthSorted(sorted, tris.(i), 0, []))
+}
+
+fn _clamp(v, minV, maxV) if v < minV {
+	true -> minV
+	_ -> if v > maxV {
+		true -> maxV
+		_ -> v
+	}
+}
+
+fn _vecSub(deps, a, b) deps.Vec3(a.x - b.x, a.y - b.y, a.z - b.z)
+
+fn _vecCross(deps, a, b) deps.Vec3(
+	a.y * b.z - a.z * b.y
+	a.z * b.x - a.x * b.z
+	a.x * b.y - a.y * b.x
+)
+
+fn _vecDot(a, b) a.x * b.x + a.y * b.y + a.z * b.z
+
+fn _vecLen(v) pow(v.x * v.x + v.y * v.y + v.z * v.z, 0.5)
+
+fn _vecNormalize(deps, v) {
+	l := _vecLen(v)
+	if l <= 0.000001 {
+		true -> deps.Vec3(0, 0, 1)
+		_ -> deps.Vec3(v.x / l, v.y / l, v.z / l)
+	}
+}
+
+fn _colorR(c) c & 255
+fn _colorG(c) (c >> 8) & 255
+fn _colorB(c) (c >> 16) & 255
+
+fn _shadeColor(deps, color, intensity) {
+	i := _clamp(intensity, 0, 1)
+	r := int(_colorR(color) * i)
+	g := int(_colorG(color) * i)
+	b := int(_colorB(color) * i)
+	deps.rgb(_clamp(r, 0, 255), _clamp(g, 0, 255), _clamp(b, 0, 255))
+}
+
+fn _faceShade(deps, pa3, pb3, pc3, light) {
+	ld := _vecNormalize(deps, deps.Vec3(_default(light.x, 0.35), _default(light.y, 0.75), _default(light.z, -1)))
+	amb := _clamp(_default(light.ambient, 0.22), 0, 1)
+	diff := _clamp(_default(light.diffuse, 0.78), 0, 1)
+	n := _vecNormalize(deps, _vecCross(deps, _vecSub(deps, pb3, pa3), _vecSub(deps, pc3, pa3)))
+	ndotl := _vecDot(n, deps.Vec3(0 - ld.x, 0 - ld.y, 0 - ld.z))
+	amb + diff * _clamp(ndotl, 0, 1)
+}
+
+fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
+
+fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
+	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
+	faces := _default(mesh.faces, [])
+	faceColors := _default(mesh.faceColors, [])
+	cam := _default(camera, {})
+	backfaceCulling := _default(cam.backfaceCulling, true)
+
+	fn collect(i, acc) if i {
+		len(faces) -> acc
+		_ -> {
+			f := faces.(i)
+			pa3 := verts.(f.0)
+			pb3 := verts.(f.1)
+			pc3 := verts.(f.2)
+			pd3 := if len(f) > 3 {
+				true -> verts.(f.3)
+				_ -> ?
+			}
+
+			pa := deps.projectPoint(window, pa3, camera)
+			pb := deps.projectPoint(window, pb3, camera)
+			pc := deps.projectPoint(window, pc3, camera)
+			pd := if pd3 {
+				? -> ?
+				_ -> deps.projectPoint(window, pd3, camera)
+			}
+
+			faceColor := if i < len(faceColors) {
+				true -> faceColors.(i)
+				_ -> _default(color, deps.rgb(150, 200, 255))
+			}
+			litColor := _shadeColor(deps, faceColor, _faceShade(deps, pa3, pb3, pc3, _default(light, {})))
+
+			depth := (pa3.z + pb3.z + pc3.z + if pd3 {
+				? -> 0
+				_ -> pd3.z
+			}) / if pd3 {
+				? -> 3
+				_ -> 4
+			}
+
+			if [pa, pb, pc] {
+				[?, _, _] -> collect(i + 1, acc)
+				[_, ?, _] -> collect(i + 1, acc)
+				[_, _, ?] -> collect(i + 1, acc)
+				_ -> {
+					triA := {
+						type: :tri
+						depth: depth
+						a: pa
+						b: pb
+						c: pc
+						color: litColor
+					}
+					if (!_triVisible?(window, pa, pb, pc)) | (backfaceCulling & (!_frontFacing?(pa, pb, pc))) {
+						true -> collect(i + 1, acc)
+						_ -> if [pd3, pd] {
+							[?, _] -> collect(i + 1, acc << triA)
+							[_, ?] -> collect(i + 1, acc << triA)
+							_ -> {
+								triB := {
+									type: :tri
+									depth: depth
+									a: pa
+									b: pc
+									c: pd
+									color: litColor
+								}
+								if (!_triVisible?(window, pa, pc, pd)) | (backfaceCulling & (!_frontFacing?(pa, pc, pd))) {
+									true -> collect(i + 1, acc << triA)
+									_ -> collect(i + 1, acc << triA << triB)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	tris := _sortDepth(collect(0, []), 0, [])
+
+	fn draw(i, drawn) if i {
+		len(tris) -> {
+			{
+				type: :ok
+				triangles: drawn
+			}
+		}
+		_ -> {
+			t := tris.(i)
+			drawTriangleFilled(deps, window, t.a, t.b, t.c, t.color)
+			draw(i + 1, drawn + 1)
+		}
+	}
+
+	draw(0, 0)
+}
+
+fn drawMeshWireframe(deps, window, mesh, transform, camera, color) {
+	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
+	edges := mesh.edges
+
+	fn sub(i, drawn) if i {
+		len(edges) -> {
+			{
+				type: :ok
+				lines: drawn
+			}
+		}
+		_ -> {
+			edge := edges.(i)
+			pa := deps.projectPoint(window, verts.(edge.0), camera)
+			pb := deps.projectPoint(window, verts.(edge.1), camera)
+			if [pa, pb] {
+				[?, _] -> sub(i + 1, drawn)
+				[_, ?] -> sub(i + 1, drawn)
+				_ -> if _lineVisible?(window, pa, pb) {
+					true -> {
+						deps.drawLine(window, pa.x, pa.y, pb.x, pb.y, color)
+						sub(i + 1, drawn + 1)
+					}
+					_ -> sub(i + 1, drawn)
+				}
+			}
+		}
+	}
+
+	sub(0, 0)
+}

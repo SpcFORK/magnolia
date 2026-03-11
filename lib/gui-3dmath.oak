@@ -1,0 +1,116 @@
+// gui-3dmath contains reusable 3D transform and projection helpers.
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+PI := 3.141592653589793
+
+fn degToRad(deg) deg * PI / 180
+
+fn Vec3(x, y, z) {
+	{
+		x: x
+		y: y
+		z: z
+	}
+}
+
+fn _rotateX(v, radians) {
+	cr := cos(radians)
+	sr := sin(radians)
+	{
+		x: v.x
+		y: v.y * cr - v.z * sr
+		z: v.y * sr + v.z * cr
+	}
+}
+
+fn _rotateY(v, radians) {
+	cr := cos(radians)
+	sr := sin(radians)
+	{
+		x: v.x * cr + v.z * sr
+		y: v.y
+		z: 0 - v.x * sr + v.z * cr
+	}
+}
+
+fn _rotateZ(v, radians) {
+	cr := cos(radians)
+	sr := sin(radians)
+	{
+		x: v.x * cr - v.y * sr
+		y: v.x * sr + v.y * cr
+		z: v.z
+	}
+}
+
+fn transformPoint(v, transform) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	rx := degToRad(_default(ts.rx, 0))
+	ry := degToRad(_default(ts.ry, 0))
+	rz := degToRad(_default(ts.rz, 0))
+
+	p0 := {
+		x: v.x * scale
+		y: v.y * scale
+		z: v.z * scale
+	}
+	p1 := _rotateX(p0, rx)
+	p2 := _rotateY(p1, ry)
+	p3 := _rotateZ(p2, rz)
+
+	{
+		x: p3.x + tx
+		y: p3.y + ty
+		z: p3.z + tz
+	}
+}
+
+fn projectPoint(window, p, camera) {
+	cam := _default(camera, {})
+	camZ := _default(cam.z, 5)
+	fov := _default(cam.fov, 90)
+	mode := _default(cam.mode, 'perspective')
+
+	z := p.z + camZ
+	if mode = 'orthographic' {
+		true -> {
+			halfW := window.width / 2
+			halfH := window.height / 2
+			orthoScale := _default(cam.orthoScale, 4)
+			scale := halfW / orthoScale
+			{
+				x: int(halfW + p.x * scale)
+				y: int(halfH - p.y * scale)
+				z: z
+			}
+		}
+		_ -> {
+			if z <= 0.05 {
+				true -> ?
+				_ -> {
+					halfW := window.width / 2
+					halfH := window.height / 2
+					focal := halfW / tan(degToRad(fov / 2))
+					{
+						x: int(halfW + (p.x * focal) / z)
+						y: int(halfH - (p.y * focal) / z)
+						z: z
+					}
+				}
+			}
+		}
+	}
+}
+
+fn transformVertices(vertices, transform, i, out) if i {
+	len(vertices) -> out
+	_ -> transformVertices(vertices, transform, i + 1, out << transformPoint(vertices.(i), transform))
+}
