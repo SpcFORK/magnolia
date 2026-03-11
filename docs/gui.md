@@ -411,6 +411,21 @@ if window.type = :ok & gui.isWeb?() -> {
 }
 ```
 
+## Module reference
+
+The GUI middleware is implemented across several focused modules. See the module pages for API details and examples.
+
+- [gui-2d](gui-2d.md) — 2D math, transforms, camera mapping, and 2D drawing helpers.
+- [gui-3dmath](gui-3dmath.md) — 3D math, vector/rotation utilities and projections.
+- [gui-draw](gui-draw.md) — Cross-platform drawing primitives (text, lines, rects).
+- [gui-mesh](gui-mesh.md) — Mesh/voxel builders and helpers used by the renderer.
+- [gui-render](gui-render.md) — High-level 3D renderer and `Renderer3D` convenience API.
+- [gui-raster](gui-raster.md) — Scanline rasterization, triangle fill, and culling.
+- [gui-native-win](gui-native-win.md) — Win32-specific window lifecycle and helpers.
+- [gui-native-linux](gui-native-linux.md) — X11-specific window lifecycle and helpers.
+- [gui-web](gui-web.md) — Canvas/WebGL middleware and command-queue helpers for web runtimes.
+
+
 ## Samples
 
 - `samples/gui-sample.oak` - cross-platform GUI quickstart
