@@ -59,6 +59,7 @@ fn rgb(r, g, b) r | (g << 8) | (b << 16)
 GL_COLOR_BUFFER_BIT := 16384
 GL_DEPTH_BUFFER_BIT := 256
 GL_TRIANGLES := 4
+SRCCOPY := 13369376
 
 fn createWindow(title, width, height, options) {
 	resolvedTitle := _default(title, 'Magnolia GUI Window')
@@ -66,6 +67,8 @@ fn createWindow(title, width, height, options) {
 	resolvedHeight := _default(height, 540)
 	opts := _default(options, {})
 	className := _default(opts.className, 'MagnoliaGUIWindowClass')
+	frameMs := _default(opts.frameMs, 16)
+	updateOnDispatch := _default(opts.updateOnDispatch, false)
 
 	if backend() {
 		:windows -> {
@@ -90,6 +93,12 @@ fn createWindow(title, width, height, options) {
 									height: resolvedHeight
 									hwnd: hwnd.r1
 									className: className
+									frameMs: frameMs
+									updateOnDispatch: updateOnDispatch
+									frameHdc: 0
+									frameTargetHdc: 0
+									frameBitmap: 0
+									framePrevBitmap: 0
 									msgBuf: msgBuf
 									closed: false
 								}
@@ -123,6 +132,8 @@ fn createWindow(title, width, height, options) {
 						screen: state.screen
 						black: state.black
 						white: state.white
+						frameMs: frameMs
+						updateOnDispatch: updateOnDispatch
 						eventBuf: eventBuf
 						closed: false
 					}
@@ -149,6 +160,8 @@ fn createWindow(title, width, height, options) {
 				title: resolvedTitle
 				width: resolvedWidth
 				height: resolvedHeight
+				frameMs: frameMs
+				updateOnDispatch: updateOnDispatch
 				closed: false
 				messages: []
 				webBridge: webBridge
@@ -402,17 +415,105 @@ fn setTitle(window, title) if window.type {
 	_ -> window
 }
 
+fn beginFrame(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			target := windows.getDC(window.hwnd)
+			if windows.callOk?(target) & target.r1 > 0 {
+				true -> {
+					window.frameTargetHdc <- target.r1
+					if window.frameHdc = 0-> {
+                        memdc := windows.gdi32('CreateCompatibleDC', target.r1)
+                        if windows.callOk?(memdc) & memdc.r1 > 0 {
+                            true -> window.frameHdc <- memdc.r1
+                            _ -> {
+                                windows.releaseDC(window.hwnd, target.r1)
+                                window.frameTargetHdc <- 0
+                                _err('CreateCompatibleDC failed', memdc)
+                            }
+                        }
+                    }
+
+					if window.frameBitmap = 0 -> {
+                        bmp := windows.gdi32('CreateCompatibleBitmap', target.r1, window.width, window.height)
+                        if windows.callOk?(bmp) & bmp.r1 > 0 {
+                            true -> {
+                                window.frameBitmap <- bmp.r1
+                                prev := windows.selectObject(window.frameHdc, window.frameBitmap)
+                                if windows.callOk?(prev) -> window.framePrevBitmap <- prev.r1
+                            }
+                            _ -> {
+                                windows.releaseDC(window.hwnd, target.r1)
+                                window.frameTargetHdc <- 0
+                                _err('CreateCompatibleBitmap failed', bmp)
+                            }
+                        }
+                    }
+					
+
+					{
+						type: :ok
+						hdc: window.frameHdc
+					}
+				}
+				_ -> _err('GetDC failed', target)
+			}
+		}
+		_ -> {type: :ok}
+	}
+	_ -> window
+}
+
+fn endFrame(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> if window.frameHdc > 0 & window.frameTargetHdc > 0 {
+			true -> {
+				windows.gdi32(
+					'BitBlt'
+					window.frameTargetHdc
+					0
+					0
+					window.width
+					window.height
+					window.frameHdc
+					0
+					0
+					SRCCOPY
+				)
+				windows.gdi32('GdiFlush')
+				windows.releaseDC(window.hwnd, window.frameTargetHdc)
+				window.frameTargetHdc <- 0
+				0
+			}
+			_ -> 0
+		}
+		_ -> 0
+	}
+	_ -> 0
+}
+
 fn drawText(window, x, y, text) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
-			hdc := windows.getDC(window.hwnd)
-			if windows.callOk?(hdc) & hdc.r1 > 0 {
+			hdcValue := if window.frameHdc > 0 {
+				true -> window.frameHdc
+				_ -> {
+					hdc := windows.getDC(window.hwnd)
+					if windows.callOk?(hdc) & hdc.r1 > 0 {
+						true -> hdc.r1
+						_ -> 0
+					}
+				}
+			}
+			if hdcValue > 0 {
 				true -> {
-					windows.textOut(hdc.r1, x, y, text)
-					windows.releaseDC(window.hwnd, hdc.r1)
+					windows.textOut(hdcValue, x, y, text)
+					if window.frameHdc = 0 {
+						true -> windows.releaseDC(window.hwnd, hdcValue)
+					}
 					{type: :ok}
 				}
-				_ -> _err('GetDC failed', hdc)
+				_ -> _err('GetDC failed', ?)
 			}
 		}
 		:linux -> {
@@ -447,25 +548,38 @@ fn fillRect(window, x, y, width, height, color) if window.type {
 		useColor := _default(color, rgb(66, 138, 245))
 		if window.backend {
 			:windows -> {
-				hdc := windows.getDC(window.hwnd)
-				if windows.callOk?(hdc) & hdc.r1 > 0 {
+				hdcValue := if window.frameHdc > 0 {
+					true -> window.frameHdc
+					_ -> {
+						hdc := windows.getDC(window.hwnd)
+						if windows.callOk?(hdc) & hdc.r1 > 0 {
+							true -> hdc.r1
+							_ -> 0
+						}
+					}
+				}
+				if hdcValue > 0 {
 					true -> {
 						brush := windows.createSolidBrush(useColor)
 						if windows.callOk?(brush) & brush.r1 > 0 {
 							true -> {
-								windows.selectObject(hdc.r1, brush.r1)
-								windows.rectangle(hdc.r1, x, y, x + width, y + height)
+								windows.selectObject(hdcValue, brush.r1)
+								windows.rectangle(hdcValue, x, y, x + width, y + height)
 								windows.deleteObject(brush.r1)
-								windows.releaseDC(window.hwnd, hdc.r1)
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
 								{type: :ok}
 							}
 							_ -> {
-								windows.releaseDC(window.hwnd, hdc.r1)
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
 								_err('CreateSolidBrush failed', brush)
 							}
 						}
 					}
-					_ -> _err('GetDC failed', hdc)
+					_ -> _err('GetDC failed', ?)
 				}
 			}
 			:linux -> {
@@ -501,13 +615,33 @@ fn fillRect(window, x, y, width, height, color) if window.type {
 fn poll(window) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
-			step := windows.pumpWindowMessage(window.hwnd, addr(window.msgBuf))
-			if step.type {
-				:closed -> {
-					window.closed <- true
-					step
+			if windows.windowAlive?(window.hwnd) {
+				true -> {
+					msg := windows.peekMessage(addr(window.msgBuf), 0, 0, 0, windows.PM_REMOVE)
+					if windows.callOk?(msg) {
+						true -> if msg.r1 > 0 {
+							true -> {
+								windows.translateMessage(addr(window.msgBuf))
+								windows.dispatchMessage(addr(window.msgBuf))
+								{type: :dispatch, detail: msg}
+							}
+							_ -> {type: :idle, detail: msg}
+						}
+						_ -> {
+							if msg.type = :error & msg.errno = 1400 {
+								true -> {
+									window.closed <- true
+									{type: :closed}
+								}
+								_ -> {type: :idle, detail: msg}
+							}
+						}
+					}
 				}
-				_ -> step
+				_ -> {
+					window.closed <- true
+					{type: :closed}
+				}
 			}
 		}
 		:linux -> {
@@ -545,13 +679,19 @@ fn run(window, onEvent, onFrame) if window.type {
 					? -> ?
 					_ -> onEvent(window, step)
 				}
-				if onFrame {
-					? -> ?
-					_ -> onFrame(window)
+				if _default(window.updateOnDispatch, false) {
+					true -> if onFrame {
+						? -> ?
+						_ -> onFrame(window)
+					}
 				}
 				run(window, onEvent, onFrame)
 			}
 			:idle -> {
+				if window.backend {
+					:windows -> windows.kernel32('Sleep', _default(window.frameMs, 16))
+					:linux -> linux.libc('usleep', _default(window.frameMs, 16) * 1000)
+				}
 				if onFrame {
 					? -> ?
 					_ -> onFrame(window)
@@ -573,6 +713,21 @@ fn close(window) if window.type {
 		true -> 0
 		_ -> if window.backend {
 			:windows -> {
+				endFrame(window)
+				if window.frameHdc > 0 {
+					true -> {
+						if window.framePrevBitmap > 0 {
+							true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+						}
+						if window.frameBitmap > 0 {
+							true -> windows.deleteObject(window.frameBitmap)
+						}
+						windows.gdi32('DeleteDC', window.frameHdc)
+						window.frameBitmap <- 0
+						window.framePrevBitmap <- 0
+						window.frameHdc <- 0
+					}
+				}
 				windows.destroyWindow(window.hwnd)
 				window.closed <- true
 				unlock_thread()

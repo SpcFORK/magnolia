@@ -1,0 +1,170 @@
+// GUI game sample: Bouncing Box.
+//
+// - Windows/Linux: opens a native window and animates a bouncing square.
+// - Web runtimes: emits a short WebGL command sequence as frame middleware.
+
+{
+	println: println
+	string: string
+	len: len
+	int: int
+} := import('std')
+
+gui := import('GUI')
+
+fn step(state) {
+	nextX := state.x + state.vx
+	nextY := state.y + state.vy
+	nextVx := state.vx
+	nextVy := state.vy
+
+	if nextX < 0 {
+		true -> {
+			nextX <- 0
+			nextVx <- 0 - nextVx
+		}
+	}
+
+	if nextY < 0 {
+		true -> {
+			nextY <- 0
+			nextVy <- 0 - nextVy
+		}
+	}
+
+	if nextX + state.size > state.worldW {
+		true -> {
+			nextX <- state.worldW - state.size
+			nextVx <- 0 - nextVx
+		}
+	}
+
+	if nextY + state.size > state.worldH {
+		true -> {
+			nextY <- state.worldH - state.size
+			nextVy <- 0 - nextVy
+		}
+	}
+
+	{
+		x: nextX
+		y: nextY
+		vx: nextVx
+		vy: nextVy
+	}
+}
+
+fn drawNative(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type = :ok {
+		true -> {
+			gui.fillRect(window, 0, 0, state.worldW, state.worldH, gui.rgb(10, 18, 28))
+			gui.fillRect(window, state.x, state.y, state.size, state.size, gui.rgb(44, 162, 255))
+			gui.drawText(window, 16, 24, 'GUI Game: Bouncing Box')
+			gui.drawText(window, 16, 46, 'Ticks: ' + string(state.ticks))
+			gui.drawText(window, 16, 68, 'Bounces: ' + string(state.bounces))
+			gui.endFrame(window)
+		}
+	}
+}
+
+fn runNative(window) {
+	state := {
+		x: 140
+		y: 90
+		vx: 5
+		vy: 4
+		size: 42
+		worldW: window.width
+		worldH: window.height
+		ticks: 0
+		bounces: 0
+		maxTicks: 2400
+	}
+
+	gui.show(window)
+	gui.setTitle(window, 'Magnolia GUI Game')
+	drawNative(window, state)
+
+	gui.run(window, ?, fn(win) {
+		if state.ticks < state.maxTicks {
+			true -> {
+				state.ticks <- state.ticks + 1
+				prevVx := state.vx
+				prevVy := state.vy
+				next := step(state)
+				state.x <- next.x
+				state.y <- next.y
+				state.vx <- next.vx
+				state.vy <- next.vy
+
+				if (prevVx != state.vx) | (prevVy != state.vy) {
+					true -> state.bounces <- state.bounces + 1
+				}
+
+				drawNative(win, state)
+			}
+			_ -> {
+				gui.drawText(win, 16, 96, 'Game complete. Close window to exit.')
+			}
+		}
+	})
+
+	gui.close(window)
+}
+
+fn runWeb(window) {
+	gui.createCanvas(window, 'magnolia-gui-game-canvas', {
+		width: 960
+		height: 540
+		dpr: 1
+	})
+
+	gui.initWebGL(window, 'webgl', {
+		alpha: true
+		antialias: true
+		depth: true
+	})
+
+	vert := gui.webglCreateShader(window, :vertex,
+		'attribute vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }')
+	frag := gui.webglCreateShader(window, :fragment,
+		'precision mediump float; void main(){ gl_FragColor = vec4(0.11, 0.75, 0.95, 1.0); }')
+	prog := gui.webglCreateProgram(window, vert.shader, frag.shader)
+	gui.webglUseProgram(window, prog.program)
+	gui.webglViewport(window, 0, 0, window.width, window.height)
+
+	fn emitFrame(i, maxFrames) if i {
+		maxFrames -> 0
+		_ -> {
+			c := int((i % 100)) / 100
+			gui.webglClearColor(window, c * 0.1, 0.03 + c * 0.2, 0.09 + c * 0.25, 1.0)
+			gui.webglClear(window, gui.GL_COLOR_BUFFER_BIT | gui.GL_DEPTH_BUFFER_BIT)
+			gui.webglDrawArrays(window, gui.GL_TRIANGLES, 0, 3)
+			emitFrame(i + 1, maxFrames)
+		}
+	}
+
+	emitFrame(0, 180)
+	flushed := gui.webglFlush(window)
+	println('Web GUI game emitted frame commands: ' + string(len(flushed.commands)))
+	gui.close(window)
+}
+
+println('== Magnolia GUI Game Sample ==')
+
+window := gui.createWindow('Magnolia GUI Game', 960, 540, {
+	canvasId: 'magnolia-gui-game-canvas'
+	frameMs: 16
+})
+
+if window.type {
+	:ok -> if window.backend {
+		:web -> runWeb(window)
+		_ -> runNative(window)
+	}
+	_ -> {
+		println('Failed to create GUI window.')
+		println(string(window))
+	}
+}

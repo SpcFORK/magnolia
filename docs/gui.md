@@ -69,6 +69,15 @@ Shows/maps the window where supported.
 
 Sets the title where supported.
 
+### `beginFrame(window)` / `endFrame(window)`
+
+Optional frame batching helpers.
+
+- On Windows, these reuse one device context (DC) across multiple draw calls
+    and flush/release once per frame, which reduces flicker and intermittent
+    draw stalls.
+- On Linux/Web they are safe no-ops for API consistency.
+
 ### `close(window)`
 
 Closes/release window resources.
@@ -229,3 +238,8 @@ if window.type = :ok & gui.isWeb?() -> {
     println(string(queued))
 }
 ```
+
+## Samples
+
+- `samples/gui-sample.oak` - cross-platform GUI quickstart
+- `samples/gui-game.oak` - bouncing-box mini game using GUI middleware
