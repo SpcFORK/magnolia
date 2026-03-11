@@ -380,65 +380,71 @@ fn nextEvent(display, eventPtr) if isLinux?() {
 	_ -> _platformError('nextEvent')
 }
 
+fn _openWindowFromRoot(display, screen, root, black, white, title, width, height) {
+	win := createSimpleWindow(display, root, 10, 10, width, height, 1, black, white)
+	if callOk?(win) & win.r1 > 0 {
+		true -> {
+			storeName(display, win.r1, title)
+			selectInput(display, win.r1, ExposureMask | KeyPressMask | StructureNotifyMask)
+			mapWindow(display, win.r1)
+			flush(display)
+			{
+				type: :ok
+				display: display
+				window: win.r1
+				screen: screen
+				black: black
+				white: white
+			}
+		}
+		_ -> {
+			closeDisplay(display)
+			{
+				type: :error
+				error: 'XCreateSimpleWindow failed'
+				detail: win
+			}
+		}
+	}
+}
+
+fn _openWindowFromScreen(display, screen, title, width, height) {
+	root := rootWindow(display, screen)
+	black := blackPixel(display, screen)
+	white := whitePixel(display, screen)
+	if callOk?(root) & root.r1 > 0 {
+		true -> _openWindowFromRoot(display, screen, root.r1, black.r1, white.r1, title, width, height)
+		_ -> {
+			closeDisplay(display)
+			{
+				type: :error
+				error: 'XRootWindow failed'
+				detail: root
+			}
+		}
+	}
+}
+
+fn _openWindowFromDisplay(display, title, width, height) {
+	screen := defaultScreen(display)
+	if callOk?(screen) {
+		true -> _openWindowFromScreen(display, screen.r1, title, width, height)
+		_ -> {
+			closeDisplay(display)
+			{
+				type: :error
+				error: 'XDefaultScreen failed'
+				detail: screen
+			}
+		}
+	}
+}
+
 fn openDefaultWindow(title, width, height) if isLinux?() {
 	true -> {
 		display := openDisplay(?)
 		if callOk?(display) & display.r1 > 0 {
-			true -> {
-				screen := defaultScreen(display.r1)
-				if callOk?(screen) {
-					true -> {
-						root := rootWindow(display.r1, screen.r1)
-						black := blackPixel(display.r1, screen.r1)
-						white := whitePixel(display.r1, screen.r1)
-						if callOk?(root) & root.r1 > 0 {
-							true -> {
-								win := createSimpleWindow(display.r1, root.r1, 10, 10, width, height, 1, black.r1, white.r1)
-								if callOk?(win) & win.r1 > 0 {
-									true -> {
-										storeName(display.r1, win.r1, title)
-										selectInput(display.r1, win.r1, ExposureMask | KeyPressMask | StructureNotifyMask)
-										mapWindow(display.r1, win.r1)
-										flush(display.r1)
-										{
-											type: :ok
-											display: display.r1
-											window: win.r1
-											screen: screen.r1
-											black: black.r1
-											white: white.r1
-										}
-									}
-									_ -> {
-										closeDisplay(display.r1)
-										{
-											type: :error
-											error: 'XCreateSimpleWindow failed'
-											detail: win
-										}
-									}
-								}
-								_ -> {
-									closeDisplay(display.r1)
-									{
-										type: :error
-										error: 'XRootWindow failed'
-										detail: root
-									}
-								}
-							}
-						}
-						_ -> {
-							closeDisplay(display.r1)
-							{
-								type: :error
-								error: 'XDefaultScreen failed'
-								detail: screen
-							}
-						}
-					}
-				}
-			}
+			true -> _openWindowFromDisplay(display.r1, title, width, height)
 			_ -> {
 				{
 					type: :error
