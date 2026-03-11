@@ -47,7 +47,22 @@ windows := import('windows')
 - `Alrsvc`, `Amstream`
 - `SixTo4svc`
 - `Adsldp`, `Adsnt`
+- `Adtschema`, `Adsldpc`, `Adsmsext`, `Adsnds`, `Adsnw`
+- `Adadmigrate`, `AdfsMig`, `Adhsvc`
+- `Admexs`, `Admparse`, `AdmTmpl`, `Admxprox`
+- `Adptif`, `Adrclient`
+- `Advapi32res`, `Advpack`
+- `Adwsmigrate`, `Aecache`, `Aeevts`, `Aelupsvc`
+- `Agcore`, `Agentctl`, `ALRes409`, `AltTab`
+- `Apcups`, `Apds`, `Amxread`
+- `Winhttp`, `Urlmon`
+- `Crypt32`, `Bcrypt`, `Secur32`
+- `Comdlg32`, `Oleaut32`
+- `Shlwapi`, `Shcore`
+- `UxTheme`, `Dwmapi`
+- `Version`, `Setupapi`, `Netapi32`
 - `ApiSetPrefix` (prefix for ApiSet compatibility stubs like `api-ms-win-*.dll`)
+- `D3dx9Prefix` (prefix for legacy `d3dx9_*.dll` helper DLL family)
 
 ### Process access flags
 
@@ -192,6 +207,8 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `comctl32(symbol, args...)`
 ### `wininet(symbol, args...)`
 ### `d3d9(symbol, args...)`
+### `d3dx9Dll(suffix)`
+### `d3dx9(suffix, symbol, args...)`
 ### `msvcp(symbol, args...)`
 ### `msvcrt(symbol, args...)`
 ### `ucrtbase(symbol, args...)`
@@ -212,6 +229,49 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `sixTo4svc(symbol, args...)`
 ### `adsldp(symbol, args...)`
 ### `adsnt(symbol, args...)`
+### `adtschema(symbol, args...)`
+### `adsldpc(symbol, args...)`
+### `adsmsext(symbol, args...)`
+### `adsnds(symbol, args...)`
+### `adsnw(symbol, args...)`
+### `adadmigrate(symbol, args...)`
+### `adfsMig(symbol, args...)`
+### `adhsvc(symbol, args...)`
+### `admexs(symbol, args...)`
+### `admparse(symbol, args...)`
+### `admTmpl(symbol, args...)`
+### `admxprox(symbol, args...)`
+### `adptif(symbol, args...)`
+### `adrclient(symbol, args...)`
+### `advapi32res(symbol, args...)`
+### `advpack(symbol, args...)`
+### `adwsmigrate(symbol, args...)`
+### `aecache(symbol, args...)`
+### `aeevts(symbol, args...)`
+### `aelupsvc(symbol, args...)`
+### `agcore(symbol, args...)`
+### `agentctl(symbol, args...)`
+### `alRes409(symbol, args...)`
+### `altTab(symbol, args...)`
+### `apcups(symbol, args...)`
+### `apds(symbol, args...)`
+### `amxread(symbol, args...)`
+### `winhttp(symbol, args...)`
+### `urlmon(symbol, args...)`
+### `crypt32(symbol, args...)`
+### `bcrypt(symbol, args...)`
+### `secur32(symbol, args...)`
+### `comdlg32(symbol, args...)`
+### `oleaut32(symbol, args...)`
+### `shlwapi(symbol, args...)`
+### `shcore(symbol, args...)`
+### `uxTheme(symbol, args...)`
+### `dwmapi(symbol, args...)`
+### `versionDll(symbol, args...)`
+### `setupapi(symbol, args...)`
+### `netapi32(symbol, args...)`
+### `apiSetDll(contract)`
+### `apiSet(contract, symbol, args...)`
 
 Convenience wrappers that route through `callIn(...)`.
 
