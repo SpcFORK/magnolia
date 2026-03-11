@@ -69,6 +69,11 @@ LR_DEFAULTSIZE := 64
 LR_LOADFROMFILE := 16
 GCLP_HICON := -14
 GCLP_HICONSM := -34
+SWP_NOSIZE := 1
+SWP_NOMOVE := 2
+SWP_NOZORDER := 4
+SWP_NOACTIVATE := 16
+SWP_FRAMECHANGED := 32
 
 fn _loadWindowsIcon(iconSpec) {
 	if iconSpec {
@@ -119,7 +124,7 @@ fn _loadWindowsIconSized(iconSpec, width, height) {
 				IMAGE_ICON
 				width
 				height
-				LR_LOADFROMFILE
+				LR_LOADFROMFILE | LR_DEFAULTSIZE
 			))
 			:object -> if type(iconSpec.handle) {
 				:int -> iconSpec.handle
@@ -133,7 +138,7 @@ fn _loadWindowsIconSized(iconSpec, width, height) {
 							IMAGE_ICON
 							width
 							height
-							LR_LOADFROMFILE
+							LR_LOADFROMFILE | LR_DEFAULTSIZE
 						))
 						_ -> 0
 					}
@@ -144,13 +149,34 @@ fn _loadWindowsIconSized(iconSpec, width, height) {
 	}
 }
 
-fn _applyWindowsIcons(hwnd, opts) {
+fn _resolveWindowsIcons(opts) {
 	baseIconSpec := _default(opts.icon, ?)
 	bigIconSpec := _default(opts.taskbarIcon, _default(opts.iconBig, baseIconSpec))
 	smallIconSpec := _default(opts.windowIcon, _default(opts.iconSmall, baseIconSpec))
 
 	bigIcon := _loadWindowsIconSized(bigIconSpec, 32, 32)
 	smallIcon := _loadWindowsIconSized(smallIconSpec, 16, 16)
+
+	if smallIcon = 0 & bigIcon > 0 {
+		true -> {
+			derived := windows.callValueOrZero(windows.user32('CopyImage', bigIcon, IMAGE_ICON, 16, 16, 0))
+			if derived > 0 {
+				true -> smallIcon <- derived
+				_ -> smallIcon <- bigIcon
+			}
+		}
+	}
+
+	{
+		big: bigIcon
+		small: smallIcon
+	}
+}
+
+fn _applyWindowsIcons(hwnd, opts) {
+	resolved := _resolveWindowsIcons(opts)
+	bigIcon := resolved.big
+	smallIcon := resolved.small
 
 	if bigIcon > 0 {
 		true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICON, bigIcon)
@@ -169,6 +195,18 @@ fn _applyWindowsIcons(hwnd, opts) {
 		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL2, smallIcon)
 	}
 
+	// Force non-client frame refresh so the titlebar picks up icon changes.
+	windows.user32(
+		'SetWindowPos'
+		hwnd
+		0
+		0
+		0
+		0
+		0
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+	)
+
 	{
 		type: :ok
 		bigIcon: bigIcon
@@ -181,15 +219,16 @@ fn createWindow(title, width, height, options) {
 	resolvedWidth := _default(width, 960)
 	resolvedHeight := _default(height, 540)
 	opts := _default(options, {})
-	className := _default(opts.className, 'MagnoliaGUIWindowClass')
+	className := _default(opts.className, 'MagnoliaGUIWindowClass_' + string(nanotime()))
 	frameMs := _default(opts.frameMs, 16)
 	updateOnDispatch := _default(opts.updateOnDispatch, false)
 
 	if backend() {
 		:windows -> {
 			lock_thread()
-			classBigIcon := _loadWindowsIconSized(_default(opts.taskbarIcon, _default(opts.iconBig, opts.icon)), 32, 32)
-			classSmallIcon := _loadWindowsIconSized(_default(opts.windowIcon, _default(opts.iconSmall, opts.icon)), 16, 16)
+			classIcons := _resolveWindowsIcons(opts)
+			classBigIcon := classIcons.big
+			classSmallIcon := classIcons.small
 			reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?)
 			if windows.callOk?(reg) & reg.r1 = 0 {
 				true -> {
@@ -315,6 +354,19 @@ fn show(window) if window.type {
 		:windows -> {
 			windows.showWindow(window.hwnd, windows.SW_SHOW)
 			windows.updateWindow(window.hwnd)
+			if type(window.icons) = :object {
+				true -> {
+					if window.icons.bigIcon > 0 {
+						true -> windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_BIG, window.icons.bigIcon)
+					}
+					if window.icons.smallIcon > 0 {
+						true -> {
+							windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_SMALL, window.icons.smallIcon)
+							windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_SMALL2, window.icons.smallIcon)
+						}
+					}
+				}
+			}
 			window
 		}
 		:linux -> {
