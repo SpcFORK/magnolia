@@ -1,0 +1,69 @@
+// X11 drawing sample using Linux stdlib wrappers.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+linux := import('Linux')
+
+fn drawScene(state, gc) {
+	linux.setForeground(state.display, gc, state.black)
+	linux.drawString(state.display, state.window, gc, 24, 30, 'Hello from Magnolia + X11')
+	linux.drawLine(state.display, state.window, gc, 24, 70, 360, 230)
+	linux.fillRectangle(state.display, state.window, gc, 380, 90, 200, 140)
+	linux.flush(state.display)
+}
+
+fn runLoopAndRedraw(state, eventPtr, gc) {
+	step := linux.pumpWindowEvent(state.display, eventPtr)
+	if step.type {
+		:dispatch -> if step.eventType {
+			linux.ClientMessage -> 0
+			linux.DestroyNotify -> 0
+			linux.Expose -> {
+				drawScene(state, gc)
+				runLoopAndRedraw(state, eventPtr, gc)
+			}
+			_ -> runLoopAndRedraw(state, eventPtr, gc)
+		}
+		:idle -> runLoopAndRedraw(state, eventPtr, gc)
+		_ -> step
+	}
+}
+
+println('== Linux X11 Draw Sample ==')
+
+if linux.isLinux?() {
+	true -> {
+		state := linux.openDefaultWindow('Magnolia Linux Draw Sample', 900, 560)
+		if state.type {
+			:ok -> {
+				gc := linux.createGC(state.display, state.window, 0, 0)
+				if linux.callOk?(gc) & gc.r1 > 0 {
+					true -> {
+						drawScene(state, gc.r1)
+						eventBuf := linux.createXEventBuffer()
+						loopResult := runLoopAndRedraw(state, addr(eventBuf), gc.r1)
+						printf('Loop ended with: {{ 0 }}', string(loopResult))
+						linux.freeGC(state.display, gc.r1)
+					}
+					_ -> {
+						println('XCreateGC failed.')
+						println(string(gc))
+					}
+				}
+				linux.closeWindow(state)
+			}
+			_ -> {
+				println('openDefaultWindow failed.')
+				println(string(state))
+				println('Last error: ' + string(linux.lastErrorMessage()))
+			}
+		}
+	}
+	_ -> println('Not on Linux; skipping X11 draw sample.')
+}
