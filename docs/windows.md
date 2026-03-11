@@ -35,26 +35,21 @@ windows := import('windows')
 - `Comctl32`
 - `Wininet`
 - `D3d9`
-- `Msvcp`
 - `Msvcrt`
 - `Ucrtbase`
 - `Vcruntime140`
 - `ActionCenter`
 - `Aclui`, `Acledit`
-- `Acppage`, `Acprgwiz`, `Acproxy`
+- `Acppage`, `Acproxy`
 - `Adprovider`
-- `Aeinv`, `Aepdu`, `Aepic`, `AepRoam`
-- `Alrsvc`, `Amstream`
-- `SixTo4svc`
+- `Aeinv`, `Aepic`
+- `Amstream`
 - `Adsldp`, `Adsnt`
-- `Adtschema`, `Adsldpc`, `Adsmsext`, `Adsnds`, `Adsnw`
-- `Adadmigrate`, `AdfsMig`, `Adhsvc`
-- `Admexs`, `Admparse`, `AdmTmpl`, `Admxprox`
-- `Adptif`, `Adrclient`
+- `Adtschema`, `Adsldpc`, `Adsmsext`
+- `Adhsvc`
 - `Advapi32res`, `Advpack`
-- `Adwsmigrate`, `Aecache`, `Aeevts`, `Aelupsvc`
-- `Agcore`, `Agentctl`, `ALRes409`, `AltTab`
-- `Apcups`, `Apds`, `Amxread`
+- `Aeevts`
+- `Apds`
 - `Winhttp`, `Urlmon`
 - `Crypt32`, `Bcrypt`, `Secur32`
 - `Comdlg32`, `Oleaut32`
@@ -219,7 +214,6 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `d3d9(symbol, args...)`
 ### `d3dx9Dll(suffix)`
 ### `d3dx9(suffix, symbol, args...)`
-### `msvcp(symbol, args...)`
 ### `msvcrt(symbol, args...)`
 ### `ucrtbase(symbol, args...)`
 ### `vcruntime140(symbol, args...)`
@@ -227,45 +221,21 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `aclui(symbol, args...)`
 ### `acledit(symbol, args...)`
 ### `acppage(symbol, args...)`
-### `acprgwiz(symbol, args...)`
 ### `acproxy(symbol, args...)`
 ### `adprovider(symbol, args...)`
 ### `aeinv(symbol, args...)`
-### `aepdu(symbol, args...)`
 ### `aepic(symbol, args...)`
-### `aepRoam(symbol, args...)`
-### `alrsvc(symbol, args...)`
 ### `amstream(symbol, args...)`
-### `sixTo4svc(symbol, args...)`
 ### `adsldp(symbol, args...)`
 ### `adsnt(symbol, args...)`
 ### `adtschema(symbol, args...)`
 ### `adsldpc(symbol, args...)`
 ### `adsmsext(symbol, args...)`
-### `adsnds(symbol, args...)`
-### `adsnw(symbol, args...)`
-### `adadmigrate(symbol, args...)`
-### `adfsMig(symbol, args...)`
 ### `adhsvc(symbol, args...)`
-### `admexs(symbol, args...)`
-### `admparse(symbol, args...)`
-### `admTmpl(symbol, args...)`
-### `admxprox(symbol, args...)`
-### `adptif(symbol, args...)`
-### `adrclient(symbol, args...)`
 ### `advapi32res(symbol, args...)`
 ### `advpack(symbol, args...)`
-### `adwsmigrate(symbol, args...)`
-### `aecache(symbol, args...)`
 ### `aeevts(symbol, args...)`
-### `aelupsvc(symbol, args...)`
-### `agcore(symbol, args...)`
-### `agentctl(symbol, args...)`
-### `alRes409(symbol, args...)`
-### `altTab(symbol, args...)`
-### `apcups(symbol, args...)`
 ### `apds(symbol, args...)`
-### `amxread(symbol, args...)`
 ### `winhttp(symbol, args...)`
 ### `urlmon(symbol, args...)`
 ### `crypt32(symbol, args...)`
