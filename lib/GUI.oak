@@ -12,6 +12,8 @@ guiRender := import('gui-render')
 gui3dmath := import('gui-3dmath')
 guiRaster := import('gui-raster')
 guiWeb := import('gui-web')
+guiNativeWin := import('gui-native-win')
+guiNativeLinux := import('gui-native-linux')
 
 fn backend() if ___runtime_sys_info().os {
 	'windows' -> :windows
@@ -45,160 +47,6 @@ fn rgb(r, g, b) r | (g << 8) | (b << 16)
 GL_COLOR_BUFFER_BIT := 16384
 GL_DEPTH_BUFFER_BIT := 256
 GL_TRIANGLES := 4
-SRCCOPY := 13369376
-WM_SETICON := 128
-ICON_SMALL := 0
-ICON_BIG := 1
-ICON_SMALL2 := 2
-IMAGE_ICON := 1
-LR_DEFAULTSIZE := 64
-LR_LOADFROMFILE := 16
-GCLP_HICON := -14
-GCLP_HICONSM := -34
-SWP_NOSIZE := 1
-SWP_NOMOVE := 2
-SWP_NOZORDER := 4
-SWP_NOACTIVATE := 16
-SWP_FRAMECHANGED := 32
-
-fn _loadWindowsIcon(iconSpec) {
-	if iconSpec {
-		? -> 0
-		_ -> if type(iconSpec) {
-			:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec))
-			:string -> windows.callValueOrZero(windows.user32(
-				'LoadImageW'
-				0
-				windows.wstr(iconSpec)
-				IMAGE_ICON
-				0
-				0
-				LR_LOADFROMFILE | LR_DEFAULTSIZE
-			))
-			:object -> if type(iconSpec.handle) {
-				:int -> iconSpec.handle
-				_ -> if type(iconSpec.id) {
-					:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec.id))
-					_ -> if type(iconSpec.path) {
-						:string -> windows.callValueOrZero(windows.user32(
-							'LoadImageW'
-							0
-							windows.wstr(iconSpec.path)
-							IMAGE_ICON
-							0
-							0
-							LR_LOADFROMFILE | LR_DEFAULTSIZE
-						))
-						_ -> 0
-					}
-				}
-			}
-			_ -> 0
-		}
-	}
-}
-
-fn _loadWindowsIconSized(iconSpec, width, height) {
-	if iconSpec {
-		? -> 0
-		_ -> if type(iconSpec) {
-			:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec))
-			:string -> windows.callValueOrZero(windows.user32(
-				'LoadImageW'
-				0
-				windows.wstr(iconSpec)
-				IMAGE_ICON
-				width
-				height
-				LR_LOADFROMFILE | LR_DEFAULTSIZE
-			))
-			:object -> if type(iconSpec.handle) {
-				:int -> iconSpec.handle
-				_ -> if type(iconSpec.id) {
-					:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec.id))
-					_ -> if type(iconSpec.path) {
-						:string -> windows.callValueOrZero(windows.user32(
-							'LoadImageW'
-							0
-							windows.wstr(iconSpec.path)
-							IMAGE_ICON
-							width
-							height
-							LR_LOADFROMFILE | LR_DEFAULTSIZE
-						))
-						_ -> 0
-					}
-				}
-			}
-			_ -> 0
-		}
-	}
-}
-
-fn _resolveWindowsIcons(opts) {
-	baseIconSpec := _default(opts.icon, ?)
-	bigIconSpec := _default(opts.taskbarIcon, _default(opts.iconBig, baseIconSpec))
-	smallIconSpec := _default(opts.windowIcon, _default(opts.iconSmall, baseIconSpec))
-
-	bigIcon := _loadWindowsIconSized(bigIconSpec, 32, 32)
-	smallIcon := _loadWindowsIconSized(smallIconSpec, 16, 16)
-
-	if smallIcon = 0 & bigIcon > 0 {
-		true -> {
-			derived := windows.callValueOrZero(windows.user32('CopyImage', bigIcon, IMAGE_ICON, 16, 16, 0))
-			if derived > 0 {
-				true -> smallIcon <- derived
-				_ -> smallIcon <- bigIcon
-			}
-		}
-	}
-
-	{
-		big: bigIcon
-		small: smallIcon
-	}
-}
-
-fn _applyWindowsIcons(hwnd, opts) {
-	resolved := _resolveWindowsIcons(opts)
-	bigIcon := resolved.big
-	smallIcon := resolved.small
-
-	if bigIcon > 0 {
-		true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICON, bigIcon)
-	}
-	if smallIcon > 0 {
-		true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICONSM, smallIcon)
-	}
-
-	if bigIcon > 0 {
-		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_BIG, bigIcon)
-	}
-	if smallIcon > 0 {
-		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL, smallIcon)
-	}
-	if smallIcon > 0 {
-		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL2, smallIcon)
-	}
-
-	// Force non-client frame refresh so the titlebar picks up icon changes.
-	windows.user32(
-		'SetWindowPos'
-		hwnd
-		0
-		0
-		0
-		0
-		0
-		SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
-	)
-
-	{
-		type: :ok
-		bigIcon: bigIcon
-		smallIcon: smallIcon
-	}
-}
 
 fn createWindow(title, width, height, options) {
 	resolvedTitle := _default(title, 'Magnolia GUI Window')
@@ -211,86 +59,9 @@ fn createWindow(title, width, height, options) {
 
 	if backend() {
 		:windows -> {
-			lock_thread()
-			classIcons := _resolveWindowsIcons(opts)
-			classBigIcon := classIcons.big
-			classSmallIcon := classIcons.small
-			reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?)
-			if windows.callOk?(reg) & reg.r1 = 0 {
-				true -> {
-					unlock_thread()
-					_err('RegisterClassExW failed', reg)
-				}
-				_ -> {
-					hwnd := windows.createTopLevelWindow(className, resolvedTitle, resolvedWidth, resolvedHeight)
-					if hwnd.type {
-						:ok -> if hwnd.r1 > 0 {
-							true -> {
-								iconState := {
-									type: :ok
-									bigIcon: classBigIcon
-									smallIcon: classSmallIcon
-								}
-								msgBuf := windows.createMsgBuffer()
-								{
-									type: :ok
-									backend: :windows
-									title: resolvedTitle
-									width: resolvedWidth
-									height: resolvedHeight
-									hwnd: hwnd.r1
-									className: className
-									frameMs: frameMs
-									updateOnDispatch: updateOnDispatch
-									frameHdc: 0
-									frameTargetHdc: 0
-									frameBitmap: 0
-									framePrevBitmap: 0
-									frameWidth: 0
-									frameHeight: 0
-									icons: iconState
-									msgBuf: msgBuf
-									closed: false
-								}
-							}
-							_ -> {
-								unlock_thread()
-								_err('CreateWindowExW returned null handle', hwnd)
-							}
-						}
-						_ -> {
-							unlock_thread()
-							_err('CreateWindowExW call failed', hwnd)
-						}
-					}
-				}
-			}
+			guiNativeWin.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, opts, className, frameMs, updateOnDispatch)
 		}
-		:linux -> {
-			state := linux.openDefaultWindow(resolvedTitle, resolvedWidth, resolvedHeight)
-			if state.type {
-				:ok -> {
-					eventBuf := linux.createXEventBuffer()
-					{
-						type: :ok
-						backend: :linux
-						title: resolvedTitle
-						width: resolvedWidth
-						height: resolvedHeight
-						display: state.display
-						window: state.window
-						screen: state.screen
-						black: state.black
-						white: state.white
-						frameMs: frameMs
-						updateOnDispatch: updateOnDispatch
-						eventBuf: eventBuf
-						closed: false
-					}
-				}
-				_ -> _err('X11 window creation failed', state)
-			}
-		}
+		:linux -> guiNativeLinux.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch)
 		:web -> {
 			guiWeb.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch, opts)
 		}
@@ -300,45 +71,8 @@ fn createWindow(title, width, height, options) {
 
 fn show(window) if window.type {
 	:ok -> if window.backend {
-		:windows -> {
-			windows.showWindow(window.hwnd, windows.SW_SHOW)
-			windows.updateWindow(window.hwnd)
-			if type(window.icons) = :object {
-				true -> {
-					if window.icons.bigIcon > 0 {
-						true -> windows.user32('SetClassLongPtrW', window.hwnd, GCLP_HICON, window.icons.bigIcon)
-					}
-					if window.icons.smallIcon > 0 {
-						true -> windows.user32('SetClassLongPtrW', window.hwnd, GCLP_HICONSM, window.icons.smallIcon)
-					}
-					if window.icons.bigIcon > 0 {
-						true -> windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_BIG, window.icons.bigIcon)
-					}
-					if window.icons.smallIcon > 0 {
-						true -> {
-							windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_SMALL, window.icons.smallIcon)
-							windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_SMALL2, window.icons.smallIcon)
-						}
-					}
-					windows.user32(
-						'SetWindowPos'
-						window.hwnd
-						0
-						0
-						0
-						0
-						0
-						SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
-					)
-				}
-			}
-			window
-		}
-		:linux -> {
-			linux.mapWindow(window.display, window.window)
-			linux.flush(window.display)
-			window
-		}
+		:windows -> guiNativeWin.showWindow(window)
+		:linux -> guiNativeLinux.showWindow(window)
 		:web -> window
 		_ -> _err('Unknown window backend', window)
 	}
@@ -367,17 +101,8 @@ fn webglFlush(window) guiWeb.webglFlush(window)
 
 fn setTitle(window, title) if window.type {
 	:ok -> if window.backend {
-		:windows -> {
-			windows.setWindowText(window.hwnd, title)
-			window.title <- title
-			window
-		}
-		:linux -> {
-			linux.storeName(window.display, window.window, title)
-			linux.flush(window.display)
-			window.title <- title
-			window
-		}
+		:windows -> guiNativeWin.setTitle(window, title)
+		:linux -> guiNativeLinux.setTitle(window, title)
 		:web -> {
 			window.title <- title
 			window
@@ -387,114 +112,9 @@ fn setTitle(window, title) if window.type {
 	_ -> window
 }
 
-fn _windowClientSize(window) {
-	rect := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-	res := windows.user32('GetClientRect', window.hwnd, addr(rect))
-	if windows.callOk?(res) & res.r1 > 0 {
-		true -> {
-			left := windows.readU32(addr(rect) + 0)
-			top := windows.readU32(addr(rect) + 4)
-			right := windows.readU32(addr(rect) + 8)
-			bottom := windows.readU32(addr(rect) + 12)
-			{
-				type: :ok
-				width: if right > left {
-					true -> right - left
-					_ -> window.width
-				}
-				height: if bottom > top {
-					true -> bottom - top
-					_ -> window.height
-				}
-			}
-		}
-		_ -> _err('GetClientRect failed', res)
-	}
-}
-
-fn _ensureWindowsBackbuffer(window, targetHdc) {
-	if window.frameHdc = 0 {
-		true -> {
-			memdc := windows.gdi32('CreateCompatibleDC', targetHdc)
-			if windows.callOk?(memdc) & memdc.r1 > 0 {
-				true -> window.frameHdc <- memdc.r1
-				_ -> _err('CreateCompatibleDC failed', memdc)
-			}
-		}
-		_ -> ?
-	}
-
-	needsResize := (window.frameBitmap = 0) | (window.frameWidth != window.width) | (window.frameHeight != window.height)
-	if needsResize {
-		true -> {
-			if window.frameBitmap > 0 {
-				true -> {
-					if window.framePrevBitmap > 0 {
-						true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
-					}
-					windows.deleteObject(window.frameBitmap)
-					window.frameBitmap <- 0
-				}
-			}
-
-			bmp := windows.gdi32('CreateCompatibleBitmap', targetHdc, window.width, window.height)
-			if windows.callOk?(bmp) & bmp.r1 > 0 {
-				true -> {
-					window.frameBitmap <- bmp.r1
-					prev := windows.selectObject(window.frameHdc, window.frameBitmap)
-					if windows.callOk?(prev) {
-						true -> window.framePrevBitmap <- prev.r1
-					}
-					window.frameWidth <- window.width
-					window.frameHeight <- window.height
-					{type: :ok}
-				}
-				_ -> _err('CreateCompatibleBitmap failed', bmp)
-			}
-		}
-		_ -> {type: :ok}
-	}
-}
-
 fn beginFrame(window) if window.type {
 	:ok -> if window.backend {
-		:windows -> {
-			target := windows.getDC(window.hwnd)
-			if windows.callOk?(target) & target.r1 > 0 {
-				true -> {
-					window.frameTargetHdc <- target.r1
-					size := _windowClientSize(window)
-					if size.type {
-						:ok -> {
-							window.width <- size.width
-							window.height <- size.height
-							ready := _ensureWindowsBackbuffer(window, target.r1)
-							if ready.type {
-								:ok -> {
-									{
-										type: :ok
-										hdc: window.frameHdc
-										width: window.width
-										height: window.height
-									}
-								}
-								_ -> {
-									windows.releaseDC(window.hwnd, target.r1)
-									window.frameTargetHdc <- 0
-									ready
-								}
-							}
-						}
-						_ -> {
-							windows.releaseDC(window.hwnd, target.r1)
-							window.frameTargetHdc <- 0
-							size
-						}
-					}
-				}
-				_ -> _err('GetDC failed', target)
-			}
-		}
+		:windows -> guiNativeWin.beginFrame(window)
 		_ -> {type: :ok}
 	}
 	_ -> window
@@ -502,27 +122,7 @@ fn beginFrame(window) if window.type {
 
 fn endFrame(window) if window.type {
 	:ok -> if window.backend {
-		:windows -> if window.frameHdc > 0 & window.frameTargetHdc > 0 {
-			true -> {
-				windows.gdi32(
-					'BitBlt'
-					window.frameTargetHdc
-					0
-					0
-					window.width
-					window.height
-					window.frameHdc
-					0
-					0
-					SRCCOPY
-				)
-				windows.gdi32('GdiFlush')
-				windows.releaseDC(window.hwnd, window.frameTargetHdc)
-				window.frameTargetHdc <- 0
-				0
-			}
-			_ -> 0
-		}
+		:windows -> guiNativeWin.endFrame(window)
 		_ -> 0
 	}
 	_ -> 0
@@ -822,53 +422,8 @@ fn Renderer3D(window, options) guiRender.Renderer3D({
 
 fn poll(window) if window.type {
 	:ok -> if window.backend {
-		:windows -> {
-			if windows.windowAlive?(window.hwnd) {
-				true -> {
-					msg := windows.peekMessage(addr(window.msgBuf), 0, 0, 0, windows.PM_REMOVE)
-					if windows.callOk?(msg) {
-						true -> if msg.r1 > 0 {
-							true -> {
-								windows.translateMessage(addr(window.msgBuf))
-								windows.dispatchMessage(addr(window.msgBuf))
-								{type: :dispatch, detail: msg}
-							}
-							_ -> {type: :idle, detail: msg}
-						}
-						_ -> {
-							if msg.type = :error & msg.errno = 1400 {
-								true -> {
-									window.closed <- true
-									{type: :closed}
-								}
-								_ -> {type: :idle, detail: msg}
-							}
-						}
-					}
-				}
-				_ -> {
-					window.closed <- true
-					{type: :closed}
-				}
-			}
-		}
-		:linux -> {
-			step := linux.pumpWindowEvent(window.display, addr(window.eventBuf))
-			if step.type {
-				:dispatch -> if step.eventType {
-					linux.DestroyNotify -> {
-						window.closed <- true
-						{type: :closed, detail: step}
-					}
-					linux.ClientMessage -> {
-						window.closed <- true
-						{type: :closed, detail: step}
-					}
-					_ -> step
-				}
-				_ -> step
-			}
-		}
+		:windows -> guiNativeWin.poll(window)
+		:linux -> guiNativeLinux.poll(window)
 		:web -> if window.closed {
 			true -> {type: :closed}
 			_ -> {type: :idle}
@@ -898,7 +453,7 @@ fn run(window, onEvent, onFrame) if window.type {
 			:idle -> {
 				if window.backend {
 					:windows -> windows.kernel32('Sleep', _default(window.frameMs, 16))
-					:linux -> linux.libc('usleep', _default(window.frameMs, 16) * 1000)
+					:linux -> guiNativeLinux.sleepFrame(window.frameMs)
 				}
 				if onFrame {
 					? -> ?
@@ -920,35 +475,8 @@ fn close(window) if window.type {
 	:ok -> if window.closed {
 		true -> 0
 		_ -> if window.backend {
-			:windows -> {
-				endFrame(window)
-				if window.frameHdc > 0 {
-					true -> {
-						if window.framePrevBitmap > 0 {
-							true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
-						}
-						if window.frameBitmap > 0 {
-							true -> windows.deleteObject(window.frameBitmap)
-						}
-						windows.gdi32('DeleteDC', window.frameHdc)
-						window.frameBitmap <- 0
-						window.framePrevBitmap <- 0
-						window.frameHdc <- 0
-						window.frameWidth <- 0
-						window.frameHeight <- 0
-					}
-				}
-				windows.destroyWindow(window.hwnd)
-				window.closed <- true
-				unlock_thread()
-				0
-			}
-			:linux -> {
-				linux.destroyWindow(window.display, window.window)
-				linux.closeDisplay(window.display)
-				window.closed <- true
-				0
-			}
+			:windows -> guiNativeWin.close(window)
+			:linux -> guiNativeLinux.close(window)
 			:web -> {
 				window.closed <- true
 				0

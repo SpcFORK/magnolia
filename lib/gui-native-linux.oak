@@ -1,0 +1,82 @@
+// gui-native-linux contains Linux/X11-specific GUI lifecycle and event-loop helpers.
+
+linux := import('linux')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _err(message, detail) {
+	{
+		type: :error
+		error: message
+		detail: detail
+	}
+}
+
+fn createWindowState(title, width, height, frameMs, updateOnDispatch) {
+	state := linux.openDefaultWindow(title, width, height)
+	if state.type {
+		:ok -> {
+			eventBuf := linux.createXEventBuffer()
+			{
+				type: :ok
+				backend: :linux
+				title: title
+				width: width
+				height: height
+				display: state.display
+				window: state.window
+				screen: state.screen
+				black: state.black
+				white: state.white
+				frameMs: frameMs
+				updateOnDispatch: updateOnDispatch
+				eventBuf: eventBuf
+				closed: false
+			}
+		}
+		_ -> _err('X11 window creation failed', state)
+	}
+}
+
+fn showWindow(window) {
+	linux.mapWindow(window.display, window.window)
+	linux.flush(window.display)
+	window
+}
+
+fn setTitle(window, title) {
+	linux.storeName(window.display, window.window, title)
+	linux.flush(window.display)
+	window.title <- title
+	window
+}
+
+fn poll(window) {
+	step := linux.pumpWindowEvent(window.display, addr(window.eventBuf))
+	if step.type {
+		:dispatch -> if step.eventType {
+			linux.DestroyNotify -> {
+				window.closed <- true
+				{type: :closed, detail: step}
+			}
+			linux.ClientMessage -> {
+				window.closed <- true
+				{type: :closed, detail: step}
+			}
+			_ -> step
+		}
+		_ -> step
+	}
+}
+
+fn close(window) {
+	linux.destroyWindow(window.display, window.window)
+	linux.closeDisplay(window.display)
+	window.closed <- true
+	0
+}
+
+fn sleepFrame(frameMs) linux.libc('usleep', _default(frameMs, 16) * 1000)

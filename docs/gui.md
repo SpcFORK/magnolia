@@ -387,6 +387,8 @@ if window.type = :ok & gui.isWeb?() -> {
 - Transform/projection math is factored into `import('gui-3dmath')` internally.
 - Shading, culling, and raster routines are factored into `import('gui-raster')` internally.
 - Web Canvas/WebGL middleware queue logic is factored into `import('gui-web')` internally.
+- Win32 lifecycle/frame internals are factored into `import('gui-native-win')` internally.
+- Linux lifecycle/event-loop internals are factored into `import('gui-native-linux')` internally.
 - Optional direct mesh module imports:
     - `Mesh(vertices, edges)`
     - `GridMesh(size, step)`

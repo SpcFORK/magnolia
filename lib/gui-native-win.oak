@@ -1,0 +1,381 @@
+// gui-native-win contains Win32-specific GUI window lifecycle and frame helpers.
+
+windows := import('windows')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _err(message, detail) {
+	{
+		type: :error
+		error: message
+		detail: detail
+	}
+}
+
+SRCCOPY := 13369376
+WM_SETICON := 128
+ICON_SMALL := 0
+ICON_BIG := 1
+ICON_SMALL2 := 2
+IMAGE_ICON := 1
+LR_DEFAULTSIZE := 64
+LR_LOADFROMFILE := 16
+GCLP_HICON := -14
+GCLP_HICONSM := -34
+SWP_NOSIZE := 1
+SWP_NOMOVE := 2
+SWP_NOZORDER := 4
+SWP_NOACTIVATE := 16
+SWP_FRAMECHANGED := 32
+
+fn _loadWindowsIconSized(iconSpec, width, height) {
+	if iconSpec {
+		? -> 0
+		_ -> if type(iconSpec) {
+			:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec))
+			:string -> windows.callValueOrZero(windows.user32(
+				'LoadImageW'
+				0
+				windows.wstr(iconSpec)
+				IMAGE_ICON
+				width
+				height
+				LR_LOADFROMFILE | LR_DEFAULTSIZE
+			))
+			:object -> if type(iconSpec.handle) {
+				:int -> iconSpec.handle
+				_ -> if type(iconSpec.id) {
+					:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec.id))
+					_ -> if type(iconSpec.path) {
+						:string -> windows.callValueOrZero(windows.user32(
+							'LoadImageW'
+							0
+							windows.wstr(iconSpec.path)
+							IMAGE_ICON
+							width
+							height
+							LR_LOADFROMFILE | LR_DEFAULTSIZE
+						))
+						_ -> 0
+					}
+				}
+			}
+			_ -> 0
+		}
+	}
+}
+
+fn resolveWindowIcons(opts) {
+	baseIconSpec := _default(opts.icon, ?)
+	bigIconSpec := _default(opts.taskbarIcon, _default(opts.iconBig, baseIconSpec))
+	smallIconSpec := _default(opts.windowIcon, _default(opts.iconSmall, baseIconSpec))
+
+	bigIcon := _loadWindowsIconSized(bigIconSpec, 32, 32)
+	smallIcon := _loadWindowsIconSized(smallIconSpec, 16, 16)
+
+	if smallIcon = 0 & bigIcon > 0 {
+		true -> {
+			derived := windows.callValueOrZero(windows.user32('CopyImage', bigIcon, IMAGE_ICON, 16, 16, 0))
+			if derived > 0 {
+				true -> smallIcon <- derived
+				_ -> smallIcon <- bigIcon
+			}
+		}
+	}
+
+	{
+		big: bigIcon
+		small: smallIcon
+	}
+}
+
+fn _applyWindowIcons(hwnd, iconState) {
+	if type(iconState) = :object {
+		true -> {
+			if iconState.bigIcon > 0 {
+				true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICON, iconState.bigIcon)
+			}
+			if iconState.smallIcon > 0 {
+				true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICONSM, iconState.smallIcon)
+			}
+			if iconState.bigIcon > 0 {
+				true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_BIG, iconState.bigIcon)
+			}
+			if iconState.smallIcon > 0 {
+				true -> {
+					windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL, iconState.smallIcon)
+					windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL2, iconState.smallIcon)
+				}
+			}
+			windows.user32(
+				'SetWindowPos'
+				hwnd
+				0
+				0
+				0
+				0
+				0
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+			)
+		}
+	}
+	0
+}
+
+fn createWindowState(title, width, height, options, className, frameMs, updateOnDispatch) {
+	opts := _default(options, {})
+	lock_thread()
+	classIcons := resolveWindowIcons(opts)
+	classBigIcon := classIcons.big
+	classSmallIcon := classIcons.small
+	reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?)
+	if windows.callOk?(reg) & reg.r1 = 0 {
+		true -> {
+			unlock_thread()
+			_err('RegisterClassExW failed', reg)
+		}
+		_ -> {
+			hwnd := windows.createTopLevelWindow(className, title, width, height)
+			if hwnd.type {
+				:ok -> if hwnd.r1 > 0 {
+					true -> {
+						iconState := {
+							type: :ok
+							bigIcon: classBigIcon
+							smallIcon: classSmallIcon
+						}
+						msgBuf := windows.createMsgBuffer()
+						{
+							type: :ok
+							backend: :windows
+							title: title
+							width: width
+							height: height
+							hwnd: hwnd.r1
+							className: className
+							frameMs: frameMs
+							updateOnDispatch: updateOnDispatch
+							frameHdc: 0
+							frameTargetHdc: 0
+							frameBitmap: 0
+							framePrevBitmap: 0
+							frameWidth: 0
+							frameHeight: 0
+							icons: iconState
+							msgBuf: msgBuf
+							closed: false
+						}
+					}
+					_ -> {
+						unlock_thread()
+						_err('CreateWindowExW returned null handle', hwnd)
+					}
+				}
+				_ -> {
+					unlock_thread()
+					_err('CreateWindowExW call failed', hwnd)
+				}
+			}
+		}
+	}
+}
+
+fn showWindow(window) {
+	windows.showWindow(window.hwnd, windows.SW_SHOW)
+	windows.updateWindow(window.hwnd)
+	_applyWindowIcons(window.hwnd, window.icons)
+	window
+}
+
+fn setTitle(window, title) {
+	windows.setWindowText(window.hwnd, title)
+	window.title <- title
+	window
+}
+
+fn _windowClientSize(window) {
+	rect := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+	res := windows.user32('GetClientRect', window.hwnd, addr(rect))
+	if windows.callOk?(res) & res.r1 > 0 {
+		true -> {
+			left := windows.readU32(addr(rect) + 0)
+			top := windows.readU32(addr(rect) + 4)
+			right := windows.readU32(addr(rect) + 8)
+			bottom := windows.readU32(addr(rect) + 12)
+			{
+				type: :ok
+				width: if right > left {
+					true -> right - left
+					_ -> window.width
+				}
+				height: if bottom > top {
+					true -> bottom - top
+					_ -> window.height
+				}
+			}
+		}
+		_ -> _err('GetClientRect failed', res)
+	}
+}
+
+fn _ensureBackbuffer(window, targetHdc) {
+	if window.frameHdc = 0 {
+		true -> {
+			memdc := windows.gdi32('CreateCompatibleDC', targetHdc)
+			if windows.callOk?(memdc) & memdc.r1 > 0 {
+				true -> window.frameHdc <- memdc.r1
+				_ -> _err('CreateCompatibleDC failed', memdc)
+			}
+		}
+		_ -> ?
+	}
+
+	needsResize := (window.frameBitmap = 0) | (window.frameWidth != window.width) | (window.frameHeight != window.height)
+	if needsResize {
+		true -> {
+			if window.frameBitmap > 0 {
+				true -> {
+					if window.framePrevBitmap > 0 {
+						true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+					}
+					windows.deleteObject(window.frameBitmap)
+					window.frameBitmap <- 0
+				}
+			}
+
+			bmp := windows.gdi32('CreateCompatibleBitmap', targetHdc, window.width, window.height)
+			if windows.callOk?(bmp) & bmp.r1 > 0 {
+				true -> {
+					window.frameBitmap <- bmp.r1
+					prev := windows.selectObject(window.frameHdc, window.frameBitmap)
+					if windows.callOk?(prev) {
+						true -> window.framePrevBitmap <- prev.r1
+					}
+					window.frameWidth <- window.width
+					window.frameHeight <- window.height
+					{type: :ok}
+				}
+				_ -> _err('CreateCompatibleBitmap failed', bmp)
+			}
+		}
+		_ -> {type: :ok}
+	}
+}
+
+fn beginFrame(window) {
+	target := windows.getDC(window.hwnd)
+	if windows.callOk?(target) & target.r1 > 0 {
+		true -> {
+			window.frameTargetHdc <- target.r1
+			size := _windowClientSize(window)
+			if size.type {
+				:ok -> {
+					window.width <- size.width
+					window.height <- size.height
+					ready := _ensureBackbuffer(window, target.r1)
+					if ready.type {
+						:ok -> {
+							{
+								type: :ok
+								hdc: window.frameHdc
+								width: window.width
+								height: window.height
+							}
+						}
+						_ -> {
+							windows.releaseDC(window.hwnd, target.r1)
+							window.frameTargetHdc <- 0
+							ready
+						}
+					}
+				}
+				_ -> {
+					windows.releaseDC(window.hwnd, target.r1)
+					window.frameTargetHdc <- 0
+					size
+				}
+			}
+		}
+		_ -> _err('GetDC failed', target)
+	}
+}
+
+fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
+	true -> {
+		windows.gdi32(
+			'BitBlt'
+			window.frameTargetHdc
+			0
+			0
+			window.width
+			window.height
+			window.frameHdc
+			0
+			0
+			SRCCOPY
+		)
+		windows.gdi32('GdiFlush')
+		windows.releaseDC(window.hwnd, window.frameTargetHdc)
+		window.frameTargetHdc <- 0
+		0
+	}
+	_ -> 0
+}
+
+fn poll(window) {
+	if windows.windowAlive?(window.hwnd) {
+		true -> {
+			msg := windows.peekMessage(addr(window.msgBuf), 0, 0, 0, windows.PM_REMOVE)
+			if windows.callOk?(msg) {
+				true -> if msg.r1 > 0 {
+					true -> {
+						windows.translateMessage(addr(window.msgBuf))
+						windows.dispatchMessage(addr(window.msgBuf))
+						{type: :dispatch, detail: msg}
+					}
+					_ -> {type: :idle, detail: msg}
+				}
+				_ -> {
+					if msg.type = :error & msg.errno = 1400 {
+						true -> {
+							window.closed <- true
+							{type: :closed}
+						}
+						_ -> {type: :idle, detail: msg}
+					}
+				}
+			}
+		}
+		_ -> {
+			window.closed <- true
+			{type: :closed}
+		}
+	}
+}
+
+fn close(window) {
+	endFrame(window)
+	if window.frameHdc > 0 {
+		true -> {
+			if window.framePrevBitmap > 0 {
+				true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+			}
+			if window.frameBitmap > 0 {
+				true -> windows.deleteObject(window.frameBitmap)
+			}
+			windows.gdi32('DeleteDC', window.frameHdc)
+			window.frameBitmap <- 0
+			window.framePrevBitmap <- 0
+			window.frameHdc <- 0
+			window.frameWidth <- 0
+			window.frameHeight <- 0
+		}
+	}
+	windows.destroyWindow(window.hwnd)
+	window.closed <- true
+	unlock_thread()
+	0
+}
