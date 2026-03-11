@@ -438,6 +438,7 @@ readFile('./path', fn(file) {
 For a more detailed description of the language, see the [work-in-progress language spec](docs/spec.md).
 
 For Magnolia-specific features, see:
+- [GUI middleware documentation](docs/gui.md)
 - [Virtual File System documentation](docs/virtual-fs.md)
 - [Transpile Middleware documentation](docs/transpile.md)
 - [Code Generation documentation](docs/runtime-codegen.md)
@@ -449,7 +450,7 @@ For Magnolia-specific features, see:
 - [Multi-backend GPU helpers (`gpus`) documentation](docs/gpus.md)
 - [Advanced Build Features](docs/build.md)
 - [String manipulation library](docs/str.md)
-- Example programs in [samples/](samples/) including threading, transpilation, VFS, and pointer/bitwise examples
+- Example programs in [samples/](samples/) including GUI, threading, transpilation, VFS, and pointer/bitwise examples
 
 ### Builds and deployment
 
