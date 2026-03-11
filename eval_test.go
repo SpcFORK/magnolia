@@ -1958,16 +1958,19 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 			type(___stdlibs().sys)
 			type(___stdlibs().windows)
 			type(___stdlibs().gpus)
+			type(___stdlibs().GUI)
 			type(___stdlibs().websocket)
 			type(___runtime_lib('std'))
 			type(___runtime_lib('sys'))
 			type(___runtime_lib('windows'))
 			type(___runtime_lib('gpus'))
+			type(___runtime_lib('GUI'))
 			type(___runtime_lib('websocket'))
 			___runtime_lib?('std')
 			___runtime_lib?('sys')
 			___runtime_lib?('windows')
 			___runtime_lib?('gpus')
+			___runtime_lib?('GUI')
 			___runtime_lib?('websocket')
 			type(___runtime_lib('definitely_missing_lib'))
 			type(___runtime_gc())
@@ -1988,6 +1991,9 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 		AtomValue("string"),
 		AtomValue("string"),
 		AtomValue("string"),
+		AtomValue("string"),
+		AtomValue("string"),
+		oakTrue,
 		oakTrue,
 		oakTrue,
 		oakTrue,
@@ -2081,6 +2087,68 @@ func TestLinuxStdlibSafeSurface(t *testing.T) {
 		AtomValue("string"),
 		oakTrue,
 		oakTrue,
+	))
+}
+
+func TestGUIStdlibSafeSurface(t *testing.T) {
+	expectProgramToReturn(t, `
+		gui := import('GUI')
+		os := ___runtime_sys_info().os
+		window := gui.createWindow('GUI Smoke', 320, 220)
+		
+		[
+			type(gui.backend())
+			type(gui.rgb(1, 2, 3))
+			type(gui.createCanvas)
+			type(gui.initWebGL)
+			type(gui.webglCreateShader)
+			type(gui.webglCreateProgram)
+			type(gui.webglUseProgram)
+			type(gui.webglClearColor)
+			type(gui.webglViewport)
+			type(gui.webglClear)
+			type(gui.webglDrawArrays)
+			type(gui.webglFlush)
+			gui.GL_COLOR_BUFFER_BIT = 16384
+			gui.GL_TRIANGLES = 4
+			type(window)
+			window.type = :ok
+			type(window.backend)
+			if os {
+				'windows' -> {
+					(gui.backend() = :windows) &
+					(window.backend = :windows)
+				}
+				'linux' -> {
+					(gui.backend() = :linux) &
+					(window.backend = :linux)
+				}
+				_ -> {
+					(gui.backend() = :web) | (gui.backend() = :unknown)
+				}
+			}
+			type(gui.close(window))
+		]
+	`, MakeList(
+		AtomValue("atom"),
+		AtomValue("int"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		oakTrue,
+		oakTrue,
+		AtomValue("object"),
+		oakTrue,
+		AtomValue("atom"),
+		oakTrue,
+		AtomValue("int"),
 	))
 }
 

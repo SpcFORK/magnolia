@@ -53,6 +53,7 @@ windows := import('windows')
 - `Winhttp`, `Urlmon`
 - `Crypt32`, `Bcrypt`, `Secur32`
 - `Comdlg32`, `Oleaut32`
+- `Imm32`
 - `Shlwapi`, `Shcore`
 - `UxTheme`, `Dwmapi`
 - `Version`, `Setupapi`, `Netapi32`
@@ -66,8 +67,10 @@ windows := import('windows')
 - `Ncrypt`, `Cryptui`, `Wintrust`, `Samlib`
 - `Netshell`, `Fwpuclnt`, `Dnsapi`, `Nlaapi`, `Httpapi`
 - `Rpcrt4`, `Srpapi`, `Sxs`
+- `Msvcirt`
 - `ApiSetPrefix` (prefix for ApiSet compatibility stubs like `api-ms-win-*.dll`)
 - `D3dx9Prefix` (prefix for legacy `d3dx9_*.dll` helper DLL family)
+- `MsvcpPrefix`, `VcruntimePrefix`, `AtlPrefix`, `MfcPrefix`, `VcompPrefix`
 
 ### Process access flags
 
@@ -243,6 +246,7 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `secur32(symbol, args...)`
 ### `comdlg32(symbol, args...)`
 ### `oleaut32(symbol, args...)`
+### `imm32(symbol, args...)`
 ### `shlwapi(symbol, args...)`
 ### `shcore(symbol, args...)`
 ### `uxTheme(symbol, args...)`
@@ -288,10 +292,206 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `rpcrt4(symbol, args...)`
 ### `srpapi(symbol, args...)`
 ### `sxs(symbol, args...)`
+### `msvcirt(symbol, args...)`
+
+### `msvcpDll(suffix)` / `msvcpFamily(suffix, symbol, args...)`
+### `vcruntimeDll(suffix)` / `vcruntimeFamily(suffix, symbol, args...)`
+### `atlDll(suffix)` / `atlFamily(suffix, symbol, args...)`
+### `mfcDll(suffix)` / `mfcFamily(suffix, symbol, args...)`
+### `vcompDll(suffix)` / `vcompFamily(suffix, symbol, args...)`
+
+Dynamic helpers for runtime library families such as `msvcp*.dll`,
+`vcruntime*.dll`, `atl*.dll`, `mfc*.dll`, and `vcomp*.dll`.
+
+- pass a numeric/variant suffix like `'140'` or `'140_1'` to build names
+- pass a full filename ending in `.dll` to use it directly
+
 ### `apiSetDll(contract)`
 ### `apiSet(contract, symbol, args...)`
 
 Convenience wrappers that route through `callIn(...)`.
+
+## Added Feature Guide
+
+This section focuses on practical usage for the expanded Windows surface.
+
+### 1) Safe Availability Pattern For Optional DLLs
+
+Some DLLs are optional by Windows edition, installed feature, or runtime package.
+Probe first, then call APIs only when loaded.
+
+```oak
+windows := import('windows')
+
+probe := windows.loadDll(windows.Taskschd)
+if probe.type = :ok {
+    true -> {
+        println('taskschd loaded: ' + string(probe.handle))
+    }
+    _ -> {
+        # Commonly 126 when the module is unavailable on this machine.
+        println('taskschd unavailable: ' + string(probe))
+    }
+}
+```
+
+### 2) Generic Dispatch For Any Export
+
+Use `callIn(dll, symbol, args...)` for quick one-off calls without creating a
+new wrapper.
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        # Beep(DWORD freq, DWORD duration)
+        beep := windows.callIn(windows.Kernel32, 'Beep', 880, 120)
+        println(string(beep))
+    }
+}
+```
+
+### 3) Runtime Family Helpers (`msvcp*`, `vcruntime*`, `atl*`, `mfc*`, `vcomp*`)
+
+Use `*Dll(suffix)` to build a DLL name and `*Family(suffix, symbol, args...)`
+to dispatch through that generated filename.
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        println(windows.msvcpDll('140'))       # msvcp140.dll
+        println(windows.vcruntimeDll('140'))   # vcruntime140.dll
+        println(windows.atlDll('100'))         # atl100.dll
+        println(windows.mfcDll('140'))         # mfc140.dll
+        println(windows.vcompDll('140'))       # vcomp140.dll
+
+        # Example: ask any runtime family DLL for DllCanUnloadNow when available.
+        unload := windows.msvcpFamily('140', 'DllCanUnloadNow')
+        println(string(unload))
+    }
+}
+```
+
+You can also pass a full filename (ending in `.dll`) as the suffix argument.
+
+### 4) ApiSet Contract Helpers
+
+Use `apiSetDll(contract)` for contract name generation and `apiSet(...)` for
+direct call attempts.
+
+```oak
+windows := import('windows')
+
+name := windows.apiSetDll('file-l1-1-0')
+println(name) # api-ms-win-core-file-l1-1-0.dll
+
+probe := windows.loadDll(name)
+println(string(probe))
+```
+
+### 5) D3DX9 Family Helpers
+
+Use `d3dx9Dll(suffix)` for `d3dx9_*.dll` names and `d3dx9(...)` for dispatch.
+
+```oak
+windows := import('windows')
+
+println(windows.d3dx9Dll('43'))
+attempt := windows.d3dx9('43', 'D3DXCheckVersion', 32, 43)
+println(string(attempt))
+```
+
+### 6) Winsock + IPv4 Struct Convenience
+
+Use `sockaddrIn(ip, port)` to build a compatible `sockaddr_in` byte buffer for
+`connectSocket` and `bindSocket`.
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        wsaData := bits([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
+        startup := windows.wsaStartup(windows.makeWord(2, 2), addr(wsaData))
+        if windows.callOk?(startup) {
+            true -> {
+                sock := windows.socket(windows.AF_INET, windows.SOCK_STREAM, windows.IPPROTO_TCP)
+                sa := windows.sockaddrIn('93.184.216.34', 80)
+                if sa.type = :ok {
+                    true -> {
+                        conn := windows.connectSocket(sock.r1, sa.ptr, sa.len)
+                        println(string(conn))
+                    }
+                }
+                windows.closeSocket(sock.r1)
+                windows.wsaCleanup()
+            }
+        }
+    }
+}
+```
+
+### 7) WinINet One-Liner HTTP Fetch
+
+Use `internetSimpleGet(url, agent?, chunkSize?)` for quick text fetches.
+
+```oak
+windows := import('windows')
+
+result := windows.internetSimpleGet('https://example.com', 'Magnolia', 4096)
+println(string(result))
+```
+
+### 8) Registry Read/Write Helpers
+
+Use `regReadString` / `regReadDword` for reads and `regWriteString` /
+`regWriteDword` for writes.
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        keyPath := 'Software\\MagnoliaDemo'
+
+        writeN := windows.regWriteDword(windows.HKEY_CURRENT_USER, keyPath, 'Counter', 7)
+        writeS := windows.regWriteString(windows.HKEY_CURRENT_USER, keyPath, 'Label', 'hello')
+        println(string(writeN))
+        println(string(writeS))
+
+        readN := windows.regReadDword(windows.HKEY_CURRENT_USER, keyPath, 'Counter')
+        readS := windows.regReadString(windows.HKEY_CURRENT_USER, keyPath, 'Label')
+        println(string(readN))
+        println(string(readS))
+    }
+}
+```
+
+### 9) Broad DLL Wrapper Surface
+
+For explicitly wrapped libraries (`imm32`, `msvcirt`, `dnsapi`, `httpapi`,
+`netapi32`, `mmdevapi`, `dbghelp`, and many others), usage is always the same:
+
+```oak
+windows := import('windows')
+
+# ImmGetContext(HWND)
+imm := windows.imm32('ImmGetContext', 0)
+println(string(imm))
+
+# Example no-arg call through another wrapper
+dbg := windows.dbghelp('SymCleanup', 0)
+println(string(dbg))
+```
+
+Use this pattern to keep module-specific code small:
+
+1. Probe with `loadDll(...)` when availability may vary.
+2. Call through the specific wrapper (`dnsapi`, `taskschd`, `wlanapi`, etc.).
+3. Handle both syscall transport success and API-level result codes.
 
 ## Winsock APIs (ws2_32)
 

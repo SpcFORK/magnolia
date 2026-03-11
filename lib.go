@@ -157,6 +157,9 @@ var liblinux string
 //go:embed lib/websocket.oak
 var libwebsocket string
 
+//go:embed lib/GUI.oak
+var libgui string
+
 var stdlibs = map[string]string{
 	"std":             libstd,
 	"str":             libstr,
@@ -209,6 +212,8 @@ var stdlibs = map[string]string{
 	"linux":           liblinux,
 	"Linux":           liblinux,
 	"websocket":       libwebsocket,
+	"GUI":             libgui,
+	"gui":             libgui,
 }
 
 var stdlibAutoLoadOrder = []string{

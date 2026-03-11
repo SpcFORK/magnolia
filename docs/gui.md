@@ -1,0 +1,231 @@
+# GUI Middleware Library (GUI)
+
+## Overview
+
+`GUI` provides a simple cross-platform middleware layer for lightweight window work.
+
+Backends:
+
+- Windows via `windows` (Win32)
+- Linux via `linux` (X11)
+- Web/JS runtimes with a Canvas/WebGL command middleware state
+
+This library is intentionally small and focuses on a consistent API shape.
+
+Because Magnolia does not currently expose direct DOM built-ins, the web backend
+uses a command queue model. You can optionally pass `options.webBridge` to
+`createWindow(...)` to forward recorded Canvas/WebGL operations to host-side
+JavaScript.
+
+## Import
+
+```oak
+gui := import('GUI')
+// alias also supported:
+gui := import('gui')
+```
+
+## Backend helpers
+
+### `backend()`
+
+Returns one of these atoms:
+
+- `:windows`
+- `:linux`
+- `:web`
+- `:unknown`
+
+### `isWindows?()`
+### `isLinux?()`
+### `isWeb?()`
+
+Boolean helpers derived from `backend()`.
+
+### `rgb(r, g, b)`
+
+Builds a packed RGB integer color value.
+
+## Window lifecycle
+
+### `createWindow(title?, width?, height?, options?)`
+
+Creates a window state object.
+
+- Windows: registers a default class and creates a top-level window.
+- Linux: creates a default X11 window.
+- Web: creates logical state with no native host window API calls.
+
+Returns:
+
+- `{type: :ok, ...windowState}` on success
+- `{type: :error, error: <string>, detail: <any>}` on failure
+
+### `show(window)`
+
+Shows/maps the window where supported.
+
+### `setTitle(window, title)`
+
+Sets the title where supported.
+
+### `close(window)`
+
+Closes/release window resources.
+
+- Windows: destroys the window and unlocks the pinned thread.
+- Linux: destroys window and closes display.
+- Web: marks the middleware state as closed.
+
+## Web Canvas + WebGL
+
+Web backend windows include these fields:
+
+- `window.canvas`
+- `window.webgl`
+- `window.messages` (recorded middleware operations)
+
+### Constants
+
+- `GL_COLOR_BUFFER_BIT`
+- `GL_DEPTH_BUFFER_BIT`
+- `GL_TRIANGLES`
+
+### `createCanvas(window, id?, options?)`
+
+Configures canvas metadata (`id`, `width`, `height`, `dpr`) and records
+`:canvas_create`.
+
+### `initWebGL(window, contextName?, attrs?)`
+
+Initializes WebGL middleware context metadata and records `:webgl_init`.
+
+### `webglCreateShader(window, shaderType, source)`
+
+Records shader creation and returns `{type: :ok, shader: {...}}`.
+
+### `webglCreateProgram(window, vertexShader, fragmentShader)`
+
+Records program creation and returns `{type: :ok, program: {...}}`.
+
+### `webglUseProgram(window, program)`
+
+Sets the active program and records `:webgl_use_program`.
+
+### `webglClearColor(window, r, g, b, a)`
+
+Sets clear color state and records `:webgl_clear_color`.
+
+### `webglViewport(window, x, y, width, height)`
+
+Sets viewport state and records `:webgl_viewport`.
+
+### `webglClear(window, mask?)`
+
+Records `:webgl_clear` (default mask is `GL_COLOR_BUFFER_BIT`).
+
+### `webglDrawArrays(window, mode?, first?, count)`
+
+Records `:webgl_draw_arrays` (default mode is `GL_TRIANGLES`).
+
+### `webglFlush(window)`
+
+Records `:webgl_flush` and returns queued commands.
+
+## Event and loop helpers
+
+### `poll(window)`
+
+Pumps one backend event step and returns an event object.
+
+Common result shapes:
+
+- `{type: :dispatch, ...}`
+- `{type: :idle}`
+- `{type: :closed}`
+- `{type: :error, ...}`
+
+### `run(window, onEvent?, onFrame?)`
+
+Runs a simple loop:
+
+- calls `poll(window)`
+- dispatches `onEvent(window, evt)` on `:dispatch`
+- calls `onFrame(window)` on `:dispatch` and `:idle`
+- exits on `:closed`
+
+## Drawing helpers
+
+### `drawText(window, x, y, text)`
+
+Draws text in the target window.
+
+- Windows: `TextOutW`
+- Linux: `XDrawString`
+- Web: records a logical `:text` draw op in `window.messages`
+
+### `fillRect(window, x, y, width, height, color?)`
+
+Fills a rectangle.
+
+- Windows: GDI brush + rectangle draw
+- Linux: X11 foreground + `XFillRectangle`
+- Web: records a logical `:rect` draw op in `window.messages`
+
+## Example
+
+```oak
+gui := import('GUI')
+
+window := gui.createWindow('Magnolia GUI', 840, 520)
+if window.type = :ok {
+    gui.show(window)
+    gui.fillRect(window, 24, 48, 320, 180, gui.rgb(46, 120, 226))
+    gui.drawText(window, 24, 26, 'Hello from Magnolia GUI')
+
+    gui.run(window, fn(win, evt) {
+        // inspect events if needed
+    }, fn(win) {
+        // optional frame callback
+    })
+
+    gui.close(window)
+}
+```
+
+### WebGL Example (Middleware Queue)
+
+```oak
+gui := import('GUI')
+
+window := gui.createWindow('WebGL Sample', 960, 540, {
+    canvasId: 'app-canvas'
+})
+
+if window.type = :ok & gui.isWeb?() {
+    gui.createCanvas(window, 'app-canvas', {
+        width: 960
+        height: 540
+        dpr: 1
+    })
+
+    gui.initWebGL(window, 'webgl', {
+        alpha: true
+        antialias: true
+        depth: true
+    })
+
+    vert := gui.webglCreateShader(window, :vertex, 'attribute vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }')
+    frag := gui.webglCreateShader(window, :fragment, 'precision mediump float; void main(){ gl_FragColor = vec4(0.08, 0.52, 0.95, 1.0); }')
+    prog := gui.webglCreateProgram(window, vert.shader, frag.shader)
+
+    gui.webglUseProgram(window, prog.program)
+    gui.webglViewport(window, 0, 0, window.width, window.height)
+    gui.webglClearColor(window, 0.02, 0.03, 0.08, 1.0)
+    gui.webglClear(window, gui.GL_COLOR_BUFFER_BIT | gui.GL_DEPTH_BUFFER_BIT)
+    gui.webglDrawArrays(window, gui.GL_TRIANGLES, 0, 3)
+
+    queued := gui.webglFlush(window)
+    println(string(queued))
+}
+```

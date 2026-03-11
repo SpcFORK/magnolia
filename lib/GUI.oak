@@ -1,0 +1,595 @@
+// libGUI provides a simple cross-platform window middleware for Magnolia.
+//
+// Backends:
+// - Windows: Win32 via lib/windows
+// - Linux: X11 via lib/linux
+// - Web/JS runtimes: logical no-op window state for portability
+
+windows := import('windows')
+linux := import('linux')
+
+fn backend() if ___runtime_sys_info().os {
+	'windows' -> :windows
+	'linux' -> :linux
+	'js' -> :web
+	'web' -> :web
+	'browser' -> :web
+	'wasm' -> :web
+	_ -> :unknown
+}
+
+fn isWindows?() backend() = :windows
+fn isLinux?() backend() = :linux
+fn isWeb?() backend() = :web
+
+fn _err(message, detail) {
+	{
+		type: :error
+		error: message
+		detail: detail
+	}
+}
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _isFn?(value) type(value) = :function
+
+fn _nextResourceId(webgl) {
+	next := webgl.nextId
+	webgl.nextId <- next + 1
+	next
+}
+
+fn _webRecord(window, op) {
+	window.messages <- window.messages << op
+	if type(window.webgl) = :object {
+		true -> window.webgl.commands <- window.webgl.commands << op
+	}
+	if _isFn?(window.webBridge) {
+		true -> window.webBridge(op)
+	}
+	op
+}
+
+fn rgb(r, g, b) r | (g << 8) | (b << 16)
+
+GL_COLOR_BUFFER_BIT := 16384
+GL_DEPTH_BUFFER_BIT := 256
+GL_TRIANGLES := 4
+
+fn createWindow(title, width, height, options) {
+	resolvedTitle := _default(title, 'Magnolia GUI Window')
+	resolvedWidth := _default(width, 960)
+	resolvedHeight := _default(height, 540)
+	opts := _default(options, {})
+	className := _default(opts.className, 'MagnoliaGUIWindowClass')
+
+	if backend() {
+		:windows -> {
+			lock_thread()
+			reg := windows.registerDefaultWindowClass(className)
+			if windows.callOk?(reg) & reg.r1 = 0 {
+				true -> {
+					unlock_thread()
+					_err('RegisterClassExW failed', reg)
+				}
+				_ -> {
+					hwnd := windows.createTopLevelWindow(className, resolvedTitle, resolvedWidth, resolvedHeight)
+					if hwnd.type {
+						:ok -> if hwnd.r1 > 0 {
+							true -> {
+								msgBuf := windows.createMsgBuffer()
+								{
+									type: :ok
+									backend: :windows
+									title: resolvedTitle
+									width: resolvedWidth
+									height: resolvedHeight
+									hwnd: hwnd.r1
+									className: className
+									msgBuf: msgBuf
+									closed: false
+								}
+							}
+							_ -> {
+								unlock_thread()
+								_err('CreateWindowExW returned null handle', hwnd)
+							}
+						}
+						_ -> {
+							unlock_thread()
+							_err('CreateWindowExW call failed', hwnd)
+						}
+					}
+				}
+			}
+		}
+		:linux -> {
+			state := linux.openDefaultWindow(resolvedTitle, resolvedWidth, resolvedHeight)
+			if state.type {
+				:ok -> {
+					eventBuf := linux.createXEventBuffer()
+					{
+						type: :ok
+						backend: :linux
+						title: resolvedTitle
+						width: resolvedWidth
+						height: resolvedHeight
+						display: state.display
+						window: state.window
+						screen: state.screen
+						black: state.black
+						white: state.white
+						eventBuf: eventBuf
+						closed: false
+					}
+				}
+				_ -> _err('X11 window creation failed', state)
+			}
+		}
+		:web -> {
+			webBridge := _default(opts.webBridge, ?)
+			canvasId := _default(opts.canvasId, 'magnolia-gui-canvas')
+			contextName := _default(opts.context, 'webgl')
+			contextAttrs := _default(opts.contextAttrs, {
+				alpha: true
+				antialias: true
+				depth: true
+				stencil: false
+				premultipliedAlpha: true
+				preserveDrawingBuffer: false
+			})
+
+			{
+				type: :ok
+				backend: :web
+				title: resolvedTitle
+				width: resolvedWidth
+				height: resolvedHeight
+				closed: false
+				messages: []
+				webBridge: webBridge
+				canvas: {
+					id: canvasId
+					width: resolvedWidth
+					height: resolvedHeight
+					dpr: 1
+				}
+				webgl: {
+					version: contextName
+					contextAttrs: contextAttrs
+					clearColor: [0, 0, 0, 1]
+					viewport: [0, 0, resolvedWidth, resolvedHeight]
+					nextId: 1
+					shaders: []
+					programs: []
+					buffers: []
+					activeProgram: ?
+					commands: []
+				}
+			}
+		}
+		_ -> _err('Unsupported runtime for GUI window middleware', ___runtime_sys_info())
+	}
+}
+
+fn show(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			windows.showWindow(window.hwnd, windows.SW_SHOW)
+			windows.updateWindow(window.hwnd)
+			window
+		}
+		:linux -> {
+			linux.mapWindow(window.display, window.window)
+			linux.flush(window.display)
+			window
+		}
+		:web -> window
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
+fn createCanvas(window, id, options) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			canvasOptions := _default(options, {})
+			window.canvas <- {
+				id: _default(id, window.canvas.id)
+				width: _default(canvasOptions.width, window.width)
+				height: _default(canvasOptions.height, window.height)
+				dpr: _default(canvasOptions.dpr, window.canvas.dpr)
+			}
+			_webRecord(window, {
+				type: :canvas_create
+				id: window.canvas.id
+				width: window.canvas.width
+				height: window.canvas.height
+				dpr: window.canvas.dpr
+			})
+			window
+		}
+		_ -> _err('createCanvas is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn initWebGL(window, contextName, attrs) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.version <- _default(contextName, window.webgl.version)
+			window.webgl.contextAttrs <- _default(attrs, window.webgl.contextAttrs)
+			_webRecord(window, {
+				type: :webgl_init
+				canvasId: window.canvas.id
+				context: window.webgl.version
+				attrs: window.webgl.contextAttrs
+			})
+			{
+				type: :ok
+				context: window.webgl.version
+			}
+		}
+		_ -> _err('initWebGL is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglCreateShader(window, shaderType, source) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			shaderId := _nextResourceId(window.webgl)
+			shader := {
+				id: shaderId
+				type: shaderType
+				source: source
+			}
+			window.webgl.shaders <- window.webgl.shaders << shader
+			_webRecord(window, {
+				type: :webgl_create_shader
+				shader: shader
+			})
+			{
+				type: :ok
+				shader: shader
+			}
+		}
+		_ -> _err('webglCreateShader is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglCreateProgram(window, vertexShader, fragmentShader) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			programId := _nextResourceId(window.webgl)
+			program := {
+				id: programId
+				vertex: vertexShader
+				fragment: fragmentShader
+			}
+			window.webgl.programs <- window.webgl.programs << program
+			_webRecord(window, {
+				type: :webgl_create_program
+				program: program
+			})
+			{
+				type: :ok
+				program: program
+			}
+		}
+		_ -> _err('webglCreateProgram is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglUseProgram(window, program) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.activeProgram <- program
+			_webRecord(window, {
+				type: :webgl_use_program
+				program: program
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglUseProgram is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglClearColor(window, r, g, b, a) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.clearColor <- [r, g, b, a]
+			_webRecord(window, {
+				type: :webgl_clear_color
+				color: window.webgl.clearColor
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglClearColor is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglViewport(window, x, y, width, height) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.webgl.viewport <- [x, y, width, height]
+			_webRecord(window, {
+				type: :webgl_viewport
+				viewport: window.webgl.viewport
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglViewport is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglClear(window, mask) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			useMask := _default(mask, GL_COLOR_BUFFER_BIT)
+			_webRecord(window, {
+				type: :webgl_clear
+				mask: useMask
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglClear is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglDrawArrays(window, mode, first, count) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			_webRecord(window, {
+				type: :webgl_draw_arrays
+				mode: _default(mode, GL_TRIANGLES)
+				first: _default(first, 0)
+				count: count
+				program: window.webgl.activeProgram
+			})
+			{type: :ok}
+		}
+		_ -> _err('webglDrawArrays is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn webglFlush(window) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			_webRecord(window, {
+				type: :webgl_flush
+			})
+			{
+				type: :ok
+				commands: window.webgl.commands
+			}
+		}
+		_ -> _err('webglFlush is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn setTitle(window, title) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			windows.setWindowText(window.hwnd, title)
+			window.title <- title
+			window
+		}
+		:linux -> {
+			linux.storeName(window.display, window.window, title)
+			linux.flush(window.display)
+			window.title <- title
+			window
+		}
+		:web -> {
+			window.title <- title
+			window
+		}
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
+fn drawText(window, x, y, text) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdc := windows.getDC(window.hwnd)
+			if windows.callOk?(hdc) & hdc.r1 > 0 {
+				true -> {
+					windows.textOut(hdc.r1, x, y, text)
+					windows.releaseDC(window.hwnd, hdc.r1)
+					{type: :ok}
+				}
+				_ -> _err('GetDC failed', hdc)
+			}
+		}
+		:linux -> {
+			gc := linux.createGC(window.display, window.window, 0, 0)
+			if linux.callOk?(gc) & gc.r1 > 0 {
+				true -> {
+					linux.setForeground(window.display, gc.r1, window.black)
+					linux.drawString(window.display, window.window, gc.r1, x, y, text)
+					linux.freeGC(window.display, gc.r1)
+					linux.flush(window.display)
+					{type: :ok}
+				}
+				_ -> _err('XCreateGC failed', gc)
+			}
+		}
+		:web -> {
+			window.messages <- window.messages << {
+				type: :text
+				x: x
+				y: y
+				text: text
+			}
+			{type: :ok}
+		}
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
+fn fillRect(window, x, y, width, height, color) if window.type {
+	:ok -> {
+		useColor := _default(color, rgb(66, 138, 245))
+		if window.backend {
+			:windows -> {
+				hdc := windows.getDC(window.hwnd)
+				if windows.callOk?(hdc) & hdc.r1 > 0 {
+					true -> {
+						brush := windows.createSolidBrush(useColor)
+						if windows.callOk?(brush) & brush.r1 > 0 {
+							true -> {
+								windows.selectObject(hdc.r1, brush.r1)
+								windows.rectangle(hdc.r1, x, y, x + width, y + height)
+								windows.deleteObject(brush.r1)
+								windows.releaseDC(window.hwnd, hdc.r1)
+								{type: :ok}
+							}
+							_ -> {
+								windows.releaseDC(window.hwnd, hdc.r1)
+								_err('CreateSolidBrush failed', brush)
+							}
+						}
+					}
+					_ -> _err('GetDC failed', hdc)
+				}
+			}
+			:linux -> {
+				gc := linux.createGC(window.display, window.window, 0, 0)
+				if linux.callOk?(gc) & gc.r1 > 0 {
+					true -> {
+						linux.setForeground(window.display, gc.r1, useColor)
+						linux.fillRectangle(window.display, window.window, gc.r1, x, y, width, height)
+						linux.freeGC(window.display, gc.r1)
+						linux.flush(window.display)
+						{type: :ok}
+					}
+					_ -> _err('XCreateGC failed', gc)
+				}
+			}
+			:web -> {
+				window.messages <- window.messages << {
+					type: :rect
+					x: x
+					y: y
+					width: width
+					height: height
+					color: useColor
+				}
+				{type: :ok}
+			}
+			_ -> _err('Unknown window backend', window)
+		}
+	}
+	_ -> window
+}
+
+fn poll(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			step := windows.pumpWindowMessage(window.hwnd, addr(window.msgBuf))
+			if step.type {
+				:closed -> {
+					window.closed <- true
+					step
+				}
+				_ -> step
+			}
+		}
+		:linux -> {
+			step := linux.pumpWindowEvent(window.display, addr(window.eventBuf))
+			if step.type {
+				:dispatch -> if step.eventType {
+					linux.DestroyNotify -> {
+						window.closed <- true
+						{type: :closed, detail: step}
+					}
+					linux.ClientMessage -> {
+						window.closed <- true
+						{type: :closed, detail: step}
+					}
+					_ -> step
+				}
+				_ -> step
+			}
+		}
+		:web -> if window.closed {
+			true -> {type: :closed}
+			_ -> {type: :idle}
+		}
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
+fn run(window, onEvent, onFrame) if window.type {
+	:ok -> {
+		step := poll(window)
+		if step.type {
+			:dispatch -> {
+				if onEvent {
+					? -> ?
+					_ -> onEvent(window, step)
+				}
+				if onFrame {
+					? -> ?
+					_ -> onFrame(window)
+				}
+				run(window, onEvent, onFrame)
+			}
+			:idle -> {
+				if onFrame {
+					? -> ?
+					_ -> onFrame(window)
+				}
+				if window.backend = :web {
+					true -> 0
+					_ -> run(window, onEvent, onFrame)
+				}
+			}
+			:closed -> 0
+			_ -> step
+		}
+	}
+	_ -> window
+}
+
+fn close(window) if window.type {
+	:ok -> if window.closed {
+		true -> 0
+		_ -> if window.backend {
+			:windows -> {
+				windows.destroyWindow(window.hwnd)
+				window.closed <- true
+				unlock_thread()
+				0
+			}
+			:linux -> {
+				linux.destroyWindow(window.display, window.window)
+				linux.closeDisplay(window.display)
+				window.closed <- true
+				0
+			}
+			:web -> {
+				window.closed <- true
+				0
+			}
+			_ -> _err('Unknown window backend', window)
+		}
+	}
+	_ -> 0
+}
