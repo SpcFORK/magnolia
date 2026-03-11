@@ -1,0 +1,167 @@
+// libwindows provides Win32-focused bindings and helpers for Magnolia.
+//
+// The wrappers are intentionally thin and are built on top of `lib/sys` so
+// callsites can compose low-level interop without repeating resolution logic.
+
+sys := import('sys')
+
+Kernel32 := 'kernel32.dll'
+Ntdll := 'ntdll.dll'
+Psapi := 'psapi.dll'
+
+// Common process access flags
+PROCESS_TERMINATE := 1
+PROCESS_VM_READ := 16
+PROCESS_VM_WRITE := 32
+PROCESS_VM_OPERATION := 8
+PROCESS_QUERY_INFORMATION := 1024
+PROCESS_QUERY_LIMITED_INFORMATION := 4096
+PROCESS_ALL_ACCESS := 2035711
+
+// Virtual memory flags
+MEM_COMMIT := 4096
+MEM_RESERVE := 8192
+MEM_DECOMMIT := 16384
+MEM_RELEASE := 32768
+
+// Protection flags
+PAGE_NOACCESS := 1
+PAGE_READONLY := 2
+PAGE_READWRITE := 4
+PAGE_EXECUTE := 16
+PAGE_EXECUTE_READ := 32
+PAGE_EXECUTE_READWRITE := 64
+
+// UTF-16 helper for Win32 *W APIs.
+fn wstr(s) utf16(s)
+
+// Null-terminated ANSI helper for APIs like GetProcAddress.
+fn cstr(s) s + char(0)
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn resolve(symbol) if isWindows?() {
+	true -> sys.resolve(Kernel32, symbol)
+	_ -> _platformError('resolve')
+}
+
+fn resolveIn(library, symbol) if isWindows?() {
+	true -> sys.resolve(library, symbol)
+	_ -> _platformError('resolveIn')
+}
+
+fn call(target, args...) if isWindows?() {
+	true -> sys.call(target, args...)
+	_ -> _platformError('call')
+}
+
+fn kernel32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Kernel32, symbol, args...)
+	_ -> _platformError('kernel32')
+}
+
+fn ntdll(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Ntdll, symbol, args...)
+	_ -> _platformError('ntdll')
+}
+
+fn psapi(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Psapi, symbol, args...)
+	_ -> _platformError('psapi')
+}
+
+fn getLastError() if isWindows?() {
+	true -> sys.valueOr(kernel32('GetLastError'), 0)
+	_ -> -1
+}
+
+fn currentProcessId() if isWindows?() {
+	true -> sys.valueOr(kernel32('GetCurrentProcessId'), -1)
+	_ -> -1
+}
+
+fn currentProcess() if isWindows?() {
+	true -> sys.valueOr(kernel32('GetCurrentProcess'), 0)
+	_ -> 0
+}
+
+// Returns the module handle for `name` (or current image base when name is ?).
+fn moduleHandle(name) if isWindows?() {
+	true -> if name {
+		? -> kernel32('GetModuleHandleW', ?)
+		_ -> kernel32('GetModuleHandleW', wstr(name))
+	}
+	_ -> _platformError('moduleHandle')
+}
+
+// Convenience helper for base address of the current executable image.
+fn imageBase() if isWindows?() {
+	true -> sys.valueOr(moduleHandle(?), 0)
+	_ -> 0
+}
+
+fn loadLibrary(path) if isWindows?() {
+	true -> kernel32('LoadLibraryW', wstr(path))
+	_ -> _platformError('loadLibrary')
+}
+
+fn freeLibrary(module) if isWindows?() {
+	true -> kernel32('FreeLibrary', module)
+	_ -> _platformError('freeLibrary')
+}
+
+fn procAddress(module, symbol) if isWindows?() {
+	true -> kernel32('GetProcAddress', module, cstr(symbol))
+	_ -> _platformError('procAddress')
+}
+
+fn openProcess(desiredAccess, inheritHandle, processId) if isWindows?() {
+	true -> kernel32('OpenProcess', desiredAccess, inheritHandle, processId)
+	_ -> _platformError('openProcess')
+}
+
+fn closeHandle(handle) if isWindows?() {
+	true -> kernel32('CloseHandle', handle)
+	_ -> _platformError('closeHandle')
+}
+
+fn virtualAlloc(baseAddress, size, allocationType, protection) if isWindows?() {
+	true -> kernel32('VirtualAlloc', baseAddress, size, allocationType, protection)
+	_ -> _platformError('virtualAlloc')
+}
+
+fn virtualFree(address, size, freeType) if isWindows?() {
+	true -> kernel32('VirtualFree', address, size, freeType)
+	_ -> _platformError('virtualFree')
+}
+
+// `oldProtectOutPtr` should point to a writable 4-byte integer buffer.
+fn virtualProtect(address, size, newProtect, oldProtectOutPtr) if isWindows?() {
+	true -> kernel32('VirtualProtect', address, size, newProtect, oldProtectOutPtr)
+	_ -> _platformError('virtualProtect')
+}
+
+// `bytesReadOutPtr` should point to a writable pointer-sized integer buffer.
+fn readProcessMemory(process, address, outBufferPtr, size, bytesReadOutPtr) if isWindows?() {
+	true -> kernel32('ReadProcessMemory', process, address, outBufferPtr, size, bytesReadOutPtr)
+	_ -> _platformError('readProcessMemory')
+}
+
+// `bytesWrittenOutPtr` should point to a writable pointer-sized integer buffer.
+fn writeProcessMemory(process, address, inBufferPtr, size, bytesWrittenOutPtr) if isWindows?() {
+	true -> kernel32('WriteProcessMemory', process, address, inBufferPtr, size, bytesWrittenOutPtr)
+	_ -> _platformError('writeProcessMemory')
+}
+
+// `mbiBufferPtr` points to a MEMORY_BASIC_INFORMATION-compatible buffer.
+fn virtualQuery(address, mbiBufferPtr, mbiSize) if isWindows?() {
+	true -> kernel32('VirtualQuery', address, mbiBufferPtr, mbiSize)
+	_ -> _platformError('virtualQuery')
+}

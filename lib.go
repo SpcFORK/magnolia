@@ -43,6 +43,9 @@ var libhttp string
 //go:embed lib/test.oak
 var libtest string
 
+//go:embed lib/thread.oak
+var libthread string
+
 //go:embed lib/debug.oak
 var libdebug string
 
@@ -70,6 +73,9 @@ var libgpus string
 //go:embed lib/syntax.oak
 var libsyntax string
 
+//go:embed lib/syntaxfmt.oak
+var libsyntaxfmt string
+
 //go:embed lib/Virtual.oak
 var libvirtual string
 
@@ -84,6 +90,12 @@ var libbundleutils string
 
 //go:embed lib/ast-transform.oak
 var libasttransform string
+
+//go:embed lib/ast-analyze.oak
+var libastanalyze string
+
+//go:embed lib/bundle-ast.oak
+var libbundleast string
 
 //go:embed lib/shell.oak
 var libshell string
@@ -133,6 +145,12 @@ var libcodegencommon string
 //go:embed lib/sys.oak
 var libsys string
 
+//go:embed lib/windows.oak
+var libwindows string
+
+//go:embed lib/Linux.oak
+var liblinux string
+
 //go:embed lib/websocket.oak
 var libwebsocket string
 
@@ -158,12 +176,16 @@ var stdlibs = map[string]string{
 	"gpu":             libgpu,
 	"gpus":            libgpus,
 	"syntax":          libsyntax,
+	"syntaxfmt":       libsyntaxfmt,
 	"Virtual":         libvirtual,
 	"VirtualToken":    libvirtualtoken,
 	"pack-utils":      libpackutils,
+	"bundle-ast":      libbundleast,
 	"bundle-utils":    libbundleutils,
+	"ast-analyze":     libastanalyze,
 	"ast-transform":   libasttransform,
 	"shell":           libshell,
+	"thread":          libthread,
 	"transpile":       libtranspile,
 	"pack":            libpack,
 	"build":           libbuild,
@@ -179,6 +201,9 @@ var stdlibs = map[string]string{
 	"runtime-codegen": libruntimecodegen,
 	"codegen-common":  libcodegencommon,
 	"sys":             libsys,
+	"windows":         libwindows,
+	"linux":           liblinux,
+	"Linux":           liblinux,
 	"websocket":       libwebsocket,
 }
 

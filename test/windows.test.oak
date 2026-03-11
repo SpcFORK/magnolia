@@ -1,0 +1,42 @@
+windows := import('windows')
+
+fn run(t) {
+	{
+		'windows constants and helpers expose expected types' |> t.eq(
+			[
+				type(windows.Kernel32)
+				type(windows.Ntdll)
+				type(windows.Psapi)
+				type(windows.PROCESS_VM_READ)
+				type(windows.MEM_COMMIT)
+				type(windows.PAGE_READWRITE)
+				type(windows.wstr('oak'))
+				type(windows.cstr('oak'))
+				len(windows.cstr('oak')) = 4
+			]
+			[:string, :string, :string, :int, :int, :int, :string, :string, true]
+		)
+
+		'windows wrapper basic behavior is OS-aware and safe' |> t.eq(
+			{
+				os := ___runtime_sys_info().os
+				pidCall := windows.kernel32('GetCurrentProcessId')
+				if os {
+					'windows' -> {
+						windows.isWindows?() &
+						((pidCall.type = :ok) | (pidCall.type = :success)) &
+						(windows.currentProcessId() > 0) &
+						(windows.imageBase() > 0)
+					}
+					_ -> {
+						(!windows.isWindows?()) &
+						(pidCall.type = :error) &
+						(windows.currentProcessId() = -1) &
+						(windows.imageBase() = 0)
+					}
+				}
+			}
+			true
+		)
+	}
+}

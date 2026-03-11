@@ -1952,14 +1952,17 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 			type(___stdlibs())
 			type(___stdlibs().std)
 			type(___stdlibs().sys)
+			type(___stdlibs().windows)
 			type(___stdlibs().gpus)
 			type(___stdlibs().websocket)
 			type(___runtime_lib('std'))
 			type(___runtime_lib('sys'))
+			type(___runtime_lib('windows'))
 			type(___runtime_lib('gpus'))
 			type(___runtime_lib('websocket'))
 			___runtime_lib?('std')
 			___runtime_lib?('sys')
+			___runtime_lib?('windows')
 			___runtime_lib?('gpus')
 			___runtime_lib?('websocket')
 			type(___runtime_lib('definitely_missing_lib'))
@@ -1979,6 +1982,9 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 		AtomValue("string"),
 		AtomValue("string"),
 		AtomValue("string"),
+		AtomValue("string"),
+		AtomValue("string"),
+		oakTrue,
 		oakTrue,
 		oakTrue,
 		oakTrue,
@@ -1988,6 +1994,49 @@ func TestRuntimeStdlibAndIntrospectionBuiltins(t *testing.T) {
 		AtomValue("int"),
 		AtomValue("int"),
 		AtomValue("int"),
+		oakTrue,
+	))
+}
+
+func TestWindowsStdlibSafeSurface(t *testing.T) {
+	expectProgramToReturn(t, `
+		win := import('windows')
+		os := ___runtime_sys_info().os
+		api := win.kernel32('GetCurrentProcessId')
+
+		[
+			type(win.Kernel32)
+			win.Kernel32 = 'kernel32.dll'
+			type(win.PROCESS_VM_READ)
+			type(win.MEM_COMMIT)
+			type(win.PAGE_READWRITE)
+			type(win.wstr('oak'))
+			type(win.cstr('oak'))
+			len(win.cstr('oak')) = 4
+			if os {
+				'windows' -> {
+					win.isWindows?() &
+					((api.type = :ok) | (api.type = :success)) &
+					(win.currentProcessId() > 0) &
+					(win.imageBase() > 0)
+				}
+				_ -> {
+					(!win.isWindows?()) &
+					(api.type = :error) &
+					(win.currentProcessId() = -1) &
+					(win.imageBase() = 0)
+				}
+			}
+		]
+	`, MakeList(
+		AtomValue("string"),
+		oakTrue,
+		AtomValue("int"),
+		AtomValue("int"),
+		AtomValue("int"),
+		AtomValue("string"),
+		AtomValue("string"),
+		oakTrue,
 		oakTrue,
 	))
 }

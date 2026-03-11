@@ -1,0 +1,140 @@
+// libLinux provides Linux-focused native interop helpers for Magnolia.
+//
+// It wraps common libc/libdl calls using libsys for consistent result shapes.
+
+sys := import('sys')
+
+LibC := ['libc.so.6', 'libc.so']
+LibDL := ['libdl.so.2', 'libdl.so']
+
+// mmap/munmap flags
+PROT_NONE := 0
+PROT_READ := 1
+PROT_WRITE := 2
+PROT_EXEC := 4
+
+MAP_SHARED := 1
+MAP_PRIVATE := 2
+MAP_FIXED := 16
+MAP_ANONYMOUS := 32
+
+// open() flags
+O_RDONLY := 0
+O_WRONLY := 1
+O_RDWR := 2
+O_CREAT := 64
+O_TRUNC := 512
+O_APPEND := 1024
+
+// dlopen() flags
+RTLD_LAZY := 1
+RTLD_NOW := 2
+RTLD_GLOBAL := 256
+RTLD_LOCAL := 0
+
+// sysconf constants
+_SC_PAGESIZE := 30
+
+fn isLinux? ___runtime_sys_info().os = 'linux'
+
+fn cstr(s) s + char(0)
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Linux'
+	}
+}
+
+fn _resolveFirst(libraries, symbol, i) if i {
+	len(libraries) -> {
+		{
+			type: :error
+			error: 'Could not resolve procedure ' + symbol + ' from any candidate library'
+			libraries: libraries
+			symbol: symbol
+		}
+	}
+	_ -> {
+		resolved := sys.resolve(libraries.(i), symbol)
+		if resolved.type {
+			:ok -> resolved
+			_ -> _resolveFirst(libraries, symbol, i + 1)
+		}
+	}
+}
+
+fn _callResolved(resolved, args...) if resolved.type {
+	:ok -> sys.call(resolved.proc, args...)
+	_ -> resolved
+}
+
+fn resolve(symbol) if isLinux?() {
+	true -> _resolveFirst(LibC, symbol, 0)
+	_ -> _platformError('resolve')
+}
+
+fn resolveIn(library, symbol) if isLinux?() {
+	true -> sys.resolve(library, symbol)
+	_ -> _platformError('resolveIn')
+}
+
+fn call(target, args...) if isLinux?() {
+	true -> sys.call(target, args...)
+	_ -> _platformError('call')
+}
+
+fn libc(symbol, args...) if isLinux?() {
+	true -> _callResolved(_resolveFirst(LibC, symbol, 0), args...)
+	_ -> _platformError('libc')
+}
+
+fn libdl(symbol, args...) if isLinux?() {
+	true -> _callResolved(_resolveFirst(LibDL, symbol, 0), args...)
+	_ -> _platformError('libdl')
+}
+
+fn currentProcessId() if isLinux?() {
+	true -> sys.valueOr(libc('getpid'), -1)
+	_ -> -1
+}
+
+fn parentProcessId() if isLinux?() {
+	true -> sys.valueOr(libc('getppid'), -1)
+	_ -> -1
+}
+
+fn pageSize() if isLinux?() {
+	true -> sys.valueOr(libc('sysconf', _SC_PAGESIZE), -1)
+	_ -> -1
+}
+
+fn mmap(addr, length, prot, flags, fd, offset) if isLinux?() {
+	true -> libc('mmap', addr, length, prot, flags, fd, offset)
+	_ -> _platformError('mmap')
+}
+
+fn munmap(addr, length) if isLinux?() {
+	true -> libc('munmap', addr, length)
+	_ -> _platformError('munmap')
+}
+
+fn mprotect(addr, length, prot) if isLinux?() {
+	true -> libc('mprotect', addr, length, prot)
+	_ -> _platformError('mprotect')
+}
+
+fn dlopen(path, flags) if isLinux?() {
+	true -> libc('dlopen', cstr(path), flags)
+	_ -> _platformError('dlopen')
+}
+
+fn dlsym(handle, symbol) if isLinux?() {
+	true -> libc('dlsym', handle, cstr(symbol))
+	_ -> _platformError('dlsym')
+}
+
+fn dlclose(handle) if isLinux?() {
+	true -> libc('dlclose', handle)
+	_ -> _platformError('dlclose')
+}

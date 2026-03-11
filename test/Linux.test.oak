@@ -1,0 +1,43 @@
+linux := import('Linux')
+
+fn run(t) {
+	{
+		'linux constants and helpers expose expected types' |> t.eq(
+			[
+				type(linux.LibC)
+				type(linux.LibDL)
+				type(linux.PROT_READ)
+				type(linux.MAP_PRIVATE)
+				type(linux.O_RDONLY)
+				type(linux.RTLD_NOW)
+				type(linux.cstr('oak'))
+				len(linux.cstr('oak')) = 4
+			]
+			[:list, :list, :int, :int, :int, :int, :string, true]
+		)
+
+		'linux wrapper basic behavior is OS-aware and safe' |> t.eq(
+			{
+				os := ___runtime_sys_info().os
+				pidCall := linux.libc('getpid')
+				if os {
+					'linux' -> {
+						linux.isLinux?() &
+						((pidCall.type = :ok) | (pidCall.type = :success)) &
+						(linux.currentProcessId() > 0) &
+						(linux.parentProcessId() > 0) &
+						(linux.pageSize() > 0)
+					}
+					_ -> {
+						(!linux.isLinux?()) &
+						(pidCall.type = :error) &
+						(linux.currentProcessId() = -1) &
+						(linux.parentProcessId() = -1) &
+						(linux.pageSize() = -1)
+					}
+				}
+			}
+			true
+		)
+	}
+}
