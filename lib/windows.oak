@@ -1458,7 +1458,7 @@ fn pumpWindowMessage(hwnd, msgPtr) if isWindows?() {
 }
 
 // Registers a top-level window class using DefWindowProcW.
-fn registerDefaultWindowClass(className) if isWindows?() {
+fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle) if isWindows?() {
 	true -> {
 		size := if ptrSize() {
 			8 -> 80
@@ -1480,8 +1480,18 @@ fn registerDefaultWindowClass(className) if isWindows?() {
 			_ -> 0
 		}
 
-		cursorHandle := callValueOrZero(loadCursor(0, IDC_ARROW))
-		iconHandle := callValueOrZero(loadIcon(0, IDI_APPLICATION))
+		resolvedCursor := if cursorHandle {
+			? -> callValueOrZero(loadCursor(0, IDC_ARROW))
+			_ -> cursorHandle
+		}
+		resolvedIcon := if iconHandle {
+			? -> callValueOrZero(loadIcon(0, IDI_APPLICATION))
+			_ -> iconHandle
+		}
+		resolvedSmallIcon := if smallIconHandle {
+			? -> resolvedIcon
+			_ -> smallIconHandle
+		}
 		classWide := wstr(className)
 		classWidePtr := ptrInt(addr(classWide))
 
@@ -1491,15 +1501,21 @@ fn registerDefaultWindowClass(className) if isWindows?() {
 		writeU32(wcPtr + 16, 0)
 		writeU32(wcPtr + 20, 0)
 		writePtr(wcPtr + 24, imageBase())
-		writePtr(wcPtr + 24 + ptrSize(), iconHandle)
-		writePtr(wcPtr + 24 + ptrSize() * 2, cursorHandle)
+		writePtr(wcPtr + 24 + ptrSize(), resolvedIcon)
+		writePtr(wcPtr + 24 + ptrSize() * 2, resolvedCursor)
 		writePtr(wcPtr + 24 + ptrSize() * 3, 6)
 		writePtr(wcPtr + 24 + ptrSize() * 4, 0)
 		writePtr(wcPtr + 24 + ptrSize() * 5, classWidePtr)
-		writePtr(wcPtr + 24 + ptrSize() * 6, iconHandle)
+		writePtr(wcPtr + 24 + ptrSize() * 6, resolvedSmallIcon)
 
 		registerClassEx(wcPtr)
 	}
+	_ -> _platformError('registerWindowClassEx')
+}
+
+// Registers a top-level window class using DefWindowProcW.
+fn registerDefaultWindowClass(className) if isWindows?() {
+	true -> registerWindowClassEx(className, ?, ?, ?)
 	_ -> _platformError('registerDefaultWindowClass')
 }
 

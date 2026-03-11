@@ -60,6 +60,121 @@ GL_COLOR_BUFFER_BIT := 16384
 GL_DEPTH_BUFFER_BIT := 256
 GL_TRIANGLES := 4
 SRCCOPY := 13369376
+WM_SETICON := 128
+ICON_SMALL := 0
+ICON_BIG := 1
+ICON_SMALL2 := 2
+IMAGE_ICON := 1
+LR_DEFAULTSIZE := 64
+LR_LOADFROMFILE := 16
+GCLP_HICON := -14
+GCLP_HICONSM := -34
+
+fn _loadWindowsIcon(iconSpec) {
+	if iconSpec {
+		? -> 0
+		_ -> if type(iconSpec) {
+			:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec))
+			:string -> windows.callValueOrZero(windows.user32(
+				'LoadImageW'
+				0
+				windows.wstr(iconSpec)
+				IMAGE_ICON
+				0
+				0
+				LR_LOADFROMFILE | LR_DEFAULTSIZE
+			))
+			:object -> if type(iconSpec.handle) {
+				:int -> iconSpec.handle
+				_ -> if type(iconSpec.id) {
+					:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec.id))
+					_ -> if type(iconSpec.path) {
+						:string -> windows.callValueOrZero(windows.user32(
+							'LoadImageW'
+							0
+							windows.wstr(iconSpec.path)
+							IMAGE_ICON
+							0
+							0
+							LR_LOADFROMFILE | LR_DEFAULTSIZE
+						))
+						_ -> 0
+					}
+				}
+			}
+			_ -> 0
+		}
+	}
+}
+
+fn _loadWindowsIconSized(iconSpec, width, height) {
+	if iconSpec {
+		? -> 0
+		_ -> if type(iconSpec) {
+			:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec))
+			:string -> windows.callValueOrZero(windows.user32(
+				'LoadImageW'
+				0
+				windows.wstr(iconSpec)
+				IMAGE_ICON
+				width
+				height
+				LR_LOADFROMFILE
+			))
+			:object -> if type(iconSpec.handle) {
+				:int -> iconSpec.handle
+				_ -> if type(iconSpec.id) {
+					:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec.id))
+					_ -> if type(iconSpec.path) {
+						:string -> windows.callValueOrZero(windows.user32(
+							'LoadImageW'
+							0
+							windows.wstr(iconSpec.path)
+							IMAGE_ICON
+							width
+							height
+							LR_LOADFROMFILE
+						))
+						_ -> 0
+					}
+				}
+			}
+			_ -> 0
+		}
+	}
+}
+
+fn _applyWindowsIcons(hwnd, opts) {
+	baseIconSpec := _default(opts.icon, ?)
+	bigIconSpec := _default(opts.taskbarIcon, _default(opts.iconBig, baseIconSpec))
+	smallIconSpec := _default(opts.windowIcon, _default(opts.iconSmall, baseIconSpec))
+
+	bigIcon := _loadWindowsIconSized(bigIconSpec, 32, 32)
+	smallIcon := _loadWindowsIconSized(smallIconSpec, 16, 16)
+
+	if bigIcon > 0 {
+		true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICON, bigIcon)
+	}
+	if smallIcon > 0 {
+		true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICONSM, smallIcon)
+	}
+
+	if bigIcon > 0 {
+		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_BIG, bigIcon)
+	}
+	if smallIcon > 0 {
+		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL, smallIcon)
+	}
+	if smallIcon > 0 {
+		true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL2, smallIcon)
+	}
+
+	{
+		type: :ok
+		bigIcon: bigIcon
+		smallIcon: smallIcon
+	}
+}
 
 fn createWindow(title, width, height, options) {
 	resolvedTitle := _default(title, 'Magnolia GUI Window')
@@ -73,7 +188,9 @@ fn createWindow(title, width, height, options) {
 	if backend() {
 		:windows -> {
 			lock_thread()
-			reg := windows.registerDefaultWindowClass(className)
+			classBigIcon := _loadWindowsIconSized(_default(opts.taskbarIcon, _default(opts.iconBig, opts.icon)), 32, 32)
+			classSmallIcon := _loadWindowsIconSized(_default(opts.windowIcon, _default(opts.iconSmall, opts.icon)), 16, 16)
+			reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?)
 			if windows.callOk?(reg) & reg.r1 = 0 {
 				true -> {
 					unlock_thread()
@@ -84,6 +201,7 @@ fn createWindow(title, width, height, options) {
 					if hwnd.type {
 						:ok -> if hwnd.r1 > 0 {
 							true -> {
+								iconState := _applyWindowsIcons(hwnd.r1, opts)
 								msgBuf := windows.createMsgBuffer()
 								{
 									type: :ok
@@ -101,6 +219,7 @@ fn createWindow(title, width, height, options) {
 									framePrevBitmap: 0
 									frameWidth: 0
 									frameHeight: 0
+									icons: iconState
 									msgBuf: msgBuf
 									closed: false
 								}

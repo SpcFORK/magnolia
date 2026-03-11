@@ -52,6 +52,23 @@ Builds a packed RGB integer color value.
 
 Creates a window state object.
 
+Useful `options` fields:
+
+- `frameMs` - target idle frame step in milliseconds (default: `16`)
+- `updateOnDispatch` - whether input/message dispatch should also trigger
+    `onFrame` (default: `false`)
+- Windows icon options:
+    - `icon` - base icon spec used for both big/small icon when specific values
+        are not provided
+    - `taskbarIcon` or `iconBig` - big icon (taskbar/alt-tab)
+    - `windowIcon` or `iconSmall` - small icon (titlebar)
+
+Icon spec can be:
+
+- an integer resource ID (for example `32512` for `IDI_APPLICATION`)
+- a string path to an `.ico` file
+- an object: `{ id: <int> }`, `{ path: <string> }`, or `{ handle: <int> }`
+
 - Windows: registers a default class and creates a top-level window.
 - Linux: creates a default X11 window.
 - Web: creates logical state with no native host window API calls.
