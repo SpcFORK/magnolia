@@ -304,6 +304,17 @@ func (t *tokenizer) readValidNumeral() string {
 				t.back()
 				break
 			}
+		} else if c == 'e' || c == 'E' {
+			// Scientific notation: 1e9, 1.2e-3, etc.
+			accumulator = append(accumulator, c)
+			// Optional sign
+			if !t.isEOF() && (t.peek() == '+' || t.peek() == '-') {
+				accumulator = append(accumulator, t.next())
+			}
+			// Exponent digits
+			for !t.isEOF() && unicode.IsDigit(t.peek()) {
+				accumulator = append(accumulator, t.next())
+			}
 		} else {
 			t.back()
 			break

@@ -683,7 +683,8 @@ func (p *parser) parseUnit() (astNode, error) {
 		}
 		return stringNode{payload: payloadBuilder.Bytes(), tok: &tok}, nil
 	case numberLiteral:
-		if strings.ContainsRune(tok.payload, '.') {
+		// Parse as float if contains '.' or 'e'/'E' (scientific notation)
+		if strings.ContainsRune(tok.payload, '.') || strings.ContainsAny(tok.payload, "eE") {
 			f, err := strconv.ParseFloat(tok.payload, 64)
 			if err != nil {
 				return nil, parseError{reason: err.Error(), pos: tok.pos}

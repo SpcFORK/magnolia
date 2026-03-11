@@ -177,6 +177,10 @@ fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (p
 
 fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
+	projected := fn sub(i, out) if i {
+		len(verts) -> out
+		_ -> sub(i + 1, out << deps.projectPoint(window, verts.(i), camera))
+	}(0, [])
 	faces := _default(mesh.faces, [])
 	faceColors := _default(mesh.faceColors, [])
 	cam := _default(camera, {})
@@ -203,12 +207,12 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 				_ -> ?
 			}
 
-			pa := deps.projectPoint(window, pa3, camera)
-			pb := deps.projectPoint(window, pb3, camera)
-			pc := deps.projectPoint(window, pc3, camera)
+			pa := projected.(f.0)
+			pb := projected.(f.1)
+			pc := projected.(f.2)
 			pd := if pd3 {
 				? -> ?
-				_ -> deps.projectPoint(window, pd3, camera)
+				_ -> projected.(f.3)
 			}
 
 			faceColor := if i < len(faceColors) {
@@ -285,6 +289,10 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 
 fn drawMeshWireframe(deps, window, mesh, transform, camera, color) {
 	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
+	projected := fn subProj(i, out) if i {
+		len(verts) -> out
+		_ -> subProj(i + 1, out << deps.projectPoint(window, verts.(i), camera))
+	}(0, [])
 	edges := mesh.edges
 
 	fn sub(i, drawn) if i {
@@ -296,8 +304,8 @@ fn drawMeshWireframe(deps, window, mesh, transform, camera, color) {
 		}
 		_ -> {
 			edge := edges.(i)
-			pa := deps.projectPoint(window, verts.(edge.0), camera)
-			pb := deps.projectPoint(window, verts.(edge.1), camera)
+			pa := projected.(edge.0)
+			pb := projected.(edge.1)
 			if [pa, pb] {
 				[?, _] -> sub(i + 1, drawn)
 				[_, ?] -> sub(i + 1, drawn)
