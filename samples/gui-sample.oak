@@ -1,0 +1,74 @@
+// Cross-platform GUI middleware sample.
+//
+// - Windows/Linux: opens a native window and draws simple primitives.
+// - Web runtimes: builds Canvas + WebGL middleware commands and prints queue.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+
+fn runNative(window) {
+	gui.show(window)
+	gui.setTitle(window, 'Magnolia GUI Middleware Sample')
+	gui.fillRect(window, 24, 52, 320, 180, gui.rgb(35, 122, 224))
+	gui.drawText(window, 24, 28, 'Hello from GUI middleware')
+	gui.drawText(window, 24, 250, 'Close the window to exit.')
+
+	loopResult := gui.run(window, ?, ?)
+	printf('Native loop ended with: {{ 0 }}', string(loopResult))
+	gui.close(window)
+}
+
+fn runWeb(window) {
+	gui.createCanvas(window, 'magnolia-gui-canvas', {
+		width: 900
+		height: 560
+		dpr: 1
+	})
+
+	gui.initWebGL(window, 'webgl', {
+		alpha: true
+		antialias: true
+		depth: true
+	})
+
+	vert := gui.webglCreateShader(window, :vertex,
+		'attribute vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }')
+	frag := gui.webglCreateShader(window, :fragment,
+		'precision mediump float; void main(){ gl_FragColor = vec4(0.16, 0.56, 0.96, 1.0); }')
+	prog := gui.webglCreateProgram(window, vert.shader, frag.shader)
+
+	gui.webglUseProgram(window, prog.program)
+	gui.webglViewport(window, 0, 0, window.width, window.height)
+	gui.webglClearColor(window, 0.02, 0.03, 0.08, 1.0)
+	gui.webglClear(window, gui.GL_COLOR_BUFFER_BIT | gui.GL_DEPTH_BUFFER_BIT)
+	gui.webglDrawArrays(window, gui.GL_TRIANGLES, 0, 3)
+
+	queued := gui.webglFlush(window)
+	println('WebGL middleware queue:')
+	println(string(queued))
+	gui.close(window)
+}
+
+println('== GUI Middleware Sample ==')
+
+window := gui.createWindow('Magnolia GUI Sample', 900, 560, {
+	canvasId: 'magnolia-gui-canvas'
+})
+
+if window.type {
+	:ok -> if window.backend {
+		:web -> runWeb(window)
+		_ -> runNative(window)
+	}
+	_ -> {
+		println('Could not create GUI window.')
+		println(string(window))
+	}
+}
