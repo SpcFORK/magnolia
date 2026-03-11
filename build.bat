@@ -122,17 +122,16 @@ if errorlevel 1 exit /b 1
 
 if exist "%SYSO_FILE%" del "%SYSO_FILE%"
 
-set "DO_WSL_INSTALL=0"
-if "%1"=="--wsl" set "DO_WSL_INSTALL=1"
-if "%DO_WSL_INSTALL%"=="1" (
-    echo Installing to /usr/local/bin via WSL...
-    wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia"
-    wsl -u root -- sh -c "mv ./build/magnolia /usr/local/bin"
-    wsl -u root -- sh -c "exec bash -l"
-    if errorlevel 1 exit /b 1
-)
-
 echo Build complete!
 echo   ELF: ./build/magnolia
 echo   EXE: ./build/magnolia.exe
 echo   ICO: ./build/magnolia.ico
+
+set "DO_WSL_INSTALL=0"
+if "%1"=="--wsl" set "DO_WSL_INSTALL=1"
+if "%DO_WSL_INSTALL%"=="1" (
+    echo Installing to /usr/local/bin via WSL...
+    wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia;"
+    wsl -u root -- sh -c "mv ./build/magnolia /usr/local/bin"
+    wsl -u root -- sh -c "exec bash -l"
+)
