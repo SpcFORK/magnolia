@@ -1131,7 +1131,7 @@ func (c *Context) oakSyscall(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	r1, r2, err := syscall.SyscallN(syscallTarget, syscallArgs...)
+	r1, r2, err := oakSyscallN(syscallTarget, syscallArgs...)
 	runtime.KeepAlive(args)
 
 	if err != 0 {
@@ -1195,12 +1195,12 @@ func (c *Context) oakWinMsgLoop(args []Value) (Value, *runtimeError) {
 	msgPtr := uintptr(unsafe.Pointer(&msgBuf[0]))
 
 	for {
-		alive, _, _ := syscall.SyscallN(isWindowAddr, hwnd)
+		alive, _, _ := oakSyscallN(isWindowAddr, hwnd)
 		if alive == 0 {
 			return IntValue(0), nil
 		}
 
-		r1, _, callErr := syscall.SyscallN(getMessageAddr, msgPtr, 0, 0, 0)
+		r1, _, callErr := oakSyscallN(getMessageAddr, msgPtr, 0, 0, 0)
 		if int32(r1) == -1 {
 			return ObjectValue{
 				"type":  AtomValue("error"),
@@ -1214,8 +1214,8 @@ func (c *Context) oakWinMsgLoop(args []Value) (Value, *runtimeError) {
 			return IntValue(0), nil
 		}
 
-		syscall.SyscallN(translateMessageAddr, msgPtr)
-		syscall.SyscallN(dispatchMessageAddr, msgPtr)
+		oakSyscallN(translateMessageAddr, msgPtr)
+		oakSyscallN(dispatchMessageAddr, msgPtr)
 	}
 }
 

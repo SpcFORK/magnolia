@@ -25,8 +25,25 @@ if not exist build (
 )
 
 echo Building ELF target...
+set "_ORIG_GOOS=%GOOS%"
+set "_ORIG_GOARCH=%GOARCH%"
+
+set "GOOS=linux"
+set "GOARCH=amd64"
 go build -o ./build/magnolia
 if errorlevel 1 exit /b 1
+
+if defined _ORIG_GOOS (
+    set "GOOS=%_ORIG_GOOS%"
+) else (
+    set "GOOS="
+)
+
+if defined _ORIG_GOARCH (
+    set "GOARCH=%_ORIG_GOARCH%"
+) else (
+    set "GOARCH="
+)
 
 if not exist "%LOGO_PNG%" (
     echo Icon source not found: %LOGO_PNG%
@@ -110,10 +127,24 @@ rsrc -ico "%ICON_PATH%" -o "%SYSO_FILE%"
 if errorlevel 1 exit /b 1
 
 echo Building EXE target...
+set "GOOS=windows"
+set "GOARCH=amd64"
 go build -o ./build/magnolia.exe
 if errorlevel 1 (
     if exist "%SYSO_FILE%" del "%SYSO_FILE%"
     exit /b 1
+)
+
+if defined _ORIG_GOOS (
+    set "GOOS=%_ORIG_GOOS%"
+) else (
+    set "GOOS="
+)
+
+if defined _ORIG_GOARCH (
+    set "GOARCH=%_ORIG_GOARCH%"
+) else (
+    set "GOARCH="
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -131,7 +162,5 @@ set "DO_WSL_INSTALL=0"
 if "%1"=="--wsl" set "DO_WSL_INSTALL=1"
 if "%DO_WSL_INSTALL%"=="1" (
     echo Installing to /usr/local/bin via WSL...
-    wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia;"
-    wsl -u root -- sh -c "mv ./build/magnolia /usr/local/bin"
-    wsl -u root -- sh -c "exec bash -l"
+    wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia; mv ./build/magnolia /usr/local/bin"
 )
