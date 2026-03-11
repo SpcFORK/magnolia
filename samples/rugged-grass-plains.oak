@@ -1,0 +1,168 @@
+// Rugged Grass Plains - first-person sample
+// WASD movement: W/S forward/back, A/D rotate camera (yaw)
+
+{ println: println, string: string, int: int } := import('std')
+
+gui := import('GUI')
+
+window := gui.createWindow('Rugged Grass Plains', 1024, 720, {
+    frameMs: 16
+    canvasId: 'rugged-grass-plains-canvas'
+    icon: './build/magnolia.ico'
+    taskbarIcon: './build/magnolia.ico'
+    windowIcon: './build/magnolia.ico'
+})
+
+if window.type {
+    :ok -> {
+        // sky blue background
+        renderer := gui.Renderer3D(window, {
+            camera: { z: 0, fov: 88 }
+            background: gui.rgb(135, 206, 235)
+            lineColor: gui.rgb(80, 200, 90)
+            light: { x: 0.4, y: 0.8, z: -0.6, ambient: 0.35, diffuse: 0.65 }
+        })
+
+        // Build a procedural terrain mesh (height field)
+        fn buildTerrain(gridN, step, amp, freq) {
+            // vertices: row-major order (x from 0..gridN-1, z from 0..gridN-1)
+            fn height(x, z) {
+                nx := (x - gridN / 2) * step
+                nz := (z - gridN / 2) * step
+                (sin(nx * freq) * cos(nz * freq) + sin(nx * freq * 0.6) * cos(nz * freq * 0.8) * 0.6) * amp
+            }
+
+            fn buildRow(x, z, verts) if x >= gridN {
+                true -> verts
+                _ -> {
+                    h := height(x, z)
+                    vx := gui.Vec3((x - gridN / 2) * step, h, (z - gridN / 2) * step)
+                    buildRow(x + 1, z, verts << vx)
+                }
+            }
+
+            fn buildAll(z, verts) if z >= gridN {
+                true -> verts
+                _ -> buildAll(z + 1, buildRow(0, z, verts))
+            }
+
+            verts := buildAll(0, [])
+
+            // build triangular faces (two tris per grid cell)
+            fn facesForCell(x, z, acc) if x >= gridN - 1 {
+                true -> acc
+                _ -> facesForCell(x + 1, z, acc << [z * gridN + x, z * gridN + x + 1, (z + 1) * gridN + x] << [(z * gridN + x + 1), ((z + 1) * gridN + x + 1), ((z + 1) * gridN + x)])
+            }
+
+            fn buildFaceRows(z, acc) if z >= gridN - 1 {
+                true -> acc
+                _ -> buildFaceRows(z + 1, facesForCell(0, z, acc))
+            }
+
+            faces := buildFaceRows(0, [])
+
+            { vertices: verts, faces: faces }
+        }
+
+        // reduce resolution to lower startup cost and avoid crashes on fast loads
+        terrain := buildTerrain(48, 0.6, 1.6, 0.25)
+
+        gui.show(window)
+
+        // Camera / player state
+        cam := { x: 0.0, y: 1.4, z: 8.0, yaw: 180.0, pitch: 0.0 }
+
+        // Key state map (initialize known keys to avoid undefined '?')
+        keys := {
+            'w': false
+            'W': false
+            'a': false
+            'A': false
+            's': false
+            'S': false
+            'd': false
+            'D': false
+        }
+
+        speed := 0.18
+        turnSpeed := 2.6
+
+        // Event handler: track key presses/releases
+        onEvent := fn(_win, evt) {
+            if evt.type = :keyDown -> {
+                keys.(evt.key) <- true
+            }
+            if evt.type = :keyUp -> {
+                keys.(evt.key) <- false
+            }
+            // toggle pointer lock with P maybe (optional)
+            if evt.type = :keyDown & (evt.key = 'p' | evt.key = 'P') {
+                true -> 0
+            }
+        }
+
+        // Frame loop: update camera from keys and render scene
+        onFrame := fn(win) {
+            // movement: W forward, S back; A/D rotate yaw
+            yawRad := cam.yaw * 3.141592653589793 / 180.0
+            forwardX := sin(yawRad)
+            forwardZ := cos(yawRad)
+
+            if keys.('w') | keys.('W') -> {
+                cam.x <- cam.x + forwardX * speed
+                cam.z <- cam.z + forwardZ * speed
+            }
+            if keys.('s') | keys.('S') -> {
+                cam.x <- cam.x - forwardX * speed
+                cam.z <- cam.z - forwardZ * speed
+            }
+            if keys.('a') | keys.('A') -> {
+                cam.yaw <- cam.yaw - turnSpeed
+            }
+            if keys.('d') | keys.('D') -> {
+                cam.yaw <- cam.yaw + turnSpeed
+            }
+
+            // keep yaw in 0..360
+            if cam.yaw >= 360 -> cam.yaw <- cam.yaw - 360
+            if cam.yaw < 0 -> cam.yaw <- cam.yaw + 360
+
+            // Build a single world transform that represents the inverse of the camera
+            worldTransform := {
+                // translate world by negative camera position
+                tx: 0 - cam.x
+                ty: 0 - cam.y
+                tz: 0 - cam.z
+                // rotate world by negative camera angles (pitch then yaw)
+                rx: 0 - cam.pitch
+                ry: 0 - cam.yaw
+                rz: 0
+            }
+
+            gui.beginFrame(win)
+            renderer.clear()
+
+            // ground plane grid (wireframe) for reference
+            renderer.renderGrid(40, 1, worldTransform, gui.rgb(80, 140, 120))
+
+            // render terrain solid
+            renderer.renderMeshSolid(terrain, worldTransform, gui.rgb(80, 180, 90))
+
+            // small marker at player's feet
+            renderer.renderCubeSolid(0.2, {tx: 0, ty: -cam.y + 0.12, tz: 0}, gui.rgb(255, 220, 120))
+
+            // HUD
+            gui.drawText(win, 16, 18, 'Rugged Grass Plains - WASD to move, A/D rotate')
+            gui.drawText(win, 16, 40, 'Position: ' + string(cam.x) + ', ' + string(cam.y) + ', ' + string(cam.z))
+            gui.drawText(win, 16, 62, 'Yaw: ' + string(int(cam.yaw)))
+
+            gui.endFrame(win)
+        }
+
+        gui.run(window, onEvent, onFrame)
+        gui.close(window)
+    }
+    _ -> {
+        println('Failed to create window: ' + string(window))
+    }
+}
