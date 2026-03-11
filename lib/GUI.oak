@@ -941,18 +941,34 @@ fn _projectPoint(window, p, camera) {
 	cam := _default(camera, {})
 	camZ := _default(cam.z, 5)
 	fov := _default(cam.fov, 90)
+	mode := _default(cam.mode, 'perspective')
 
 	z := p.z + camZ
-	if z <= 0.05 {
-		true -> ?
-		_ -> {
+	if mode = 'orthographic' {
+		true -> {
 			halfW := window.width / 2
 			halfH := window.height / 2
-			focal := halfW / tan(degToRad(fov / 2))
+			orthoScale := _default(cam.orthoScale, 4)
+			scale := halfW / orthoScale
 			{
-				x: int(halfW + (p.x * focal) / z)
-				y: int(halfH - (p.y * focal) / z)
+				x: int(halfW + p.x * scale)
+				y: int(halfH - p.y * scale)
 				z: z
+			}
+		}
+		_ -> {
+			if z <= 0.05 {
+				true -> ?
+				_ -> {
+					halfW := window.width / 2
+					halfH := window.height / 2
+					focal := halfW / tan(degToRad(fov / 2))
+					{
+						x: int(halfW + (p.x * focal) / z)
+						y: int(halfH - (p.y * focal) / z)
+						z: z
+					}
+				}
 			}
 		}
 	}
@@ -1063,6 +1079,245 @@ fn CubeMesh(size) {
 	}
 }
 
+fn Mesh(vertices, edges) {
+	{
+		vertices: _default(vertices, [])
+		edges: _default(edges, [])
+	}
+}
+
+fn GridMesh(size, step) {
+	half := _default(size, 10) / 2
+	s := _default(step, 1)
+
+	fn subX(x, vertices, edges) if x > half {
+		true -> {
+			Mesh(vertices, edges)
+		}
+		_ -> {
+			i := len(vertices)
+			v0 := Vec3(x, 0, 0 - half)
+			v1 := Vec3(x, 0, half)
+			subX(x + s, vertices << v0 << v1, edges << [i, i + 1])
+		}
+	}
+
+	fn subZ(z, mesh) if z > half {
+		true -> mesh
+		_ -> {
+			i := len(mesh.vertices)
+			v0 := Vec3(0 - half, 0, z)
+			v1 := Vec3(half, 0, z)
+			subZ(z + s, {
+				vertices: mesh.vertices << v0 << v1
+				edges: mesh.edges << [i, i + 1]
+			})
+		}
+	}
+
+	subZ(0 - half, subX(0 - half, [], []))
+}
+
+fn AxesMesh(length) {
+	l := _default(length, 3)
+	Mesh(
+		[
+			Vec3(0, 0, 0)
+			Vec3(l, 0, 0)
+			Vec3(0, l, 0)
+			Vec3(0, 0, l)
+		]
+		[
+			[0, 1]
+			[0, 2]
+			[0, 3]
+		]
+	)
+}
+
+fn _vecKey(v) string(v.x) + ',' + string(v.y) + ',' + string(v.z)
+
+fn _edgeKey(a, b) if a < b {
+	true -> string(a) + '|' + string(b)
+	_ -> string(b) + '|' + string(a)
+}
+
+fn _addVertex(vertices, indexByKey, v) {
+	key := _vecKey(v)
+	if existing := indexByKey.(key) {
+		? -> {
+			idx := len(vertices)
+			indexByKey.(key) <- idx
+			{
+				vertices: vertices << v
+				indexByKey: indexByKey
+				idx: idx
+			}
+		}
+		_ -> {
+			{
+				vertices: vertices
+				indexByKey: indexByKey
+				idx: existing
+			}
+		}
+	}
+}
+
+fn _addEdge(edges, edgeSet, a, b) {
+	k := _edgeKey(a, b)
+	if edgeSet.(k) {
+		? -> {
+			edgeSet.(k) <- true
+			{
+				edges: edges << [a, b]
+				edgeSet: edgeSet
+			}
+		}
+		_ -> {
+			{
+				edges: edges
+				edgeSet: edgeSet
+			}
+		}
+	}
+}
+
+fn _voxelMeshSub(voxels, voxelSize, i, vertices, indexByKey, edges, edgeSet) if i {
+	len(voxels) -> Mesh(vertices, edges)
+	_ -> {
+		v := voxels.(i)
+		hs := voxelSize / 2
+		x := _default(v.x, 0)
+		y := _default(v.y, 0)
+		z := _default(v.z, 0)
+
+		cubeVerts := [
+			Vec3(x - hs, y - hs, z - hs)
+			Vec3(x + hs, y - hs, z - hs)
+			Vec3(x + hs, y + hs, z - hs)
+			Vec3(x - hs, y + hs, z - hs)
+			Vec3(x - hs, y - hs, z + hs)
+			Vec3(x + hs, y - hs, z + hs)
+			Vec3(x + hs, y + hs, z + hs)
+			Vec3(x - hs, y + hs, z + hs)
+		]
+
+		edgePairs := [
+			[0, 1]
+			[1, 2]
+			[2, 3]
+			[3, 0]
+			[4, 5]
+			[5, 6]
+			[6, 7]
+			[7, 4]
+			[0, 4]
+			[1, 5]
+			[2, 6]
+			[3, 7]
+		]
+
+		fn addVertsSub(j, vv, map, outIdx) if j {
+			len(cubeVerts) -> {
+				{
+					vertices: vv
+					indexByKey: map
+					indices: outIdx
+				}
+			}
+			_ -> {
+				added := _addVertex(vv, map, cubeVerts.(j))
+				addVertsSub(j + 1, added.vertices, added.indexByKey, outIdx << added.idx)
+			}
+		}
+
+		addedVerts := addVertsSub(0, vertices, indexByKey, [])
+
+		fn addEdgesSub(j, ee, set) if j {
+			len(edgePairs) -> {
+				{
+					edges: ee
+					edgeSet: set
+				}
+			}
+			_ -> {
+				ep := edgePairs.(j)
+				step := _addEdge(ee, set, addedVerts.indices.(ep.0), addedVerts.indices.(ep.1))
+				addEdgesSub(j + 1, step.edges, step.edgeSet)
+			}
+		}
+
+		addedEdges := addEdgesSub(0, edges, edgeSet)
+
+		_voxelMeshSub(
+			voxels
+			voxelSize
+			i + 1
+			addedVerts.vertices
+			addedVerts.indexByKey
+			addedEdges.edges
+			addedEdges.edgeSet
+		)
+	}
+}
+
+fn VoxelMesh(voxels, voxelSize) _voxelMeshSub(_default(voxels, []), _default(voxelSize, 1), 0, [], {}, [], {})
+
+fn VoxelGrid(options) {
+	opts := _default(options, {})
+	voxelSize := _default(opts.voxelSize, 1)
+	voxels := _default(opts.voxels, [])
+
+	fn indexOf(x, y, z, i) if i {
+		len(voxels) -> -1
+		_ -> {
+			v := voxels.(i)
+			if [v.x = x, v.y = y, v.z = z] {
+				[true, true, true] -> i
+				_ -> indexOf(x, y, z, i + 1)
+			}
+		}
+	}
+
+	fn setVoxel(x, y, z, value) {
+		i := indexOf(x, y, z, 0)
+		fn withoutIndex(j, out) if j {
+			len(voxels) -> out
+			_ -> if j = i {
+				true -> withoutIndex(j + 1, out)
+				_ -> withoutIndex(j + 1, out << voxels.(j))
+			}
+		}
+		if value {
+			false -> if i >= 0 {
+				true -> voxels <- withoutIndex(0, [])
+			}
+			_ -> if i >= 0 {
+				true -> voxels.(i) <- {
+					x: x
+					y: y
+					z: z
+				}
+				_ -> voxels <- voxels << {
+					x: x
+					y: y
+					z: z
+				}
+			}
+		}
+	}
+
+	{
+		voxelSize: voxelSize
+		voxels: fn() voxels
+		set: fn(x, y, z, value) setVoxel(x, y, z, _default(value, true))
+		get: fn(x, y, z) indexOf(x, y, z, 0) >= 0
+		clear: fn() voxels <- []
+		toMesh: fn() VoxelMesh(voxels, voxelSize)
+	}
+}
+
 fn drawMeshWireframe(window, mesh, transform, camera, color) {
 	verts := _transformVertices(mesh.vertices, transform, 0, [])
 	edges := mesh.edges
@@ -1097,6 +1352,7 @@ fn Renderer3D(window, options) {
 	camera := _default(opts.camera, {
 		z: 5
 		fov: 90
+		mode: 'perspective'
 	})
 	background := _default(opts.background, rgb(8, 14, 22))
 	lineColor := _default(opts.lineColor, rgb(96, 190, 255))
@@ -1106,9 +1362,24 @@ fn Renderer3D(window, options) {
 		camera: camera
 		background: background
 		lineColor: lineColor
+		setCamera: fn(nextCamera) camera <- _default(nextCamera, camera)
+		setProjection: fn(mode, orthoScale) camera <- {
+			z: _default(camera.z, 5)
+			fov: _default(camera.fov, 90)
+			mode: _default(mode, _default(camera.mode, 'perspective'))
+			orthoScale: _default(orthoScale, _default(camera.orthoScale, 4))
+		}
 		clear: fn() fillRect(window, 0, 0, window.width, window.height, background)
 		renderMesh: fn(mesh, transform, color) drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
 		renderCube: fn(size, transform, color) drawMeshWireframe(window, CubeMesh(size), transform, camera, _default(color, lineColor))
+		renderGrid: fn(size, step, transform, color) drawMeshWireframe(window, GridMesh(size, step), transform, camera, _default(color, lineColor))
+		renderAxes: fn(length, transform) {
+			drawMeshWireframe(window, Mesh([Vec3(0, 0, 0), Vec3(_default(length, 3), 0, 0)], [[0, 1]]), transform, camera, rgb(255, 90, 90))
+			drawMeshWireframe(window, Mesh([Vec3(0, 0, 0), Vec3(0, _default(length, 3), 0)], [[0, 1]]), transform, camera, rgb(120, 255, 140))
+			drawMeshWireframe(window, Mesh([Vec3(0, 0, 0), Vec3(0, 0, _default(length, 3))], [[0, 1]]), transform, camera, rgb(120, 170, 255))
+		}
+		renderVoxels: fn(voxels, voxelSize, transform, color) drawMeshWireframe(window, VoxelMesh(voxels, _default(voxelSize, 1)), transform, camera, _default(color, lineColor))
+		renderVoxelGrid: fn(grid, transform, color) drawMeshWireframe(window, grid.toMesh(), transform, camera, _default(color, lineColor))
 	}
 }
 

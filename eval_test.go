@@ -2111,6 +2111,12 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 			type(gui.webglFlush)
 			type(gui.Vec3)
 			type(gui.CubeMesh)
+			type(gui.Mesh)
+			type(gui.GridMesh)
+			type(gui.AxesMesh)
+			type(gui.VoxelMesh)
+			type(gui.VoxelGrid)
+			type(gui.degToRad)
 			type(gui.drawLine)
 			type(gui.drawMeshWireframe)
 			type(gui.Renderer3D)
@@ -2137,6 +2143,12 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 	`, MakeList(
 		AtomValue("atom"),
 		AtomValue("int"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),

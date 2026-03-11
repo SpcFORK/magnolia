@@ -222,6 +222,42 @@ Returns a cube wireframe mesh object:
 - `vertices` list
 - `edges` index pairs
 
+### `Mesh(vertices?, edges?)`
+
+Constructs a custom wireframe mesh object.
+
+### `GridMesh(size?, step?)`
+
+Builds an XZ-plane wireframe grid mesh.
+
+### `AxesMesh(length?)`
+
+Builds an XYZ axis wireframe mesh.
+
+### `VoxelMesh(voxels, voxelSize?)`
+
+Builds a wireframe mesh from voxel center positions.
+
+- `voxels`: list of objects like `{x: 0, y: 1, z: 2}`
+- `voxelSize`: cube size per voxel (default `1`)
+
+### `VoxelGrid(options?)`
+
+Mutable voxel set helper.
+
+Options:
+
+- `voxelSize`
+- `voxels` (initial list)
+
+Methods:
+
+- `set(x, y, z, value?)`
+- `get(x, y, z)`
+- `clear()`
+- `voxels()`
+- `toMesh()`
+
 ### `drawMeshWireframe(window, mesh, transform?, camera?, color?)`
 
 Projects and draws mesh edges as 2D lines.
@@ -236,6 +272,8 @@ Camera fields:
 
 - `z` (distance offset)
 - `fov` (degrees)
+- `mode` (`'perspective'` or `'orthographic'`)
+- `orthoScale` (orthographic zoom scale)
 
 ### `Renderer3D(window, options?)`
 
@@ -249,9 +287,15 @@ Options:
 
 Returns object methods:
 
+- `setCamera(camera)`
+- `setProjection(mode, orthoScale?)`
 - `clear()`
 - `renderMesh(mesh, transform?, color?)`
 - `renderCube(size?, transform?, color?)`
+- `renderGrid(size?, step?, transform?, color?)`
+- `renderAxes(length?, transform?)`
+- `renderVoxels(voxels, voxelSize?, transform?, color?)`
+- `renderVoxelGrid(grid, transform?, color?)`
 
 ## Example
 
