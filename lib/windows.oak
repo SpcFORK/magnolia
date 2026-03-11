@@ -386,6 +386,161 @@ fn waitMessage() if isWindows?() {
 	_ -> _platformError('waitMessage')
 }
 
+fn ptrSize() if ___runtime_sys_info().arch {
+	'amd64' -> 8
+	'arm64' -> 8
+	_ -> 4
+}
+
+fn writePtr(address, value) if ptrSize() {
+	8 -> writeU64(address, value)
+	_ -> writeU32(address, value)
+}
+
+fn ptrInt(ptrOrInt) ptr_int(ptrOrInt)
+
+fn callValueOrZero(res) if sys.ok?(res) {
+	true -> res.r1
+	_ -> 0
+}
+
+fn _zeros(n, acc) if n {
+	0 -> acc
+	_ -> _zeros(n - 1, acc << 0)
+}
+
+fn callOk?(res) sys.ok?(res) | (res.type = :error & res.r1 > 0)
+
+fn noMessage?(res) {
+	(sys.ok?(res) & res.r1 = 0) |
+	(res.type = :error & res.errno = 1400)
+}
+
+fn windowAlive?(hwnd) {
+	res := isWindow(hwnd)
+	sys.ok?(res) & res.r1 > 0
+}
+
+fn msgStructSize() if ptrSize() {
+	8 -> 48
+	_ -> 28
+}
+
+// Returns a zero-initialized MSG-compatible byte buffer.
+fn createMsgBuffer() bits(_zeros(msgStructSize(), []))
+
+// Pumps one message iteration for `hwnd` using PeekMessageW + WaitMessage.
+// Returns {type: :dispatch|:idle|:closed|:error, ...}.
+fn pumpWindowMessage(hwnd, msgPtr) if isWindows?() {
+	true -> if windowAlive?(hwnd) {
+		true -> {
+			msg := peekMessage(msgPtr, 0, 0, 0, PM_REMOVE)
+			if callOk?(msg) | noMessage?(msg) {
+				true -> if msg.r1 > 0 {
+					true -> {
+						translateMessage(msgPtr)
+						dispatchMessage(msgPtr)
+						{type: :dispatch, detail: msg}
+					}
+					_ -> {
+						waitMessage()
+						{type: :idle, detail: msg}
+					}
+				}
+				_ -> {
+					{type: :error, error: 'PeekMessageW failed', detail: msg}
+				}
+			}
+		}
+		_ -> {type: :closed}
+	}
+	_ -> _platformError('pumpWindowMessage')
+}
+
+// Registers a top-level window class using DefWindowProcW.
+fn registerDefaultWindowClass(className) if isWindows?() {
+	true -> {
+		size := if ptrSize() {
+			8 -> 80
+			_ -> 48
+		}
+
+		wcBuf := bits({
+			fn zeros(n, acc) if n {
+				0 -> acc
+				_ -> zeros(n - 1, acc << 0)
+			}
+			zeros(size, [])
+		})
+		wcPtr := addr(wcBuf)
+
+		defProc := resolveInLoaded(User32, 'DefWindowProcW')
+		defProcAddr := if defProc.type {
+			:ok -> defProc.proc
+			_ -> 0
+		}
+
+		cursorHandle := callValueOrZero(loadCursor(0, IDC_ARROW))
+		iconHandle := callValueOrZero(loadIcon(0, IDI_APPLICATION))
+		classWide := wstr(className)
+		classWidePtr := ptrInt(addr(classWide))
+
+		writeU32(wcPtr + 0, size)
+		writeU32(wcPtr + 4, CS_HREDRAW | CS_VREDRAW)
+		writePtr(wcPtr + 8, defProcAddr)
+		writeU32(wcPtr + 16, 0)
+		writeU32(wcPtr + 20, 0)
+		writePtr(wcPtr + 24, imageBase())
+		writePtr(wcPtr + 24 + ptrSize(), iconHandle)
+		writePtr(wcPtr + 24 + ptrSize() * 2, cursorHandle)
+		writePtr(wcPtr + 24 + ptrSize() * 3, 6)
+		writePtr(wcPtr + 24 + ptrSize() * 4, 0)
+		writePtr(wcPtr + 24 + ptrSize() * 5, classWidePtr)
+		writePtr(wcPtr + 24 + ptrSize() * 6, iconHandle)
+
+		registerClassEx(wcPtr)
+	}
+	_ -> _platformError('registerDefaultWindowClass')
+}
+
+fn createTopLevelWindow(className, title, width, height) if isWindows?() {
+	true -> createWindowEx(
+		0
+		className
+		title
+		WS_OVERLAPPEDWINDOW | WS_VISIBLE
+		CW_USEDEFAULT
+		CW_USEDEFAULT
+		width
+		height
+		0
+		0
+		imageBase()
+		0
+	)
+	_ -> _platformError('createTopLevelWindow')
+}
+
+// Runs a native Win32 message loop on the current thread until the window closes.
+fn runWindowLoop(hwnd) if isWindows?() {
+	true -> win_msg_loop(hwnd)
+	_ -> _platformError('runWindowLoop')
+}
+
+// Runs a close-aware PeekMessageW loop for `hwnd` until the window closes.
+fn runWindowLoopPeek(hwnd, msgPtr) if isWindows?() {
+	true -> {
+		step := pumpWindowMessage(hwnd, msgPtr)
+		if step.type {
+			:dispatch -> runWindowLoopPeek(hwnd, msgPtr)
+			:idle -> runWindowLoopPeek(hwnd, msgPtr)
+			:closed -> 0
+			_ -> step
+		}
+	}
+	_ -> _platformError('runWindowLoopPeek')
+}
+
 fn messageBox(hwnd, text, caption, msgType) if isWindows?() {
 	true -> user32('MessageBoxW', hwnd, wstr(text), wstr(caption), msgType)
 	_ -> _platformError('messageBox')
@@ -470,11 +625,7 @@ fn getLastError() if isWindows?() {
 fn formatMessage(errorCode) if isWindows?() {
 	true -> {
 		wideChars := 1024
-		fn zeros(n, acc) if n {
-			0 -> acc
-			_ -> zeros(n - 1, acc << 0)
-		}
-		buf := bits(zeros(wideChars * 2, []))
+		buf := bits(_zeros(wideChars * 2, []))
 		res := kernel32(
 			'FormatMessageW'
 			FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS

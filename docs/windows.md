@@ -166,6 +166,42 @@ Core window lifecycle helpers.
 
 Message-loop helpers. `msgPtr` should point to a `MSG`-compatible buffer.
 
+### `callOk?(res)`
+
+Returns true for a successful syscall result, and also treats some Win32
+interop cases with `r1 > 0` as truthy.
+
+### `noMessage?(res)`
+
+Returns true when a peek/get call produced no queued message.
+
+### `windowAlive?(hwnd)`
+
+Returns true when `IsWindow(hwnd)` indicates the handle is still valid.
+
+### `msgStructSize()`
+
+Returns platform-correct `MSG` struct byte size (`48` on 64-bit, `28` on
+32-bit targets).
+
+### `createMsgBuffer()`
+
+Allocates and returns a zero-initialized `MSG`-compatible byte buffer.
+
+### `pumpWindowMessage(hwnd, msgPtr)`
+
+Runs one non-blocking `PeekMessageW` loop iteration and returns one of:
+
+- `{type: :dispatch, detail: ...}` when a message was dispatched
+- `{type: :idle, detail: ...}` when no message was pending
+- `{type: :closed}` when the window is no longer valid
+- `{type: :error, ...}` on unexpected call failure
+
+### `runWindowLoopPeek(hwnd, msgPtr)`
+
+Runs a close-aware `PeekMessageW` + `WaitMessage` loop until `hwnd` closes.
+Returns `0` when the window closes, or an error object.
+
 ### `messageBox(hwnd, text, caption, msgType)`
 ### `setWindowText(hwnd, text)`
 ### `loadCursor(instance, cursorId)`

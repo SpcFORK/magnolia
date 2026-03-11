@@ -94,16 +94,17 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("exec", c.callbackify(c.oakExec))
 	c.LoadFunc("sysproc", c.oakSysProc)
 	c.LoadFunc("syscall", c.oakSyscall)
+	c.LoadFunc("win_msg_loop", c.oakWinMsgLoop)
 	c.LoadFunc("utf16", c.oakUTF16)
 	c.LoadFunc("bits", c.oakBits)
 	c.LoadFunc("addr", c.oakAddr)
 	c.LoadFunc("pointer", c.oakPointer) // convert integer or string to a pointer value
+	c.LoadFunc("ptr_int", c.oakPtrInt)
 	c.LoadFunc("memread", c.oakMemRead)
 	c.LoadFunc("memwrite", c.oakMemWrite)
 	c.LoadFunc("go", c.oakGo)
 	c.LoadFunc("lock_thread", c.oakLockThread)
 	c.LoadFunc("unlock_thread", c.oakUnlockThread)
-	c.LoadFunc("win_run_loop", c.oakWinRunLoop)
 	c.LoadFunc("make_chan", c.oakMakeChan)
 	c.LoadFunc("chan_send", c.oakChanSend)
 	c.LoadFunc("chan_recv", c.oakChanRecv)
@@ -980,6 +981,23 @@ func (c *Context) oakAddr(args []Value) (Value, *runtimeError) {
 	}
 }
 
+func (c *Context) oakPtrInt(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("ptr_int", args, 1); err != nil {
+		return nil, err
+	}
+
+	switch arg := args[0].(type) {
+	case PointerValue:
+		return IntValue(arg), nil
+	case IntValue:
+		return arg, nil
+	default:
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("ptr_int() expects pointer or int, got %s", args[0]),
+		}
+	}
+}
+
 func (c *Context) oakMemRead(args []Value) (Value, *runtimeError) {
 	if err := c.requireArgLen("memread", args, 2); err != nil {
 		return nil, err
@@ -1150,6 +1168,73 @@ func (c *Context) oakSyscall(args []Value) (Value, *runtimeError) {
 	}, nil
 }
 
+func (c *Context) oakWinMsgLoop(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("win_msg_loop", args, 1); err != nil {
+		return nil, err
+	}
+
+	if runtime.GOOS != "windows" {
+		return errObj("win_msg_loop is only supported on Windows"), nil
+	}
+
+	var hwnd uintptr
+	switch v := args[0].(type) {
+	case IntValue:
+		if v < 0 {
+			return nil, &runtimeError{reason: fmt.Sprintf("win_msg_loop expects a non-negative handle, got %d", v)}
+		}
+		hwnd = uintptr(v)
+	case PointerValue:
+		hwnd = uintptr(v)
+	default:
+		return nil, &runtimeError{reason: fmt.Sprintf("win_msg_loop expects int or pointer, got %s", args[0])}
+	}
+
+	getMessageAddr, err := lookupSysProc("user32.dll", "GetMessageW")
+	if err != nil {
+		return errObj("Could not resolve user32.dll!GetMessageW: " + err.Error()), nil
+	}
+	translateMessageAddr, err := lookupSysProc("user32.dll", "TranslateMessage")
+	if err != nil {
+		return errObj("Could not resolve user32.dll!TranslateMessage: " + err.Error()), nil
+	}
+	dispatchMessageAddr, err := lookupSysProc("user32.dll", "DispatchMessageW")
+	if err != nil {
+		return errObj("Could not resolve user32.dll!DispatchMessageW: " + err.Error()), nil
+	}
+	isWindowAddr, err := lookupSysProc("user32.dll", "IsWindow")
+	if err != nil {
+		return errObj("Could not resolve user32.dll!IsWindow: " + err.Error()), nil
+	}
+
+	msgBuf := make([]byte, 48)
+	msgPtr := uintptr(unsafe.Pointer(&msgBuf[0]))
+
+	for {
+		alive, _, _ := syscall.SyscallN(isWindowAddr, hwnd)
+		if alive == 0 {
+			return IntValue(0), nil
+		}
+
+		r1, _, callErr := syscall.SyscallN(getMessageAddr, msgPtr, 0, 0, 0)
+		if int32(r1) == -1 {
+			return ObjectValue{
+				"type":  AtomValue("error"),
+				"error": MakeString(callErr.Error()),
+				"errno": IntValue(callErr),
+				"r1":    IntValue(r1),
+				"r2":    IntValue(0),
+			}, nil
+		}
+		if r1 == 0 {
+			return IntValue(0), nil
+		}
+
+		syscall.SyscallN(translateMessageAddr, msgPtr)
+		syscall.SyscallN(dispatchMessageAddr, msgPtr)
+	}
+}
+
 func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 	if len(args) < 1 {
 		return nil, &runtimeError{
@@ -1194,125 +1279,6 @@ func (c *Context) oakUnlockThread(args []Value) (Value, *runtimeError) {
 	}
 	runtime.UnlockOSThread()
 	return null, nil
-}
-
-type winMsg struct {
-	Hwnd    uintptr
-	Message uint32
-	_       uint32
-	WParam  uintptr
-	LParam  uintptr
-	Time    uint32
-	_       uint32
-	PtX     int32
-	PtY     int32
-}
-
-func (c *Context) oakWinRunLoop(args []Value) (Value, *runtimeError) {
-	if runtime.GOOS != "windows" {
-		return errObj("win_run_loop is only supported on Windows"), nil
-	}
-	if err := c.requireArgLen("win_run_loop", args, 3); err != nil {
-		return nil, err
-	}
-
-	hwndVal, ok := args[0].(IntValue)
-	if !ok || hwndVal <= 0 {
-		return nil, &runtimeError{reason: fmt.Sprintf("win_run_loop hwnd must be a positive int, got %s", args[0])}
-	}
-
-	var msgPtr uintptr
-	switch v := args[1].(type) {
-	case IntValue:
-		if v <= 0 {
-			return nil, &runtimeError{reason: fmt.Sprintf("win_run_loop msgPtr must be positive, got %s", args[1])}
-		}
-		msgPtr = uintptr(v)
-	case PointerValue:
-		if v <= 0 {
-			return nil, &runtimeError{reason: fmt.Sprintf("win_run_loop msgPtr must be positive, got %s", args[1])}
-		}
-		msgPtr = uintptr(v)
-	default:
-		return nil, &runtimeError{reason: fmt.Sprintf("win_run_loop msgPtr must be int or pointer, got %s", args[1])}
-	}
-
-	onTick, ok := args[2].(FnValue)
-	if !ok {
-		return nil, &runtimeError{reason: fmt.Sprintf("win_run_loop onTick must be a function, got %s", args[2])}
-	}
-
-	frameDelay := 16 * time.Millisecond
-	if len(args) >= 4 {
-		switch v := args[3].(type) {
-		case IntValue:
-			frameDelay = time.Duration(float64(v) * float64(time.Second))
-		case FloatValue:
-			frameDelay = time.Duration(float64(v) * float64(time.Second))
-		default:
-			return nil, &runtimeError{reason: fmt.Sprintf("win_run_loop frameDelay must be int or float, got %s", args[3])}
-		}
-		if frameDelay < 0 {
-			frameDelay = 0
-		}
-	}
-
-	peekProc, err := lookupSysProc("user32.dll", "PeekMessageW")
-	if err != nil {
-		return errObj(fmt.Sprintf("Could not resolve PeekMessageW: %s", err)), nil
-	}
-	translateProc, err := lookupSysProc("user32.dll", "TranslateMessage")
-	if err != nil {
-		return errObj(fmt.Sprintf("Could not resolve TranslateMessage: %s", err)), nil
-	}
-	dispatchProc, err := lookupSysProc("user32.dll", "DispatchMessageW")
-	if err != nil {
-		return errObj(fmt.Sprintf("Could not resolve DispatchMessageW: %s", err)), nil
-	}
-	isWindowProc, err := lookupSysProc("user32.dll", "IsWindow")
-	if err != nil {
-		return errObj(fmt.Sprintf("Could not resolve IsWindow: %s", err)), nil
-	}
-
-	hwnd := uintptr(hwndVal)
-	frame := int64(0)
-	for {
-		r1, _, callErr := syscall.SyscallN(peekProc, msgPtr, 0, 0, 0, 1)
-		if callErr != 0 && callErr != syscall.Errno(1400) {
-			return ObjectValue{
-				"type":  AtomValue("error"),
-				"error": MakeString(callErr.Error()),
-				"errno": IntValue(callErr),
-				"r1":    IntValue(r1),
-				"r2":    IntValue(0),
-			}, nil
-		}
-
-		if r1 != 0 {
-			msg := (*winMsg)(unsafe.Pointer(msgPtr))
-			syscall.SyscallN(translateProc, msgPtr)
-			syscall.SyscallN(dispatchProc, msgPtr)
-			if msg.Message == 0x0012 {
-				return IntValue(frame), nil
-			}
-			continue
-		}
-
-		alive, _, _ := syscall.SyscallN(isWindowProc, hwnd)
-		if alive == 0 {
-			return IntValue(frame), nil
-		}
-
-		_, evalErr := c.EvalFnValue(onTick, false, IntValue(frame))
-		if evalErr != nil {
-			return nil, evalErr
-		}
-		frame++
-
-		if frameDelay > 0 {
-			time.Sleep(frameDelay)
-		}
-	}
 }
 
 func (c *Context) oakMakeChan(args []Value) (Value, *runtimeError) {

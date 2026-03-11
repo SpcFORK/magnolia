@@ -13,34 +13,41 @@
 
 windows := import('windows')
 
-fn zeros(n, acc) if n {
-	0 -> acc
-	_ -> zeros(n - 1, acc << 0)
-}
-
 fn rgb(r, g, b) r | (g << 8) | (b << 16)
 
-fn ok?(res) res.type = :ok | res.type = :success
+fn drawScene(hwnd) {
+	hdc := windows.getDC(hwnd)
+	if hdc.type {
+		:ok -> if hdc.r1 > 0 -> {
+			brush := windows.createSolidBrush(rgb(55, 140, 225))
+			if brush.type {
+				:ok -> if brush.r1 > 0 {
+					true -> {
+						windows.selectObject(hdc.r1, brush.r1)
+						windows.rectangle(hdc.r1, 24, 70, 320, 230)
+						windows.ellipse(hdc.r1, 360, 70, 620, 230)
+						windows.deleteObject(brush.r1)
+					}
+				}
+			}
 
-fn callOk?(res) ok?(res) | (res.type = :error & res.r1 > 0)
-
-fn noMessage?(res) {
-	(ok?(res) & res.r1 = 0) |
-	(res.type = :error & res.errno = 1400)
+			windows.textOut(hdc.r1, 24, 24, 'Hello from Magnolia + Win32 GDI')
+			windows.textOut(hdc.r1, 24, 250, 'Close the window to exit the loop.')
+			windows.releaseDC(hwnd, hdc.r1)
+		}
+	}
 }
 
-fn runMessageLoop(msgPtr) {
-	msg := windows.getMessage(msgPtr, 0, 0, 0)
-	if callOk?(msg) | noMessage?(msg) {
-		true -> if msg.r1 > 0 {
-			true -> {
-				windows.translateMessage(msgPtr)
-				windows.dispatchMessage(msgPtr)
-				runMessageLoop(msgPtr)
-			}
-			_ -> 0
+fn runMessageLoopAndRedraw(hwnd, msgPtr) {
+	step := windows.pumpWindowMessage(hwnd, msgPtr)
+	if step.type {
+		:dispatch -> {
+			if windows.windowAlive?(hwnd) -> drawScene(hwnd)
+			runMessageLoopAndRedraw(hwnd, msgPtr)
 		}
-		_ -> msg
+		:idle -> runMessageLoopAndRedraw(hwnd, msgPtr)
+		:closed -> 0
+		_ -> step
 	}
 }
 
@@ -49,54 +56,31 @@ println('== Windows Draw Sample ==')
 if windows.isWindows?() {
 	true -> {
 		lock_thread()
-		hwnd := windows.createWindowEx(
-			0
-			'STATIC'
-			'Magnolia GDI Drawing Sample'
-			windows.WS_OVERLAPPEDWINDOW | windows.WS_VISIBLE
-			windows.CW_USEDEFAULT
-			windows.CW_USEDEFAULT
-			900
-			560
-			0
-			0
-			windows.imageBase()
-			0
-		)
+		className := 'MagnoliaDrawWindowClass'
+		registerClassExResult := windows.registerDefaultWindowClass(className)
+		if windows.callOk?(registerClassExResult) & registerClassExResult.r1 = 0 -> {
+			println('RegisterClassExW failed.')
+			println(string(registerClassExResult))
+			unlock_thread()
+			exit(1)
+		}
+
+		hwnd := windows.createTopLevelWindow(className, 'Magnolia GDI Drawing Sample', 900, 560)
 
 		if hwnd.type {
 			:ok -> if hwnd.r1 > 0 {
 				true -> {
 					windows.showWindow(hwnd.r1, windows.SW_SHOW)
 					windows.updateWindow(hwnd.r1)
-
-					hdc := windows.getDC(hwnd.r1)
-					if hdc.type {
-						:ok -> if hdc.r1 > 0 {
-							true -> {
-								brush := windows.createSolidBrush(rgb(55, 140, 225))
-								if brush.type {
-									:ok -> if brush.r1 > 0 {
-										true -> {
-											windows.selectObject(hdc.r1, brush.r1)
-											windows.rectangle(hdc.r1, 24, 70, 320, 230)
-											windows.ellipse(hdc.r1, 360, 70, 620, 230)
-											windows.deleteObject(brush.r1)
-										}
-									}
-								}
-
-								windows.textOut(hdc.r1, 24, 24, 'Hello from Magnolia + Win32 GDI')
-								windows.textOut(hdc.r1, 24, 250, 'Close the window to exit the loop.')
-								windows.releaseDC(hwnd.r1, hdc.r1)
-							}
-						}
-					}
+					drawScene(hwnd.r1)
 
 					printf('Window handle: {{ 0 }}', hwnd.r1)
-					msgBuf := bits(zeros(48, []))
-					loopResult := runMessageLoop(addr(msgBuf))
+					msgBuf := windows.createMsgBuffer()
+					loopResult := runMessageLoopAndRedraw(hwnd.r1, addr(msgBuf))
 					printf('Message loop ended with: {{ 0 }}', string(loopResult))
+					if loopResult = 0 {
+						true -> exit(0)
+					}
 				}
 				_ -> {
 					println('CreateWindowExW returned null handle.')

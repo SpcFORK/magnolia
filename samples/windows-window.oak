@@ -13,54 +13,23 @@
 
 windows := import('windows')
 
-fn zeros(n, acc) if n {
-	0 -> acc
-	_ -> zeros(n - 1, acc << 0)
-}
-
-fn ok?(res) res.type = :ok | res.type = :success
-
-fn callOk?(res) ok?(res) | (res.type = :error & res.r1 > 0)
-
-fn noMessage?(res) {
-	(ok?(res) & res.r1 = 0) |
-	(res.type = :error & res.errno = 1400)
-}
-
-fn runMessageLoop(msgPtr) {
-	msg := windows.getMessage(msgPtr, 0, 0, 0)
-	if callOk?(msg) | noMessage?(msg) {
-		true -> if msg.r1 > 0 {
-			true -> {
-				windows.translateMessage(msgPtr)
-				windows.dispatchMessage(msgPtr)
-				runMessageLoop(msgPtr)
-			}
-			_ -> 0
-		}
-		_ -> msg
-	}
-}
-
 println('== Windows Window Sample ==')
 
 if windows.isWindows?() {
 	true -> {
 		lock_thread()
-		hwnd := windows.createWindowEx(
-			0
-			'STATIC'
-			'Magnolia Win32 Window'
-			windows.WS_OVERLAPPEDWINDOW | windows.WS_VISIBLE
-			windows.CW_USEDEFAULT
-			windows.CW_USEDEFAULT
-			800
-			480
-			0
-			0
-			windows.imageBase()
-			0
-		)
+		className := 'MagnoliaWindowClass'
+		registerClassExResult := windows.registerDefaultWindowClass(className)
+		if windows.callOk?(registerClassExResult) & registerClassExResult.r1 = 0 {
+			true -> {
+				println('RegisterClassExW failed.')
+				println(string(registerClassExResult))
+				unlock_thread()
+				exit(1)
+			}
+		}
+
+		hwnd := windows.createTopLevelWindow(className, 'Magnolia Win32 Window', 800, 480)
 
 		if hwnd.type {
 			:ok -> {
@@ -70,9 +39,12 @@ if windows.isWindows?() {
 						windows.updateWindow(hwnd.r1)
 						printf('Window handle: {{ 0 }}', hwnd.r1)
 
-						msgBuf := bits(zeros(48, []))
-						loopResult := runMessageLoop(addr(msgBuf))
+						msgBuf := windows.createMsgBuffer()
+						loopResult := windows.runWindowLoopPeek(hwnd.r1, addr(msgBuf))
 						printf('Message loop ended with: {{ 0 }}', string(loopResult))
+						if loopResult = 0 {
+							true -> exit(0)
+						}
 					}
 					_ -> {
 						println('CreateWindowExW returned null handle.')
