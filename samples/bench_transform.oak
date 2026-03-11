@@ -1,0 +1,54 @@
+std := import('std')
+gui3d := import('gui-3dmath')
+
+// Build a grid of vertices (row-major)
+fn buildGrid(gridN, step) {
+    fn buildRow(x, z, verts) if x >= gridN {
+        true -> verts
+        _ -> {
+            h := 0
+            vx := gui3d.Vec3((x - gridN / 2) * step, h, (z - gridN / 2) * step)
+            buildRow(x + 1, z, verts << vx)
+        }
+    }
+
+    fn buildAll(z, verts) if z >= gridN {
+        true -> verts
+        _ -> buildAll(z + 1, buildRow(0, z, verts))
+    }
+
+    buildAll(0, [])
+}
+
+// Parameters
+gridN := 50
+step := 0.6
+iterations := 30
+
+std.println('Building grid: ' + string(gridN) + 'x' + string(gridN))
+verts := buildGrid(gridN, step)
+
+// Reusable output buffer for transformVertices
+outBuf := []
+
+start := nanotime()
+
+fn run(i) if i >= iterations {
+    true -> {
+        elapsed := nanotime() - start
+        avgNs := elapsed / iterations
+        avgMs := avgNs / 1000000
+        std.println('Iterations: ' + string(iterations))
+        std.println('Total ns: ' + string(elapsed))
+        std.println('Avg ms per transform: ' + string(avgMs))
+    }
+    _ -> {
+        angle := i % 360
+        transform := { rx: angle, ry: angle }
+        gui3d.transformVertices(verts, transform, 0, outBuf)
+        if i % 5 = 0 -> std.println('iter: ' + string(i))
+        run(i + 1)
+    }
+}
+
+run(0)

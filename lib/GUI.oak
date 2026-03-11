@@ -5,6 +5,7 @@
 // - Linux: X11 via lib/linux
 // - Web/JS runtimes: logical no-op window state for portability
 
+std := import('std')
 windows := import('windows')
 linux := import('linux')
 guiMesh := import('gui-mesh')
@@ -124,7 +125,33 @@ fn beginFrame(window) if window.type {
 
 fn endFrame(window) if window.type {
 	:ok -> if window.backend {
-		:windows -> guiNativeWin.endFrame(window)
+		:windows -> {
+			res := guiNativeWin.endFrame(window)
+			// record frame timing and update FPS once per second
+			if window._frameStart {
+				? -> 0
+				_ -> {
+					delta := nanotime() - window._frameStart
+					window._fpsCount <- _default(window._fpsCount, 0) + 1
+					window._fpsAccum <- _default(window._fpsAccum, 0) + delta
+					last := _default(window._fpsLastReport, 0)
+					if last = 0 -> window._fpsLastReport <- nanotime()
+					if nanotime() - _default(window._fpsLastReport, 0) >= 1000000000 {
+						fps := int(window._fpsCount * 1000000000 / window._fpsAccum)
+						// preserve base title
+						titleBase := _default(window._titleBase, window.title)
+						window._titleBase <- titleBase
+						setTitle(window, titleBase + ' - FPS: ' + string(fps))
+						// also print to console for automated capture
+						std.println('FPS: ' + string(fps))
+						window._fpsCount <- 0
+						window._fpsAccum <- 0
+						window._fpsLastReport <- nanotime()
+					}
+				}
+			}
+			res
+		}
 		_ -> 0
 	}
 	_ -> 0

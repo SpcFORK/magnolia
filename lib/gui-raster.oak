@@ -50,6 +50,59 @@ fn _lerpX(pa, pb, y) if pb.y = pa.y {
 	_ -> pa.x + (y - pa.y) * (pb.x - pa.x) / (pb.y - pa.y)
 }
 
+fn projectVertices(deps, window, verts, camera) {
+	fn sub(i, out) if i {
+		len(verts) -> out
+		_ -> sub(i + 1, out << deps.projectPoint(window, verts.(i), camera))
+	}
+	// Project vertices and compute screen-space bounds to allow early culling
+	fn projSub(i, out, minX, maxX, minY, maxY, maxZ, anyDefined) if i {
+		len(verts) -> {
+			{
+				projected: out
+				minX: minX
+				maxX: maxX
+				minY: minY
+				maxY: maxY
+				maxZ: maxZ
+				anyDefined: anyDefined
+			}
+		}
+		_ -> {
+			p := deps.projectPoint(window, verts.(i), camera)
+			// update bounds only for defined projected points
+			if p {
+				? -> {
+					nMinX := if p.x < minX { true -> p.x _ -> minX }
+					nMaxX := if p.x > maxX { true -> p.x _ -> maxX }
+					nMinY := if p.y < minY { true -> p.y _ -> minY }
+					nMaxY := if p.y > maxY { true -> p.y _ -> maxY }
+					nMaxZ := if verts.(i).z > maxZ { true -> verts.(i).z _ -> maxZ }
+					projSub(i + 1, out << p, nMinX, nMaxX, nMinY, nMaxY, nMaxZ, true)
+				}
+				_ -> projSub(i + 1, out << p, minX, maxX, minY, maxY, maxZ, anyDefined)
+			}
+		}
+	}
+
+	projRes := projSub(0, [], window.width, 0, window.height, 0, -999999, false)
+	projected := projRes.projected
+
+	// Early reject: completely off-screen or entirely behind near plane
+	if projRes.anyDefined {
+		true -> {
+			if (projRes.maxX < 0) | (projRes.maxY < 0) | (projRes.minX >= window.width) | (projRes.minY >= window.height) {
+				true -> {type: :ok, triangles: 0}
+				_ -> 0
+			}
+			if projRes.maxZ <= 0.05 -> {type: :ok, triangles: 0}
+		}
+		_ -> 0
+	}
+}
+
+ 
+
 fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
 	true -> deps.drawLine(window, int(xa), y, int(xb), y, color)
 	_ -> deps.drawLine(window, int(xb), y, int(xa), y, color)
@@ -161,6 +214,32 @@ fn _vecNormalize(deps, v) {
 	}
 }
 
+fn projectVertices(deps, window, verts, camera) {
+	fn sub(i, out) if i {
+		len(verts) -> out
+		_ -> sub(i + 1, out << deps.projectPoint(window, verts.(i), camera))
+	}
+	sub(0, [])
+}
+
+fn computeLightParams(deps, light) {
+	lightCfg := _default(light, {})
+	ld := _vecNormalize(deps, deps.Vec3(_default(lightCfg.x, 0.35), _default(lightCfg.y, 0.75), _default(lightCfg.z, -1)))
+	amb := _clamp(_default(lightCfg.ambient, 0.22), 0, 1)
+	diff := _clamp(_default(lightCfg.diffuse, 0.78), 0, 1)
+	{
+		ld: ld
+		amb: amb
+		diff: diff
+	}
+}
+
+fn faceShadeGeneric(deps, lp, pa3, pb3, pc3) {
+	n := _vecNormalize(deps, _vecCross(deps, _vecSub(deps, pb3, pa3), _vecSub(deps, pc3, pa3)))
+	ndotl := 0 - _vecDot(n, lp.ld)
+	lp.amb + lp.diff * _clamp(ndotl, 0, 1)
+}
+
 fn _colorR(c) c & 255
 fn _colorG(c) (c >> 8) & 255
 fn _colorB(c) (c >> 16) & 255
@@ -177,24 +256,13 @@ fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (p
 
 fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
-	fn sub(i, out) if i {
-		len(verts) -> out
-		_ -> sub(i + 1, out << deps.projectPoint(window, verts.(i), camera))
-	}
-	projected := sub(0, [])
+	projected := projectVertices(deps, window, verts, camera)
 	faces := _default(mesh.faces, [])
 	faceColors := _default(mesh.faceColors, [])
 	cam := _default(camera, {})
 	backfaceCulling := _default(cam.backfaceCulling, true)
-	lightCfg := _default(light, {})
-	ld := _vecNormalize(deps, deps.Vec3(_default(lightCfg.x, 0.35), _default(lightCfg.y, 0.75), _default(lightCfg.z, -1)))
-	amb := _clamp(_default(lightCfg.ambient, 0.22), 0, 1)
-	diff := _clamp(_default(lightCfg.diffuse, 0.78), 0, 1)
-	faceShade := fn(pa3, pb3, pc3) {
-		n := _vecNormalize(deps, _vecCross(deps, _vecSub(deps, pb3, pa3), _vecSub(deps, pc3, pa3)))
-		ndotl := 0 - _vecDot(n, ld)
-		amb + diff * _clamp(ndotl, 0, 1)
-	}
+	lightParams := computeLightParams(deps, light)
+	faceShade := fn(pa3, pb3, pc3) { faceShadeGeneric(deps, lightParams, pa3, pb3, pc3) }
 
 	fn collect(i, acc) if i {
 		len(faces) -> acc
