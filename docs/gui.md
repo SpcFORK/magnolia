@@ -202,7 +202,7 @@ window := gui.createWindow('WebGL Sample', 960, 540, {
     canvasId: 'app-canvas'
 })
 
-if window.type = :ok & gui.isWeb?() {
+if window.type = :ok & gui.isWeb?() -> {
     gui.createCanvas(window, 'app-canvas', {
         width: 960
         height: 540
