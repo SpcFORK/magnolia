@@ -2045,6 +2045,45 @@ func TestWindowsStdlibSafeSurface(t *testing.T) {
 	))
 }
 
+func TestLinuxStdlibSafeSurface(t *testing.T) {
+	expectProgramToReturn(t, `
+		lin := import('linux')
+		os := ___runtime_sys_info().os
+		uid := lin.getuid()
+		gid := lin.getgid()
+		fileAccess := lin.access('./README.md', lin.F_OK)
+
+		[
+			type(lin.LibC)
+			lin.SEEK_SET = 0
+			lin.F_OK = 0
+			type(lin.cstr('oak'))
+			len(lin.cstr('oak')) = 4
+			if os {
+				'linux' -> {
+					lin.isLinux?() &
+					((uid.type = :ok) | (uid.type = :success)) &
+					((gid.type = :ok) | (gid.type = :success)) &
+					((fileAccess.type = :ok) | (fileAccess.type = :success))
+				}
+				_ -> {
+					(!lin.isLinux?()) &
+					(uid.type = :error) &
+					(gid.type = :error) &
+					(fileAccess.type = :error)
+				}
+			}
+		]
+	`, MakeList(
+		AtomValue("list"),
+		oakTrue,
+		oakTrue,
+		AtomValue("string"),
+		oakTrue,
+		oakTrue,
+	))
+}
+
 func TestBuiltinPresenceForRemainingIoAndProcessFeatures(t *testing.T) {
 	expectProgramToReturn(t, `
 		[

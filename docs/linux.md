@@ -58,6 +58,19 @@ linux := import('Linux')
 - `O_TRUNC`
 - `O_APPEND`
 
+### `lseek()` constants
+
+- `SEEK_SET`
+- `SEEK_CUR`
+- `SEEK_END`
+
+### `access()` mode constants
+
+- `F_OK`
+- `R_OK`
+- `W_OK`
+- `X_OK`
+
 ### `dlopen()` flags
 
 - `RTLD_LAZY`
@@ -154,6 +167,39 @@ Returns a best-effort error string for a numeric errno code (or `?` on failure).
 ### `lastErrorMessage()`
 
 Convenience helper for `strerror(errno())`.
+
+### `getuid()` / `geteuid()`
+### `getgid()` / `getegid()`
+
+Returns real/effective UID and GID via libc wrappers.
+
+### `gethostname(bufferPtr, size)`
+
+Calls `gethostname(2)` with caller-managed memory.
+
+### `getcwd(bufferPtr, size)`
+
+Calls `getcwd(3)` with caller-managed memory.
+
+### `chdir(path)`
+
+Changes process working directory.
+
+### `access(path, mode)`
+
+Calls `access(2)`; use `F_OK`, `R_OK`, `W_OK`, `X_OK`.
+
+### `openFile(path, flags, mode?)`
+### `closeFile(fd)`
+### `readFileDescriptor(fd, bufferPtr, count)`
+### `writeFileDescriptor(fd, bufferPtr, count)`
+### `seek(fd, offset, whence)`
+### `unlink(path)`
+
+Thin wrappers over POSIX fd APIs (`open`, `close`, `read`, `write`, `lseek`,
+`unlink`).
+
+- `openFile(..., mode?)` defaults mode to decimal `420` (`0644`) when omitted.
 
 ## Virtual Memory APIs
 

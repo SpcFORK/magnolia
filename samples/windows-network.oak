@@ -1,0 +1,64 @@
+// Windows networking sample using Winsock and WinINet helpers.
+
+{
+	println: println
+	string: string
+	slice: slice
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+println('== Windows Network Sample ==')
+
+if windows.isWindows?() {
+	true -> {
+		// WSAData is typically 400 bytes.
+		wsaData := bits({
+			fn zeros(n, acc) if n {
+				0 -> acc
+				_ -> zeros(n - 1, acc << 0)
+			}
+			zeros(400, [])
+		})
+
+		startup := windows.wsaStartup(windows.makeWord(2, 2), addr(wsaData))
+		if windows.callOk?(startup) {
+			true -> {
+				println('WSAStartup succeeded.')
+
+				addrInfo := windows.sockaddrIn('1.1.1.1', 80)
+				printf('sockaddrIn result type: {{ 0 }}', addrInfo.type)
+				if addrInfo.type = :ok {
+					true -> printf('sockaddr length: {{ 0 }}', addrInfo.len)
+				}
+
+				resp := windows.internetSimpleGet('https://example.com', 'Magnolia Windows Sample', 2048)
+				if resp.type {
+					:ok -> {
+						previewLen := if len(resp.body) > 120 {
+							true -> 120
+							_ -> len(resp.body)
+						}
+						printf('HTTP GET ok. body size: {{ 0 }}', len(resp.body))
+						printf('Body preview: {{ 0 }}', resp.body |> slice(0, previewLen))
+					}
+					_ -> {
+						println('internetSimpleGet failed:')
+						println(string(resp))
+					}
+				}
+
+				windows.wsaCleanup()
+			}
+			_ -> {
+				println('WSAStartup failed:')
+				println(string(startup))
+				println('WSA last error: ' + string(windows.wsLastError()))
+			}
+		}
+	}
+	_ -> println('Not on Windows; skipping network sample.')
+}

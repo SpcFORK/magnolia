@@ -31,6 +31,23 @@ windows := import('windows')
 - `Advapi32`
 - `Shell32`
 - `Ole32`
+- `Ws2_32`
+- `Comctl32`
+- `Wininet`
+- `D3d9`
+- `Msvcp`
+- `Msvcrt`
+- `Ucrtbase`
+- `Vcruntime140`
+- `ActionCenter`
+- `Aclui`, `Acledit`
+- `Acppage`, `Acprgwiz`, `Acproxy`
+- `Adprovider`
+- `Aeinv`, `Aepdu`, `Aepic`, `AepRoam`
+- `Alrsvc`, `Amstream`
+- `SixTo4svc`
+- `Adsldp`, `Adsnt`
+- `ApiSetPrefix` (prefix for ApiSet compatibility stubs like `api-ms-win-*.dll`)
 
 ### Process access flags
 
@@ -62,6 +79,35 @@ windows := import('windows')
 
 - `FORMAT_MESSAGE_IGNORE_INSERTS`
 - `FORMAT_MESSAGE_FROM_SYSTEM`
+- `ERROR_SUCCESS`
+
+### Winsock constants
+
+- `AF_INET`
+- `SOCK_STREAM`, `SOCK_DGRAM`
+- `IPPROTO_TCP`, `IPPROTO_UDP`
+- `SOCKET_ERROR`, `INVALID_SOCKET`
+- `SD_RECEIVE`, `SD_SEND`, `SD_BOTH`
+
+### WinINet constants
+
+- `INTERNET_OPEN_TYPE_PRECONFIG`
+- `INTERNET_OPEN_TYPE_DIRECT`
+- `INTERNET_OPEN_TYPE_PROXY`
+- `INTERNET_DEFAULT_HTTP_PORT`
+- `INTERNET_DEFAULT_HTTPS_PORT`
+- `INTERNET_SERVICE_HTTP`
+
+### Registry constants
+
+- `HKEY_CLASSES_ROOT`
+- `HKEY_CURRENT_USER`
+- `HKEY_LOCAL_MACHINE`
+- `HKEY_USERS`
+- `HKEY_CURRENT_CONFIG`
+- `KEY_QUERY_VALUE`, `KEY_SET_VALUE`, `KEY_CREATE_SUB_KEY`, `KEY_ENUMERATE_SUB_KEYS`, `KEY_READ`
+- `KEY_WRITE`
+- `REG_SZ`, `REG_DWORD`, `REG_QWORD`
 
 ### Window class/style/message constants
 
@@ -89,6 +135,11 @@ Converts a string to UTF-16 bytes with trailing null terminator (for `*W` APIs).
 
 Converts a string to ANSI bytes with trailing null terminator.
 
+### `makeWord(low, high)`
+
+Builds a 16-bit value commonly used for Winsock version negotiation. Example:
+`makeWord(2, 2)` for Winsock 2.2.
+
 ## Resolution and Dispatch
 
 ### `resolve(symbol)`
@@ -105,6 +156,7 @@ Calls a resolved proc or address through `sys.call`.
 
 ### `kernel32(symbol, args...)`
 ### `ntdll(symbol, args...)`
+### `ntNative(symbol, args...)`
 ### `psapi(symbol, args...)`
 
 Resolve + call convenience wrappers for each library.
@@ -136,8 +188,94 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `advapi32(symbol, args...)`
 ### `shell32(symbol, args...)`
 ### `ole32(symbol, args...)`
+### `ws2_32(symbol, args...)`
+### `comctl32(symbol, args...)`
+### `wininet(symbol, args...)`
+### `d3d9(symbol, args...)`
+### `msvcp(symbol, args...)`
+### `msvcrt(symbol, args...)`
+### `ucrtbase(symbol, args...)`
+### `vcruntime140(symbol, args...)`
+### `actionCenter(symbol, args...)`
+### `aclui(symbol, args...)`
+### `acledit(symbol, args...)`
+### `acppage(symbol, args...)`
+### `acprgwiz(symbol, args...)`
+### `acproxy(symbol, args...)`
+### `adprovider(symbol, args...)`
+### `aeinv(symbol, args...)`
+### `aepdu(symbol, args...)`
+### `aepic(symbol, args...)`
+### `aepRoam(symbol, args...)`
+### `alrsvc(symbol, args...)`
+### `amstream(symbol, args...)`
+### `sixTo4svc(symbol, args...)`
+### `adsldp(symbol, args...)`
+### `adsnt(symbol, args...)`
 
 Convenience wrappers that route through `callIn(...)`.
+
+## Winsock APIs (ws2_32)
+
+### `wsLastError()`
+### `wsaStartup(version, wsaDataPtr)`
+### `wsaCleanup()`
+
+Core Winsock lifecycle helpers.
+
+### `socket(af, socketType, protocol)`
+### `bindSocket(sock, sockaddrPtr, sockaddrLen)`
+### `connectSocket(sock, sockaddrPtr, sockaddrLen)`
+### `listenSocket(sock, backlog)`
+### `acceptSocket(sock, addrOutPtr, addrLenInOutPtr)`
+### `sendSocket(sock, bufferPtr, size, flags)`
+### `recvSocket(sock, bufferPtr, size, flags)`
+### `shutdownSocket(sock, how)`
+### `closeSocket(sock)`
+
+Thin socket wrappers over WinSock calls.
+
+### `htons(value)`
+### `htonl(value)`
+### `inetAddr(ipv4)`
+### `sockaddrIn(ipv4, port)`
+
+Network byte-order and IPv4 conversion helpers.
+
+`sockaddrIn` returns `{type: :ok, buffer, ptr, len}` for passing to
+`connectSocket`/`bindSocket`.
+
+## WinINet APIs (wininet)
+
+### `internetOpen(agent, accessType, proxy, proxyBypass, flags)`
+### `internetConnect(hInternet, serverName, serverPort, username, password, service, flags, context)`
+### `internetOpenUrl(hInternet, url, headers, headersLen, flags, context)`
+### `internetReadFile(hFile, outBufferPtr, bytesToRead, bytesReadOutPtr)`
+### `internetCloseHandle(hInternet)`
+### `internetSimpleGet(url, agent?, chunkSize?)`
+
+Thin wrappers for high-level HTTP/FTP style network handles.
+
+## Registry APIs (advapi32)
+
+### `statusOk?(res)`
+
+Returns true when a syscall result is successful and has `ERROR_SUCCESS` status
+(`r1 = 0`), which is common for Win32 registry functions.
+
+### `regCloseKey(hKey)`
+### `regOpenKeyEx(rootKey, subKey, options, samDesired, outKeyPtr)`
+### `regCreateKeyEx(rootKey, subKey, reserved, className, options, samDesired, securityAttributesPtr, outKeyPtr, dispositionOutPtr)`
+### `regQueryValueEx(hKey, valueName, reserved, typeOutPtr, dataOutPtr, dataLenInOutPtr)`
+### `regSetValueEx(hKey, valueName, reserved, valueType, dataPtr, dataLen)`
+### `regDeleteValue(hKey, valueName)`
+### `regReadDword(rootKey, subKey, valueName)`
+### `regWriteDword(rootKey, subKey, valueName, value)`
+### `regReadString(rootKey, subKey, valueName)`
+### `regWriteString(rootKey, subKey, valueName, value)`
+
+Thin registry wrappers for opening, creating, querying, setting, and deleting
+registry values.
 
 ## Windowing APIs (user32)
 
@@ -382,6 +520,56 @@ example that:
 - creates a visible top-level window
 - draws text + simple shapes using `getDC`, `textOut`, `rectangle`, and `ellipse`
 - enters a close-aware `PeekMessage`/`DispatchMessage` loop
+
+### Networking Example (Winsock + WinINet)
+
+See [samples/windows-network.oak](../samples/windows-network.oak) for a runnable
+network sample that:
+
+- initializes Winsock with `wsaStartup(makeWord(2, 2), ...)`
+- builds a `sockaddr_in` struct via `sockaddrIn(ip, port)`
+- performs a simple HTTP GET via `internetSimpleGet(...)`
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        wsaData := bits([...])
+        startup := windows.wsaStartup(windows.makeWord(2, 2), addr(wsaData))
+        if windows.callOk?(startup) {
+            true -> {
+                response := windows.internetSimpleGet('https://example.com', 'Magnolia', 2048)
+                println(string(response))
+                windows.wsaCleanup()
+            }
+        }
+    }
+}
+```
+
+### Registry Example (Advapi32 Helpers)
+
+See [samples/windows-registry.oak](../samples/windows-registry.oak) for a
+runnable registry sample that:
+
+- reads a known system value with `regReadString(...)`
+- writes and reads back `REG_DWORD` and `REG_SZ` values under `HKEY_CURRENT_USER`
+
+```oak
+windows := import('windows')
+
+if windows.isWindows?() {
+    true -> {
+        product := windows.regReadString(
+            windows.HKEY_LOCAL_MACHINE
+            'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'
+            'ProductName'
+        )
+        println(string(product))
+    }
+}
+```
 
 ## Current Limitation
 

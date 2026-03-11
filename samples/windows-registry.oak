@@ -1,0 +1,76 @@
+// Windows registry sample using Advapi32 convenience helpers.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+println('== Windows Registry Sample ==')
+
+if windows.isWindows?() {
+	true -> {
+		// Read a well-known OS value from HKLM.
+		product := windows.regReadString(
+			windows.HKEY_LOCAL_MACHINE
+			'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'
+			'ProductName'
+		)
+		if product.type {
+			:ok -> printf('Windows product name: {{ 0 }}', product.value)
+			_ -> {
+				println('Could not read ProductName:')
+				println(string(product))
+			}
+		}
+
+		// Write + read back under HKCU for user-safe testing.
+		testPath := 'SOFTWARE\\Magnolia\\WindowsSample'
+		writeDword := windows.regWriteDword(
+			windows.HKEY_CURRENT_USER
+			testPath
+			'ExampleDword'
+			123456
+		)
+		if writeDword.type {
+			:ok -> println('Wrote HKCU DWORD value.')
+			_ -> println('regWriteDword failed: ' + string(writeDword))
+		}
+
+		readDword := windows.regReadDword(
+			windows.HKEY_CURRENT_USER
+			testPath
+			'ExampleDword'
+		)
+		if readDword.type {
+			:ok -> printf('Read HKCU DWORD value: {{ 0 }}', readDword.value)
+			_ -> println('regReadDword failed: ' + string(readDword))
+		}
+
+		writeString := windows.regWriteString(
+			windows.HKEY_CURRENT_USER
+			testPath
+			'ExampleString'
+			'hello from magnolia'
+		)
+		if writeString.type {
+			:ok -> println('Wrote HKCU string value.')
+			_ -> println('regWriteString failed: ' + string(writeString))
+		}
+
+		readString := windows.regReadString(
+			windows.HKEY_CURRENT_USER
+			testPath
+			'ExampleString'
+		)
+		if readString.type {
+			:ok -> printf('Read HKCU string value: {{ 0 }}', readString.value)
+			_ -> println('regReadString failed: ' + string(readString))
+		}
+	}
+	_ -> println('Not on Windows; skipping registry sample.')
+}
