@@ -1679,6 +1679,10 @@ func TestPointerBuiltinAndArithmetic(t *testing.T) {
 	))
 }
 
+func TestIntFromPointerBuiltin(t *testing.T) {
+	expectProgramToReturn(t, `int(pointer(123))`, IntValue(123))
+}
+
 func TestBuildLibraryParseIncludesFromString(t *testing.T) {
 	expectProgramToReturn(t, `
 		std := import('std')

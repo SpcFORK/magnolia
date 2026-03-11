@@ -99,7 +99,6 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("bits", c.oakBits)
 	c.LoadFunc("addr", c.oakAddr)
 	c.LoadFunc("pointer", c.oakPointer) // convert integer or string to a pointer value
-	c.LoadFunc("ptr_int", c.oakPtrInt)
 	c.LoadFunc("memread", c.oakMemRead)
 	c.LoadFunc("memwrite", c.oakMemWrite)
 	c.LoadFunc("go", c.oakGo)
@@ -506,6 +505,8 @@ func (c *Context) oakInt(args []Value) (Value, *runtimeError) {
 	switch arg := args[0].(type) {
 	case IntValue:
 		return arg, nil
+	case PointerValue:
+		return IntValue(arg), nil
 	case FloatValue:
 		return IntValue(math.Floor(float64(arg))), nil
 	case *StringValue:
@@ -977,23 +978,6 @@ func (c *Context) oakAddr(args []Value) (Value, *runtimeError) {
 	default:
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("addr() expects a byte string, got %s", args[0]),
-		}
-	}
-}
-
-func (c *Context) oakPtrInt(args []Value) (Value, *runtimeError) {
-	if err := c.requireArgLen("ptr_int", args, 1); err != nil {
-		return nil, err
-	}
-
-	switch arg := args[0].(type) {
-	case PointerValue:
-		return IntValue(arg), nil
-	case IntValue:
-		return arg, nil
-	default:
-		return nil, &runtimeError{
-			reason: fmt.Sprintf("ptr_int() expects pointer or int, got %s", args[0]),
 		}
 	}
 }

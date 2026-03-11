@@ -9,6 +9,8 @@ This includes:
 - Goroutines and channels (`go`, `make_chan`, `chan_send`, `chan_recv`)
 - Runtime metadata (`___runtime_go_version`, `___runtime_sys_info`)
 - Foreign function calls (`sysproc`, `syscall`)
+- Thread affinity helpers (`lock_thread`, `unlock_thread`)
+- Native Win32 loop helper (`win_msg_loop`, Windows only)
 - Raw byte and memory helpers (`bits`, `addr`, `pointer`, `memread`, `memwrite`)
 
 These APIs are powerful and intentionally minimal. They are best used inside thin wrapper libraries for safety and readability.
@@ -129,6 +131,55 @@ if res.type = :ok -> {
     println('PID: ' + string(res.r1))
 } else {
     println('syscall failed: ' + res.error)
+}
+```
+
+### `lock_thread()` / `unlock_thread()`
+
+Pins the current Oak execution to the current OS thread, then releases it.
+
+This is especially important for Win32 UI code, where window creation and
+message pumping must happen on the same OS thread.
+
+```oak
+if ___runtime_sys_info().os = 'windows' {
+    true -> {
+        lock_thread()
+        // Create window + run message loop here.
+        unlock_thread()
+    }
+}
+```
+
+### `int(x)` with pointers
+
+`int(...)` accepts pointer values and converts them to integer addresses.
+
+Useful when writing pointer-sized values into native struct buffers.
+
+```oak
+buf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+ptr := addr(buf)
+n := int(ptr)
+println(string(n))
+```
+
+### `win_msg_loop(hwnd)`
+
+Windows-only helper that runs a native `GetMessageW` / `TranslateMessage` /
+`DispatchMessageW` loop for a window handle until exit.
+
+Returns `0` on normal loop exit, or an error object.
+
+```oak
+if ___runtime_sys_info().os = 'windows' {
+    true -> {
+        lock_thread()
+        // hwnd should be a valid window handle (int/pointer value)
+        result := win_msg_loop(hwnd)
+        unlock_thread()
+        println(string(result))
+    }
 }
 ```
 

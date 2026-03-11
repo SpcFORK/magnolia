@@ -202,6 +202,25 @@ Runs one non-blocking `PeekMessageW` loop iteration and returns one of:
 Runs a close-aware `PeekMessageW` + `WaitMessage` loop until `hwnd` closes.
 Returns `0` when the window closes, or an error object.
 
+### `registerDefaultWindowClass(className)`
+
+Registers a default top-level `WNDCLASSEXW` using `DefWindowProcW`.
+
+This is a convenience helper for Magnolia samples where no custom Oak WNDPROC
+callback is available.
+
+### `createTopLevelWindow(className, title, width, height)`
+
+Convenience helper that creates a visible overlapped top-level window using
+`CreateWindowExW`.
+
+### `runWindowLoop(hwnd)`
+
+Runs the native `win_msg_loop` builtin for `hwnd` on the current thread.
+
+For Win32 UI code, pair this with `lock_thread()` / `unlock_thread()` so
+window creation and message dispatch stay on the same OS thread.
+
 ### `messageBox(hwnd, text, caption, msgType)`
 ### `setWindowText(hwnd, text)`
 ### `loadCursor(instance, cursorId)`
@@ -334,25 +353,23 @@ windows := import('windows')
 
 if windows.isWindows?() {
     true -> {
-        hwnd := windows.createWindowEx(
-            0
-            'STATIC'
-            'Magnolia Win32 Window'
-            windows.WS_OVERLAPPEDWINDOW | windows.WS_VISIBLE
-            windows.CW_USEDEFAULT
-            windows.CW_USEDEFAULT
-            800
-            480
-            0
-            0
-            windows.imageBase()
-            0
-        )
+        lock_thread()
 
-        if hwnd.type = :ok & hwnd.r1 > 0 -> {
-            windows.showWindow(hwnd.r1, windows.SW_SHOW)
-            windows.updateWindow(hwnd.r1)
+        className := 'MagnoliaWindowClass'
+        windows.registerDefaultWindowClass(className)
+        hwnd := windows.createTopLevelWindow(className, 'Magnolia Win32 Window', 800, 480)
+
+        if hwnd.type = :ok & hwnd.r1 > 0 {
+            true -> {
+                windows.showWindow(hwnd.r1, windows.SW_SHOW)
+                windows.updateWindow(hwnd.r1)
+
+                msgBuf := windows.createMsgBuffer()
+                windows.runWindowLoopPeek(hwnd.r1, addr(msgBuf))
+            }
         }
+
+        unlock_thread()
     }
 }
 ```
@@ -364,7 +381,7 @@ example that:
 
 - creates a visible top-level window
 - draws text + simple shapes using `getDC`, `textOut`, `rectangle`, and `ellipse`
-- enters the `GetMessage`/`DispatchMessage` loop
+- enters a close-aware `PeekMessage`/`DispatchMessage` loop
 
 ## Current Limitation
 
@@ -374,11 +391,34 @@ native callback bridge for passing an Oak function as `WNDPROC`.
 That means custom message handling (for example explicit `WM_PAINT` handlers)
 still requires runtime support beyond the current `sysproc/syscall` surface.
 
+## Threading and UI Loop Checklist
+
+Use this sequence for stable Win32 window behavior in Magnolia:
+
+1. Gate execution with `windows.isWindows?()`.
+2. Call `lock_thread()` before creating any UI objects.
+3. Register a class (`registerDefaultWindowClass(...)` or custom class setup).
+4. Create the window (`createTopLevelWindow(...)` or `createWindowEx(...)`).
+5. Show and update the window (`showWindow`, then `updateWindow`).
+6. Allocate a `MSG` buffer with `createMsgBuffer()`.
+7. Run a message loop on the same locked thread:
+    - `runWindowLoopPeek(hwnd, addr(msgBuf))` for close-aware peek/wait flow, or
+    - `runWindowLoop(hwnd)` for native built-in loop flow.
+8. Exit loop when closed (`0` result for helper loops).
+9. Call `unlock_thread()` when UI work is complete.
+
+Common symptoms when steps are skipped:
+
+- Missing `lock_thread()`: window can freeze or become non-responsive.
+- No running message loop: window appears but does not process input/close.
+- Loop on a different thread than creation: undefined behavior and stale handles.
+
 ## Notes
 
 - Interop calls are unsafe by nature; validate pointers and sizes.
 - A successful syscall-like response can be `:ok` or `:success`.
 - Prefer building higher-level wrappers for application logic.
+- On Windows UI code, lock to a single OS thread during create/show/loop flow.
 
 ## Related
 

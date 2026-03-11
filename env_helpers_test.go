@@ -219,6 +219,9 @@ func TestOakConversionAndTypeHelpers(t *testing.T) {
 	if v, err := ctx.oakInt([]Value{MakeString("bad")}); err != nil || v != null {
 		t.Fatalf("unexpected invalid string->int behavior: v=%v err=%v", v, err)
 	}
+	if v, err := ctx.oakInt([]Value{PointerValue(123)}); err != nil || v != IntValue(123) {
+		t.Fatalf("unexpected pointer->int conversion: v=%v err=%v", v, err)
+	}
 
 	if v, err := ctx.oakFloat([]Value{IntValue(8)}); err != nil || v != FloatValue(8) {
 		t.Fatalf("unexpected int->float conversion: v=%v err=%v", v, err)
