@@ -240,7 +240,11 @@ fn createWindow(title, width, height, options) {
 					if hwnd.type {
 						:ok -> if hwnd.r1 > 0 {
 							true -> {
-								iconState := _applyWindowsIcons(hwnd.r1, opts)
+								iconState := {
+									type: :ok
+									bigIcon: classBigIcon
+									smallIcon: classSmallIcon
+								}
 								msgBuf := windows.createMsgBuffer()
 								{
 									type: :ok
@@ -357,6 +361,12 @@ fn show(window) if window.type {
 			if type(window.icons) = :object {
 				true -> {
 					if window.icons.bigIcon > 0 {
+						true -> windows.user32('SetClassLongPtrW', window.hwnd, GCLP_HICON, window.icons.bigIcon)
+					}
+					if window.icons.smallIcon > 0 {
+						true -> windows.user32('SetClassLongPtrW', window.hwnd, GCLP_HICONSM, window.icons.smallIcon)
+					}
+					if window.icons.bigIcon > 0 {
 						true -> windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_BIG, window.icons.bigIcon)
 					}
 					if window.icons.smallIcon > 0 {
@@ -365,6 +375,16 @@ fn show(window) if window.type {
 							windows.user32('SendMessageW', window.hwnd, WM_SETICON, ICON_SMALL2, window.icons.smallIcon)
 						}
 					}
+					windows.user32(
+						'SetWindowPos'
+						window.hwnd
+						0
+						0
+						0
+						0
+						0
+						SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+					)
 				}
 			}
 			window
