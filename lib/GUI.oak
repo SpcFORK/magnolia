@@ -869,6 +869,249 @@ fn fillRect(window, x, y, width, height, color) if window.type {
 	_ -> window
 }
 
+PI := 3.141592653589793
+
+fn degToRad(deg) deg * PI / 180
+
+fn Vec3(x, y, z) {
+	{
+		x: x
+		y: y
+		z: z
+	}
+}
+
+fn _rotateX(v, radians) {
+	cr := cos(radians)
+	sr := sin(radians)
+	{
+		x: v.x
+		y: v.y * cr - v.z * sr
+		z: v.y * sr + v.z * cr
+	}
+}
+
+fn _rotateY(v, radians) {
+	cr := cos(radians)
+	sr := sin(radians)
+	{
+		x: v.x * cr + v.z * sr
+		y: v.y
+		z: 0 - v.x * sr + v.z * cr
+	}
+}
+
+fn _rotateZ(v, radians) {
+	cr := cos(radians)
+	sr := sin(radians)
+	{
+		x: v.x * cr - v.y * sr
+		y: v.x * sr + v.y * cr
+		z: v.z
+	}
+}
+
+fn _transformPoint(v, transform) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	rx := degToRad(_default(ts.rx, 0))
+	ry := degToRad(_default(ts.ry, 0))
+	rz := degToRad(_default(ts.rz, 0))
+
+	p0 := {
+		x: v.x * scale
+		y: v.y * scale
+		z: v.z * scale
+	}
+	p1 := _rotateX(p0, rx)
+	p2 := _rotateY(p1, ry)
+	p3 := _rotateZ(p2, rz)
+
+	{
+		x: p3.x + tx
+		y: p3.y + ty
+		z: p3.z + tz
+	}
+}
+
+fn _projectPoint(window, p, camera) {
+	cam := _default(camera, {})
+	camZ := _default(cam.z, 5)
+	fov := _default(cam.fov, 90)
+
+	z := p.z + camZ
+	if z <= 0.05 {
+		true -> ?
+		_ -> {
+			halfW := window.width / 2
+			halfH := window.height / 2
+			focal := halfW / tan(degToRad(fov / 2))
+			{
+				x: int(halfW + (p.x * focal) / z)
+				y: int(halfH - (p.y * focal) / z)
+				z: z
+			}
+		}
+	}
+}
+
+fn _transformVertices(vertices, transform, i, out) if i {
+	len(vertices) -> out
+	_ -> _transformVertices(vertices, transform, i + 1, out << _transformPoint(vertices.(i), transform))
+}
+
+fn drawLine(window, x1, y1, x2, y2, color) if window.type {
+	:ok -> {
+		useColor := _default(color, rgb(215, 235, 255))
+		if window.backend {
+			:windows -> {
+				hdcValue := if window.frameHdc > 0 {
+					true -> window.frameHdc
+					_ -> {
+						hdc := windows.getDC(window.hwnd)
+						if windows.callOk?(hdc) & hdc.r1 > 0 {
+							true -> hdc.r1
+							_ -> 0
+						}
+					}
+				}
+				if hdcValue > 0 {
+					true -> {
+						pen := windows.gdi32('CreatePen', 0, 1, useColor)
+						if windows.callOk?(pen) & pen.r1 > 0 {
+							true -> {
+								windows.selectObject(hdcValue, pen.r1)
+								windows.gdi32('MoveToEx', hdcValue, x1, y1, 0)
+								windows.gdi32('LineTo', hdcValue, x2, y2)
+								windows.deleteObject(pen.r1)
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
+								{type: :ok}
+							}
+							_ -> {
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
+								_err('CreatePen failed', pen)
+							}
+						}
+					}
+					_ -> _err('GetDC failed', ?)
+				}
+			}
+			:linux -> {
+				gc := linux.createGC(window.display, window.window, 0, 0)
+				if linux.callOk?(gc) & gc.r1 > 0 {
+					true -> {
+						linux.setForeground(window.display, gc.r1, useColor)
+						linux.drawLine(window.display, window.window, gc.r1, x1, y1, x2, y2)
+						linux.freeGC(window.display, gc.r1)
+						linux.flush(window.display)
+						{type: :ok}
+					}
+					_ -> _err('XCreateGC failed', gc)
+				}
+			}
+			:web -> {
+				window.messages <- window.messages << {
+					type: :line
+					x1: x1
+					y1: y1
+					x2: x2
+					y2: y2
+					color: useColor
+				}
+				{type: :ok}
+			}
+			_ -> _err('Unknown window backend', window)
+		}
+	}
+	_ -> window
+}
+
+fn CubeMesh(size) {
+	hs := _default(size, 2) / 2
+	{
+		vertices: [
+			Vec3(-hs, -hs, -hs)
+			Vec3(hs, -hs, -hs)
+			Vec3(hs, hs, -hs)
+			Vec3(-hs, hs, -hs)
+			Vec3(-hs, -hs, hs)
+			Vec3(hs, -hs, hs)
+			Vec3(hs, hs, hs)
+			Vec3(-hs, hs, hs)
+		]
+		edges: [
+			[0, 1]
+			[1, 2]
+			[2, 3]
+			[3, 0]
+			[4, 5]
+			[5, 6]
+			[6, 7]
+			[7, 4]
+			[0, 4]
+			[1, 5]
+			[2, 6]
+			[3, 7]
+		]
+	}
+}
+
+fn drawMeshWireframe(window, mesh, transform, camera, color) {
+	verts := _transformVertices(mesh.vertices, transform, 0, [])
+	edges := mesh.edges
+
+	fn sub(i, drawn) if i {
+		len(edges) -> {
+			{
+				type: :ok
+				lines: drawn
+			}
+		}
+		_ -> {
+			edge := edges.(i)
+			pa := _projectPoint(window, verts.(edge.0), camera)
+			pb := _projectPoint(window, verts.(edge.1), camera)
+			if [pa, pb] {
+				[?, _] -> sub(i + 1, drawn)
+				[_, ?] -> sub(i + 1, drawn)
+				_ -> {
+					drawLine(window, pa.x, pa.y, pb.x, pb.y, color)
+					sub(i + 1, drawn + 1)
+				}
+			}
+		}
+	}
+
+	sub(0, 0)
+}
+
+fn Renderer3D(window, options) {
+	opts := _default(options, {})
+	camera := _default(opts.camera, {
+		z: 5
+		fov: 90
+	})
+	background := _default(opts.background, rgb(8, 14, 22))
+	lineColor := _default(opts.lineColor, rgb(96, 190, 255))
+
+	{
+		window: window
+		camera: camera
+		background: background
+		lineColor: lineColor
+		clear: fn() fillRect(window, 0, 0, window.width, window.height, background)
+		renderMesh: fn(mesh, transform, color) drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
+		renderCube: fn(size, transform, color) drawMeshWireframe(window, CubeMesh(size), transform, camera, _default(color, lineColor))
+	}
+}
+
 fn poll(window) if window.type {
 	:ok -> if window.backend {
 		:windows -> {

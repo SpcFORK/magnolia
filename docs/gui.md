@@ -198,6 +198,61 @@ Fills a rectangle.
 - Linux: X11 foreground + `XFillRectangle`
 - Web: records a logical `:rect` draw op in `window.messages`
 
+### `drawLine(window, x1, y1, x2, y2, color?)`
+
+Draws a line segment in the target window.
+
+- Windows: GDI pen + `MoveToEx`/`LineTo`
+- Linux: X11 `XDrawLine`
+- Web: records a logical `:line` draw op in `window.messages`
+
+## 3D Renderer
+
+GUI includes a lightweight wireframe 3D renderer that works on native backends
+and uses command recording on web backends.
+
+### `Vec3(x, y, z)`
+
+Constructs a 3D vector object.
+
+### `CubeMesh(size?)`
+
+Returns a cube wireframe mesh object:
+
+- `vertices` list
+- `edges` index pairs
+
+### `drawMeshWireframe(window, mesh, transform?, camera?, color?)`
+
+Projects and draws mesh edges as 2D lines.
+
+Transform fields:
+
+- `tx`, `ty`, `tz`
+- `rx`, `ry`, `rz` (degrees)
+- `scale`
+
+Camera fields:
+
+- `z` (distance offset)
+- `fov` (degrees)
+
+### `Renderer3D(window, options?)`
+
+Creates a convenience renderer object.
+
+Options:
+
+- `camera`
+- `background`
+- `lineColor`
+
+Returns object methods:
+
+- `clear()`
+- `renderMesh(mesh, transform?, color?)`
+- `renderCube(size?, transform?, color?)`
+
 ## Example
 
 ```oak
@@ -260,3 +315,4 @@ if window.type = :ok & gui.isWeb?() -> {
 
 - `samples/gui-sample.oak` - cross-platform GUI quickstart
 - `samples/gui-game.oak` - bouncing-box mini game using GUI middleware
+- `samples/gui-3d.oak` - rotating wireframe cube using GUI 3D renderer

@@ -2109,6 +2109,11 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 			type(gui.webglClear)
 			type(gui.webglDrawArrays)
 			type(gui.webglFlush)
+			type(gui.Vec3)
+			type(gui.CubeMesh)
+			type(gui.drawLine)
+			type(gui.drawMeshWireframe)
+			type(gui.Renderer3D)
 			gui.GL_COLOR_BUFFER_BIT = 16384
 			gui.GL_TRIANGLES = 4
 			type(window)
@@ -2132,6 +2137,11 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 	`, MakeList(
 		AtomValue("atom"),
 		AtomValue("int"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
