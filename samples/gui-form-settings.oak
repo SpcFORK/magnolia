@@ -1,0 +1,522 @@
+// gui-form-settings.oak
+// Application-style settings panel built with the Magnolia GUI middleware.
+//
+// Features:
+//  - Two-column layout: sidebar navigation + content pane
+//  - Four setting categories: General, Display, Audio, Network
+//  - Checkboxes, radio-button groups, and a visual slider
+//  - SAVE / CANCEL buttons with hover + press feedback
+//  - Status bar confirming save
+//
+// Run: magnolia run samples/gui-form-settings.oak
+
+{
+	println: println
+	string:  string
+	int:     int
+	len:     len
+} := import('std')
+
+gui     := import('GUI')
+windows := import('windows')
+
+// ─── Colours ───────────────────────────────────────────────────────────────
+
+C_BG         := gui.rgb(18, 22, 32)
+C_SIDEBAR    := gui.rgb(24, 30, 44)
+C_CONTENT    := gui.rgb(28, 34, 48)
+C_HEADER     := gui.rgb(34, 56, 130)
+C_NAV_ACTIVE := gui.rgb(46, 98, 222)
+C_NAV_HOVER  := gui.rgb(36, 44, 66)
+C_BORDER     := gui.rgb(48, 58, 82)
+C_FIELD      := gui.rgb(14, 17, 26)
+C_BTN_P      := gui.rgb(46, 98, 222)
+C_BTN_PH     := gui.rgb(66, 124, 255)
+C_BTN_PP     := gui.rgb(28, 72, 175)
+C_BTN_S      := gui.rgb(48, 56, 78)
+C_BTN_SH     := gui.rgb(66, 78, 108)
+C_BTN_SP     := gui.rgb(32, 38, 58)
+C_TEXT       := gui.rgb(216, 226, 248)
+C_LABEL      := gui.rgb(142, 162, 196)
+C_ACCENT     := gui.rgb(106, 162, 255)
+C_CHECK_ON   := gui.rgb(46, 98, 222)
+C_SUCCESS    := gui.rgb(68, 208, 116)
+C_SLIDER_TRK := gui.rgb(40, 50, 72)
+C_SLIDER_THB := gui.rgb(80, 138, 255)
+
+// ─── Win32 MSG layout ──────────────────────────────────────────────────────
+
+MSG_OFF_TYPE   := 8
+MSG_OFF_WPARAM := 16
+MSG_OFF_LPARAM := 24
+
+WM_MOUSEMOVE   := 512
+WM_LBUTTONDOWN := 513
+WM_LBUTTONUP   := 514
+
+fn msgType(w)   windows.readU32(addr(w.msgBuf) + MSG_OFF_TYPE)
+fn msgLParam(w) windows.readU32(addr(w.msgBuf) + MSG_OFF_LPARAM)
+fn loword(v)    v & 65535
+fn hiword(v)    (v >> 16) & 65535
+
+// ─── Geometry ──────────────────────────────────────────────────────────────
+
+fn inRect?(mx, my, rx, ry, rw, rh) {
+	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
+}
+
+fn clamp(v, lo, hi) if v < lo {
+	true -> lo
+	_ -> if v > hi { true -> hi, _ -> v }
+}
+
+// ─── Drawing primitives ────────────────────────────────────────────────────
+
+fn drawBorder(window, x, y, w, h, color) {
+	gui.drawLine(window, x,     y,     x + w, y,     color)
+	gui.drawLine(window, x,     y + h, x + w, y + h, color)
+	gui.drawLine(window, x,     y,     x,     y + h, color)
+	gui.drawLine(window, x + w, y,     x + w, y + h, color)
+}
+
+fn drawCheckbox(window, x, y, checked, label) {
+	gui.fillRect(window, x, y, 16, 16, C_FIELD)
+	drawBorder(window, x, y, 16, 16, C_BORDER)
+	if checked {
+		true -> gui.fillRect(window, x + 3, y + 3, 10, 10, C_CHECK_ON)
+	}
+	gui.drawText(window, x + 24, y + 1, label)
+}
+
+fn drawRadio(window, x, y, selected, label) {
+	// draw circle approximation as a square with corners
+	gui.fillRect(window, x + 2, y,     12, 16, C_FIELD)
+	gui.fillRect(window, x,     y + 2, 16, 12, C_FIELD)
+	gui.drawLine(window, x + 2, y,           x + 14, y,           C_BORDER)
+	gui.drawLine(window, x + 2, y + 16,      x + 14, y + 16,      C_BORDER)
+	gui.drawLine(window, x,     y + 2,        x,      y + 14,      C_BORDER)
+	gui.drawLine(window, x + 16, y + 2,       x + 16, y + 14,     C_BORDER)
+	if selected {
+		true -> {
+			gui.fillRect(window, x + 5, y + 5, 7, 7, C_ACCENT)
+		}
+	}
+	gui.drawText(window, x + 24, y + 1, label)
+}
+
+fn drawSlider(window, x, y, w, value, maxVal) {
+	// Track
+	gui.fillRect(window, x, y + 6, w, 4, C_SLIDER_TRK)
+	// Filled portion
+	filled := (value * (w - 12)) / maxVal
+	gui.fillRect(window, x, y + 6, filled + 6, 4, C_ACCENT)
+	// Thumb
+	tx := x + filled
+	gui.fillRect(window, tx, y, 12, 16, C_SLIDER_THB)
+	drawBorder(window, tx, y, 12, 16, gui.rgb(50, 100, 200))
+	// Value label
+	gui.drawText(window, x + w + 8, y, string(value))
+}
+
+fn drawPrimaryBtn(window, x, y, w, h, label, hover, press) {
+	c := if press {
+		true -> C_BTN_PP
+		_ -> if hover { true -> C_BTN_PH, _ -> C_BTN_P }
+	}
+	gui.fillRect(window, x, y, w, h, c)
+	gui.drawLine(window, x, y + h, x + w, y + h, gui.rgb(18, 54, 145))
+	lx := x + (w - len(label) * 7) / 2
+	gui.drawText(window, lx, y + (h / 2) - 6, label)
+}
+
+fn drawSecondaryBtn(window, x, y, w, h, label, hover, press) {
+	c := if press {
+		true -> C_BTN_SP
+		_ -> if hover { true -> C_BTN_SH, _ -> C_BTN_S }
+	}
+	gui.fillRect(window, x, y, w, h, c)
+	drawBorder(window, x, y, w, h, C_BORDER)
+	lx := x + (w - len(label) * 7) / 2
+	gui.drawText(window, lx, y + (h / 2) - 6, label)
+}
+
+// ─── Content panels ────────────────────────────────────────────────────────
+
+fn drawGeneralPanel(window, cx, cy, cw, ch, state) {
+	gui.drawText(window, cx + 16, cy + 16, 'General Settings')
+	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
+
+	drawCheckbox(window, cx + 16, cy + 48, state.autoSave,      'Auto-save changes')
+	drawCheckbox(window, cx + 16, cy + 74, state.autoUpdate,    'Check for updates automatically')
+	drawCheckbox(window, cx + 16, cy + 100, state.sendTelemetry, 'Send anonymous usage data')
+	drawCheckbox(window, cx + 16, cy + 126, state.showWelcome,   'Show welcome screen on startup')
+
+	gui.drawLine(window, cx + 16, cy + 158, cx + cw - 16, cy + 158, C_BORDER)
+	gui.drawText(window, cx + 16, cy + 170, 'Language')
+
+	drawRadio(window, cx + 16, cy + 190, state.lang = :en, 'English')
+	drawRadio(window, cx + 16, cy + 214, state.lang = :es, 'Espanol')
+	drawRadio(window, cx + 16, cy + 238, state.lang = :fr, 'Francais')
+}
+
+fn drawDisplayPanel(window, cx, cy, cw, ch, state) {
+	gui.drawText(window, cx + 16, cy + 16, 'Display Settings')
+	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
+
+	drawCheckbox(window, cx + 16, cy + 48,  state.fullscreen,  'Fullscreen mode')
+	drawCheckbox(window, cx + 16, cy + 74,  state.showFPS,     'Show FPS counter')
+	drawCheckbox(window, cx + 16, cy + 100, state.vsync,       'Enable VSync')
+	drawCheckbox(window, cx + 16, cy + 126, state.hiDPI,       'High-DPI scaling')
+
+	gui.drawLine(window, cx + 16, cy + 158, cx + cw - 16, cy + 158, C_BORDER)
+	gui.drawText(window, cx + 16, cy + 170, 'Theme')
+
+	drawRadio(window, cx + 16, cy + 190, state.theme = :dark,   'Dark')
+	drawRadio(window, cx + 16, cy + 214, state.theme = :light,  'Light')
+	drawRadio(window, cx + 16, cy + 238, state.theme = :system, 'System default')
+}
+
+fn drawAudioPanel(window, cx, cy, cw, ch, state) {
+	gui.drawText(window, cx + 16, cy + 16, 'Audio Settings')
+	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
+
+	drawCheckbox(window, cx + 16, cy + 48,  state.soundEnabled, 'Enable sound effects')
+	drawCheckbox(window, cx + 16, cy + 74,  state.musicEnabled, 'Enable background music')
+	drawCheckbox(window, cx + 16, cy + 100, state.notifSound,   'Notification sounds')
+
+	gui.drawLine(window, cx + 16, cy + 132, cx + cw - 16, cy + 132, C_BORDER)
+	gui.drawText(window, cx + 16, cy + 144, 'Master Volume')
+	drawSlider(window, cx + 16, cy + 164, cw - 80, state.masterVol, 100)
+
+	gui.drawText(window, cx + 16, cy + 196, 'Music Volume')
+	drawSlider(window, cx + 16, cy + 216, cw - 80, state.musicVol, 100)
+
+	gui.drawText(window, cx + 16, cy + 248, 'Effects Volume')
+	drawSlider(window, cx + 16, cy + 268, cw - 80, state.effectsVol, 100)
+}
+
+fn drawNetworkPanel(window, cx, cy, cw, ch, state) {
+	gui.drawText(window, cx + 16, cy + 16, 'Network Settings')
+	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
+
+	drawCheckbox(window, cx + 16, cy + 48,  state.netEnabled,   'Enable network access')
+	drawCheckbox(window, cx + 16, cy + 74,  state.syncCloud,    'Sync settings to cloud')
+	drawCheckbox(window, cx + 16, cy + 100, state.offlineMode,  'Offline mode')
+
+	gui.drawLine(window, cx + 16, cy + 132, cx + cw - 16, cy + 132, C_BORDER)
+	gui.drawText(window, cx + 16, cy + 144, 'Connection')
+
+	drawRadio(window, cx + 16, cy + 164, state.connType = :auto,     'Automatic')
+	drawRadio(window, cx + 16, cy + 188, state.connType = :wifi,     'Wi-Fi only')
+	drawRadio(window, cx + 16, cy + 212, state.connType = :ethernet, 'Ethernet only')
+}
+
+// ─── Full form render ──────────────────────────────────────────────────────
+
+CATEGORIES := ['General', 'Display', 'Audio', 'Network']
+
+fn drawForm(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type != :ok -> 0
+
+	W := window.width
+	H := window.height
+
+	// Background
+	gui.fillRect(window, 0, 0, W, H, C_BG)
+
+	// ── Header strip
+	gui.fillRect(window, 0, 0, W, 46, C_HEADER)
+	gui.drawText(window, 14, 16, 'M  MAGNOLIA APP  –  Settings')
+
+	// ── Sidebar
+	sideW := 160
+	sideX := 0
+	sideY := 46
+	sideH := H - 46 - 50
+	gui.fillRect(window, sideX, sideY, sideW, sideH, C_SIDEBAR)
+	gui.drawLine(window, sideX + sideW, sideY, sideX + sideW, sideY + sideH, C_BORDER)
+
+	// Nav items
+	navH := 38
+	i    := 0
+	fn drawNavItems() if i < len(CATEGORIES) {
+		true -> {
+			cat := CATEGORIES.(i)
+			ny  := sideY + i * navH
+			if state.category = i {
+				true -> {
+					gui.fillRect(window, sideX + 2, ny, sideW - 2, navH, C_NAV_ACTIVE)
+					gui.fillRect(window, sideX, ny, 3, navH, C_ACCENT)
+				}
+				_ -> if state.hovCat = i {
+					true -> gui.fillRect(window, sideX, ny, sideW, navH, C_NAV_HOVER)
+				}
+			}
+			gui.drawText(window, sideX + 16, ny + (navH / 2) - 6, cat)
+			i <- i + 1
+			drawNavItems()
+		}
+	}
+	drawNavItems()
+
+	// ── Content pane
+	cx := sideW + 1
+	cy := sideY
+	cw := W - sideW - 1
+	ch := sideH
+	gui.fillRect(window, cx, cy, cw, ch, C_CONTENT)
+
+	if state.category = 0 -> drawGeneralPanel(window, cx, cy, cw, ch, state)
+	if state.category = 1 -> drawDisplayPanel(window, cx, cy, cw, ch, state)
+	if state.category = 2 -> drawAudioPanel(window, cx, cy, cw, ch, state)
+	if state.category = 3 -> drawNetworkPanel(window, cx, cy, cw, ch, state)
+
+	// ── Footer bar
+	footY := H - 50
+	gui.fillRect(window, 0, footY, W, 50, C_SIDEBAR)
+	gui.drawLine(window, 0, footY, W, footY, C_BORDER)
+
+	btnW  := 110
+	btnH  := 30
+	bSavX := W - 16 - btnW
+	bCanX := W - 16 - btnW * 2 - 12
+	bBtnY := footY + 10
+
+	drawPrimaryBtn(window, bSavX, bBtnY, btnW, btnH, 'SAVE', state.hoverSave, state.pressSave)
+	drawSecondaryBtn(window, bCanX, bBtnY, btnW, btnH, 'CANCEL', state.hoverCancel, state.pressCancel)
+
+	if state.status != '' {
+		true -> gui.drawText(window, 16, footY + 18, state.status)
+	}
+
+	gui.endFrame(window)
+}
+
+// ─── Initial state ─────────────────────────────────────────────────────────
+
+fn initState(W, H) {
+	sideW := 160
+	navH  := 38
+	footY := H - 50
+	btnW  := 110
+	btnH  := 30
+	{
+		// Navigation
+		category: 0
+		hovCat:   -1
+		// General
+		autoSave:      true
+		autoUpdate:    true
+		sendTelemetry: false
+		showWelcome:   true
+		lang:          :en
+		// Display
+		fullscreen: false
+		showFPS:    false
+		vsync:      true
+		hiDPI:      true
+		theme:      :dark
+		// Audio
+		soundEnabled: true
+		musicEnabled: false
+		notifSound:   true
+		masterVol:    70
+		musicVol:     50
+		effectsVol:   80
+		// Slider drag state
+		dragSlider: :none
+		// Network
+		netEnabled: true
+		syncCloud:  false
+		offlineMode: false
+		connType:   :auto
+		// Footer buttons
+		hoverSave:    false
+		pressSave:    false
+		hoverCancel:  false
+		pressCancel:  false
+		status:       ''
+		// Layout
+		sideW: sideW
+		navH:  navH
+		footY: footY
+		btnW:  btnW
+		btnH:  btnH
+		bSavX: W - 16 - btnW
+		bCanX: W - 16 - btnW * 2 - 12
+		bBtnY: footY + 10
+		// Slider tracks (audio panel, content starts at sideW+1, cy=46)
+		// masterVol slider: cx+16, cy+164
+		// musicVol slider:  cx+16, cy+216
+		// effectsVol slider: cx+16, cy+268
+		sliderCX: sideW + 1 + 16
+		sliderW:  W - sideW - 1 - 80
+	}
+}
+
+// ─── Hit-test helpers ──────────────────────────────────────────────────────
+
+fn catHitIndex(mx, my, sideW, navH, sideY, count) {
+	fn loop(i) if i < count {
+		true -> {
+			ny := sideY + i * navH
+			if inRect?(mx, my, 0, ny, sideW, navH) {
+				true -> i
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> -1
+	}
+	loop(0)
+}
+
+// Determine which slider is under mx, if any (returns :vol_master / :vol_music / :vol_effects / :none)
+fn sliderHit(mx, my, state) if state.category = 2 {
+	true -> {
+		cx  := state.sideW + 1
+		cy  := 46
+		sw  := state.sliderW
+		scx := state.sliderCX
+		if inRect?(mx, my, scx, cy + 164, sw, 16) { true -> :master, _ ->
+		if inRect?(mx, my, scx, cy + 216, sw, 16) { true -> :music, _ ->
+		if inRect?(mx, my, scx, cy + 268, sw, 16) { true -> :effects, _ -> :none }}}
+	}
+	_ -> :none
+}
+
+fn sliderValue(mx, state, sliderX) {
+	sw := state.sliderW
+	v  := ((mx - sliderX) * 100) / (sw - 12)
+	clamp(v, 0, 100)
+}
+
+// ─── Event handler ─────────────────────────────────────────────────────────
+
+fn onEvent(window, step, state) if step.type = :dispatch -> {
+	mt := msgType(window)
+	lp := msgLParam(window)
+	mx := loword(lp)
+	my := hiword(lp)
+
+	sideY := 46
+	footY := state.footY
+
+	if mt = WM_MOUSEMOVE -> {
+		hovIdx := catHitIndex(mx, my, state.sideW, state.navH, sideY, len(CATEGORIES))
+		state.hovCat <- hovIdx
+
+		state.hoverSave   <- inRect?(mx, my, state.bSavX, state.bBtnY, state.btnW, state.btnH)
+		state.hoverCancel <- inRect?(mx, my, state.bCanX, state.bBtnY, state.btnW, state.btnH)
+
+		// Slider dragging
+		if state.dragSlider = :master -> {
+			state.masterVol <- sliderValue(mx, state, state.sliderCX)
+		}
+		if state.dragSlider = :music -> {
+			state.musicVol <- sliderValue(mx, state, state.sliderCX)
+		}
+		if state.dragSlider = :effects -> {
+			state.effectsVol <- sliderValue(mx, state, state.sliderCX)
+		}
+	}
+
+	if mt = WM_LBUTTONDOWN -> {
+		// Category nav click
+		navIdx := catHitIndex(mx, my, state.sideW, state.navH, sideY, len(CATEGORIES))
+		if navIdx >= 0 -> state.category <- navIdx
+
+		// Save button
+		if inRect?(mx, my, state.bSavX, state.bBtnY, state.btnW, state.btnH) -> {
+			state.pressSave <- true
+			state.status    <- 'Settings saved.'
+		}
+
+		// Cancel button
+		if inRect?(mx, my, state.bCanX, state.bBtnY, state.btnW, state.btnH) -> {
+			state.pressCancel <- true
+			state.status      <- ''
+		}
+
+		// General: checkboxes
+		if state.category = 0 -> {
+			cx := state.sideW + 1 + 16
+			cy := 46
+			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.autoSave      <- !state.autoSave
+			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.autoUpdate    <- !state.autoUpdate
+			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.sendTelemetry <- !state.sendTelemetry
+			if inRect?(mx, my, cx, cy + 126, 16, 16) -> state.showWelcome   <- !state.showWelcome
+			if inRect?(mx, my, cx, cy + 190, 40, 16) -> state.lang <- :en
+			if inRect?(mx, my, cx, cy + 214, 40, 16) -> state.lang <- :es
+			if inRect?(mx, my, cx, cy + 238, 40, 16) -> state.lang <- :fr
+		}
+
+		// Display: checkboxes + theme radios
+		if state.category = 1 -> {
+			cx := state.sideW + 1 + 16
+			cy := 46
+			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.fullscreen <- !state.fullscreen
+			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.showFPS    <- !state.showFPS
+			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.vsync      <- !state.vsync
+			if inRect?(mx, my, cx, cy + 126, 16, 16) -> state.hiDPI      <- !state.hiDPI
+			if inRect?(mx, my, cx, cy + 190, 40, 16) -> state.theme <- :dark
+			if inRect?(mx, my, cx, cy + 214, 40, 16) -> state.theme <- :light
+			if inRect?(mx, my, cx, cy + 238, 40, 16) -> state.theme <- :system
+		}
+
+		// Audio: checkboxes + slider grab
+		if state.category = 2 -> {
+			cx := state.sideW + 1 + 16
+			cy := 46
+			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.soundEnabled <- !state.soundEnabled
+			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.musicEnabled <- !state.musicEnabled
+			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.notifSound   <- !state.notifSound
+			// Slider grab
+			hit := sliderHit(mx, my, state)
+			if hit != :none -> state.dragSlider <- hit
+		}
+
+		// Network: checkboxes + radios
+		if state.category = 3 -> {
+			cx := state.sideW + 1 + 16
+			cy := 46
+			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.netEnabled  <- !state.netEnabled
+			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.syncCloud   <- !state.syncCloud
+			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.offlineMode <- !state.offlineMode
+			if inRect?(mx, my, cx, cy + 164, 40, 16) -> state.connType <- :auto
+			if inRect?(mx, my, cx, cy + 188, 40, 16) -> state.connType <- :wifi
+			if inRect?(mx, my, cx, cy + 212, 40, 16) -> state.connType <- :ethernet
+		}
+	}
+
+	if mt = WM_LBUTTONUP -> {
+		state.pressSave    <- false
+		state.pressCancel  <- false
+		state.dragSlider   <- :none
+	}
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────
+
+println('== Magnolia Settings Panel ==')
+println('  Click sidebar categories to switch panes')
+println('  Drag audio sliders to adjust volume')
+
+window := gui.createWindow('Magnolia – Settings', 640, 520, {
+	updateOnDispatch: true
+})
+
+if window.type {
+	:ok -> {
+		state := initState(640, 520)
+		gui.show(window)
+		drawForm(window, state)
+		gui.run(
+			window
+			fn(win, step) onEvent(win, step, state)
+			fn(win, dt)   drawForm(win, state)
+		)
+		gui.close(window)
+	}
+	_ -> println('Could not create window: ' + string(window))
+}

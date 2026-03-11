@@ -50,59 +50,6 @@ fn _lerpX(pa, pb, y) if pb.y = pa.y {
 	_ -> pa.x + (y - pa.y) * (pb.x - pa.x) / (pb.y - pa.y)
 }
 
-fn projectVertices(deps, window, verts, camera) {
-	fn sub(i, out) if i {
-		len(verts) -> out
-		_ -> sub(i + 1, out << deps.projectPoint(window, verts.(i), camera))
-	}
-	// Project vertices and compute screen-space bounds to allow early culling
-	fn projSub(i, out, minX, maxX, minY, maxY, maxZ, anyDefined) if i {
-		len(verts) -> {
-			{
-				projected: out
-				minX: minX
-				maxX: maxX
-				minY: minY
-				maxY: maxY
-				maxZ: maxZ
-				anyDefined: anyDefined
-			}
-		}
-		_ -> {
-			p := deps.projectPoint(window, verts.(i), camera)
-			// update bounds only for defined projected points
-			if p {
-				? -> {
-					nMinX := if p.x < minX { true -> p.x _ -> minX }
-					nMaxX := if p.x > maxX { true -> p.x _ -> maxX }
-					nMinY := if p.y < minY { true -> p.y _ -> minY }
-					nMaxY := if p.y > maxY { true -> p.y _ -> maxY }
-					nMaxZ := if verts.(i).z > maxZ { true -> verts.(i).z _ -> maxZ }
-					projSub(i + 1, out << p, nMinX, nMaxX, nMinY, nMaxY, nMaxZ, true)
-				}
-				_ -> projSub(i + 1, out << p, minX, maxX, minY, maxY, maxZ, anyDefined)
-			}
-		}
-	}
-
-	projRes := projSub(0, [], window.width, 0, window.height, 0, -999999, false)
-	projected := projRes.projected
-
-	// Early reject: completely off-screen or entirely behind near plane
-	if projRes.anyDefined {
-		true -> {
-			if (projRes.maxX < 0) | (projRes.maxY < 0) | (projRes.minX >= window.width) | (projRes.minY >= window.height) {
-				true -> {type: :ok, triangles: 0}
-				_ -> 0
-			}
-			if projRes.maxZ <= 0.05 -> {type: :ok, triangles: 0}
-		}
-		_ -> 0
-	}
-}
-
- 
-
 fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
 	true -> deps.drawLine(window, int(xa), y, int(xb), y, color)
 	_ -> deps.drawLine(window, int(xb), y, int(xa), y, color)
@@ -254,6 +201,91 @@ fn _shadeColor(deps, color, intensity) {
 
 fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
 
+fn _buildTriangle(pa, pb, pc, depth, color) {
+	{
+		type: :tri
+		depth: depth
+		a: pa
+		b: pb
+		c: pc
+		color: color
+	}
+}
+
+fn _shouldCullTriangle?(backfaceCulling, pa, pb, pc, window) {
+	(!_triVisible?(window, pa, pb, pc)) | (backfaceCulling & (!_frontFacing?(pa, pb, pc)))
+}
+
+fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, acc) {
+	f := faces.(i)
+	pa3 := verts.(f.0)
+	pb3 := verts.(f.1)
+	pc3 := verts.(f.2)
+	pd3 := if len(f) > 3 {
+		true -> verts.(f.3)
+		_ -> ?
+	}
+
+	pa := projected.(f.0)
+	pb := projected.(f.1)
+	pc := projected.(f.2)
+	pd := if pd3 {
+		? -> ?
+		_ -> projected.(f.3)
+	}
+
+	faceColor := if i < len(faceColors) {
+		true -> faceColors.(i)
+		_ -> _default(color, deps.rgb(150, 200, 255))
+	}
+	litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
+
+	depth := (pa3.z + pb3.z + pc3.z + if pd3 {
+		? -> 0
+		_ -> pd3.z
+	}) / if pd3 {
+		? -> 3
+		_ -> 4
+	}
+
+	if [pa, pb, pc] {
+		[?, _, _] -> acc
+		[_, ?, _] -> acc
+		[_, _, ?] -> acc
+		_ -> {
+			triA := _buildTriangle(pa, pb, pc, depth, litColor)
+			if _shouldCullTriangle?(backfaceCulling, pa, pb, pc, window) {
+				true -> acc
+				_ -> if [pd3, pd] {
+					[?, _] -> acc << triA
+					[_, ?] -> acc << triA
+					_ -> {
+						triB := _buildTriangle(pa, pc, pd, depth, litColor)
+						if _shouldCullTriangle?(backfaceCulling, pa, pc, pd, window) {
+							true -> acc << triA
+							_ -> acc << triA << triB
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _collectFaces(deps, window, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, i, acc) if i {
+	len(faces) -> acc
+	_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, i + 1, _processFace(deps, window, i, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, acc))
+}
+
+fn _drawTriangles(deps, window, tris, i, drawn) if i {
+	len(tris) -> drawn
+	_ -> {
+		t := tris.(i)
+		drawTriangleFilled(deps, window, t.a, t.b, t.c, t.color)
+		_drawTriangles(deps, window, tris, i + 1, drawn + 1)
+	}
+}
+
 fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
 	projected := projectVertices(deps, window, verts, camera)
@@ -262,98 +294,15 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	cam := _default(camera, {})
 	backfaceCulling := _default(cam.backfaceCulling, true)
 	lightParams := computeLightParams(deps, light)
-	faceShade := fn(pa3, pb3, pc3) { faceShadeGeneric(deps, lightParams, pa3, pb3, pc3) }
+	faceShade := fn(pa3, pb3, pc3) faceShadeGeneric(deps, lightParams, pa3, pb3, pc3)
 
-	fn collect(i, acc) if i {
-		len(faces) -> acc
-		_ -> {
-			f := faces.(i)
-			pa3 := verts.(f.0)
-			pb3 := verts.(f.1)
-			pc3 := verts.(f.2)
-			pd3 := if len(f) > 3 {
-				true -> verts.(f.3)
-				_ -> ?
-			}
+	tris := _sortDepth(_collectFaces(deps, window, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, 0, []))
+	drawn := _drawTriangles(deps, window, tris, 0, 0)
 
-			pa := projected.(f.0)
-			pb := projected.(f.1)
-			pc := projected.(f.2)
-			pd := if pd3 {
-				? -> ?
-				_ -> projected.(f.3)
-			}
-
-			faceColor := if i < len(faceColors) {
-				true -> faceColors.(i)
-				_ -> _default(color, deps.rgb(150, 200, 255))
-			}
-			litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
-
-			depth := (pa3.z + pb3.z + pc3.z + if pd3 {
-				? -> 0
-				_ -> pd3.z
-			}) / if pd3 {
-				? -> 3
-				_ -> 4
-			}
-
-			if [pa, pb, pc] {
-				[?, _, _] -> collect(i + 1, acc)
-				[_, ?, _] -> collect(i + 1, acc)
-				[_, _, ?] -> collect(i + 1, acc)
-				_ -> {
-					triA := {
-						type: :tri
-						depth: depth
-						a: pa
-						b: pb
-						c: pc
-						color: litColor
-					}
-					if (!_triVisible?(window, pa, pb, pc)) | (backfaceCulling & (!_frontFacing?(pa, pb, pc))) {
-						true -> collect(i + 1, acc)
-						_ -> if [pd3, pd] {
-							[?, _] -> collect(i + 1, acc << triA)
-							[_, ?] -> collect(i + 1, acc << triA)
-							_ -> {
-								triB := {
-									type: :tri
-									depth: depth
-									a: pa
-									b: pc
-									c: pd
-									color: litColor
-								}
-								if (!_triVisible?(window, pa, pc, pd)) | (backfaceCulling & (!_frontFacing?(pa, pc, pd))) {
-									true -> collect(i + 1, acc << triA)
-									_ -> collect(i + 1, acc << triA << triB)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+	{
+		type: :ok
+		triangles: drawn
 	}
-
-	tris := _sortDepth(collect(0, []))
-
-	fn draw(i, drawn) if i {
-		len(tris) -> {
-			{
-				type: :ok
-				triangles: drawn
-			}
-		}
-		_ -> {
-			t := tris.(i)
-			drawTriangleFilled(deps, window, t.a, t.b, t.c, t.color)
-			draw(i + 1, drawn + 1)
-		}
-	}
-
-	draw(0, 0)
 }
 
 fn drawMeshWireframe(deps, window, mesh, transform, camera, color) {

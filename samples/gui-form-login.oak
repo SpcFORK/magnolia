@@ -1,0 +1,376 @@
+// gui-form-login.oak
+// Application-style login form built with the Magnolia GUI middleware.
+//
+// Features:
+//  - Username and password text fields with live keyboard input
+//  - Password masking (shown as asterisks)
+//  - "Remember me" checkbox toggle
+//  - LOGIN / CLEAR buttons with hover + press effects
+//  - Status feedback bar
+//
+// Run: magnolia run samples/gui-form-login.oak
+
+{
+	println: println
+	string:  string
+	int:     int
+	len:     len
+	slice:   slice
+} := import('std')
+
+gui     := import('GUI')
+windows := import('windows')
+
+// ─── Colour palette ────────────────────────────────────────────────────────
+
+C_BG          := gui.rgb(20, 24, 34)
+C_CARD        := gui.rgb(30, 36, 50)
+C_HEADER      := gui.rgb(36, 60, 140)
+C_FIELD       := gui.rgb(14, 17, 26)
+C_FIELD_FOC   := gui.rgb(17, 23, 42)
+C_BORDER      := gui.rgb(52, 62, 86)
+C_BORDER_FOC  := gui.rgb(70, 128, 252)
+C_BTN_P       := gui.rgb(46, 98, 222)
+C_BTN_PH      := gui.rgb(66, 124, 255)
+C_BTN_PP      := gui.rgb(30, 74, 178)
+C_BTN_S       := gui.rgb(50, 58, 82)
+C_BTN_SH      := gui.rgb(68, 80, 110)
+C_BTN_SP      := gui.rgb(34, 40, 60)
+C_TEXT        := gui.rgb(218, 228, 248)
+C_LABEL       := gui.rgb(145, 165, 198)
+C_ACCENT      := gui.rgb(106, 162, 255)
+C_SUCCESS     := gui.rgb(68, 208, 116)
+C_ERROR       := gui.rgb(240, 78, 82)
+C_CURSOR      := gui.rgb(118, 178, 255)
+C_CHECK_FILL  := gui.rgb(46, 98, 222)
+
+// ─── Win32 MSG layout (64-bit) ─────────────────────────────────────────────
+// MSG = { HWND(8) | UINT msg(4) | pad(4) | WPARAM(8) | LPARAM(8) | ... }
+
+MSG_OFF_TYPE   := 8
+MSG_OFF_WPARAM := 16
+MSG_OFF_LPARAM := 24
+
+WM_MOUSEMOVE   := 512
+WM_LBUTTONDOWN := 513
+WM_LBUTTONUP   := 514
+WM_CHAR        := 258
+WM_KEYDOWN     := 256
+
+VK_BACK        := 8
+VK_TAB         := 9
+VK_RETURN      := 13
+VK_ESCAPE      := 27
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+fn inRect?(mx, my, rx, ry, rw, rh) {
+	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
+}
+
+fn msgType(w)   windows.readU32(addr(w.msgBuf) + MSG_OFF_TYPE)
+fn msgWParam(w) windows.readU32(addr(w.msgBuf) + MSG_OFF_WPARAM)
+fn msgLParam(w) windows.readU32(addr(w.msgBuf) + MSG_OFF_LPARAM)
+fn loword(v)    v & 65535
+fn hiword(v)    (v >> 16) & 65535
+
+fn maskStr(s) {
+	fn loop(i, acc) if i < len(s) {
+		true -> loop(i + 1, acc + '*')
+		_    -> acc
+	}
+	loop(0, '')
+}
+
+fn popChar(s) if len(s) > 0 {
+	true -> slice(s, 0, len(s) - 1)
+	_    -> ''
+}
+
+// ─── Drawing primitives ────────────────────────────────────────────────────
+
+fn drawBorder(window, x, y, w, h, color) {
+	gui.drawLine(window, x,     y,     x + w, y,     color)
+	gui.drawLine(window, x,     y + h, x + w, y + h, color)
+	gui.drawLine(window, x,     y,     x,     y + h, color)
+	gui.drawLine(window, x + w, y,     x + w, y + h, color)
+}
+
+fn drawField(window, x, y, w, h, text, placeholder, focused) {
+	bg     := if focused { true -> C_FIELD_FOC, _ -> C_FIELD }
+	border := if focused { true -> C_BORDER_FOC, _ -> C_BORDER }
+	gui.fillRect(window, x, y, w, h, bg)
+	drawBorder(window, x, y, w, h, border)
+	display := if text = '' { true -> placeholder, _ -> text }
+	gui.drawText(window, x + 10, y + (h / 2) - 6, display)
+	if focused & text != '' {
+		true -> {
+			cx := x + 10 + len(text) * 7 + 2
+			if cx < x + w - 6 {
+				true -> gui.drawLine(window, cx, y + 6, cx, y + h - 7, C_CURSOR)
+			}
+		}
+	}
+}
+
+fn drawPassField(window, x, y, w, h, text, focused) {
+	bg     := if focused { true -> C_FIELD_FOC, _ -> C_FIELD }
+	border := if focused { true -> C_BORDER_FOC, _ -> C_BORDER }
+	gui.fillRect(window, x, y, w, h, bg)
+	drawBorder(window, x, y, w, h, border)
+	display := if text = '' { true -> 'Enter password', _ -> maskStr(text) }
+	gui.drawText(window, x + 10, y + (h / 2) - 6, display)
+	if focused & text != '' {
+		true -> {
+			cx := x + 10 + len(text) * 7 + 2
+			if cx < x + w - 6 {
+				true -> gui.drawLine(window, cx, y + 6, cx, y + h - 7, C_CURSOR)
+			}
+		}
+	}
+}
+
+fn drawPrimaryBtn(window, x, y, w, h, label, hover, press) {
+	c := if press {
+		true -> C_BTN_PP
+		_ -> if hover { true -> C_BTN_PH, _ -> C_BTN_P }
+	}
+	gui.fillRect(window, x, y, w, h, c)
+	gui.drawLine(window, x, y + h, x + w, y + h, gui.rgb(20, 56, 148))
+	lx := x + (w - len(label) * 7) / 2
+	gui.drawText(window, lx, y + (h / 2) - 6, label)
+}
+
+fn drawSecondaryBtn(window, x, y, w, h, label, hover, press) {
+	c := if press {
+		true -> C_BTN_SP
+		_ -> if hover { true -> C_BTN_SH, _ -> C_BTN_S }
+	}
+	gui.fillRect(window, x, y, w, h, c)
+	drawBorder(window, x, y, w, h, C_BORDER)
+	lx := x + (w - len(label) * 7) / 2
+	gui.drawText(window, lx, y + (h / 2) - 6, label)
+}
+
+fn drawCheckbox(window, x, y, checked, label) {
+	gui.fillRect(window, x, y, 16, 16, C_FIELD)
+	drawBorder(window, x, y, 16, 16, C_BORDER)
+	if checked {
+		true -> gui.fillRect(window, x + 3, y + 3, 10, 10, C_CHECK_FILL)
+	}
+	gui.drawText(window, x + 24, y + 1, label)
+}
+
+// ─── Full form render ──────────────────────────────────────────────────────
+
+fn drawForm(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type != :ok -> 0
+
+	W := window.width
+	H := window.height
+
+	// ── Background
+	gui.fillRect(window, 0, 0, W, H, C_BG)
+
+	// ── Card
+	cw := 380
+	ch := 400
+	cx := (W - cw) / 2
+	cy := (H - ch) / 2
+
+	gui.fillRect(window, cx, cy, cw, ch, C_CARD)
+	drawBorder(window, cx, cy, cw, ch, C_BORDER)
+
+	// ── App header strip
+	gui.fillRect(window, cx, cy, cw, 46, C_HEADER)
+	gui.drawText(window, cx + 14, cy + 16, 'M  MAGNOLIA APP')
+
+	// ── Heading
+	gui.drawText(window, cx + 16, cy + 60, 'Sign in to your account')
+
+	// ── Username
+	uFY := cy + 86
+	gui.drawText(window, cx + 16, uFY, 'Username')
+	drawField(window, cx + 16, uFY + 18, cw - 32, 30,
+		state.username, 'Enter username', state.focus = :username)
+
+	// ── Password
+	pFY := cy + 156
+	gui.drawText(window, cx + 16, pFY, 'Password')
+	drawPassField(window, cx + 16, pFY + 18, cw - 32, 30,
+		state.password, state.focus = :password)
+
+	// ── Remember me
+	rmY := cy + 224
+	drawCheckbox(window, cx + 16, rmY, state.remember, 'Remember me')
+
+	// ── Buttons
+	bW  := (cw - 48) / 2
+	b1x := cx + 16
+	b2x := cx + 16 + bW + 16
+	bY  := cy + 258
+	bH  := 34
+	drawPrimaryBtn(window, b1x, bY, bW, bH, 'LOGIN', state.hoverLogin, state.pressLogin)
+	drawSecondaryBtn(window, b2x, bY, bW, bH, 'CLEAR', state.hoverClear, state.pressClear)
+
+	// ── Divider + status
+	gui.drawLine(window, cx + 16, cy + 308, cx + cw - 16, cy + 308, C_BORDER)
+	if state.status != '' {
+		true -> {
+			sc := if state.statusOk { true -> C_SUCCESS, _ -> C_ERROR }
+			gui.drawText(window, cx + 16, cy + 322, state.status)
+		}
+	}
+
+	gui.endFrame(window)
+}
+
+// ─── Layout constants (precomputed from 480×520 window) ───────────────────
+
+fn layout(W, H) {
+	cw := 380
+	ch := 400
+	cx := (W - cw) / 2
+	cy := (H - ch) / 2
+	bW := (cw - 48) / 2
+	{
+		cx: cx,  cy: cy,  cw: cw,  ch: ch
+		// username field
+		ux: cx + 16,  uy: cy + 86 + 18,  uw: cw - 32,  uh: 30
+		// password field
+		px: cx + 16,  py: cy + 156 + 18, pw: cw - 32,  ph: 30
+		// remember me checkbox
+		rmx: cx + 16, rmy: cy + 224
+		// buttons
+		b1x: cx + 16,          b2x: cx + 16 + bW + 16
+		bY:  cy + 258,         bW:  bW,  bH: 34
+	}
+}
+
+// ─── Initial state ─────────────────────────────────────────────────────────
+
+fn initState(W, H) {
+	lo := layout(W, H)
+	{
+		username:   ''
+		password:   ''
+		remember:   false
+		focus:      :username
+		hoverLogin: false
+		pressLogin: false
+		hoverClear: false
+		pressClear: false
+		status:     ''
+		statusOk:   false
+		lo:         lo
+	}
+}
+
+// ─── Event handler ─────────────────────────────────────────────────────────
+
+fn onEvent(window, step, state) if step.type = :dispatch -> {
+	mt := msgType(window)
+	wp := msgWParam(window)
+	lp := msgLParam(window)
+	mx := loword(lp)
+	my := hiword(lp)
+	lo := state.lo
+
+	if mt = WM_MOUSEMOVE -> {
+		state.hoverLogin <- inRect?(mx, my, lo.b1x, lo.bY, lo.bW, lo.bH)
+		state.hoverClear <- inRect?(mx, my, lo.b2x, lo.bY, lo.bW, lo.bH)
+	}
+
+	if mt = WM_LBUTTONDOWN -> {
+		// Focus fields
+		if inRect?(mx, my, lo.ux, lo.uy, lo.uw, lo.uh) -> state.focus <- :username
+		if inRect?(mx, my, lo.px, lo.py, lo.pw, lo.ph) -> state.focus <- :password
+
+		// Checkbox
+		if inRect?(mx, my, lo.rmx, lo.rmy, 16, 16) -> state.remember <- !state.remember
+
+		// LOGIN button
+		if inRect?(mx, my, lo.b1x, lo.bY, lo.bW, lo.bH) -> {
+			state.pressLogin <- true
+			if state.username != '' & state.password != '' {
+				true -> {
+					state.status   <- 'Signed in as: ' + state.username
+					state.statusOk <- true
+				}
+				_ -> {
+					state.status   <- 'Username and password are required.'
+					state.statusOk <- false
+				}
+			}
+		}
+
+		// CLEAR button
+		if inRect?(mx, my, lo.b2x, lo.bY, lo.bW, lo.bH) -> {
+			state.pressClear <- true
+			state.username   <- ''
+			state.password   <- ''
+			state.status     <- ''
+			state.focus      <- :username
+		}
+	}
+
+	if mt = WM_LBUTTONUP -> {
+		state.pressLogin <- false
+		state.pressClear <- false
+	}
+
+	// Printable character typed (WM_CHAR)
+	if mt = WM_CHAR & wp >= 32 & wp < 127 -> {
+		c := codepoint(wp)
+		if state.focus = :username & len(state.username) < 36 -> {
+			state.username <- state.username + c
+		}
+		if state.focus = :password & len(state.password) < 36 -> {
+			state.password <- state.password + c
+		}
+	}
+
+	// Control keys (WM_KEYDOWN)
+	if mt = WM_KEYDOWN -> {
+		if wp = VK_BACK -> {
+			if state.focus = :username -> state.username <- popChar(state.username)
+			if state.focus = :password -> state.password <- popChar(state.password)
+		}
+		if wp = VK_TAB -> {
+			state.focus <- if state.focus = :username { true -> :password, _ -> :username }
+		}
+		if wp = VK_RETURN & state.focus = :username -> state.focus <- :password
+		if wp = VK_ESCAPE -> {
+			state.username <- ''
+			state.password <- ''
+			state.status   <- ''
+			state.focus    <- :username
+		}
+	}
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────
+
+println('== Magnolia Login Form ==')
+println('  Tab / Enter  — move between fields')
+println('  Escape       — clear form')
+
+window := gui.createWindow('Magnolia – Login', 480, 520, {
+	updateOnDispatch: true
+})
+
+if window.type {
+	:ok -> {
+		state := initState(480, 520)
+		gui.show(window)
+		drawForm(window, state)
+		gui.run(
+			window
+			fn(win, step) onEvent(win, step, state)
+			fn(win, dt)   drawForm(win, state)
+		)
+		gui.close(window)
+	}
+	_ -> println('Could not create window: ' + string(window))
+}

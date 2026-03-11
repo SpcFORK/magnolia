@@ -154,3 +154,83 @@ fn transformVertices(vertices, transform, i, out) {
 
 	sub(i, out)
 }
+
+// Matrix4: 4x4 transformation matrices for advanced 3D transforms
+fn Mat4Identity() [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+
+fn Mat4Translate(x, y, z) [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1]
+
+fn Mat4Scale(x, y, z) [x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1]
+
+fn Mat4RotateX(radians) {
+	c := cos(radians)
+	s := sin(radians)
+	[1, 0, 0, 0, 0, c, 0 - s, 0, 0, s, c, 0, 0, 0, 0, 1]
+}
+
+fn Mat4RotateY(radians) {
+	c := cos(radians)
+	s := sin(radians)
+	[c, 0, s, 0, 0, 1, 0, 0, 0 - s, 0, c, 0, 0, 0, 0, 1]
+}
+
+fn Mat4RotateZ(radians) {
+	c := cos(radians)
+	s := sin(radians)
+	[c, 0 - s, 0, 0, s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+}
+
+fn Mat4Multiply(a, b) {
+	fn dot(row) {
+		fn col(c, sum, i) if i {
+			4 -> sum
+			_ -> col(c, sum + a.(row * 4 + i) * b.(i * 4 + c), i + 1)
+		}
+		col(0, 0, 0)
+	}
+	fn buildRow(r, acc) if r {
+		4 -> acc
+		_ -> buildRow(r + 1, acc << dot(r))
+	}
+	buildRow(0, [])
+}
+
+fn Mat4TransformPoint(m, v) {
+	x := v.x; y := v.y; z := v.z
+	x_out := m.0 * x + m.1 * y + m.2 * z + m.3
+	y_out := m.4 * x + m.5 * y + m.6 * z + m.7
+	z_out := m.8 * x + m.9 * y + m.10 * z + m.11
+	w_out := m.12 * x + m.13 * y + m.14 * z + m.15
+	if w_out = 0 { true -> Vec3(0, 0, 0) _ -> Vec3(x_out / w_out, y_out / w_out, z_out / w_out) }
+}
+
+// Quaternion support for smooth 3D rotations
+fn Quat(x, y, z, w) { {x: x, y: y, z: z, w: w} }
+
+fn QuatFromAxisAngle(axis, radians) {
+	s := sin(radians / 2)
+	Quat(axis.x * s, axis.y * s, axis.z * s, cos(radians / 2))
+}
+
+fn QuatMultiply(a, b) {
+	Quat(
+		a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y
+		a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x
+		a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+		a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+	)
+}
+
+fn QuatNormalize(q) {
+	len := pow(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w, 0.5)
+	if len <= 0.000001 { true -> Quat(0, 0, 0, 1) _ -> Quat(q.x / len, q.y / len, q.z / len, q.w / len) }
+}
+
+fn QuatRotateVector(q, v) {
+	qx := q.x; qy := q.y; qz := q.z; qw := q.w
+	vx := v.x; vy := v.y; vz := v.z
+	c1x := qy * vz - qz * vy; c1y := qz * vx - qx * vz; c1z := qx * vy - qy * vx
+	c2x := qy * c1z - qz * c1y; c2y := qz * c1x - qx * c1z; c2z := qx * c1y - qy * c1x
+	Vec3(vx + 2 * (qw * c1x + c2x), vy + 2 * (qw * c1y + c2y), vz + 2 * (qw * c1z + c2z))
+}
+
