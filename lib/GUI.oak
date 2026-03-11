@@ -99,6 +99,8 @@ fn createWindow(title, width, height, options) {
 									frameTargetHdc: 0
 									frameBitmap: 0
 									framePrevBitmap: 0
+									frameWidth: 0
+									frameHeight: 0
 									msgBuf: msgBuf
 									closed: false
 								}
@@ -415,6 +417,75 @@ fn setTitle(window, title) if window.type {
 	_ -> window
 }
 
+fn _windowClientSize(window) {
+	rect := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+	res := windows.user32('GetClientRect', window.hwnd, addr(rect))
+	if windows.callOk?(res) & res.r1 > 0 {
+		true -> {
+			left := windows.readU32(addr(rect) + 0)
+			top := windows.readU32(addr(rect) + 4)
+			right := windows.readU32(addr(rect) + 8)
+			bottom := windows.readU32(addr(rect) + 12)
+			{
+				type: :ok
+				width: if right > left {
+					true -> right - left
+					_ -> window.width
+				}
+				height: if bottom > top {
+					true -> bottom - top
+					_ -> window.height
+				}
+			}
+		}
+		_ -> _err('GetClientRect failed', res)
+	}
+}
+
+fn _ensureWindowsBackbuffer(window, targetHdc) {
+	if window.frameHdc = 0 {
+		true -> {
+			memdc := windows.gdi32('CreateCompatibleDC', targetHdc)
+			if windows.callOk?(memdc) & memdc.r1 > 0 {
+				true -> window.frameHdc <- memdc.r1
+				_ -> _err('CreateCompatibleDC failed', memdc)
+			}
+		}
+		_ -> ?
+	}
+
+	needsResize := (window.frameBitmap = 0) | (window.frameWidth != window.width) | (window.frameHeight != window.height)
+	if needsResize {
+		true -> {
+			if window.frameBitmap > 0 {
+				true -> {
+					if window.framePrevBitmap > 0 {
+						true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+					}
+					windows.deleteObject(window.frameBitmap)
+					window.frameBitmap <- 0
+				}
+			}
+
+			bmp := windows.gdi32('CreateCompatibleBitmap', targetHdc, window.width, window.height)
+			if windows.callOk?(bmp) & bmp.r1 > 0 {
+				true -> {
+					window.frameBitmap <- bmp.r1
+					prev := windows.selectObject(window.frameHdc, window.frameBitmap)
+					if windows.callOk?(prev) {
+						true -> window.framePrevBitmap <- prev.r1
+					}
+					window.frameWidth <- window.width
+					window.frameHeight <- window.height
+					{type: :ok}
+				}
+				_ -> _err('CreateCompatibleBitmap failed', bmp)
+			}
+		}
+		_ -> {type: :ok}
+	}
+}
+
 fn beginFrame(window) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
@@ -422,38 +493,33 @@ fn beginFrame(window) if window.type {
 			if windows.callOk?(target) & target.r1 > 0 {
 				true -> {
 					window.frameTargetHdc <- target.r1
-					if window.frameHdc = 0-> {
-                        memdc := windows.gdi32('CreateCompatibleDC', target.r1)
-                        if windows.callOk?(memdc) & memdc.r1 > 0 {
-                            true -> window.frameHdc <- memdc.r1
-                            _ -> {
-                                windows.releaseDC(window.hwnd, target.r1)
-                                window.frameTargetHdc <- 0
-                                _err('CreateCompatibleDC failed', memdc)
-                            }
-                        }
-                    }
-
-					if window.frameBitmap = 0 -> {
-                        bmp := windows.gdi32('CreateCompatibleBitmap', target.r1, window.width, window.height)
-                        if windows.callOk?(bmp) & bmp.r1 > 0 {
-                            true -> {
-                                window.frameBitmap <- bmp.r1
-                                prev := windows.selectObject(window.frameHdc, window.frameBitmap)
-                                if windows.callOk?(prev) -> window.framePrevBitmap <- prev.r1
-                            }
-                            _ -> {
-                                windows.releaseDC(window.hwnd, target.r1)
-                                window.frameTargetHdc <- 0
-                                _err('CreateCompatibleBitmap failed', bmp)
-                            }
-                        }
-                    }
-					
-
-					{
-						type: :ok
-						hdc: window.frameHdc
+					size := _windowClientSize(window)
+					if size.type {
+						:ok -> {
+							window.width <- size.width
+							window.height <- size.height
+							ready := _ensureWindowsBackbuffer(window, target.r1)
+							if ready.type {
+								:ok -> {
+									{
+										type: :ok
+										hdc: window.frameHdc
+										width: window.width
+										height: window.height
+									}
+								}
+								_ -> {
+									windows.releaseDC(window.hwnd, target.r1)
+									window.frameTargetHdc <- 0
+									ready
+								}
+							}
+						}
+						_ -> {
+							windows.releaseDC(window.hwnd, target.r1)
+							window.frameTargetHdc <- 0
+							size
+						}
 					}
 				}
 				_ -> _err('GetDC failed', target)
@@ -726,6 +792,8 @@ fn close(window) if window.type {
 						window.frameBitmap <- 0
 						window.framePrevBitmap <- 0
 						window.frameHdc <- 0
+						window.frameWidth <- 0
+						window.frameHeight <- 0
 					}
 				}
 				windows.destroyWindow(window.hwnd)
