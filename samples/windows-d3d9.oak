@@ -1,0 +1,77 @@
+// Minimal D3D9 bootstrap sample using windows stdlib wrappers.
+//
+// This sample demonstrates:
+// 1) calling Direct3DCreate9 from d3d9.dll
+// 2) calling COM methods through the IDirect3D9 vtable
+// 3) reading adapter count and releasing the COM object
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+D3D_SDK_VERSION := 32
+IDirect3D9_Release := 2
+IDirect3D9_GetAdapterCount := 4
+
+fn ptrSize() if ___runtime_sys_info().arch {
+	'amd64' -> 8
+	'arm64' -> 8
+	_ -> 4
+}
+
+fn ptrRead(address) if ptrSize() {
+	8 -> windows.readU64(address)
+	_ -> windows.readU32(address)
+}
+
+// Calls a COM method with no extra args, passing only `this`.
+fn comCall0(comObj, methodIndex) {
+	vtbl := ptrRead(comObj)
+	methodPtr := ptrRead(vtbl + methodIndex * ptrSize())
+	windows.call(methodPtr, comObj)
+}
+
+fn releaseOk?(res) windows.callOk?(res) | (res.type = :error & res.errno = 31)
+
+println('== Windows D3D9 Sample ==')
+
+if windows.isWindows?() {
+	true -> {
+		d3d := windows.d3d9('Direct3DCreate9', D3D_SDK_VERSION)
+		if windows.callOk?(d3d) & d3d.r1 > 0 {
+			true -> {
+				d3d9 := d3d.r1
+				printf('IDirect3D9 pointer: {{ 0 }}', d3d9)
+
+				adapters := comCall0(d3d9, IDirect3D9_GetAdapterCount)
+				if windows.callOk?(adapters) {
+					true -> printf('Adapter count: {{ 0 }}', adapters.r1)
+					_ -> println('GetAdapterCount failed: ' + string(adapters))
+				}
+
+				rel := comCall0(d3d9, IDirect3D9_Release)
+				if releaseOk?(rel) {
+					true -> {
+						printf('Release refcount: {{ 0 }}', rel.r1)
+						if rel.type = :error & rel.errno = 31 {
+							true -> println('Note: errno 31 on Release can be a benign syscall bridge quirk in this runtime.')
+						}
+					}
+					_ -> println('Release failed: ' + string(rel))
+				}
+			}
+			_ -> {
+				println('Direct3DCreate9 failed:')
+				println(string(d3d))
+				println('Last error: ' + string(windows.lastErrorMessage()))
+			}
+		}
+	}
+	_ -> println('Not on Windows; skipping D3D9 sample.')
+}

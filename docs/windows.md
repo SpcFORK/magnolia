@@ -61,6 +61,16 @@ windows := import('windows')
 - `Shlwapi`, `Shcore`
 - `UxTheme`, `Dwmapi`
 - `Version`, `Setupapi`, `Netapi32`
+- `Winmm`, `Avrt`, `Mmdevapi`, `Dsound`
+- `Mfplat`, `Mfreadwrite`, `Mfuuid`
+- `Taskschd`, `Wevtapi`
+- `Wlanapi`, `Mpr`, `Spoolss`, `Wtsapi32`, `Rasapi32`
+- `Msi`, `Wimgapi`, `Cabinet`, `Apphelp`
+- `Wer`, `Faultrep`, `Dbghelp`, `Dbgeng`
+- `Pdh`, `Iphlpapi`, `Wscapi`, `Sensapi`
+- `Ncrypt`, `Cryptui`, `Wintrust`, `Samlib`
+- `Netshell`, `Fwpuclnt`, `Dnsapi`, `Nlaapi`, `Httpapi`
+- `Rpcrt4`, `Srpapi`, `Sxs`
 - `ApiSetPrefix` (prefix for ApiSet compatibility stubs like `api-ms-win-*.dll`)
 - `D3dx9Prefix` (prefix for legacy `d3dx9_*.dll` helper DLL family)
 
@@ -270,6 +280,44 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `versionDll(symbol, args...)`
 ### `setupapi(symbol, args...)`
 ### `netapi32(symbol, args...)`
+### `winmm(symbol, args...)`
+### `avrt(symbol, args...)`
+### `mmdevapi(symbol, args...)`
+### `dsound(symbol, args...)`
+### `mfplat(symbol, args...)`
+### `mfreadwrite(symbol, args...)`
+### `mfuuid(symbol, args...)`
+### `taskschd(symbol, args...)`
+### `wevtapi(symbol, args...)`
+### `wlanapi(symbol, args...)`
+### `mpr(symbol, args...)`
+### `spoolss(symbol, args...)`
+### `wtsapi32(symbol, args...)`
+### `rasapi32(symbol, args...)`
+### `msi(symbol, args...)`
+### `wimgapi(symbol, args...)`
+### `cabinet(symbol, args...)`
+### `apphelp(symbol, args...)`
+### `wer(symbol, args...)`
+### `faultrep(symbol, args...)`
+### `dbghelp(symbol, args...)`
+### `dbgeng(symbol, args...)`
+### `pdh(symbol, args...)`
+### `iphlpapi(symbol, args...)`
+### `wscapi(symbol, args...)`
+### `sensapi(symbol, args...)`
+### `ncrypt(symbol, args...)`
+### `cryptui(symbol, args...)`
+### `wintrust(symbol, args...)`
+### `samlib(symbol, args...)`
+### `netshell(symbol, args...)`
+### `fwpuclnt(symbol, args...)`
+### `dnsapi(symbol, args...)`
+### `nlaapi(symbol, args...)`
+### `httpapi(symbol, args...)`
+### `rpcrt4(symbol, args...)`
+### `srpapi(symbol, args...)`
+### `sxs(symbol, args...)`
 ### `apiSetDll(contract)`
 ### `apiSet(contract, symbol, args...)`
 
@@ -630,6 +678,37 @@ if windows.isWindows?() {
     }
 }
 ```
+
+### DLL Coverage Example (Requested Set)
+
+See [samples/windows-dll-bindings.oak](../samples/windows-dll-bindings.oak) for
+a runnable sample that:
+
+- probes the full explicitly requested DLL set using `loadDll(...)`
+- prints counts of loaded vs failed modules
+- classifies `errno = 126` as unavailable modules (often SKU/feature-dependent)
+- prints detailed failures only for non-126 hard errors
+
+### Dynamic Family Example (ApiSet + D3DX9)
+
+See [samples/windows-dll-families.oak](../samples/windows-dll-families.oak) for
+a runnable sample that:
+
+- generates `api-ms-win-*.dll` names through `apiSetDll(...)`
+- generates `d3dx9_*.dll` names through `d3dx9Dll(...)`
+- probes those generated names with `loadDll(...)`
+
+### D3D9 Program Sample
+
+See [samples/windows-d3d9.oak](../samples/windows-d3d9.oak) for a runnable D3D9
+bootstrap sample that:
+
+- calls `Direct3DCreate9(D3D_SDK_VERSION)` through `d3d9(...)`
+- invokes `IDirect3D9` COM methods via vtable pointer dispatch
+- prints adapter count and releases the D3D object
+
+Note: `Release` can report `errno = 31` in this runtime bridge even when the
+call path is otherwise valid; the sample reports this as a benign runtime quirk.
 
 ## Current Limitation
 

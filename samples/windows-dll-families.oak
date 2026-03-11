@@ -1,0 +1,50 @@
+// Windows DLL dynamic family sample.
+// Demonstrates ApiSet and D3DX9 helper name generation + load attempts.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+println('== Windows DLL Family Sample ==')
+
+fn probeNames(names, i) if i < len(names) {
+	true -> {
+		dll := names.(i)
+		res := windows.loadDll(dll)
+		if res.type {
+			:ok -> printf('OK: {{ 0 }}', dll)
+			_ -> printf('MISS: {{ 0 }} => {{ 1 }}', dll, string(res))
+		}
+		probeNames(names, i + 1)
+	}
+	_ -> ?
+}
+
+if windows.isWindows?() {
+	true -> {
+		apiContracts := [
+			'core-synch-l1-2-0'
+			'core-path-l1-1-0'
+			'core-file-l1-2-0'
+			'core-threadpool-l1-2-0'
+		]
+
+		d3dxVersions := ['24', '36', '43']
+
+		apiDlls := apiContracts |> with map(fn(x) windows.apiSetDll(x))
+		d3dxDlls := d3dxVersions |> with map(fn(x) windows.d3dx9Dll(x))
+
+		println('ApiSet DLL probes:')
+		probeNames(apiDlls, 0)
+
+		println('D3DX9 DLL probes:')
+		probeNames(d3dxDlls, 0)
+	}
+	_ -> println('Not on Windows; skipping DLL family sample.')
+}

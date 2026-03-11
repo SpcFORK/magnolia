@@ -1,0 +1,149 @@
+// Windows DLL binding coverage sample.
+// Probes all explicitly requested DLL bindings via loadDll.
+
+{
+	println: println
+	string: string
+	reduce: reduce
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+println('== Windows DLL Binding Coverage Sample ==')
+
+fn probeDlls(dlls, i, loaded, failed) if i < len(dlls) {
+	true -> {
+		dll := dlls.(i)
+		res := windows.loadDll(dll)
+		if res.type {
+			:ok -> probeDlls(dlls, i + 1, loaded << dll, failed)
+			_ -> probeDlls(dlls, i + 1, loaded, failed << {dll: dll, detail: res})
+		}
+	}
+	_ -> {loaded: loaded, failed: failed}
+}
+
+fn printFailures(failed, i) if i < len(failed) {
+	true -> {
+		item := failed.(i)
+		printf('FAILED: {{ 0 }} => {{ 1 }}', item.dll, string(item.detail))
+		printFailures(failed, i + 1)
+	}
+	_ -> ?
+}
+
+fn loadErrno(item) if item.detail.detail {
+	? -> if item.detail.fallback {
+		? -> -1
+		_ -> if item.detail.fallback.errno {
+			? -> -1
+			_ -> item.detail.fallback.errno
+		}
+	}
+	_ -> if item.detail.detail.errno {
+		? -> -1
+		_ -> item.detail.detail.errno
+	}
+}
+
+fn splitFailures(failed) failed |> reduce({missing: [], hard: []}, fn(acc, item) if loadErrno(item) = 126 {
+	true -> {
+		acc.missing << item
+		acc
+	}
+	_ -> {
+		acc.hard << item
+		acc
+	}
+})
+
+fn printUnavailable(unavailable, i) if i < len(unavailable) {
+	true -> {
+		item := unavailable.(i)
+		printf('UNAVAILABLE (SKU/feature-dependent): {{ 0 }}', item.dll)
+		printUnavailable(unavailable, i + 1)
+	}
+	_ -> ?
+}
+
+if windows.isWindows?() {
+	true -> {
+		dlls := [
+			windows.Kernel32
+			windows.Ntdll
+			windows.User32
+			windows.Gdi32
+			windows.Advapi32
+			windows.Ws2_32
+			windows.Msvcp
+			windows.Msvcrt
+			windows.Ucrtbase
+			windows.Vcruntime140
+			windows.Comctl32
+			windows.Wininet
+			windows.D3d9
+			windows.ActionCenter
+			windows.Aclui
+			windows.Acledit
+			windows.Acppage
+			windows.Acprgwiz
+			windows.Acproxy
+			windows.Adprovider
+			windows.Aeinv
+			windows.Aepdu
+			windows.Alrsvc
+			windows.Amstream
+			windows.SixTo4svc
+			windows.Adtschema
+			windows.Adsldp
+			windows.Adsnt
+			windows.Aepic
+			windows.AepRoam
+			windows.Agcore
+			windows.Agentctl
+			windows.ALRes409
+			windows.AltTab
+			windows.Apcups
+			windows.Apds
+			windows.Adadmigrate
+			windows.AdfsMig
+			windows.Adhsvc
+			windows.Admexs
+			windows.Admparse
+			windows.AdmTmpl
+			windows.Admxprox
+			windows.Adptif
+			windows.Adrclient
+			windows.Adsldpc
+			windows.Adsmsext
+			windows.Adsnds
+			windows.Adsnw
+			windows.Advapi32res
+			windows.Advpack
+			windows.Adwsmigrate
+			windows.Aecache
+			windows.Aeevts
+			windows.Aelupsvc
+			windows.Amxread
+		]
+
+		result := probeDlls(dlls, 0, [], [])
+		split := splitFailures(result.failed)
+		printf('Requested DLLs: {{ 0 }}', len(dlls))
+		printf('Loaded DLLs: {{ 0 }}', len(result.loaded))
+		printf('Unavailable DLLs (errno 126): {{ 0 }}', len(split.missing))
+		printf('Hard failures (other errors): {{ 0 }}', len(split.hard))
+
+		if len(split.missing) > 0 {
+			true -> printUnavailable(split.missing, 0)
+		}
+
+		if len(split.hard) > 0 {
+			true -> printFailures(split.hard, 0)
+		}
+	}
+	_ -> println('Not on Windows; skipping DLL binding coverage sample.')
+}
