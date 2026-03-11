@@ -1,0 +1,207 @@
+// gui-draw contains cross-platform drawing primitives for GUI facade.
+
+windows := import('windows')
+linux := import('linux')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _err(message, detail) {
+	{
+		type: :error
+		error: message
+		detail: detail
+	}
+}
+
+fn drawText(window, x, y, text) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdcValue := if window.frameHdc > 0 {
+				true -> window.frameHdc
+				_ -> {
+					hdc := windows.getDC(window.hwnd)
+					if windows.callOk?(hdc) & hdc.r1 > 0 {
+						true -> hdc.r1
+						_ -> 0
+					}
+				}
+			}
+			if hdcValue > 0 {
+				true -> {
+					windows.textOut(hdcValue, x, y, text)
+					if window.frameHdc = 0 {
+						true -> windows.releaseDC(window.hwnd, hdcValue)
+					}
+					{type: :ok}
+				}
+				_ -> _err('GetDC failed', ?)
+			}
+		}
+		:linux -> {
+			gc := linux.createGC(window.display, window.window, 0, 0)
+			if linux.callOk?(gc) & gc.r1 > 0 {
+				true -> {
+					linux.setForeground(window.display, gc.r1, window.black)
+					linux.drawString(window.display, window.window, gc.r1, x, y, text)
+					linux.freeGC(window.display, gc.r1)
+					linux.flush(window.display)
+					{type: :ok}
+				}
+				_ -> _err('XCreateGC failed', gc)
+			}
+		}
+		:web -> {
+			window.messages <- window.messages << {
+				type: :text
+				x: x
+				y: y
+				text: text
+			}
+			{type: :ok}
+		}
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
+fn fillRect(window, x, y, width, height, color, defaultColor) if window.type {
+	:ok -> {
+		useColor := _default(color, defaultColor)
+		if window.backend {
+			:windows -> {
+				hdcValue := if window.frameHdc > 0 {
+					true -> window.frameHdc
+					_ -> {
+						hdc := windows.getDC(window.hwnd)
+						if windows.callOk?(hdc) & hdc.r1 > 0 {
+							true -> hdc.r1
+							_ -> 0
+						}
+					}
+				}
+				if hdcValue > 0 {
+					true -> {
+						brush := windows.createSolidBrush(useColor)
+						if windows.callOk?(brush) & brush.r1 > 0 {
+							true -> {
+								windows.selectObject(hdcValue, brush.r1)
+								windows.rectangle(hdcValue, x, y, x + width, y + height)
+								windows.deleteObject(brush.r1)
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
+								{type: :ok}
+							}
+							_ -> {
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
+								_err('CreateSolidBrush failed', brush)
+							}
+						}
+					}
+					_ -> _err('GetDC failed', ?)
+				}
+			}
+			:linux -> {
+				gc := linux.createGC(window.display, window.window, 0, 0)
+				if linux.callOk?(gc) & gc.r1 > 0 {
+					true -> {
+						linux.setForeground(window.display, gc.r1, useColor)
+						linux.fillRectangle(window.display, window.window, gc.r1, x, y, width, height)
+						linux.freeGC(window.display, gc.r1)
+						linux.flush(window.display)
+						{type: :ok}
+					}
+					_ -> _err('XCreateGC failed', gc)
+				}
+			}
+			:web -> {
+				window.messages <- window.messages << {
+					type: :rect
+					x: x
+					y: y
+					width: width
+					height: height
+					color: useColor
+				}
+				{type: :ok}
+			}
+			_ -> _err('Unknown window backend', window)
+		}
+	}
+	_ -> window
+}
+
+fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
+	:ok -> {
+		useColor := _default(color, defaultColor)
+		if window.backend {
+			:windows -> {
+				hdcValue := if window.frameHdc > 0 {
+					true -> window.frameHdc
+					_ -> {
+						hdc := windows.getDC(window.hwnd)
+						if windows.callOk?(hdc) & hdc.r1 > 0 {
+							true -> hdc.r1
+							_ -> 0
+						}
+					}
+				}
+				if hdcValue > 0 {
+					true -> {
+						pen := windows.gdi32('CreatePen', 0, 1, useColor)
+						if windows.callOk?(pen) & pen.r1 > 0 {
+							true -> {
+								windows.selectObject(hdcValue, pen.r1)
+								windows.gdi32('MoveToEx', hdcValue, x1, y1, 0)
+								windows.gdi32('LineTo', hdcValue, x2, y2)
+								windows.deleteObject(pen.r1)
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
+								{type: :ok}
+							}
+							_ -> {
+								if window.frameHdc = 0 {
+									true -> windows.releaseDC(window.hwnd, hdcValue)
+								}
+								_err('CreatePen failed', pen)
+							}
+						}
+					}
+					_ -> _err('GetDC failed', ?)
+				}
+			}
+			:linux -> {
+				gc := linux.createGC(window.display, window.window, 0, 0)
+				if linux.callOk?(gc) & gc.r1 > 0 {
+					true -> {
+						linux.setForeground(window.display, gc.r1, useColor)
+						linux.drawLine(window.display, window.window, gc.r1, x1, y1, x2, y2)
+						linux.freeGC(window.display, gc.r1)
+						linux.flush(window.display)
+						{type: :ok}
+					}
+					_ -> _err('XCreateGC failed', gc)
+				}
+			}
+			:web -> {
+				window.messages <- window.messages << {
+					type: :line
+					x1: x1
+					y1: y1
+					x2: x2
+					y2: y2
+					color: useColor
+				}
+				{type: :ok}
+			}
+			_ -> _err('Unknown window backend', window)
+		}
+	}
+	_ -> window
+}

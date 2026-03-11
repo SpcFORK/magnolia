@@ -2099,6 +2099,27 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 		[
 			type(gui.backend())
 			type(gui.rgb(1, 2, 3))
+			type(gui.Vec2)
+			type(gui.Rect2)
+			type(gui.vec2Add)
+			type(gui.vec2Sub)
+			type(gui.vec2Scale)
+			type(gui.vec2Dot)
+			type(gui.vec2Len)
+			type(gui.vec2Normalize)
+			type(gui.rectTranslate)
+			type(gui.rectContains)
+			type(gui.rectIntersects)
+			type(gui.Transform2D)
+			type(gui.applyTransform2D)
+			type(gui.Camera2D)
+			type(gui.worldToScreen2D)
+			type(gui.screenToWorld2D)
+			type(gui.drawRect2D)
+			type(gui.drawCircle2D)
+			type(gui.drawPolyline2D)
+			type(gui.drawPolygon2D)
+			type(gui.drawGrid2D)
 			type(gui.createCanvas)
 			type(gui.initWebGL)
 			type(gui.webglCreateShader)
@@ -2145,6 +2166,26 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 	`, MakeList(
 		AtomValue("atom"),
 		AtomValue("int"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),

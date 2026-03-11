@@ -206,6 +206,44 @@ Draws a line segment in the target window.
 - Linux: X11 `XDrawLine`
 - Web: records a logical `:line` draw op in `window.messages`
 
+## 2D Tooling
+
+GUI now includes a 2D helper suite for math, transforms, camera mapping, and
+shape drawing.
+
+### 2D math and geometry
+
+- `Vec2(x, y)`
+- `Rect2(x, y, width, height)`
+- `vec2Add(a, b)`
+- `vec2Sub(a, b)`
+- `vec2Scale(v, s)`
+- `vec2Dot(a, b)`
+- `vec2Len(v)`
+- `vec2Normalize(v)`
+- `rectTranslate(rect, dx, dy)`
+- `rectContains(rect, point)`
+- `rectIntersects(a, b)`
+
+### 2D transforms and camera
+
+- `Transform2D(options)` fields:
+    - `tx`, `ty` translation
+    - `r` rotation in degrees
+    - `sx`, `sy` scale (or `scale` for uniform)
+- `applyTransform2D(point, transform)`
+- `Camera2D(options)` fields: `x`, `y`, `zoom`
+- `worldToScreen2D(point, camera, window)`
+- `screenToWorld2D(point, camera, window)`
+
+### 2D drawing primitives
+
+- `drawRect2D(window, x, y, width, height, color?, filled?)`
+- `drawCircle2D(window, cx, cy, radius, color?, filled?)`
+- `drawPolyline2D(window, points, color?, closed?)`
+- `drawPolygon2D(window, points, color?, filled?)`
+- `drawGrid2D(window, spacing?, color?, originX?, originY?)`
+
 ## 3D Renderer
 
 GUI includes a lightweight wireframe 3D renderer that works on native backends
@@ -389,6 +427,8 @@ if window.type = :ok & gui.isWeb?() -> {
 - Web Canvas/WebGL middleware queue logic is factored into `import('gui-web')` internally.
 - Win32 lifecycle/frame internals are factored into `import('gui-native-win')` internally.
 - Linux lifecycle/event-loop internals are factored into `import('gui-native-linux')` internally.
+- Cross-platform drawing primitives are factored into `import('gui-draw')` internally.
+- 2D math/shape tooling is factored into `import('gui-2d')` internally.
 - Optional direct mesh module imports:
     - `Mesh(vertices, edges)`
     - `GridMesh(size, step)`

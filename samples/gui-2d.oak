@@ -1,0 +1,109 @@
+// GUI 2D sample showcasing the gui-2d toolkit through the GUI facade.
+
+{
+	println: println
+	string: string
+} := import('std')
+
+gui := import('GUI')
+
+window := gui.createWindow('Magnolia GUI 2D', 960, 640, {
+	frameMs: 16
+	icon: './build/magnolia.ico'
+	taskbarIcon: './build/magnolia.ico'
+	windowIcon: './build/magnolia.ico'
+})
+
+if window.type {
+	:ok -> {
+		gui.show(window)
+
+		state := {
+			angle: 0
+			t: 0
+			camera: gui.Camera2D({x: 0, y: 0, zoom: 1})
+			boxA: gui.Rect2(-120, -40, 80, 80)
+			boxB: gui.Rect2(60, -20, 120, 90)
+		}
+
+		gui.run(window, fn(_win, evt) {
+			if evt.type = :dispatch {
+				true -> 0
+			}
+		}, fn(win) {
+			state.t <- state.t + 0.016
+			state.angle <- state.angle + 1.4
+			if state.angle > 360 {
+				true -> state.angle <- state.angle - 360
+			}
+
+			state.camera <- gui.Camera2D({
+				x: sin(state.t * 0.8) * 30
+				y: cos(state.t * 0.6) * 20
+				zoom: 1 + sin(state.t * 0.5) * 0.12
+			})
+
+			mover := gui.rectTranslate(state.boxA, sin(state.t * 2.0) * 120, cos(state.t * 1.6) * 70)
+			hit := gui.rectIntersects(mover, state.boxB)
+
+			gui.beginFrame(win)
+			gui.fillRect(win, 0, 0, win.width, win.height, gui.rgb(10, 14, 24))
+
+			gui.drawGrid2D(win, 32, gui.rgb(36, 54, 84), int(state.camera.x * 2), int(state.camera.y * 2))
+
+			origin := gui.worldToScreen2D(gui.Vec2(0, 0), state.camera, win)
+			gui.drawCircle2D(win, origin.x, origin.y, 4, gui.rgb(255, 240, 120), true)
+
+			boxAPos := gui.worldToScreen2D(gui.Vec2(mover.x, mover.y), state.camera, win)
+			boxBPos := gui.worldToScreen2D(gui.Vec2(state.boxB.x, state.boxB.y), state.camera, win)
+			gui.drawRect2D(win, boxAPos.x, boxAPos.y, mover.width, mover.height, if hit {
+				true -> gui.rgb(255, 120, 120)
+				_ -> gui.rgb(120, 220, 170)
+			}, true)
+			gui.drawRect2D(win, boxBPos.x, boxBPos.y, state.boxB.width, state.boxB.height, gui.rgb(120, 170, 255), false)
+
+			pivot := gui.worldToScreen2D(gui.Vec2(240, -20), state.camera, win)
+			arm := gui.applyTransform2D(gui.Vec2(60, 0), gui.Transform2D({
+				tx: pivot.x
+				ty: pivot.y
+				r: state.angle
+				scale: 1
+			}))
+			gui.drawLine(win, pivot.x, pivot.y, arm.x, arm.y, gui.rgb(250, 210, 110))
+			gui.drawCircle2D(win, arm.x, arm.y, 10, gui.rgb(250, 210, 110), false)
+
+			path := [
+				gui.Vec2(80 + sin(state.t * 1.0) * 30, 520)
+				gui.Vec2(220, 560 + cos(state.t * 1.8) * 22)
+				gui.Vec2(360, 510 + sin(state.t * 1.4) * 16)
+				gui.Vec2(520, 570 + cos(state.t * 1.2) * 18)
+			]
+			gui.drawPolyline2D(win, path, gui.rgb(150, 210, 255), false)
+
+			poly := [
+				gui.Vec2(700, 150)
+				gui.Vec2(820, 180)
+				gui.Vec2(860, 280)
+				gui.Vec2(770, 340)
+				gui.Vec2(670, 280)
+			]
+			gui.drawPolygon2D(win, poly, gui.rgb(200, 140, 255), false)
+
+			gui.drawText(win, 16, 26, 'Magnolia GUI 2D Toolkit Sample')
+			gui.drawText(win, 16, 48, 'rect overlap: ' + if hit {
+				true -> 'true'
+				_ -> 'false'
+			})
+			gui.drawText(win, 16, 70, 'camera: (' + string(int(state.camera.x)) + ', ' + string(int(state.camera.y)) + ') z=' + string(state.camera.zoom))
+			gui.drawText(win, 16, 92, 'features: Vec2 / Rect2 / Transform2D / Camera2D / shapes / grid')
+
+			gui.endFrame(win)
+		})
+
+		gui.close(window)
+	}
+	_ -> {
+		println('Could not create GUI 2D window.')
+		println(string(window))
+	}
+}

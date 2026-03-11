@@ -10,10 +10,12 @@ linux := import('linux')
 guiMesh := import('gui-mesh')
 guiRender := import('gui-render')
 gui3dmath := import('gui-3dmath')
+gui2d := import('gui-2d')
 guiRaster := import('gui-raster')
 guiWeb := import('gui-web')
 guiNativeWin := import('gui-native-win')
 guiNativeLinux := import('gui-native-linux')
+guiDraw := import('gui-draw')
 
 fn backend() if ___runtime_sys_info().os {
 	'windows' -> :windows
@@ -128,125 +130,9 @@ fn endFrame(window) if window.type {
 	_ -> 0
 }
 
-fn drawText(window, x, y, text) if window.type {
-	:ok -> if window.backend {
-		:windows -> {
-			hdcValue := if window.frameHdc > 0 {
-				true -> window.frameHdc
-				_ -> {
-					hdc := windows.getDC(window.hwnd)
-					if windows.callOk?(hdc) & hdc.r1 > 0 {
-						true -> hdc.r1
-						_ -> 0
-					}
-				}
-			}
-			if hdcValue > 0 {
-				true -> {
-					windows.textOut(hdcValue, x, y, text)
-					if window.frameHdc = 0 {
-						true -> windows.releaseDC(window.hwnd, hdcValue)
-					}
-					{type: :ok}
-				}
-				_ -> _err('GetDC failed', ?)
-			}
-		}
-		:linux -> {
-			gc := linux.createGC(window.display, window.window, 0, 0)
-			if linux.callOk?(gc) & gc.r1 > 0 {
-				true -> {
-					linux.setForeground(window.display, gc.r1, window.black)
-					linux.drawString(window.display, window.window, gc.r1, x, y, text)
-					linux.freeGC(window.display, gc.r1)
-					linux.flush(window.display)
-					{type: :ok}
-				}
-				_ -> _err('XCreateGC failed', gc)
-			}
-		}
-		:web -> {
-			window.messages <- window.messages << {
-				type: :text
-				x: x
-				y: y
-				text: text
-			}
-			{type: :ok}
-		}
-		_ -> _err('Unknown window backend', window)
-	}
-	_ -> window
-}
+fn drawText(window, x, y, text) guiDraw.drawText(window, x, y, text)
 
-fn fillRect(window, x, y, width, height, color) if window.type {
-	:ok -> {
-		useColor := _default(color, rgb(66, 138, 245))
-		if window.backend {
-			:windows -> {
-				hdcValue := if window.frameHdc > 0 {
-					true -> window.frameHdc
-					_ -> {
-						hdc := windows.getDC(window.hwnd)
-						if windows.callOk?(hdc) & hdc.r1 > 0 {
-							true -> hdc.r1
-							_ -> 0
-						}
-					}
-				}
-				if hdcValue > 0 {
-					true -> {
-						brush := windows.createSolidBrush(useColor)
-						if windows.callOk?(brush) & brush.r1 > 0 {
-							true -> {
-								windows.selectObject(hdcValue, brush.r1)
-								windows.rectangle(hdcValue, x, y, x + width, y + height)
-								windows.deleteObject(brush.r1)
-								if window.frameHdc = 0 {
-									true -> windows.releaseDC(window.hwnd, hdcValue)
-								}
-								{type: :ok}
-							}
-							_ -> {
-								if window.frameHdc = 0 {
-									true -> windows.releaseDC(window.hwnd, hdcValue)
-								}
-								_err('CreateSolidBrush failed', brush)
-							}
-						}
-					}
-					_ -> _err('GetDC failed', ?)
-				}
-			}
-			:linux -> {
-				gc := linux.createGC(window.display, window.window, 0, 0)
-				if linux.callOk?(gc) & gc.r1 > 0 {
-					true -> {
-						linux.setForeground(window.display, gc.r1, useColor)
-						linux.fillRectangle(window.display, window.window, gc.r1, x, y, width, height)
-						linux.freeGC(window.display, gc.r1)
-						linux.flush(window.display)
-						{type: :ok}
-					}
-					_ -> _err('XCreateGC failed', gc)
-				}
-			}
-			:web -> {
-				window.messages <- window.messages << {
-					type: :rect
-					x: x
-					y: y
-					width: width
-					height: height
-					color: useColor
-				}
-				{type: :ok}
-			}
-			_ -> _err('Unknown window backend', window)
-		}
-	}
-	_ -> window
-}
+fn fillRect(window, x, y, width, height, color) guiDraw.fillRect(window, x, y, width, height, color, rgb(66, 138, 245))
 
 fn degToRad(deg) gui3dmath.degToRad(deg)
 
@@ -258,75 +144,29 @@ fn _projectPoint(window, p, camera) gui3dmath.projectPoint(window, p, camera)
 
 fn _transformVertices(vertices, transform, i, out) gui3dmath.transformVertices(vertices, transform, i, out)
 
-fn drawLine(window, x1, y1, x2, y2, color) if window.type {
-	:ok -> {
-		useColor := _default(color, rgb(215, 235, 255))
-		if window.backend {
-			:windows -> {
-				hdcValue := if window.frameHdc > 0 {
-					true -> window.frameHdc
-					_ -> {
-						hdc := windows.getDC(window.hwnd)
-						if windows.callOk?(hdc) & hdc.r1 > 0 {
-							true -> hdc.r1
-							_ -> 0
-						}
-					}
-				}
-				if hdcValue > 0 {
-					true -> {
-						pen := windows.gdi32('CreatePen', 0, 1, useColor)
-						if windows.callOk?(pen) & pen.r1 > 0 {
-							true -> {
-								windows.selectObject(hdcValue, pen.r1)
-								windows.gdi32('MoveToEx', hdcValue, x1, y1, 0)
-								windows.gdi32('LineTo', hdcValue, x2, y2)
-								windows.deleteObject(pen.r1)
-								if window.frameHdc = 0 {
-									true -> windows.releaseDC(window.hwnd, hdcValue)
-								}
-								{type: :ok}
-							}
-							_ -> {
-								if window.frameHdc = 0 {
-									true -> windows.releaseDC(window.hwnd, hdcValue)
-								}
-								_err('CreatePen failed', pen)
-							}
-						}
-					}
-					_ -> _err('GetDC failed', ?)
-				}
-			}
-			:linux -> {
-				gc := linux.createGC(window.display, window.window, 0, 0)
-				if linux.callOk?(gc) & gc.r1 > 0 {
-					true -> {
-						linux.setForeground(window.display, gc.r1, useColor)
-						linux.drawLine(window.display, window.window, gc.r1, x1, y1, x2, y2)
-						linux.freeGC(window.display, gc.r1)
-						linux.flush(window.display)
-						{type: :ok}
-					}
-					_ -> _err('XCreateGC failed', gc)
-				}
-			}
-			:web -> {
-				window.messages <- window.messages << {
-					type: :line
-					x1: x1
-					y1: y1
-					x2: x2
-					y2: y2
-					color: useColor
-				}
-				{type: :ok}
-			}
-			_ -> _err('Unknown window backend', window)
-		}
-	}
-	_ -> window
-}
+fn drawLine(window, x1, y1, x2, y2, color) guiDraw.drawLine(window, x1, y1, x2, y2, color, rgb(215, 235, 255))
+
+fn Vec2(x, y) gui2d.Vec2(x, y)
+fn Rect2(x, y, width, height) gui2d.Rect2(x, y, width, height)
+fn vec2Add(a, b) gui2d.vec2Add(a, b)
+fn vec2Sub(a, b) gui2d.vec2Sub(a, b)
+fn vec2Scale(v, s) gui2d.vec2Scale(v, s)
+fn vec2Dot(a, b) gui2d.vec2Dot(a, b)
+fn vec2Len(v) gui2d.vec2Len(v)
+fn vec2Normalize(v) gui2d.vec2Normalize(v)
+fn rectTranslate(rect, dx, dy) gui2d.rectTranslate(rect, dx, dy)
+fn rectContains(rect, point) gui2d.rectContains(rect, point)
+fn rectIntersects(a, b) gui2d.rectIntersects(a, b)
+fn Transform2D(options) gui2d.Transform2D(options)
+fn applyTransform2D(point, transform) gui2d.applyTransform2D(point, transform)
+fn Camera2D(options) gui2d.Camera2D(options)
+fn worldToScreen2D(point, camera, window) gui2d.worldToScreen2D(point, camera, window)
+fn screenToWorld2D(point, camera, window) gui2d.screenToWorld2D(point, camera, window)
+fn drawRect2D(window, x, y, width, height, color, filled) gui2d.drawRect2D({drawLine: drawLine, fillRect: fillRect}, window, x, y, width, height, color, filled)
+fn drawCircle2D(window, cx, cy, radius, color, filled) gui2d.drawCircle2D({drawLine: drawLine}, window, cx, cy, radius, color, filled)
+fn drawPolyline2D(window, points, color, closed) gui2d.drawPolyline2D({drawLine: drawLine}, window, points, color, closed)
+fn drawPolygon2D(window, points, color, filled) gui2d.drawPolygon2D({drawLine: drawLine}, window, points, color, filled)
+fn drawGrid2D(window, spacing, color, originX, originY) gui2d.drawGrid2D({drawLine: drawLine}, window, spacing, color, originX, originY)
 
 fn CubeMesh(size) {
 	hs := _default(size, 2) / 2

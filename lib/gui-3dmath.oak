@@ -110,7 +110,47 @@ fn projectPoint(window, p, camera) {
 	}
 }
 
-fn transformVertices(vertices, transform, i, out) if i {
-	len(vertices) -> out
-	_ -> transformVertices(vertices, transform, i + 1, out << transformPoint(vertices.(i), transform))
+fn transformVertices(vertices, transform, i, out) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	rx := degToRad(_default(ts.rx, 0))
+	ry := degToRad(_default(ts.ry, 0))
+	rz := degToRad(_default(ts.rz, 0))
+
+	cx := cos(rx)
+	sx := sin(rx)
+	cy := cos(ry)
+	sy := sin(ry)
+	cz := cos(rz)
+	sz := sin(rz)
+
+	fn sub(j, acc) if j {
+		len(vertices) -> acc
+		_ -> {
+			v := vertices.(j)
+			x0 := v.x * scale
+			y0 := v.y * scale
+			z0 := v.z * scale
+
+			y1 := y0 * cx - z0 * sx
+			z1 := y0 * sx + z0 * cx
+
+			x2 := x0 * cy + z1 * sy
+			z2 := 0 - x0 * sy + z1 * cy
+
+			x3 := x2 * cz - y1 * sz
+			y3 := x2 * sz + y1 * cz
+
+			sub(j + 1, acc << {
+				x: x3 + tx
+				y: y3 + ty
+				z: z2 + tz
+			})
+		}
+	}
+
+	sub(i, out)
 }

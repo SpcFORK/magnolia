@@ -181,6 +181,12 @@ var libguinativewin string
 //go:embed lib/gui-native-linux.oak
 var libguinativelinux string
 
+//go:embed lib/gui-draw.oak
+var libguidraw string
+
+//go:embed lib/gui-2d.oak
+var libgui2d string
+
 var stdlibs = map[string]string{
 	"std":              libstd,
 	"str":              libstr,
@@ -240,6 +246,8 @@ var stdlibs = map[string]string{
 	"gui-web":          libguiweb,
 	"gui-native-win":   libguinativewin,
 	"gui-native-linux": libguinativelinux,
+	"gui-draw":         libguidraw,
+	"gui-2d":           libgui2d,
 	"GUI":              libgui,
 	"gui":              libgui,
 }

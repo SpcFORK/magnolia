@@ -104,26 +104,33 @@ fn drawTriangleFilled(deps, window, p0, p1, p2, color) {
 	_fillScan(deps, window, int(a.y), int(c.y), a, b, c, color)
 }
 
-fn _insertDepthSorted(tris, tri, i, out) if i {
-	len(tris) -> out << tri
+fn _slice(list, i, end, out) if i {
+	end -> out
+	_ -> _slice(list, i + 1, end, out << list.(i))
+}
+
+fn _mergeDepth(left, right, i, j, out) if [i, j] {
+	[len(left), len(right)] -> out
+	[len(left), _] -> _mergeDepth(left, right, i, j + 1, out << right.(j))
+	[_, len(right)] -> _mergeDepth(left, right, i + 1, j, out << left.(i))
 	_ -> {
-		cur := tris.(i)
-		if tri.depth > cur.depth {
-			true -> _insertDepthSorted(tris, tri, i + 1, out << cur)
-			_ -> {
-				tail := fn sub(j, acc) if j {
-					len(tris) -> acc
-					_ -> sub(j + 1, acc << tris.(j))
-				}
-				tail(i + 1, out << tri << cur)
-			}
+		la := left.(i)
+		rb := right.(j)
+		if la.depth <= rb.depth {
+			true -> _mergeDepth(left, right, i + 1, j, out << la)
+			_ -> _mergeDepth(left, right, i, j + 1, out << rb)
 		}
 	}
 }
 
-fn _sortDepth(tris, i, sorted) if i {
-	len(tris) -> sorted
-	_ -> _sortDepth(tris, i + 1, _insertDepthSorted(sorted, tris.(i), 0, []))
+fn _sortDepth(tris) if len(tris) <= 1 {
+	true -> tris
+	_ -> {
+		mid := int(len(tris) / 2)
+		left := _sortDepth(_slice(tris, 0, mid, []))
+		right := _sortDepth(_slice(tris, mid, len(tris), []))
+		_mergeDepth(left, right, 0, 0, [])
+	}
 }
 
 fn _clamp(v, minV, maxV) if v < minV {
@@ -166,15 +173,6 @@ fn _shadeColor(deps, color, intensity) {
 	deps.rgb(_clamp(r, 0, 255), _clamp(g, 0, 255), _clamp(b, 0, 255))
 }
 
-fn _faceShade(deps, pa3, pb3, pc3, light) {
-	ld := _vecNormalize(deps, deps.Vec3(_default(light.x, 0.35), _default(light.y, 0.75), _default(light.z, -1)))
-	amb := _clamp(_default(light.ambient, 0.22), 0, 1)
-	diff := _clamp(_default(light.diffuse, 0.78), 0, 1)
-	n := _vecNormalize(deps, _vecCross(deps, _vecSub(deps, pb3, pa3), _vecSub(deps, pc3, pa3)))
-	ndotl := _vecDot(n, deps.Vec3(0 - ld.x, 0 - ld.y, 0 - ld.z))
-	amb + diff * _clamp(ndotl, 0, 1)
-}
-
 fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
 
 fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
@@ -183,6 +181,15 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	faceColors := _default(mesh.faceColors, [])
 	cam := _default(camera, {})
 	backfaceCulling := _default(cam.backfaceCulling, true)
+	lightCfg := _default(light, {})
+	ld := _vecNormalize(deps, deps.Vec3(_default(lightCfg.x, 0.35), _default(lightCfg.y, 0.75), _default(lightCfg.z, -1)))
+	amb := _clamp(_default(lightCfg.ambient, 0.22), 0, 1)
+	diff := _clamp(_default(lightCfg.diffuse, 0.78), 0, 1)
+	faceShade := fn(pa3, pb3, pc3) {
+		n := _vecNormalize(deps, _vecCross(deps, _vecSub(deps, pb3, pa3), _vecSub(deps, pc3, pa3)))
+		ndotl := 0 - _vecDot(n, ld)
+		amb + diff * _clamp(ndotl, 0, 1)
+	}
 
 	fn collect(i, acc) if i {
 		len(faces) -> acc
@@ -208,7 +215,7 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 				true -> faceColors.(i)
 				_ -> _default(color, deps.rgb(150, 200, 255))
 			}
-			litColor := _shadeColor(deps, faceColor, _faceShade(deps, pa3, pb3, pc3, _default(light, {})))
+			litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
 
 			depth := (pa3.z + pb3.z + pc3.z + if pd3 {
 				? -> 0
@@ -257,7 +264,7 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 		}
 	}
 
-	tris := _sortDepth(collect(0, []), 0, [])
+	tris := _sortDepth(collect(0, []))
 
 	fn draw(i, drawn) if i {
 		len(tris) -> {
