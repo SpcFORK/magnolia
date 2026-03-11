@@ -1,0 +1,799 @@
+// libaudio provides raw audio processing utilities for Oak.
+//
+// It covers PCM sample-type conversions, WAV format encoding and parsing,
+// oscillator synthesis, basic DSP transforms (gain, normalize, mix, pan),
+// windowing functions, FIR filter kernel generation, ADSR envelope shaping,
+// a radix-2 Cooley-Tukey FFT/IFFT, and common unit-conversion helpers.
+//
+// Samples are normalised floats in [-1, 1] unless otherwise documented.
+// Stereo frames are interleaved as [L0, R0, L1, R1, ...] or split into
+// { left: [...], right: [...] } objects.
+
+{
+	range: range
+	map: map
+	each: each
+	reduce: reduce
+	default: default
+	slice: slice
+	clone: clone
+} := import('std')
+{
+	join: join
+} := import('str')
+{
+	abs: abs
+	sqrt: sqrt
+	pow: pow
+	sin: sin
+	cos: cos
+	floor: floor
+	Pi: Pi
+} := import('math')
+
+// ---- constants -------------------------------------------------------
+
+// TwoPi is 2π, a commonly needed constant for oscillators.
+TwoPi := 2 * Pi
+
+// SampleRateCD is the standard CD audio sample rate (44 100 Hz).
+SampleRateCD := 44100
+// SampleRateDVD is the standard DVD / broadcast sample rate (48 000 Hz).
+SampleRateDVD := 48000
+// SampleRateHD is a common high-definition sample rate (96 000 Hz).
+SampleRateHD := 96000
+
+// Mono and Stereo are channel-count constants.
+Mono := 1
+Stereo := 2
+
+// BitDepth8, BitDepth16, BitDepth32 are common PCM bit-width constants.
+BitDepth8 := 8
+BitDepth16 := 16
+BitDepth32 := 32
+
+// ---- sample-type conversions ----------------------------------------
+
+// f32ToI16 converts a normalised float in [-1, 1] to a signed 16-bit integer.
+//
+// Example:
+//   f32ToI16(1.0)   // => 32767
+//   f32ToI16(-1.0)  // => -32767
+fn f32ToI16(s) int(s * 32767)
+
+// i16ToF32 converts a signed 16-bit integer to a normalised float in [-1, 1].
+//
+// Example:
+//   i16ToF32(32767)   // => ~1.0
+//   i16ToF32(-32768)  // => ~-1.0
+fn i16ToF32(s) s / 32768
+
+// f32ToI32 converts a normalised float in [-1, 1] to a signed 32-bit integer.
+//
+// Example:
+//   f32ToI32(0.5)  // => 1073741823
+fn f32ToI32(s) int(s * 2147483647)
+
+// i32ToF32 converts a signed 32-bit integer to a normalised float in [-1, 1].
+//
+// Example:
+//   i32ToF32(2147483647)  // => ~1.0
+fn i32ToF32(s) s / 2147483648
+
+// f32ToU8 converts a normalised float in [-1, 1] to an unsigned 8-bit integer
+// (0-255), as used in 8-bit WAV files (128 = silence).
+//
+// Example:
+//   f32ToU8(0.0)   // => 128
+//   f32ToU8(1.0)   // => 255
+//   f32ToU8(-1.0)  // => 0
+fn f32ToU8(s) int((s + 1) / 2 * 255)
+
+// u8ToF32 converts an unsigned 8-bit integer (0-255) to a normalised float
+// in [-1, 1].
+//
+// Example:
+//   u8ToF32(128)  // => ~0.0
+//   u8ToF32(255)  // => ~1.0
+fn u8ToF32(s) s / 127.5 - 1
+
+// clipF32 clamps a single float sample to the normalised [-1, 1] range.
+//
+// Example:
+//   clipF32(1.5)   // => 1.0
+//   clipF32(-2.0)  // => -1.0
+fn clipF32(s) if {
+	s > 1 -> 1
+	s < -1 -> -1
+	_ -> s
+}
+
+// ---- little-endian byte utilities -----------------------------------
+
+// _byteStr converts a list of byte integers into a binary string.
+fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
+
+// _u16LE encodes a non-negative integer as a 2-byte little-endian list.
+fn _u16LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256]
+}
+
+// _i16LE encodes a signed integer as a 2-byte little-endian list.
+fn _i16LE(n) {
+	n := int(n)
+	u := if n < 0 { true -> n + 65536, _ -> n }
+	_u16LE(u)
+}
+
+// _u32LE encodes a non-negative integer as a 4-byte little-endian list.
+fn _u32LE(n) {
+	n := int(n)
+	b0 := n % 256
+	b1 := int(n / 256) % 256
+	b2 := int(n / 65536) % 256
+	b3 := int(n / 16777216) % 256
+	[b0, b1, b2, b3]
+}
+
+// _readU8 reads a single unsigned byte from a binary string at byte offset.
+fn _readU8(s, off) codepoint(s.(off))
+
+// _readU16LE reads a little-endian unsigned 16-bit integer from a binary
+// string at byte offset `off`.
+fn _readU16LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b0 + b1 * 256
+}
+
+// _readI16LE reads a little-endian signed 16-bit integer from a binary string.
+fn _readI16LE(s, off) {
+	u := _readU16LE(s, off)
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+// _readU32LE reads a little-endian unsigned 32-bit integer from a binary string.
+fn _readU32LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+// _readI32LE reads a little-endian signed 32-bit integer from a binary string.
+fn _readI32LE(s, off) {
+	u := _readU32LE(s, off)
+	if u > 2147483647 { true -> u - 4294967296, _ -> u }
+}
+
+// ---- WAV encoding ---------------------------------------------------
+
+// wav encodes a list of normalised float samples into a PCM WAV binary string.
+// `samples` must already be interleaved when channels > 1.
+//
+// Example:
+//   s := sine(440, 44100, 44100)      // 1 s of 440 Hz mono
+//   data := wav(s, 44100, 1, 16)      // 44.1 kHz, mono, 16-bit PCM WAV
+fn wav(samples, sampleRate, channels, bitDepth) {
+	sampleRate := default(sampleRate, SampleRateCD)
+	channels := default(channels, Mono)
+	bitDepth := default(bitDepth, BitDepth16)
+
+	bytesPerSample := int(bitDepth / 8)
+	blockAlign := channels * bytesPerSample
+	byteRate := sampleRate * blockAlign
+	dataLen := len(samples) * bytesPerSample
+	fileLen := 36 + dataLen
+
+	// Encode each sample to bytes and join into the data sub-chunk body
+	sampleData := samples |> map(fn(s) {
+		sc := clipF32(s)
+		if bitDepth {
+			8 -> _byteStr([f32ToU8(sc)])
+			16 -> _byteStr(_i16LE(f32ToI16(sc)))
+			32 -> _byteStr(_u32LE(f32ToI32(sc)))
+			_ -> _byteStr(_i16LE(f32ToI16(sc)))
+		}
+	}) |> join('')
+
+	// RIFF / WAVE / fmt / data header then sample payload
+	'RIFF' +
+		_byteStr(_u32LE(fileLen)) +
+		'WAVE' +
+		'fmt ' +
+		_byteStr(_u32LE(16)) +          // Subchunk1Size = 16 (PCM)
+		_byteStr(_u16LE(1)) +           // AudioFormat = 1 (PCM, no compression)
+		_byteStr(_u16LE(channels)) +    // NumChannels
+		_byteStr(_u32LE(sampleRate)) +  // SampleRate
+		_byteStr(_u32LE(byteRate)) +    // ByteRate
+		_byteStr(_u16LE(blockAlign)) +  // BlockAlign
+		_byteStr(_u16LE(bitDepth)) +    // BitsPerSample
+		'data' +
+		_byteStr(_u32LE(dataLen)) +     // Subchunk2Size
+		sampleData
+}
+
+// ---- WAV parsing ----------------------------------------------------
+
+// parseWav parses a PCM WAV binary string and returns:
+//   { sampleRate, channels, bitDepth, samples }
+// where `samples` is a list of normalised floats. Returns ? on error.
+//
+// Example:
+//   r := parseWav(fileBytes)
+//   r.sampleRate  // => 44100
+//   r.samples.(0) // => first normalised sample
+fn parseWav(data) {
+	if len(data) < 44 {
+		true -> ?
+		_ -> {
+			riff := data.(0) + data.(1) + data.(2) + data.(3)
+			wave := data.(8) + data.(9) + data.(10) + data.(11)
+			fmtTag := data.(12) + data.(13) + data.(14) + data.(15)
+
+			if riff != 'RIFF' | wave != 'WAVE' | fmtTag != 'fmt ' {
+				true -> ?
+				_ -> {
+					audioFmt := _readU16LE(data, 20)
+					if audioFmt != 1 {
+						true -> ?   // only uncompressed PCM supported
+						_ -> {
+							channels := _readU16LE(data, 22)
+							sampleRate := _readU32LE(data, 24)
+							bitDepth := _readU16LE(data, 34)
+
+							// Walk chunks after the fmt block to locate 'data'
+							fn findData(off) if off + 8 > len(data) {
+								true -> ?
+								_ -> {
+									tag := data.(off) + data.(off + 1) +
+										data.(off + 2) + data.(off + 3)
+									chunkSize := _readU32LE(data, off + 4)
+									if tag = 'data' {
+										true -> { off: off + 8, size: chunkSize }
+										_ -> findData(off + 8 + chunkSize)
+									}
+								}
+							}
+
+							chunk := findData(36)
+							if chunk = ? {
+								true -> ?
+								_ -> {
+									dataOff := chunk.off
+									bytesPerSample := int(bitDepth / 8)
+									totalSamples := int(chunk.size / bytesPerSample)
+
+									fn readSamples(acc, i) if i >= totalSamples {
+										true -> acc
+										_ -> {
+											off := dataOff + i * bytesPerSample
+											s := if bitDepth {
+												8 -> u8ToF32(_readU8(data, off))
+												16 -> i16ToF32(_readI16LE(data, off))
+												32 -> i32ToF32(_readI32LE(data, off))
+												_ -> i16ToF32(_readI16LE(data, off))
+											}
+											readSamples(acc << s, i + 1)
+										}
+									}
+
+									{
+										sampleRate: sampleRate
+										channels: channels
+										bitDepth: bitDepth
+										samples: readSamples([], 0)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// ---- oscillators ----------------------------------------------------
+
+// sine generates a sine wave and returns a sample list of `length` samples.
+// `phase` is an initial phase offset in radians (default 0).
+//
+// Example:
+//   s := sine(440, 44100, 44100)  // 1 second of A4
+fn sine(freq, sampleRate, length, phase) {
+	phase := default(phase, 0)
+	range(length) |> map(fn(i) sin(TwoPi * freq * i / sampleRate + phase))
+}
+
+// square generates a band-unlimited square wave (±1).
+//
+// Example:
+//   s := square(440, 44100, 44100)
+fn square(freq, sampleRate, length, phase) {
+	phase := default(phase, 0)
+	range(length) |> map(fn(i) {
+		t := freq * i / sampleRate + phase / TwoPi
+		if (t % 1) < 0.5 { true -> 1, _ -> -1 }
+	})
+}
+
+// sawtooth generates a sawtooth wave that ramps from -1 to 1 per period.
+//
+// Example:
+//   s := sawtooth(220, 44100, 22050)
+fn sawtooth(freq, sampleRate, length, phase) {
+	phase := default(phase, 0)
+	range(length) |> map(fn(i) {
+		t := freq * i / sampleRate + phase / TwoPi
+		2 * (t % 1) - 1
+	})
+}
+
+// triangle generates a triangle wave that ramps between -1 and 1 per period.
+//
+// Example:
+//   s := triangle(440, 44100, 44100)
+fn triangle(freq, sampleRate, length, phase) {
+	phase := default(phase, 0)
+	range(length) |> map(fn(i) {
+		t := freq * i / sampleRate + phase / TwoPi
+		p := t % 1
+		if p < 0.5 { true -> 4 * p - 1, _ -> 3 - 4 * p }
+	})
+}
+
+// noise generates white noise with amplitude uniformly in [-1, 1].
+//
+// Example:
+//   s := noise(44100)  // 1 second of white noise
+fn noise(length) range(length) |> map(fn(_) rand() * 2 - 1)
+
+// silence generates a zero-amplitude signal of the given length.
+//
+// Example:
+//   s := silence(4410)  // 100 ms of silence at 44100 Hz
+fn silence(length) range(length) |> map(fn(_) 0)
+
+// ---- basic DSP ------------------------------------------------------
+
+// gain scales every sample in `samples` by `factor`.
+//
+// Example:
+//   quieter := gain(s, 0.5)
+fn gain(samples, factor) samples |> map(fn(s) s * factor)
+
+// clip hard-clips every sample to the normalised [-1, 1] range.
+//
+// Example:
+//   safe := clip(driven)
+fn clip(samples) samples |> map(clipF32)
+
+// normalize scales `samples` so the peak absolute value equals 1.0.
+// Returns the original list unchanged when all samples are zero.
+//
+// Example:
+//   loud := normalize(quiet)
+fn normalize(samples) {
+	peak := samples |> reduce(0, fn(mx, s) {
+		a := abs(s)
+		if a > mx { true -> a, _ -> mx }
+	})
+	if peak = 0 { true -> samples, _ -> gain(samples, 1 / peak) }
+}
+
+// add adds two equal-length sample lists element-wise.
+//
+// Example:
+//   mixed := add(sine(440, 44100, N), sine(880, 44100, N))
+fn add(a, b) range(len(a)) |> map(fn(i) a.(i) + b.(i))
+
+// mix crossfades two equal-length sample lists.
+// `ratio` = 0 gives all of `a`; `ratio` = 1 gives all of `b`.
+//
+// Example:
+//   blend := mix(a, b, 0.3)
+fn mix(a, b, ratio) {
+	r := clipF32(ratio)
+	range(len(a)) |> map(fn(i) a.(i) * (1 - r) + b.(i) * r)
+}
+
+// dc shifts every sample by a constant DC offset.
+//
+// Example:
+//   biased := dc(s, 0.1)
+fn dc(samples, offset) samples |> map(fn(s) s + offset)
+
+// reverseSignal reverses the order of samples in time.
+//
+// Example:
+//   rev := reverseSignal(s)
+fn reverseSignal(samples) {
+	n := len(samples)
+	range(n) |> map(fn(i) samples.(n - 1 - i))
+}
+
+// panStereo applies equal-power stereo panning to a mono sample list.
+// `position` is in [-1, 1]: -1 is hard-left, 0 is centre, +1 is hard-right.
+// Returns { left, right } with each channel as a sample list.
+//
+// Example:
+//   st := panStereo(mono, 0.3)
+//   st.left   // => left channel samples
+//   st.right  // => right channel samples
+fn panStereo(samples, position) {
+	pos := clipF32(default(position, 0))
+	angle := (pos + 1) / 4 * Pi    // [-1,1] → [0, π/2]
+	lGain := cos(angle)
+	rGain := sin(angle)
+	{
+		left: gain(samples, lGain)
+		right: gain(samples, rGain)
+	}
+}
+
+// interleave combines left and right channel lists into a single interleaved
+// sample list [L0, R0, L1, R1, ...].
+//
+// Example:
+//   frames := interleave(st.left, st.right)
+fn interleave(left, right) {
+	n := len(left)
+	range(n * 2) |> map(fn(i) {
+		half := int(i / 2)
+		if i % 2 = 0 { true -> left.(half), _ -> right.(half) }
+	})
+}
+
+// deinterleave splits an interleaved multi-channel list into a list of
+// per-channel sample lists.
+//
+// Example:
+//   channels := deinterleave(frames, 2)
+//   channels.(0)  // => left
+//   channels.(1)  // => right
+fn deinterleave(samples, nChannels) {
+	nChannels := default(nChannels, 2)
+	nFrames := int(len(samples) / nChannels)
+	range(nChannels) |> map(fn(ch) {
+		range(nFrames) |> map(fn(i) samples.(i * nChannels + ch))
+	})
+}
+
+// ---- windowing functions --------------------------------------------
+
+// windowRect returns a rectangular (boxcar) window of length `n` (all ones).
+fn windowRect(n) range(n) |> map(fn(_) 1)
+
+// windowHann returns a Hann window of length `n`.
+//
+// Example:
+//   w := windowHann(1024)
+fn windowHann(n) range(n) |> map(fn(i) {
+	0.5 * (1 - cos(TwoPi * i / (n - 1)))
+})
+
+// windowHamming returns a Hamming window of length `n`.
+//
+// Example:
+//   w := windowHamming(1024)
+fn windowHamming(n) range(n) |> map(fn(i) {
+	0.54 - 0.46 * cos(TwoPi * i / (n - 1))
+})
+
+// windowBlackman returns a Blackman window of length `n`.
+//
+// Example:
+//   w := windowBlackman(1024)
+fn windowBlackman(n) range(n) |> map(fn(i) {
+	0.42 - 0.5 * cos(TwoPi * i / (n - 1)) +
+		0.08 * cos(2 * TwoPi * i / (n - 1))
+})
+
+// applyWindow multiplies `samples` element-wise by `window`.
+// Both lists must have the same length.
+//
+// Example:
+//   windowed := applyWindow(frame, windowHann(1024))
+fn applyWindow(samples, window) range(len(samples)) |> map(fn(i) {
+	samples.(i) * window.(i)
+})
+
+// ---- FIR filter kernels and convolution ----------------------------
+
+// convolve computes the full linear convolution of `signal` and `kernel`.
+// The returned list has length len(signal) + len(kernel) - 1.
+// To recover a same-length output, slice out the centre portion.
+//
+// Example:
+//   filtered := convolve(signal, lowPassFIR(1000, 44100, 63))
+fn convolve(signal, kernel) {
+	sLen := len(signal)
+	kLen := len(kernel)
+	outLen := sLen + kLen - 1
+	range(outLen) |> map(fn(n) {
+		kLo := if n - sLen + 1 > 0 { true -> n - sLen + 1, _ -> 0 }
+		kHi := if n < kLen - 1 { true -> n, _ -> kLen - 1 }
+		range(kHi - kLo + 1) |> reduce(0, fn(acc, ki) {
+			k := ki + kLo
+			acc + kernel.(k) * signal.(n - k)
+		})
+	})
+}
+
+// _sincNorm returns the normalised sinc: sin(π x) / (π x).
+fn _sincNorm(x) if x = 0 { true -> 1, _ -> sin(Pi * x) / (Pi * x) }
+
+// lowPassFIR generates a Hamming-windowed sinc low-pass FIR kernel.
+// `cutoff` is the -6 dB cut frequency in Hz; `size` must be odd (default 63).
+//
+// Example:
+//   k := lowPassFIR(2000, 44100, 63)
+//   filtered := convolve(signal, k) |> slice(31, len(signal) + 31)
+fn lowPassFIR(cutoff, sampleRate, size) {
+	size := default(size, 63)
+	fc := cutoff / sampleRate      // normalised cutoff [0, 0.5]
+	half := int(size / 2)
+	win := windowHamming(size)
+	raw := range(size) |> map(fn(i) 2 * fc * _sincNorm(2 * fc * (i - half)))
+	total := raw |> reduce(0, fn(a, b) a + b)
+	range(size) |> map(fn(i) raw.(i) * win.(i) / total)
+}
+
+// highPassFIR generates a high-pass FIR kernel via spectral inversion of a
+// low-pass kernel. `size` must be odd (default 63).
+//
+// Example:
+//   k := highPassFIR(2000, 44100, 63)
+fn highPassFIR(cutoff, sampleRate, size) {
+	size := default(size, 63)
+	lp := lowPassFIR(cutoff, sampleRate, size)
+	half := int(size / 2)
+	range(size) |> map(fn(i) {
+		delta := if i = half { true -> 1, _ -> 0 }
+		delta - lp.(i)
+	})
+}
+
+// ---- ADSR envelope --------------------------------------------------
+
+// adsr applies an ADSR volume envelope to `samples`.
+// attack, decay, and release are durations in seconds; sustain is a gain in
+// [0, 1].
+//
+// Example:
+//   shaped := adsr(s, 44100, 0.01, 0.1, 0.7, 0.2)
+fn adsr(samples, sampleRate, attack, decay, sustain, release) {
+	attack := default(attack, 0.01)
+	decay := default(decay, 0.1)
+	sustain := default(sustain, 0.7)
+	release := default(release, 0.2)
+
+	aS := int(attack * sampleRate)
+	dS := int(decay * sampleRate)
+	rS := int(release * sampleRate)
+	total := len(samples)
+	sStart := aS + dS
+	rStart := total - rS
+
+	range(total) |> map(fn(i) {
+		env := if {
+			i < aS -> if aS > 0 { true -> i / aS, _ -> 1 }
+			i < sStart -> {
+				t := (i - aS) / if dS > 0 { true -> dS, _ -> 1 }
+				1 - t * (1 - sustain)
+			}
+			i < rStart -> sustain
+			_ -> {
+				t := (i - rStart) / if rS > 0 { true -> rS, _ -> 1 }
+				sustain * (1 - t)
+			}
+		}
+		samples.(i) * env
+	})
+}
+
+// ---- FFT / IFFT (radix-2 Cooley-Tukey DIT) -------------------------
+
+// _nextPow2 returns the smallest power of 2 >= n.
+fn _nextPow2(n) {
+	fn sub(p) if p >= n { true -> p, _ -> sub(p * 2) }
+	sub(1)
+}
+
+// _log2Floor returns floor(log2(n)) for positive integers.
+fn _log2Floor(n) {
+	fn sub(x, acc) if x <= 1 { true -> acc, _ -> sub(int(x / 2), acc + 1) }
+	sub(n, 0)
+}
+
+// _bitrev reverses the low `bits` bits of integer `x`.
+fn _bitrev(x, bits) {
+	fn sub(x, bits, r) if bits = 0 {
+		true -> r
+		_ -> sub(int(x / 2), bits - 1, r * 2 + x % 2)
+	}
+	sub(x, bits, 0)
+}
+
+// _fftCore is the shared forward/inverse implementation.
+// sign = -1 for forward FFT; sign = +1 for inverse.
+fn _fftCore(re, im, sign) {
+	n := len(re)
+	re := clone(re)
+	im := clone(im)
+	bits := _log2Floor(n)
+
+	// Bit-reversal permutation
+	range(n) |> each(fn(i) {
+		j := _bitrev(i, bits)
+		if j > i {
+			tmp := re.(i)
+			re.(i) := re.(j)
+			re.(j) := tmp
+			tmp2 := im.(i)
+			im.(i) := im.(j)
+			im.(j) := tmp2
+		}
+	})
+
+	// Cooley-Tukey butterfly passes
+	fn pass(step) if step > n {
+		true -> { re: re, im: im }
+		_ -> {
+			half := int(step / 2)
+			fn group(k) if k >= n {
+				true -> ?
+				_ -> {
+					fn butterfly(j) if j >= half {
+						true -> ?
+						_ -> {
+							angle := sign * TwoPi * j / step
+							wr := cos(angle)
+							wi := sin(angle)
+							u := k + j
+							v := u + half
+							tr := wr * re.(v) - wi * im.(v)
+							ti := wr * im.(v) + wi * re.(v)
+							re.(v) := re.(u) - tr
+							im.(v) := im.(u) - ti
+							re.(u) := re.(u) + tr
+							im.(u) := im.(u) + ti
+							butterfly(j + 1)
+						}
+					}
+					butterfly(0)
+					group(k + step)
+				}
+			}
+			group(0)
+			pass(step * 2)
+		}
+	}
+
+	pass(2)
+}
+
+// fft computes the forward Discrete Fourier Transform of a real (or complex)
+// signal. `re` and `im` must be lists of the same power-of-2 length.
+// `im` may be omitted (defaults to silence/zeros).
+// Returns { re, im }.
+//
+// Example:
+//   result := fft(samples, ?)
+//   mags := magnitude(result.re, result.im)
+fn fft(re, im) {
+	im := default(im, silence(len(re)))
+	_fftCore(re, im, -1)
+}
+
+// ifft computes the inverse DFT. The output is automatically scaled by 1/N.
+// Returns { re, im } (imaginary part is ~0 for real-valued input).
+//
+// Example:
+//   back := ifft(freq.re, freq.im)
+//   samples := back.re
+fn ifft(re, im) {
+	n := len(re)
+	result := _fftCore(re, im, 1)
+	{
+		re: result.re |> map(fn(s) s / n)
+		im: result.im |> map(fn(s) s / n)
+	}
+}
+
+// magnitude computes the magnitude of each complex FFT bin.
+//
+// Example:
+//   mags := magnitude(result.re, result.im)
+fn magnitude(re, im) range(len(re)) |> map(fn(i) {
+	r := re.(i)
+	g := im.(i)
+	sqrt(r * r + g * g)
+})
+
+// phase computes the phase angle (radians) of each complex FFT bin.
+//
+// Example:
+//   phases := phase(result.re, result.im)
+fn phase(re, im) range(len(re)) |> map(fn(i) {
+	x := re.(i)
+	y := im.(i)
+	if {
+		x > 0 -> 2 * atan(y / (sqrt(x * x + y * y) + x))
+		x <= 0 & y != 0 -> 2 * atan((sqrt(x * x + y * y) - x) / y)
+		x < 0 & y = 0 -> Pi
+		_ -> 0
+	}
+})
+
+// powerSpectrum computes magnitude-spectrum bins from a real signal.
+// The signal is zero-padded to the next power of 2 if needed.
+//
+// Example:
+//   ps := powerSpectrum(s)
+fn powerSpectrum(samples) {
+	sLen := len(samples)
+	n := _nextPow2(sLen)
+	padded := range(n) |> map(fn(i) if i < sLen { true -> samples.(i), _ -> 0 })
+	result := fft(padded, ?)
+	magnitude(result.re, result.im)
+}
+
+// ---- unit conversions -----------------------------------------------
+
+// durationSamples converts a duration in seconds to a sample count.
+//
+// Example:
+//   n := durationSamples(2.5, 44100)  // => 110250
+fn durationSamples(seconds, sampleRate) int(seconds * sampleRate)
+
+// samplesDuration converts a sample count to a duration in seconds.
+//
+// Example:
+//   t := samplesDuration(44100, 44100)  // => 1.0
+fn samplesDuration(n, sampleRate) n / sampleRate
+
+// freqBin returns the FFT bin index for a given frequency.
+//
+// Example:
+//   bin := freqBin(1000, 44100, 1024)  // => 23
+fn freqBin(f, sampleRate, fftSize) int(f * fftSize / sampleRate)
+
+// binFreq returns the centre frequency in Hz of a given FFT bin.
+//
+// Example:
+//   f := binFreq(23, 44100, 1024)  // => ~991 Hz
+fn binFreq(bin, sampleRate, fftSize) bin * sampleRate / fftSize
+
+// midiToFreq converts a MIDI note number to a frequency in Hz.
+// MIDI note 69 = A4 = 440 Hz.
+//
+// Example:
+//   midiToFreq(69)  // => 440.0
+//   midiToFreq(60)  // => 261.63 (middle C)
+fn midiToFreq(note) 440 * pow(2, (note - 69) / 12)
+
+// freqToMidi converts a frequency in Hz to the nearest MIDI note number.
+//
+// Example:
+//   freqToMidi(440)     // => 69
+//   freqToMidi(261.63)  // => 60
+fn freqToMidi(freq) int(69 + 12 * log(2, freq / 440) + 0.5)
+
+// dbToLinear converts a dB value to a linear amplitude gain factor.
+//
+// Example:
+//   dbToLinear(-6)  // => ~0.501
+//   dbToLinear(0)   // => 1.0
+fn dbToLinear(db) pow(10, db / 20)
+
+// linearToDb converts a linear gain factor to dB.
+// Returns ? for zero or negative values.
+//
+// Example:
+//   linearToDb(0.5)  // => ~-6.02
+//   linearToDb(1.0)  // => 0.0
+fn linearToDb(g) if g > 0 { true -> 20 * log(10, g), _ -> ? }

@@ -1,0 +1,340 @@
+// Tests for gui-raster.oak — scanline fill, depth sort, culling, shading helpers
+
+std := import('std')
+r := import('gui-raster')
+
+fn run(t) {
+	// ── helpers ──────────────────────────────────────────────────────────────
+
+	fn pt(x, y) { x: x, y: y }
+	fn pt3(x, y, z) { x: x, y: y, z: z }
+
+	// ── _min2 / _max2 ────────────────────────────────────────────────────────
+
+	'_min2 picks smaller' |> t.eq(r._min2(3, 7), 3)
+	'_min2 picks smaller (reversed)' |> t.eq(r._min2(7, 3), 3)
+	'_min2 equal values' |> t.eq(r._min2(5, 5), 5)
+
+	'_max2 picks larger' |> t.eq(r._max2(3, 7), 7)
+	'_max2 picks larger (reversed)' |> t.eq(r._max2(7, 3), 7)
+	'_max2 equal values' |> t.eq(r._max2(5, 5), 5)
+
+	// ── _lerpX ───────────────────────────────────────────────────────────────
+
+	'_lerpX exact start' |> t.eq(
+		r._lerpX(pt(0, 0), pt(10, 10), 0)
+		0
+	)
+	'_lerpX exact end' |> t.eq(
+		r._lerpX(pt(0, 0), pt(10, 10), 10)
+		10
+	)
+	'_lerpX midpoint diagonal' |> t.eq(
+		r._lerpX(pt(0, 0), pt(10, 10), 5)
+		5
+	)
+	'_lerpX horizontal edge returns pa.x' |> t.eq(
+		r._lerpX(pt(3, 5), pt(7, 5), 5)
+		3
+	)
+	'_lerpX non-integer result' |> t.approx(
+		r._lerpX(pt(0, 0), pt(3, 6), 3)
+		1.5
+	)
+
+	// ── _pointOutCode / _lineVisible? ────────────────────────────────────────
+
+	{
+		win := { width: 100, height: 80 }
+
+		'_pointOutCode inside' |> t.eq(r._pointOutCode(win, pt(50, 40)), 0)
+		'_pointOutCode left of window' |> t.eq(r._pointOutCode(win, pt(-1, 40)), 1)
+		'_pointOutCode right of window' |> t.eq(r._pointOutCode(win, pt(100, 40)), 2)
+		'_pointOutCode above window' |> t.eq(r._pointOutCode(win, pt(50, -1)), 4)
+		'_pointOutCode below window' |> t.eq(r._pointOutCode(win, pt(50, 80)), 8)
+
+		'_lineVisible? line fully inside' |> t.eq(
+			r._lineVisible?(win, pt(10, 10), pt(90, 70))
+			true
+		)
+		'_lineVisible? line fully outside (left)' |> t.eq(
+			r._lineVisible?(win, pt(-10, 40), pt(-5, 40))
+			false
+		)
+		'_lineVisible? line from inside to outside' |> t.eq(
+			r._lineVisible?(win, pt(10, 10), pt(-10, 10))
+			true
+		)
+	}
+
+	// ── _triVisible? ─────────────────────────────────────────────────────────
+
+	{
+		win := { width: 100, height: 80 }
+
+		'_triVisible? triangle fully inside' |> t.eq(
+			r._triVisible?(win, pt(10, 10), pt(50, 10), pt(30, 60))
+			true
+		)
+		'_triVisible? triangle fully left of viewport' |> t.eq(
+			r._triVisible?(win, pt(-30, 10), pt(-20, 10), pt(-25, 60))
+			false
+		)
+		'_triVisible? triangle fully above viewport' |> t.eq(
+			r._triVisible?(win, pt(10, -30), pt(50, -20), pt(30, -10))
+			false
+		)
+		'_triVisible? triangle straddling left edge' |> t.eq(
+			r._triVisible?(win, pt(-5, 10), pt(10, 10), pt(5, 60))
+			true
+		)
+	}
+
+	// ── _sortTriByY ──────────────────────────────────────────────────────────
+
+	{
+		fn sorty(p0, p1, p2) r._sortTriByY(p0, p1, p2)
+
+		'_sortTriByY already sorted' |> t.eq(
+			sorty(pt(0, 0), pt(5, 5), pt(10, 10))
+			[pt(0, 0), pt(5, 5), pt(10, 10)]
+		)
+		'_sortTriByY reversed' |> t.eq(
+			sorty(pt(0, 10), pt(5, 5), pt(10, 0))
+			[pt(10, 0), pt(5, 5), pt(0, 10)]
+		)
+		'_sortTriByY all same y' |> t.eq(
+			{
+				s := sorty(pt(1, 4), pt(3, 4), pt(2, 4))
+				s.0.y = 4 & s.1.y = 4 & s.2.y = 4
+			}
+			true
+		)
+		'_sortTriByY result is ascending' |> t.eq(
+			{
+				s := sorty(pt(5, 7), pt(2, 1), pt(8, 4))
+				s.0.y <= s.1.y & s.1.y <= s.2.y
+			}
+			true
+		)
+		'_sortTriByY random order 1' |> t.eq(
+			sorty(pt(0, 3), pt(0, 1), pt(0, 2))
+			[pt(0, 1), pt(0, 2), pt(0, 3)]
+		)
+	}
+
+	// ── _colorR / _colorG / _colorB ──────────────────────────────────────────
+
+	{
+		// rgb(r, g, b) packs as r | (g << 8) | (b << 16)
+		c := 255 | (128 << 8) | (64 << 16)
+
+		'_colorR extracts red' |> t.eq(r._colorR(c), 255)
+		'_colorG extracts green' |> t.eq(r._colorG(c), 128)
+		'_colorB extracts blue' |> t.eq(r._colorB(c), 64)
+
+		'_colorR black' |> t.eq(r._colorR(0), 0)
+		'_colorG black' |> t.eq(r._colorG(0), 0)
+		'_colorB black' |> t.eq(r._colorB(0), 0)
+
+		white := 255 | (255 << 8) | (255 << 16)
+		'_colorR white' |> t.eq(r._colorR(white), 255)
+		'_colorG white' |> t.eq(r._colorG(white), 255)
+		'_colorB white' |> t.eq(r._colorB(white), 255)
+	}
+
+	// ── _clamp ───────────────────────────────────────────────────────────────
+
+	'_clamp below min' |> t.eq(r._clamp(-1, 0, 1), 0)
+	'_clamp above max' |> t.eq(r._clamp(2, 0, 1), 1)
+	'_clamp within range' |> t.eq(r._clamp(0.5, 0, 1), 0.5)
+	'_clamp at min boundary' |> t.eq(r._clamp(0, 0, 1), 0)
+	'_clamp at max boundary' |> t.eq(r._clamp(1, 0, 1), 1)
+
+	// ── _shadeColor ──────────────────────────────────────────────────────────
+
+	{
+		fn mockRgb(rv, gv, bv) rv | (gv << 8) | (bv << 16)
+		deps := { rgb: mockRgb }
+
+		white := 255 | (255 << 8) | (255 << 16)
+		black := 0
+
+		'_shadeColor at full intensity keeps white' |> t.eq(
+			r._shadeColor(deps, white, 1.0)
+			white
+		)
+		'_shadeColor at zero intensity gives black' |> t.eq(
+			r._shadeColor(deps, white, 0.0)
+			black
+		)
+		'_shadeColor at half intensity halves channels' |> t.eq(
+			{
+				c := r._shadeColor(deps, white, 0.5)
+				[r._colorR(c), r._colorG(c), r._colorB(c)]
+			}
+			[127, 127, 127]
+		)
+		'_shadeColor clamps over-bright' |> t.eq(
+			r._shadeColor(deps, white, 2.0)
+			white
+		)
+		'_shadeColor clamps negative intensity' |> t.eq(
+			r._shadeColor(deps, white, -0.5)
+			black
+		)
+	}
+
+	// ── _frontFacing? ────────────────────────────────────────────────────────
+
+	'_frontFacing? counter-clockwise is front' |> t.eq(
+		r._frontFacing?(pt(0, 0), pt(1, 0), pt(0, 1))
+		true
+	)
+	'_frontFacing? clockwise is back' |> t.eq(
+		r._frontFacing?(pt(0, 0), pt(0, 1), pt(1, 0))
+		false
+	)
+
+	// ── _vecSub / _vecCross / _vecDot / _vecLen / _vecNormalize ─────────────
+
+	{
+		fn mockVec3(x, y, z) { x: x, y: y, z: z }
+		deps := { Vec3: mockVec3 }
+
+		'_vecSub correct' |> t.eq(
+			r._vecSub(deps, pt3(3, 5, 7), pt3(1, 2, 3))
+			pt3(2, 3, 4)
+		)
+		'_vecDot correct' |> t.eq(
+			r._vecDot(pt3(1, 2, 3), pt3(4, 5, 6))
+			32
+		)
+		'_vecLen unit x' |> t.approx(r._vecLen(pt3(1, 0, 0)), 1)
+		'_vecLen pythagorean' |> t.approx(r._vecLen(pt3(3, 4, 0)), 5)
+		'_vecCross i×j=k' |> t.eq(
+			r._vecCross(deps, pt3(1, 0, 0), pt3(0, 1, 0))
+			pt3(0, 0, 1)
+		)
+		'_vecNormalize zero vector returns fallback z' |> t.eq(
+			r._vecNormalize(deps, pt3(0, 0, 0))
+			pt3(0, 0, 1)
+		)
+		{
+			n := r._vecNormalize(deps, pt3(3, 4, 0))
+			'_vecNormalize result has length 1' |> t.approx(r._vecLen(n), 1)
+		}
+	}
+
+	// ── computeLightParams ───────────────────────────────────────────────────
+
+	{
+		fn mockVec3(x, y, z) { x: x, y: y, z: z }
+		deps := { Vec3: mockVec3 }
+
+		lp := r.computeLightParams(deps, ?)
+
+		'computeLightParams default ambient in [0,1]' |> t.eq(
+			lp.amb >= 0 & lp.amb <= 1
+			true
+		)
+		'computeLightParams default diffuse in [0,1]' |> t.eq(
+			lp.diff >= 0 & lp.diff <= 1
+			true
+		)
+		'computeLightParams ld is normalized (length~1)' |> t.approx(
+			r._vecLen(lp.ld)
+			1
+		)
+	}
+
+	// ── _buildTriangle ───────────────────────────────────────────────────────
+
+	{
+		tri := r._buildTriangle(pt(0, 0), pt(1, 0), pt(0, 1), 5.0, 0xFFFFFF)
+		'_buildTriangle type is :tri' |> t.eq(tri.type, :tri)
+		'_buildTriangle depth' |> t.eq(tri.depth, 5.0)
+		'_buildTriangle color' |> t.eq(tri.color, 0xFFFFFF)
+		'_buildTriangle vertex a' |> t.eq(tri.a, pt(0, 0))
+		'_buildTriangle vertex b' |> t.eq(tri.b, pt(1, 0))
+		'_buildTriangle vertex c' |> t.eq(tri.c, pt(0, 1))
+	}
+
+	// ── _slice ───────────────────────────────────────────────────────────────
+
+	'_slice full list' |> t.eq(r._slice([10, 20, 30], 0, 3, []), [10, 20, 30])
+	'_slice first half' |> t.eq(r._slice([10, 20, 30, 40], 0, 2, []), [10, 20])
+	'_slice second half' |> t.eq(r._slice([10, 20, 30, 40], 2, 4, []), [30, 40])
+	'_slice empty range' |> t.eq(r._slice([10, 20, 30], 1, 1, []), [])
+	'_slice empty list' |> t.eq(r._slice([], 0, 0, []), [])
+
+	// ── _sortDepth ───────────────────────────────────────────────────────────
+
+	{
+		fn tri(d) { depth: d }
+
+		'_sortDepth empty' |> t.eq(r._sortDepth([]), [])
+		'_sortDepth single' |> t.eq(r._sortDepth([tri(1)]), [tri(1)])
+		'_sortDepth already sorted' |> t.eq(
+			r._sortDepth([tri(1), tri(2), tri(3)])
+			[tri(1), tri(2), tri(3)]
+		)
+		'_sortDepth reversed' |> t.eq(
+			r._sortDepth([tri(3), tri(2), tri(1)])
+			[tri(1), tri(2), tri(3)]
+		)
+		'_sortDepth random order' |> t.eq(
+			r._sortDepth([tri(5), tri(1), tri(3), tri(2), tri(4)])
+			[tri(1), tri(2), tri(3), tri(4), tri(5)]
+		)
+		'_sortDepth duplicate depths' |> t.eq(
+			r._sortDepth([tri(3), tri(1), tri(3), tri(1)])
+			[tri(1), tri(1), tri(3), tri(3)]
+		)
+	}
+
+	// ── drawTriangleFilled (mock deps) ───────────────────────────────────────
+
+	{
+		lines := []
+
+		fn mockDrawLine(win, x1, y1, x2, y2, color) {
+			lines <- lines << { x1: x1, y1: y1, x2: x2, y2: y2, color: color }
+		}
+
+		deps := { drawLine: mockDrawLine }
+		win := { width: 100, height: 100 }
+
+		r.drawTriangleFilled(deps, win, pt(5, 0), pt(0, 4), pt(10, 4), 0xFF)
+
+		'drawTriangleFilled draws at least one line' |> t.eq(len(lines) > 0, true)
+		'drawTriangleFilled first scanline at y=0' |> t.eq(lines.0.y1, 0)
+		'drawTriangleFilled last scanline at y=4' |> t.eq(lines.(len(lines) - 1).y2, 4)
+		'drawTriangleFilled all same color' |> t.eq(
+			{
+				allSame := true
+				std.each(lines, fn(l) if l.color {
+					0xFF -> _
+					_ -> allSame <- false
+				})
+				allSame
+			}
+			true
+		)
+	}
+
+	// ── projectVertices ──────────────────────────────────────────────────────
+
+	{
+		fn mockProject(win, v, cam) { x: int(v.x * 10), y: int(v.y * 10), z: v.z }
+		deps := { projectPoint: mockProject }
+		win := { width: 100, height: 100 }
+		verts := [pt3(1, 2, 3), pt3(4, 5, 6)]
+
+		projected := r.projectVertices(deps, win, verts, {})
+
+		'projectVertices count matches' |> t.eq(len(projected), 2)
+		'projectVertices first point x' |> t.eq(projected.0.x, 10)
+		'projectVertices second point y' |> t.eq(projected.1.y, 50)
+	}
+}

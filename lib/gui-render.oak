@@ -22,6 +22,11 @@ fn Renderer3D(deps, window, options) {
 		diffuse: 0.78
 	})
 	cubeMeshCache := {}
+	gridMeshCache := {}
+	axesMeshCache := {}
+	axisColorX := deps.rgb(255, 90, 90)
+	axisColorY := deps.rgb(120, 255, 140)
+	axisColorZ := deps.rgb(120, 170, 255)
 
 	fn cubeMesh(size) {
 		resolvedSize := _default(size, 2)
@@ -30,6 +35,37 @@ fn Renderer3D(deps, window, options) {
 			? -> {
 				created := deps.CubeMesh(resolvedSize)
 				cubeMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn gridMesh(size, step) {
+		resolvedSize := _default(size, 10)
+		resolvedStep := _default(step, 1)
+		key := string(resolvedSize) + '|' + string(resolvedStep)
+		if cached := gridMeshCache.(key) {
+			? -> {
+				created := deps.GridMesh(resolvedSize, resolvedStep)
+				gridMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn axesMeshes(length) {
+		lenValue := _default(length, 3)
+		key := string(lenValue)
+		if cached := axesMeshCache.(key) {
+			? -> {
+				created := {
+					x: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(lenValue, 0, 0)], [[0, 1]])
+					y: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, lenValue, 0)], [[0, 1]])
+					z: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, 0, lenValue)], [[0, 1]])
+				}
+				axesMeshCache.(key) <- created
 				created
 			}
 			_ -> cached
@@ -56,11 +92,12 @@ fn Renderer3D(deps, window, options) {
 		renderCubeSolid: fn(size, transform, color) deps.drawMeshSolid(window, cubeMesh(size), transform, camera, _default(color, lineColor), light)
 		renderMesh: fn(mesh, transform, color) deps.drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
 		renderCube: fn(size, transform, color) deps.drawMeshWireframe(window, cubeMesh(size), transform, camera, _default(color, lineColor))
-		renderGrid: fn(size, step, transform, color) deps.drawMeshWireframe(window, deps.GridMesh(size, step), transform, camera, _default(color, lineColor))
+		renderGrid: fn(size, step, transform, color) deps.drawMeshWireframe(window, gridMesh(size, step), transform, camera, _default(color, lineColor))
 		renderAxes: fn(length, transform) {
-			deps.drawMeshWireframe(window, deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(_default(length, 3), 0, 0)], [[0, 1]]), transform, camera, deps.rgb(255, 90, 90))
-			deps.drawMeshWireframe(window, deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, _default(length, 3), 0)], [[0, 1]]), transform, camera, deps.rgb(120, 255, 140))
-			deps.drawMeshWireframe(window, deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, 0, _default(length, 3))], [[0, 1]]), transform, camera, deps.rgb(120, 170, 255))
+			axes := axesMeshes(length)
+			deps.drawMeshWireframe(window, axes.x, transform, camera, axisColorX)
+			deps.drawMeshWireframe(window, axes.y, transform, camera, axisColorY)
+			deps.drawMeshWireframe(window, axes.z, transform, camera, axisColorZ)
 		}
 		renderVoxels: fn(voxels, voxelSize, transform, color) deps.drawMeshWireframe(window, deps.VoxelMesh(voxels, _default(voxelSize, 1)), transform, camera, _default(color, lineColor))
 		renderVoxelGrid: fn(grid, transform, color) deps.drawMeshWireframe(window, grid.toMesh(), transform, camera, _default(color, lineColor))

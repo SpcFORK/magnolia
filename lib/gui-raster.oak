@@ -161,10 +161,54 @@ fn _vecNormalize(deps, v) {
 	}
 }
 
+fn _projectionParams(window, camera) {
+	cam := _default(camera, {})
+	mode := _default(cam.mode, 'perspective')
+	halfW := window.width / 2
+	halfH := window.height / 2
+	camZ := _default(cam.z, 5)
+	orthoScale := _default(cam.orthoScale, 4)
+	fov := _default(cam.fov, 90)
+	focal := halfW / tan((fov / 2) * 3.141592653589793 / 180)
+	{
+		mode: mode
+		halfW: halfW
+		halfH: halfH
+		camZ: camZ
+		orthoScale: orthoScale
+		focal: focal
+	}
+}
+
+fn _projectPointFast(p, params) {
+	z := p.z + params.camZ
+	if params.mode = 'orthographic' {
+		true -> {
+			scale := params.halfW / params.orthoScale
+			{
+				x: int(params.halfW + p.x * scale)
+				y: int(params.halfH - p.y * scale)
+				z: z
+			}
+		}
+		_ -> if z <= 0.05 {
+			true -> ?
+			_ -> {
+				{
+					x: int(params.halfW + (p.x * params.focal) / z)
+					y: int(params.halfH - (p.y * params.focal) / z)
+					z: z
+				}
+			}
+		}
+	}
+}
+
 fn projectVertices(deps, window, verts, camera) {
+	params := _projectionParams(window, camera)
 	fn sub(i, out) if i {
 		len(verts) -> out
-		_ -> sub(i + 1, out << deps.projectPoint(window, verts.(i), camera))
+		_ -> sub(i + 1, out << _projectPointFast(verts.(i), params))
 	}
 	sub(0, [])
 }
@@ -238,7 +282,6 @@ fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, fac
 		true -> faceColors.(i)
 		_ -> _default(color, deps.rgb(150, 200, 255))
 	}
-	litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
 
 	depth := (pa3.z + pb3.z + pc3.z + if pd3 {
 		? -> 0
@@ -253,13 +296,20 @@ fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, fac
 		[_, ?, _] -> acc
 		[_, _, ?] -> acc
 		_ -> {
-			triA := _buildTriangle(pa, pb, pc, depth, litColor)
 			if _shouldCullTriangle?(backfaceCulling, pa, pb, pc, window) {
 				true -> acc
 				_ -> if [pd3, pd] {
-					[?, _] -> acc << triA
-					[_, ?] -> acc << triA
+					[?, _] -> {
+						litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
+						acc << _buildTriangle(pa, pb, pc, depth, litColor)
+					}
+					[_, ?] -> {
+						litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
+						acc << _buildTriangle(pa, pb, pc, depth, litColor)
+					}
 					_ -> {
+						litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
+						triA := _buildTriangle(pa, pb, pc, depth, litColor)
 						triB := _buildTriangle(pa, pc, pd, depth, litColor)
 						if _shouldCullTriangle?(backfaceCulling, pa, pc, pd, window) {
 							true -> acc << triA
@@ -307,11 +357,7 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 
 fn drawMeshWireframe(deps, window, mesh, transform, camera, color) {
 	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
-	fn subProj(i, out) if i {
-		len(verts) -> out
-		_ -> subProj(i + 1, out << deps.projectPoint(window, verts.(i), camera))
-	}
-	projected := subProj(0, [])
+	projected := projectVertices(deps, window, verts, camera)
 	edges := mesh.edges
 
 	fn sub(i, drawn) if i {

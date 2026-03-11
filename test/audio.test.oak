@@ -1,0 +1,490 @@
+std := import('std')
+str := import('str')
+math := import('math')
+fmt := import('fmt')
+audio := import('audio')
+
+fn run(t) {
+	// sample type conversions
+	{
+		{
+			f32ToI16: f32ToI16
+			i16ToF32: i16ToF32
+			f32ToI32: f32ToI32
+			i32ToF32: i32ToF32
+			f32ToU8: f32ToU8
+			u8ToF32: u8ToF32
+			clipF32: clipF32
+		} := audio
+
+		'f32ToI16 converts normalised 1.0 to 32767' |> t.eq(
+			f32ToI16(1.0)
+			32767
+		)
+		'f32ToI16 converts normalised -1.0 to -32767' |> t.eq(
+			f32ToI16(-1.0)
+			-32767
+		)
+		'f32ToI16 converts normalised 0.0 to 0' |> t.eq(
+			f32ToI16(0.0)
+			0
+		)
+
+		'i16ToF32 converts 32767 back to ~1.0' |> t.approx(
+			i16ToF32(32767)
+			1.0
+		)
+		'i16ToF32 converts -32768 back to ~-1.0' |> t.approx(
+			i16ToF32(-32768)
+			-1.0
+		)
+
+		'f32ToI32 converts 1.0' |> t.eq(
+			f32ToI32(1.0)
+			2147483647
+		)
+
+		'i32ToF32 round-trip' |> t.approx(
+			i32ToF32(f32ToI32(0.5))
+			0.5
+		)
+
+		'f32ToU8 converts 0 to 128' |> t.eq(
+			f32ToU8(0.0)
+			128
+		)
+		'f32ToU8 converts 1.0 to 255' |> t.eq(
+			f32ToU8(1.0)
+			255
+		)
+		'f32ToU8 converts -1.0 to 0' |> t.eq(
+			f32ToU8(-1.0)
+			0
+		)
+
+		'u8ToF32 converts 128 back to 0' |> t.approx(
+			u8ToF32(128)
+			0.0
+		)
+		'u8ToF32 converts 255 back to 1.0' |> t.approx(
+			u8ToF32(255)
+			1.0
+		)
+
+		'clipF32 clips values > 1 to 1' |> t.eq(
+			clipF32(1.5)
+			1.0
+		)
+		'clipF32 clips values < -1 to -1' |> t.eq(
+			clipF32(-2.0)
+			-1.0
+		)
+		'clipF32 passes through values in range' |> t.eq(
+			clipF32(0.3)
+			0.3
+		)
+	}
+
+	// oscillators
+	{
+		{
+			sine: sine
+			square: square
+			sawtooth: sawtooth
+			triangle: triangle
+			noise: noise
+			silence: silence
+		} := audio
+
+		'sine generates correct length' |> t.eq(
+			len(sine(440, 44100, 100))
+			100
+		)
+
+		'sine at 0 phase starts near 0' |> t.approx(
+			sine(440, 44100, 10, 0).(0)
+			0.0
+		)
+
+		'square generates +1 or -1' |> t.eq(
+			square(440, 44100, 10) |> std.reduce(true, fn(valid, s) {
+				valid & (s = 1 | s = -1)
+			})
+			true
+		)
+
+		'sawtooth stays in [-1, 1]' |> t.eq(
+			sawtooth(220, 44100, 100) |> std.reduce(true, fn(valid, s) {
+				valid & s >= -1.1 & s <= 1.1
+			})
+			true
+		)
+
+		'triangle stays in [-1, 1]' |> t.eq(
+			triangle(440, 44100, 100) |> std.reduce(true, fn(valid, s) {
+				valid & s >= -1.1 & s <= 1.1
+			})
+			true
+		)
+
+		'noise returns [-1, 1] values' |> t.eq(
+			noise(100) |> std.reduce(true, fn(valid, s) {
+				valid & s >= -1 & s <= 1
+			})
+			true
+		)
+
+		'silence returns all zeros' |> t.eq(
+			silence(50) |> std.reduce(true, fn(v, s) v & s = 0)
+			true
+		)
+	}
+
+	// basic DSP
+	{
+		{
+			gain: gain
+			clip: clip
+			normalize: normalize
+			add: add
+			mix: mix
+			dc: dc
+			reverseSignal: reverseSignal
+		} := audio
+
+		'gain scales samples by factor' |> t.eq(
+			gain([0.5, 0.25, -0.5], 2) |> std.map(fn(x) int(x * 1000))
+			[1000, 500, -1000]
+		)
+
+		'clip hard-limits overdriven signal' |> t.eq(
+			clip([1.5, 0.5, -2.0]) |> std.map(fn(x) int(x * 10))
+			[10, 5, -10]
+		)
+
+		'normalize scales peak to 1' |> t.approx(
+			normalize([0.25, 0.5, -0.25]) |> std.reduce(0, fn(m, x) {
+				a := math.abs(x)
+				if a > m { true -> a, _ -> m }
+			})
+			1.0
+		)
+
+		'add combines two signals' |> t.eq(
+			add([0.5, 0.25], [0.3, 0.1]) |> std.map(fn(x) int(x * 100))
+			[80, 35]
+		)
+
+		'mix blends two signals' |> t.eq(
+			mix([1.0, 1.0], [0.0, 0.0], 0.5) |> std.map(fn(x) int(x * 10))
+			[5, 5]
+		)
+
+		'dc shifts samples' |> t.eq(
+			dc([0.0, 0.5, -0.5], 0.1) |> std.map(fn(x) int(x * 10))
+			[1, 6, -4]
+		)
+
+		'reverseSignal reverses order' |> t.eq(
+			reverseSignal([1, 2, 3, 4, 5])
+			[5, 4, 3, 2, 1]
+		)
+	}
+
+	// panning and interleaving
+	{
+		{
+			panStereo: panStereo
+			interleave: interleave
+			deinterleave: deinterleave
+		} := audio
+
+		'panStereo at 0 is balanced' |> t.eq(
+			{
+				s := panStereo([1, 1, 1], 0)
+				(s.left).(0) |> int(math.abs(_) * 10000) =
+					(s.right).(0) |> int(math.abs(_) * 10000)
+			}
+			true
+		)
+
+		'panStereo at -1 is left only' |> t.approx(
+			{
+				s := panStereo([1, 1, 1], -1)
+				(s.right).(0)
+			}
+			0.0
+		)
+
+		'panStereo at +1 is right only' |> t.approx(
+			{
+				s := panStereo([1, 1, 1], 1)
+				(s.left).(0)
+			}
+			0.0
+		)
+
+		'interleave combines channels' |> t.eq(
+			interleave([1, 2, 3], [4, 5, 6])
+			[1, 4, 2, 5, 3, 6]
+		)
+
+		'deinterleave splits channels' |> t.eq(
+			{
+				ch := deinterleave([1, 4, 2, 5, 3, 6], 2)
+				ch.(0) = [1, 2, 3] & ch.(1) = [4, 5, 6]
+			}
+			true
+		)
+	}
+
+	// windowing
+	{
+		{
+			windowRect: windowRect
+			windowHann: windowHann
+			windowHamming: windowHamming
+			windowBlackman: windowBlackman
+			applyWindow: applyWindow
+		} := audio
+
+		'windowRect generates all 1s' |> t.eq(
+			windowRect(5) |> std.reduce(true, fn(v, x) v & x = 1)
+			true
+		)
+
+		'windowHann generates correct length' |> t.eq(
+			len(windowHann(256))
+			256
+		)
+
+		'windowHann starts at 0' |> t.approx(
+			(windowHann(256)).(0)
+			0.0
+		)
+
+		'windowHamming generates correct length' |> t.eq(
+			len(windowHamming(128))
+			128
+		)
+
+		'windowBlackman generates correct length' |> t.eq(
+			len(windowBlackman(512))
+			512
+		)
+
+		'applyWindow scales samples' |> t.eq(
+			applyWindow([2, 4, 6], [0.5, 0.5, 1 / 3]) |>
+				std.map(fn(x) int(x * 10))
+			[10, 20, 20]
+		)
+	}
+
+	// FIR filters
+	{
+		{
+			convolve: convolve
+			lowPassFIR: lowPassFIR
+			highPassFIR: highPassFIR
+		} := audio
+
+		'convolve output length is correct' |> t.eq(
+			len(convolve([1, 2, 3], [1, 1]))
+			4
+		)
+
+		'convolve with impulse is identity' |> t.eq(
+			convolve([1, 2, 3], [1, 0, 0]) |> std.slice(0, 3)
+			[1, 2, 3]
+		)
+
+		'lowPassFIR generates kernel' |> t.eq(
+			{
+				k := lowPassFIR(2000, 44100, 63)
+				len(k) = 63 & len(k) > 0
+			}
+			true
+		)
+
+		'highPassFIR generates kernel' |> t.eq(
+			{
+				k := highPassFIR(2000, 44100, 63)
+				len(k) = 63 & len(k) > 0
+			}
+			true
+		)
+	}
+
+	// ADSR envelope
+	{
+		{
+			adsr: adsr
+		} := audio
+
+		'adsr output length matches input' |> t.eq(
+			len(adsr([1, 1, 1, 1, 1], 1, 0, 0, 0.5, 0))
+			5
+		)
+
+		'adsr with zero times scales by sustain' |> t.approx(
+			(adsr([1, 1, 1], 1, 0, 0, 0.5, 0)).(1)
+			0.5
+		)
+	}
+
+	// FFT / IFFT
+	{
+		{
+			fft: fft
+			ifft: ifft
+			magnitude: magnitude
+			phase: phase
+			powerSpectrum: powerSpectrum
+		} := audio
+
+		'fft output has correct shape' |> t.eq(
+			{
+				result := fft([1, 0, 1, 0], ?)
+				type(result) = :object & type(result.re) = :list
+			}
+			true
+		)
+
+		'ifft inverts fft for zero-padded signal' |> t.eq(
+			{
+				orig := [0.5, -0.3, 0.1, -0.2]
+				result := fft(orig, ?)
+				back := ifft(result.re, result.im)
+				orig |> std.map(fn(x) int(x * 1000)) =
+					back.re |> std.map(fn(x) int(x * 1000))
+			}
+			true
+		)
+
+		'magnitude has correct length' |> t.eq(
+			len(magnitude([1, 0, 1, 0], [0, 1, 0, 1]))
+			4
+		)
+
+		'phase has correct length' |> t.eq(
+			len(phase([1, 0, 1, 0], [0, 1, 0, 1]))
+			4
+		)
+
+		'powerSpectrum works on short signals' |> t.eq(
+			len(powerSpectrum([0.5, -0.3, 0.1]))
+			4
+		)
+	}
+
+	// unit conversions
+	{
+		{
+			durationSamples: durationSamples
+			samplesDuration: samplesDuration
+			freqBin: freqBin
+			binFreq: binFreq
+			midiToFreq: midiToFreq
+			freqToMidi: freqToMidi
+			dbToLinear: dbToLinear
+			linearToDb: linearToDb
+		} := audio
+
+		'durationSamples converts time to samples' |> t.eq(
+			durationSamples(1, 44100)
+			44100
+		)
+
+		'samplesDuration converts samples to time' |> t.approx(
+			samplesDuration(44100, 44100)
+			1.0
+		)
+
+		'freqBin maps frequency to bin' |> t.eq(
+			freqBin(22050, 44100, 2048)
+			1024
+		)
+
+		'binFreq maps bin to frequency' |> t.approx(
+			binFreq(1024, 44100, 2048)
+			22050.0
+		)
+
+		'midiToFreq converts MIDI note 69 (A4) to 440 Hz' |> t.approx(
+			midiToFreq(69)
+			440.0
+		)
+
+		'midiToFreq converts MIDI note 60 (middle C) to ~261.63 Hz' |> t.approx(
+			midiToFreq(60)
+			261.63
+		)
+
+		'freqToMidi converts 440 Hz back to 69' |> t.eq(
+			freqToMidi(440)
+			69
+		)
+
+		'dbToLinear converts 0 dB to 1' |> t.approx(
+			dbToLinear(0)
+			1.0
+		)
+
+		'dbToLinear converts -6 dB to ~0.501' |> t.approx(
+			dbToLinear(-6)
+			0.501
+		)
+
+		'linearToDb converts 1 to 0 dB' |> t.approx(
+			linearToDb(1.0)
+			0.0
+		)
+
+		'linearToDb converts 0.5 to ~-6.02 dB' |> t.approx(
+			linearToDb(0.5)
+			-6.02
+		)
+	}
+
+	// WAV encoding and parsing
+	{
+		{
+			wav: wav
+			parseWav: parseWav
+		} := audio
+
+		'wav generates RIFF header' |> t.eq(
+			{
+				data := wav([0, 0, 0, 0], 44100, 1, 16)
+				data.(0) + data.(1) + data.(2) + data.(3) = 'RIFF'
+			}
+			true
+		)
+
+		'wav includes WAVE marker' |> t.eq(
+			{
+				data := wav([0, 0], 44100, 1, 16)
+				data.(8) + data.(9) + data.(10) + data.(11) = 'WAVE'
+			}
+			true
+		)
+
+		'wav round-trip with parseWav' |> t.eq(
+			{
+				orig := [0.5, 0.25, -0.3, 0.1]
+				wavData := wav(orig, 44100, 1, 16)
+				parsed := parseWav(wavData)
+				parsed.sampleRate = 44100 &
+					parsed.channels = 1 &
+					parsed.bitDepth = 16 &
+					len(parsed.samples) = 4
+			}
+			true
+		)
+
+		'parseWav returns ? for invalid data' |> t.eq(
+			parseWav('invalid')
+			?
+		)
+	}
+}

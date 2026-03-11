@@ -1,0 +1,129 @@
+// perf-gui-renderer demonstrates and benchmarks 2D and 3D rendering performance.
+// Run with: magnolia samples/perf-gui-renderer.oak
+//
+// This sample exercises:
+// - 2D circle drawing (tight per-frame loop, tests trig optimization)
+// - 3D mesh rendering (tests projection caching & culling optimization)
+// - Grid and axes rendering (tests mesh caching)
+//
+// Output shows frame timings and triangle/line counts to quantify improvements.
+
+std := import('std')
+gui := import('GUI')
+
+fn main() {
+	// Create a 640x480 window
+	window := gui.createWindow('GUI Renderer Perf', 640, 480, {
+		frameMs: 16
+		updateOnDispatch: false
+	})
+
+	if window.type {
+		:error -> {
+			std.println('Failed to create window: ' + window.error)
+			? -> 0
+		}
+		_ -> {
+			gui.show(window)
+
+			// Initialize 3D renderer
+			renderer := gui.Renderer3D(window, {
+				background: gui.rgb(8, 14, 22)
+				lineColor: gui.rgb(96, 190, 255)
+				camera: {
+					z: 8
+					fov: 90
+					mode: 'perspective'
+				}
+				light: {
+					x: 0.35
+					y: 0.75
+					z: -1
+					ambient: 0.22
+					diffuse: 0.78
+				}
+			})
+
+			// State tracking
+			frameCount := 0
+			totalNs := 0
+			startNs := nanotime()
+			lastReportNs := startNs
+
+			// Demo parameters
+			cubeRotX := 0.0
+			cubeRotY := 0.0
+			gridRotX := 0.3
+			gridRotY := 0.4
+			circlePhase := 0.0
+
+			// Main loop
+			gui.run(window, fn(w, ev) ? -> 0, fn(w, dt) {
+				frameCount <- frameCount + 1
+				nowNs := nanotime()
+				totalNs <- totalNs + int(dt * 1000000000)
+
+				// Update animations (slow rotation for visual interest)
+				cubeRotX <- cubeRotX + 0.3 * dt
+				cubeRotY <- cubeRotY + 0.2 * dt
+				gridRotX <- gridRotX + 0.1 * dt
+				gridRotY <- gridRotY + 0.15 * dt
+				circlePhase <- circlePhase + 2 * dt
+
+				// Clear and render frame
+				renderer.clear()
+
+				// Render 3D elements
+				renderer.renderCubeSolid(2.0, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
+				renderer.renderGrid(10, 1, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
+				renderer.renderAxes(3, { tz: 0 }),
+
+				// Render 2D elements (circle grid pattern)
+				fn drawCircleGrid(x, y, cols, rows, radius, color) {
+					step := radius * 2.2
+					fn row(r) if r >= rows {
+						true -> 0
+						_ -> {
+							fn col(c) if c >= cols {
+								true -> 0
+								_ -> {
+									cx := int(x + c * step)
+									cy := int(y + r * step)
+									gui.drawCircle2D(window, cx, cy, int(radius), color, false)
+									col(c + 1)
+								}
+							}
+							col(0)
+							row(r + 1)
+						}
+					}
+					row(0)
+				}
+
+				// Draw circles with phase-based color cycling
+				hue := int(circlePhase * 256) % 256
+				color1 := gui.rgb(150 + int(hue / 2), 100, 150)
+				color2 := gui.rgb(100, 150 + int(hue / 2), 150)
+
+				drawCircleGrid(50, 50, 4, 3, 20, color1)
+				drawCircleGrid(350, 50, 4, 3, 20, color2)
+
+				gui.endFrame(window)
+
+				// Report every 1 second
+				if nowNs - lastReportNs >= 1000000000 {
+					avgMs := totalNs / frameCount / 1000000
+					std.println('Frame ' + string(frameCount) + ': ' + string(avg Ms) + ' ms/frame @ ' + string(int(1000 / avgMs)) + ' FPS')
+					lastReportNs <- nowNs
+				}
+
+				0
+			})
+
+			gui.close(window)
+			0
+		}
+	}
+}
+
+main()
