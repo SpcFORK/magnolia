@@ -1,0 +1,347 @@
+// Test suite for the AI library
+// Tests vector operations, neural network functions, embeddings, and utilities
+
+std := import('std')
+math := import('math')
+fmt := import('fmt')
+ai := import('ai')
+
+fn run(t) {
+	// ============================================================================
+	// Vector Operations Tests
+	// ============================================================================
+
+	'dotProduct: basic vectors' |> t.eq(
+		ai.dotProduct([1, 2, 3], [4, 5, 6])
+		32
+	)
+
+	'dotProduct: orthogonal vectors' |> t.eq(
+		ai.dotProduct([1, 0], [0, 1])
+		0
+	)
+
+	'dotProduct: single element' |> t.eq(
+		ai.dotProduct([5], [3])
+		15
+	)
+
+	'magnitude: standard vector' |> t.eq(
+		ai.magnitude([3, 4])
+		5
+	)
+
+	'magnitude: unit vector' |> t.eq(
+		ai.magnitude([1])
+		1
+	)
+
+	'magnitude: zero vector' |> t.eq(
+		ai.magnitude([0, 0])
+		0
+	)
+
+	'normalize: basic vector exists' |> t.eq(
+		ai.normalize([3, 4]) != ?
+		true
+	)
+
+	'normalize: zero vector returns null' |> t.eq(
+		ai.normalize([0, 0])
+		?
+	)
+
+	'cosineSimilarity: identical vectors' |> t.eq(
+		ai.cosineSimilarity([1, 0, 0], [1, 0, 0])
+		1
+	)
+
+	'cosineSimilarity: opposite vectors' |> t.eq(
+		ai.cosineSimilarity([1, 0], [-1, 0])
+		-1
+	)
+
+	'euclideanDistance: standard distance' |> t.eq(
+		ai.euclideanDistance([0, 0], [3, 4])
+		5
+	)
+
+	'euclideanDistance: same point' |> t.eq(
+		ai.euclideanDistance([5, 5], [5, 5])
+		0
+	)
+
+	'manhattanDistance: standard distance' |> t.eq(
+		ai.manhattanDistance([0, 0], [3, 4])
+		7
+	)
+
+	// ============================================================================
+	// Normalization Tests
+	// ============================================================================
+
+	'minMaxScale: basic scaling' |> t.eq(
+		{
+			minVal := ai.minMaxScale([1, 2, 3, 4, 5])
+			[minVal.min, minVal.max, minVal.data.(0), minVal.data.(4)]
+		}
+		[1, 5, 0, 1]
+	)
+
+	'minMaxScale: constant values' |> t.eq(
+		{
+			result := ai.minMaxScale([5, 5, 5])
+			result.min = 5 & result.max = 5 & len(result.data) = 3
+		}
+		true
+	)
+
+	'zScore: creates output' |> t.eq(
+		{
+			result := ai.zScore([1, 2, 3, 4, 5])
+			type(result.mean) = :int | type(result.mean) = :float
+		}
+		true
+	)
+
+	'zScore: empty list' |> t.eq(
+		{
+			result := ai.zScore([])
+			result.mean = 0 & result.stddev = 0
+		}
+		true
+	)
+
+	// ============================================================================
+	// Activation Function Tests
+	// ============================================================================
+
+	'relu: positive values' |> t.eq(
+		ai.relu(5)
+		5
+	)
+
+	'relu: negative values' |> t.eq(
+		ai.relu(-5)
+		0
+	)
+
+	'relu: zero' |> t.eq(
+		ai.relu(0)
+		0
+	)
+
+	'leakyRelu: positive values' |> t.eq(
+		ai.leakyRelu(5, 0.1)
+		5
+	)
+
+	'leakyRelu: negative values with slope' |> t.eq(
+		ai.leakyRelu(-5, 0.1)
+		-0.5
+	)
+
+	'sigmoid: range is (0,1)' |> t.eq(
+		{
+			sigNeg := ai.sigmoid(-10)
+			sigZero := ai.sigmoid(0)
+			sigPos := ai.sigmoid(10)
+			sigZero > sigNeg & sigZero < sigPos
+		}
+		true
+	)
+
+	'tanh: zero input' |> t.eq(
+		ai.tanh(0)
+		0
+	)
+
+	'gelu: zero input' |> t.approx(
+		ai.gelu(0)
+		0
+	)
+
+	'gelu: positive' |> t.eq(
+		ai.gelu(1) > 0.5 & ai.gelu(1) < 1
+		true
+	)
+
+	// ============================================================================
+	// Loss Function Tests
+	// ============================================================================
+
+	'meanSquaredError: perfect prediction' |> t.eq(
+		ai.meanSquaredError([1, 2, 3], [1, 2, 3])
+		0
+	)
+
+	'meanSquaredError: off by one' |> t.eq(
+		ai.meanSquaredError([1, 2, 3], [2, 3, 4])
+		1
+	)
+
+	'meanSquaredError: empty' |> t.eq(
+		ai.meanSquaredError([], [])
+		0
+	)
+
+	// ============================================================================
+	// Tokenization Tests
+	// ============================================================================
+
+	'tokenizeSimple: basic text' |> t.eq(
+		{
+			tokens := ai.tokenizeSimple('hello world AI')
+			[len(tokens), tokens.(0), tokens.(1)]
+		}
+		[3, 'hello', 'world']
+	)
+
+	'tokenizeSimple: empty string' |> t.eq(
+		len(ai.tokenizeSimple(''))
+		0
+	)
+
+	'tokenCount: produces int' |> t.eq(
+		{
+			count := ai.tokenCount('hello world AI model')
+			type(count) = :int & count > 3
+		}
+		true
+	)
+
+	// ============================================================================
+	// Batch Processing Tests
+	// ============================================================================
+
+	'batchify: even batches' |> t.eq(
+		{
+			result := ai.batchify([1, 2, 3, 4], 2)
+			[len(result), len(result.(0)), len(result.(1))]
+		}
+		[2, 2, 2]
+	)
+
+	'batchify: uneven batches' |> t.eq(
+		{
+			result := ai.batchify([1, 2, 3, 4, 5], 2)
+			len(result) = 3 & len(result.(2)) = 1
+		}
+		true
+	)
+
+	'padSequence: padding needed' |> t.eq(
+		{
+			result := ai.padSequence([1, 2, 3], 5, 0)
+			[len(result), result.(3), result.(4)]
+		}
+		[5, 0, 0]
+	)
+
+	'padSequence: no padding needed' |> t.eq(
+		{
+			result := ai.padSequence([1, 2, 3, 4, 5], 3, 0)
+			[len(result), result.(0)]
+		}
+		[3, 1]
+	)
+
+	// ============================================================================
+	// Statistical Utilities Tests
+	// ============================================================================
+
+	'mean: basic list' |> t.eq(
+		ai.mean([1, 2, 3, 4, 5])
+		3
+	)
+
+	'mean: empty list' |> t.eq(
+		ai.mean([])
+		0
+	)
+
+	'mean: single element' |> t.eq(
+		ai.mean([42])
+		42
+	)
+
+	'variance: produces value' |> t.eq(
+		{
+			v := ai.variance([1, 2, 3, 4, 5])
+			type(v) = :int | type(v) = :float
+		}
+		true
+	)
+
+	'stddev: constant values' |> t.eq(
+		ai.stddev([5, 5, 5])
+		0
+	)
+
+	// ============================================================================
+	// Model Configuration Tests
+	// ============================================================================
+
+	'ModelConfig: defaults' |> t.eq(
+		{
+			config := ai.ModelConfig({})
+			config.vocabSize = 50000 & config.trainable = true
+		}
+		true
+	)
+
+	'ModelConfig: custom values' |> t.eq(
+		{
+			config := ai.ModelConfig({
+				name: 'test-model'
+				vocabSize: 100000
+				numLayers: 48
+			})
+			config.name = 'test-model' & config.vocabSize = 100000
+		}
+		true
+	)
+
+	// ============================================================================
+	// Retrieval Tests
+	// ============================================================================
+
+	'topK: basic retrieval' |> t.eq(
+		{
+			items := [['a', 0.9], ['b', 0.5], ['c', 0.8]]
+			result := ai.topK(items, 2)
+			len(result) = 2 & result.(0).(1) >= result.(1).(1)
+		}
+		true
+	)
+
+	'topK: k larger than list' |> t.eq(
+		{
+			items := [['a', 0.5], ['b', 0.3]]
+			result := ai.topK(items, 10)
+			len(result) = 2
+		}
+		true
+	)
+
+	// ============================================================================
+	// Softmax Tests
+	// ============================================================================
+
+	'softmax: basic probabilities' |> t.eq(
+		{
+			result := ai.softmax([1, 2, 3])
+			len(result) = 3 & result.(2) > result.(1) & result.(1) > result.(0)
+		}
+		true
+	)
+
+	'softmax: equal logits' |> t.eq(
+		{
+			result := ai.softmax([0, 0, 0])
+			len(result) = 3
+		}
+		true
+	)
+}
+

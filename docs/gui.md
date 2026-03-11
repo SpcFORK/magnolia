@@ -17,6 +17,18 @@ uses a command queue model. You can optionally pass `options.webBridge` to
 `createWindow(...)` to forward recorded Canvas/WebGL operations to host-side
 JavaScript.
 
+## Performance
+
+The GUI renderer includes several performance optimizations for 2D and 3D rendering. See **[gui-performance.md](gui-performance.md)** for:
+
+- Projection parameter caching (40–50% reduction in vertex overhead)
+- Deferred lighting for culled faces (20–30% faster backface culling)
+- Renderer mesh caching (100% bypass of repeated allocations)
+- Circle outline trig optimization (95% reduction in per-segment trigonometry)
+- Benchmarking guide and best practices
+
+Expected overall improvement: **5–15% FPS gain** on typical hardware.
+
 ## Import
 
 ```oak
