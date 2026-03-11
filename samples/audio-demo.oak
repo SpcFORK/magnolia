@@ -1,0 +1,93 @@
+// Audio demo sample.
+// On Windows, plays a short melody using Kernel32!Beep.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+windows := import('windows')
+
+println('== Audio Demo Sample ==')
+
+fn playBeepMelody(notes, i) if i < len(notes) {
+	true -> {
+		note := notes.(i)
+		res := windows.kernel32('Beep', note.freq, note.dur)
+		if windows.callOk?(res) & res.r1 > 0 {
+			true -> printf('Played {{ 0 }} ({{ 1 }} Hz for {{ 2 }} ms)', note.name, note.freq, note.dur)
+			_ -> {
+				printf('Beep failed at note {{ 0 }}', note.name)
+				println(string(res))
+			}
+		}
+
+		// Small pause between notes.
+		windows.kernel32('Sleep', 35)
+		playBeepMelody(notes, i + 1)
+	}
+	_ -> ?
+}
+
+fn playAlias(name) {
+	buf := bits(bits(name) << 0)
+	// PlaySoundA(pszSound, hmod, SND_ALIAS)
+	windows.winmm('PlaySoundA', addr(buf), 0, 65536)
+}
+
+fn playWinMMAliases(aliases, i) if i < len(aliases) {
+	true -> {
+		alias := aliases.(i)
+		res := playAlias(alias)
+		if windows.callOk?(res) & res.r1 > 0 {
+			true -> {
+				printf('WinMM played alias {{ 0 }}', alias)
+				windows.kernel32('Sleep', 160)
+				playWinMMAliases(aliases, i + 1)
+			}
+			_ -> {
+				printf('WinMM could not play alias {{ 0 }}', alias)
+				println(string(res))
+				playWinMMAliases(aliases, i + 1)
+			}
+		}
+	}
+	_ -> ?
+}
+
+if windows.isWindows?() {
+	true -> {
+		melody := [
+			{name: 'C5', freq: 523, dur: 140}
+			{name: 'D5', freq: 587, dur: 140}
+			{name: 'E5', freq: 659, dur: 140}
+			{name: 'G5', freq: 784, dur: 220}
+			{name: 'E5', freq: 659, dur: 140}
+			{name: 'D5', freq: 587, dur: 140}
+			{name: 'C5', freq: 523, dur: 260}
+		]
+		aliases := ['SystemAsterisk', 'SystemExclamation', 'SystemQuestion']
+
+		winmmLoad := windows.loadDll(windows.Winmm)
+		if winmmLoad.type = :ok {
+			true -> {
+				println('winmm.dll loaded; trying PlaySoundA system aliases...')
+				playWinMMAliases(aliases, 0)
+			}
+			_ -> {
+				println('winmm.dll unavailable; using Beep fallback.')
+				println(string(winmmLoad))
+				playBeepMelody(melody, 0)
+			}
+		}
+
+		if winmmLoad.type = :ok {
+			true -> println('WinMM demo complete.')
+			_ -> println('Beep melody complete.')
+		}
+	}
+	_ -> println('Audio demo currently uses Windows Beep and requires Windows.')
+}

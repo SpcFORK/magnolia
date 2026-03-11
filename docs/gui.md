@@ -262,6 +262,14 @@ Methods:
 
 Projects and draws mesh edges as 2D lines.
 
+### `drawTriangleFilled(window, p0, p1, p2, color?)`
+
+Fills a projected triangle using scanline rasterization.
+
+### `drawMeshSolid(window, mesh, transform?, camera?, color?)`
+
+Renders solid faces (triangulated quads) with a simple painter sort by depth.
+
 Transform fields:
 
 - `tx`, `ty`, `tz`
@@ -290,6 +298,8 @@ Returns object methods:
 - `setCamera(camera)`
 - `setProjection(mode, orthoScale?)`
 - `clear()`
+- `renderMeshSolid(mesh, transform?, color?)`
+- `renderCubeSolid(size?, transform?, color?)`
 - `renderMesh(mesh, transform?, color?)`
 - `renderCube(size?, transform?, color?)`
 - `renderGrid(size?, step?, transform?, color?)`

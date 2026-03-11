@@ -2118,6 +2118,8 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 			type(gui.VoxelGrid)
 			type(gui.degToRad)
 			type(gui.drawLine)
+			type(gui.drawTriangleFilled)
+			type(gui.drawMeshSolid)
 			type(gui.drawMeshWireframe)
 			type(gui.Renderer3D)
 			gui.GL_COLOR_BUFFER_BIT = 16384
@@ -2143,6 +2145,8 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 	`, MakeList(
 		AtomValue("atom"),
 		AtomValue("int"),
+		AtomValue("function"),
+		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
