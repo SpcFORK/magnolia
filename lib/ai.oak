@@ -12,7 +12,12 @@
 	slice: slice
 	each: each
 	range: range
+	println: println
+	print: print
 } := import('std')
+{
+	sort: sort
+} := import('sort')
 {
 	sqrt: sqrt
 	Pi: Pi
@@ -24,10 +29,6 @@
 	split: split
 	slice?: slice?
 } := import('str')
-{
-	println: println
-	print: print
-} := import('std')
 
 // ============================================================================
 // Vector Operations & Embeddings
@@ -222,11 +223,34 @@ fn zScore(data) {
 // Example:
 //   softmax([1, 2, 3])  // => [0.09, 0.24, 0.67] (approximately)
 fn softmax(logits) {
-	// For numerical stability, subtract the max
-	maxLogit := logits |> reduce(fn(acc, x) if x > acc { true -> x, _ -> acc }, logits.(0))
-	shifted := logits |> map(fn(x) pow(Pi, x - maxLogit))
-	expSum := shifted |> reduce(fn(a, b) a + b, 0)
-	shifted |> map(fn(x) x / expSum)
+	if len(logits) = 0 {
+		true -> []
+		_ -> {
+			// For numerical stability, subtract the max
+			fn findMax(i, m) if i >= len(logits) {
+				true -> m
+				_ -> {
+					x := logits.(i)
+					next := if x > m { true -> x, _ -> m }
+					findMax(i + 1, next)
+				}
+			}
+			maxLogit := findMax(0, logits.(0))
+			
+			// Compute exponentials
+			shifted := logits |> map(fn(x) pow(2.71828, x - maxLogit))
+			
+			// Sum exponentials
+			fn sumExps(i, acc) if i >= len(shifted) {
+				true -> acc
+				_ -> sumExps(i + 1, acc + shifted.(i))
+			}
+			expSum := sumExps(0, 0)
+			
+			// Normalize
+			shifted |> map(fn(x) x / expSum)
+		}
+	}
 }
 
 // scaledDotProductAttention computes scaled dot-product attention.
@@ -419,7 +443,11 @@ fn ModelConfig(params) {
 //   topK([['a', 0.9], ['b', 0.5], ['c', 0.8]], 2)
 //   // => [['a', 0.9], ['c', 0.8]]
 fn topK(items, k) {
-	sorted := items |> sort(fn(a, b) if a.(1) > b.(1) { true -> -1, false -> 1, _ -> 0 })
+	// Sort by score (second element) in descending order
+	sorted := items |> sort(fn(pair) {
+		// Return negative score for descending order
+		pair.(1) * -1
+	})
 	if k >= len(sorted) {
 		true -> sorted
 		_ -> sorted |> slice(0, k)
@@ -458,7 +486,7 @@ fn batchify(items, batchSize) {
 				_ -> idx + batchSize
 			}
 			batch := items |> slice(idx, endIdx)
-			makeBatch(endIdx, acc << [batch])
+			makeBatch(endIdx, acc << batch)
 		}
 	}
 	makeBatch(0, [])
@@ -474,8 +502,17 @@ fn padSequence(sequence, targetLength, padToken) {
 	if currentLen >= targetLength {
 		true -> sequence |> slice(0, targetLength)
 		_ -> {
-			padding := range(currentLen, targetLength) |> map(fn(_) padToken)
-			sequence << padding
+			fn addPadding(i, acc) if i >= targetLength {
+				true -> acc
+				_ -> {
+					elem := if i < currentLen {
+						true -> sequence.(i)
+						_ -> padToken
+					}
+					addPadding(i + 1, acc << elem)
+				}
+			}
+			addPadding(0, [])
 		}
 	}
 }

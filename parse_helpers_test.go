@@ -200,6 +200,8 @@ func TestParseUnitBasePrefixedIntLiteral(t *testing.T) {
 	}{
 		{name: "hex", payload: "0x3", want: 3},
 		{name: "hex uppercase prefix", payload: "0Xf", want: 15},
+		{name: "hex with e digit", payload: "0xe9", want: 233},
+		{name: "hex with multiple e digits", payload: "0xabcdef", want: 11259375},
 		{name: "binary", payload: "0b0011", want: 3},
 		{name: "binary uppercase prefix", payload: "0B11", want: 3},
 	}

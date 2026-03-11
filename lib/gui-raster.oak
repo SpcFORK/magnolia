@@ -58,13 +58,30 @@ fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
 fn _fillScan(deps, window, y, maxY, p0, p1, p2, color) if y > maxY {
 	true -> {type: :ok}
 	_ -> {
-		xa := if y <= p1.y {
-			true -> _lerpX(p0, p1, y)
-			_ -> _lerpX(p1, p2, y)
+		dy01 := if p1.y = p0.y {
+			true -> 1.0
+			_ -> p1.y - p0.y
 		}
-		xb := _lerpX(p0, p2, y)
-		_drawScanline(deps, window, y, xa, xb, color)
-		_fillScan(deps, window, y + 1, maxY, p0, p1, p2, color)
+		dy02 := if p2.y = p0.y {
+			true -> 1.0
+			_ -> p2.y - p0.y
+		}
+		dx01 := (p1.x - p0.x) / dy01
+		dx02 := (p2.x - p0.x) / dy02
+		
+		fn fillStep(cy, xa, xb) if cy > maxY {
+			true -> {type: :ok}
+			_ -> {
+				_drawScanline(deps, window, cy, xa, xb, color)
+				nextXa := if cy < p1.y {
+					true -> xa + dx01
+					_ -> xb + dx01
+				}
+				fillStep(cy + 1, nextXa, xb + dx02)
+			}
+		}
+		
+		fillStep(y, p0.x, p0.x)
 	}
 }
 
@@ -226,9 +243,22 @@ fn computeLightParams(deps, light) {
 }
 
 fn faceShadeGeneric(deps, lp, pa3, pb3, pc3) {
-	n := _vecNormalize(deps, _vecCross(deps, _vecSub(deps, pb3, pa3), _vecSub(deps, pc3, pa3)))
-	ndotl := 0 - _vecDot(n, lp.ld)
-	lp.amb + lp.diff * _clamp(ndotl, 0, 1)
+	eb := {x: pb3.x - pa3.x, y: pb3.y - pa3.y, z: pb3.z - pa3.z}
+	ec := {x: pc3.x - pa3.x, y: pc3.y - pa3.y, z: pc3.z - pa3.z}
+	cx := eb.y * ec.z - eb.z * ec.y
+	cy := eb.z * ec.x - eb.x * ec.z
+	cz := eb.x * ec.y - eb.y * ec.x
+	len := pow(cx * cx + cy * cy + cz * cz, 0.5)
+	if len <= 0.000001 {
+		true -> lp.amb
+		_ -> {
+			nx := cx / len
+			ny := cy / len
+			nz := cz / len
+			ndotl := 0 - (nx * lp.ld.x + ny * lp.ld.y + nz * lp.ld.z)
+			lp.amb + lp.diff * _clamp(ndotl, 0, 1)
+		}
+	}
 }
 
 fn _colorR(c) c & 255
@@ -237,10 +267,10 @@ fn _colorB(c) (c >> 16) & 255
 
 fn _shadeColor(deps, color, intensity) {
 	i := _clamp(intensity, 0, 1)
-	r := int(_colorR(color) * i)
-	g := int(_colorG(color) * i)
-	b := int(_colorB(color) * i)
-	deps.rgb(_clamp(r, 0, 255), _clamp(g, 0, 255), _clamp(b, 0, 255))
+	cr := _colorR(color)
+	cg := _colorG(color)
+	cb := _colorB(color)
+	deps.rgb(_clamp(int(cr * i), 0, 255), _clamp(int(cg * i), 0, 255), _clamp(int(cb * i), 0, 255))
 }
 
 fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
