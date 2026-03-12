@@ -1,0 +1,130 @@
+// Macro expansion utilities for libsyntax.
+
+std := import('std')
+default := std.default
+clone := std.clone
+map := std.map
+{
+	parse: parse
+} := import('syntax-parse')
+
+// Macro wraps a macro expander function for AST transforms.
+// The expander receives `(args, callNode, macros)` and must return an AST node.
+fn Macro(expand) {
+	type: :macro
+	expand: expand
+}
+
+// macro? checks whether a value is a syntax macro wrapper object.
+fn macro?(x) x.type = :macro & x.expand != ?
+
+fn expandMacros(ast, macros) {
+	macros := default(macros, {})
+
+	fn lookupMacro(name) {
+		candidate := macros.(name)
+		if macro?(candidate) {
+			true -> candidate
+			_ -> ?
+		}
+	}
+
+	fn expandNode(node) if node = ? {
+		true -> ?
+		_ -> if node.type {
+			:fnCall -> {
+				fnIdent := node.function
+				if fnIdent.type = :identifier {
+					true -> if macro := lookupMacro(fnIdent.val) {
+						? -> {
+							// no macro match, recurse into children normally
+							fnCallNode := clone(node)
+							fnCallNode.function := expandNode(node.function)
+							fnCallNode.args := node.args |> map(expandNode)
+							if node.restArg != ? -> fnCallNode.restArg := expandNode(node.restArg)
+							fnCallNode
+						}
+						_ -> {
+							expanded := macro.expand(node.args, node, macros)
+							expandNode(expanded)
+						}
+					}
+					_ -> {
+						fnCallNode := clone(node)
+						fnCallNode.function := expandNode(node.function)
+						fnCallNode.args := node.args |> map(expandNode)
+						if node.restArg != ? -> fnCallNode.restArg := expandNode(node.restArg)
+						fnCallNode
+					}
+				}
+			}
+			:list -> {
+				listNode := clone(node)
+				listNode.elems := node.elems |> map(expandNode)
+				listNode
+			}
+			:object -> {
+				objNode := clone(node)
+				objNode.entries := node.entries |> map(fn(entry) {
+					key: expandNode(entry.key)
+					val: expandNode(entry.val)
+				})
+				objNode
+			}
+			:function -> {
+				fnNode := clone(node)
+				fnNode.body := expandNode(node.body)
+				fnNode
+			}
+			:assignment -> {
+				assignNode := clone(node)
+				assignNode.left := expandNode(node.left)
+				assignNode.right := expandNode(node.right)
+				assignNode
+			}
+			:propertyAccess -> {
+				accessNode := clone(node)
+				accessNode.left := expandNode(node.left)
+				accessNode.right := expandNode(node.right)
+				accessNode
+			}
+			:unary -> {
+				unaryNode := clone(node)
+				unaryNode.right := expandNode(node.right)
+				unaryNode
+			}
+			:binary -> {
+				binNode := clone(node)
+				binNode.left := expandNode(node.left)
+				binNode.right := expandNode(node.right)
+				binNode
+			}
+			:ifExpr -> {
+				ifNode := clone(node)
+				ifNode.cond := expandNode(node.cond)
+				ifNode.branches := node.branches |> map(fn(branch) {
+					type: :ifBranch
+					target: expandNode(branch.target)
+					body: expandNode(branch.body)
+				})
+				ifNode
+			}
+			:block -> {
+				block := clone(node)
+				block.exprs := node.exprs |> map(expandNode)
+				block
+			}
+			_ -> node
+		}
+	}
+
+	if type(ast) = :list {
+		true -> ast |> map(expandNode)
+		_ -> expandNode(ast)
+	}
+}
+
+// parseWithMacros parses source and applies AST macro expansion.
+fn parseWithMacros(text, macros) {
+	parse(text) |> expandMacros(macros)
+}

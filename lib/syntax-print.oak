@@ -1,0 +1,314 @@
+// Token-stream printer utilities for libsyntax.
+
+std := import('std')
+default := std.default
+range := std.range
+take := std.take
+first := std.first
+each := std.each
+map := std.map
+str := import('str')
+cut := str.cut
+join := str.join
+trimStart := str.trimStart
+trim := str.trim
+math := import('math')
+min := math.min
+max := math.max
+fmt := import('fmt')
+printf := fmt.printf
+{
+	tokenize: tokenize
+	shebang?: shebang?
+} := import('syntax-tokenize')
+
+// Printer takes a list of Oak tokens and pretty-prints the source code into a
+// string. As a rule, all newlines are preserved, including those in comments.
+// This differs from the approach of other pretty-printers that prefer to
+// decide on newlines themselves, and is an intentional design decision.
+fn Printer(tokens) {
+	// create a string with N tabs in it
+	fn tabs(n) if {
+		n > 0 -> tabs(n - 1) << '\t'
+		_ -> ''
+	}
+
+	// a single token -> its printed value
+	fn render(token) if token.type {
+		:comment -> '//' + token.val
+		:comma -> ','
+		:dot -> '.'
+		:leftParen -> '('
+		:rightParen -> ')'
+		:leftBracket -> '['
+		:rightBracket -> ']'
+		:leftBrace -> '{'
+		:rightBrace -> '}'
+		:assign -> ':='
+		:nonlocalAssign -> '<-'
+		:pipeArrow -> '|>'
+		:branchArrow -> '->'
+		:pushArrow -> '<<'
+		:colon -> ':'
+		:ellipsis -> '...'
+		:qmark -> '?'
+		:exclam -> '!'
+		:plus -> '+'
+		:minus -> '-'
+		:times -> '*'
+		:divide -> '/'
+		:modulus -> '%'
+		:xor -> '^'
+		:and -> '&'
+		:or -> '|'
+		:greater -> '>'
+		:less -> '<'
+		:eq -> '='
+		:geq -> '>='
+		:leq -> '<='
+		:neq -> '!='
+		:ifKeyword -> 'if'
+		:fnKeyword -> 'fn'
+		:withKeyword -> 'with'
+		:csKeyword -> 'cs'
+		:underscore -> '_'
+		:identifier -> token.val
+		:trueLiteral -> 'true'
+		:falseLiteral -> 'false'
+		:stringLiteral -> '\'' << token.val << '\''
+		:numberLiteral -> token.val
+		_ -> {
+			printf('Unknown token {{0}}', token)
+			string(token)
+		}
+	}
+
+	// does a token require a space to follow it in well-formatted code?
+	fn connectingToken?(tokenType) if tokenType {
+		:assign
+		:nonlocalAssign
+		:pipeArrow
+		:branchArrow
+		:pushArrow
+		:colon
+		:plus, :minus, :times, :divide, :modulus
+		:xor, :and, :or
+		:greater, :less, :eq, :geq, :leq, :neq -> true
+		_ -> false
+	}
+
+	// shorthand for the last item of a list
+	fn last(list) list.(len(list) - 1)
+
+	fn print {
+		lines := ['']
+		indents := []
+		curr := 0
+		currs := [0]
+		hanging? := false
+
+		fn add(s, tabs) {
+			if last(lines) |> trim('\t') {
+				'' -> last(lines) << trimStart(s)
+				_ -> last(lines) << s
+			}
+			curr <- curr + tabs
+			currs << curr
+		}
+
+		fn purelyDescendingPrefix(list) if len(list) {
+			0 -> list
+			_ -> {
+				fn sub(i) if {
+					i = len(list) -> list |> take(i)
+					list.(i - 1) > list.(i) -> sub(i + 1)
+					_ -> list |> take(i)
+				}
+				sub(1)
+			}
+		}
+
+		fn indentLine(lastType) {
+			indent := min(currs...)
+			if {
+				{
+					prefix := purelyDescendingPrefix(currs)
+					len(prefix) <= 1 & default(prefix.0, 0) > indent
+				}
+				hanging? -> indent <- indent + 1
+			}
+
+			hanging? <- if {
+				connectingToken?(lastType)
+				lastType = :dot -> true
+				_ -> false
+			}
+
+			indent
+		}
+
+		tokens |> with each() fn(token, i) {
+			nextType := default(tokens.(i + 1), { type: :newline }).type
+
+			[lastLastType, lastType] := if i {
+				0 -> [:newline, :newline]
+				1 -> [:newline, tokens.(i - 1).type]
+				_ -> {
+					fn sub(prev) if prev {
+						-2, -1, 0 -> prev
+						_ -> if [tokens.(prev).type, tokens.(prev - 1).type] {
+							[:newline, :comment]
+							[:comment, :newline] -> sub(prev - 2)
+							[:comment, _] -> sub(prev - 1)
+							_ -> prev
+						}
+					}
+					prev := sub(i - 1) |> max(0)
+
+					[
+						if prev {
+							0 -> :newline
+							_ -> tokens.(prev - 1).type
+						}
+						tokens.(prev).type
+					]
+				}
+			}
+
+			if [lastType, token.type, nextType] {
+				[_, :newline, _] -> {
+					indents << indentLine(lastType)
+					currs <- [curr]
+					lines << ''
+				}
+				[_, :dot, _] -> add('.', 0)
+
+				[_, :leftParen, _] -> if {
+					connectingToken?(lastType)
+					lastType = :comma
+					lastType = :ifKeyword
+					lastType = :withKeyword
+					lastType = :csKeyword -> add(' ' << render(token), 1)
+					_ -> add(render(token), 1)
+				}
+				[_, :leftBracket, _]
+				[_, :leftBrace, _] -> if lastType {
+					:leftParen
+					:leftBracket -> add(render(token), 1)
+					_ -> add(' ' << render(token), 1)
+				}
+
+				[:newline, :rightParen, _]
+				[:newline, :rightBracket, _]
+				[:newline, :rightBrace, _] -> add(render(token), -1)
+
+				[_, :rightParen, _]
+				[_, :rightBracket, _] -> add(render(token), -1)
+				[:leftBrace, :rightBrace, _] -> add(render(token), -1)
+				[_, :rightBrace, _] -> add(' ' << render(token), -1)
+
+				[_, :comma, :newline]
+				[_, :comma, :rightParen]
+				[_, :comma, :rightBracket]
+				[_, :comma, :rightBrace] -> ?
+
+				[_, :colon, _] -> if {
+					lastType = :comma
+					lastType = :leftBrace
+					connectingToken?(lastType) -> add(' :', 0)
+					_ -> add(':', 0)
+				}
+
+				[_, :comma, _]
+				[_, :ellipsis, _] -> add(render(token), 0)
+
+				[:leftParen, _, _]
+				[:leftBracket, _, _]
+
+				[:dot, _, _]
+				[:exclam, _, _] -> add(render(token), 0)
+
+				[:minus, _, _] -> if lastLastType {
+					:leftParen, :leftBracket, :leftBrace
+					:ifKeyword
+					:csKeyword
+					:exclam
+					:minus
+					:newline
+					:comma
+					:colon -> add(render(token), 0)
+					_ -> if connectingToken?(lastLastType) {
+						true -> add(render(token), 0)
+						_ -> add(' ' << render(token), 0)
+					}
+				}
+
+				[:colon, :identifier, _]
+				[:colon, :ifKeyword, _]
+				[:colon, :fnKeyword, _]
+				[:colon, :withKeyword, _]
+				[:colon, :csKeyword, _]
+				[:colon, :trueLiteral, _]
+				[:colon, :falseLiteral, _] -> if lastLastType {
+					:leftParen, :leftBracket, :leftBrace
+					:rightParen, :rightBracket, :rightBrace
+					:ifKeyword
+					:csKeyword
+					:exclam
+					:minus
+					:newline
+					:comma
+					:colon -> add(render(token), 0)
+					_ -> if connectingToken?(lastLastType) {
+						true -> add(render(token), 0)
+						_ -> add(' ' << render(token), 0)
+					}
+				}
+
+				[:leftBrace, _, _]
+				_ -> add(' ' << render(token), 0)
+			}
+		}
+
+		indents << indentLine(last(tokens))
+
+		indents |> with each() fn(n, i) if i {
+			0 -> ?
+			_ -> if n < indents.(i - 1) -> {
+				fn sub(j) if {
+					indents.(j) > n -> sub(j - 1)
+					_ -> j + 1
+				}
+				target := sub(i - 1)
+
+				if indents.(target) - n > 1 -> {
+					diff := indents.(target) - n
+					range(target, i) |> with each() fn(j) {
+						indents.(j) := indents.(j) - diff + 1
+					}
+				}
+			}
+		}
+
+		indentedLines := lines |> with map() fn(line, i) if line {
+			'' -> ''
+			_ -> tabs(indents.(i)) << line
+		}
+		indentedLines |> join('\n')
+	}
+
+	{
+		print: print
+	}
+}
+
+// print takes an Oak source file and returns a pretty-printed string.
+// Unlike Printer.print, print also correctly processes shebang lines.
+fn print(text) {
+	tokens := tokenize(text)
+	printer := Printer(tokens)
+	if shebang?(text) {
+		true -> text |> cut('\n') |> first() << '\n' << printer.print()
+		_ -> printer.print()
+	}
+}

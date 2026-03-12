@@ -1,0 +1,312 @@
+// Tokenization and token rendering utilities for libsyntax.
+
+std := import('std')
+contains? := std.contains?
+str := import('str')
+digit? := str.digit?
+word? := str.word?
+space? := str.space?
+startsWith? := str.startsWith?
+trimEnd := str.trimEnd
+trim := str.trim
+fmt := import('fmt')
+format := fmt.format
+
+fn shebang?(text) text |> startsWith?('#!')
+
+fn renderPos(pos) '[' + string(pos.1) + ':' + string(pos.2) + ']'
+
+fn renderToken(token) if token.val {
+	? -> format('{{ 0 }} {{ 1 }}', string(token.type), renderPos(token.pos))
+	_ -> format('{{ 0 }}({{ 1 }}) {{ 2 }}', string(token.type), token.val, renderPos(token.pos))
+}
+
+// Tokenizer is a full-fidelity, lossless tokenizer for Oak. It produces a
+// stream of valid Oak token types, plus any shebang, newlines, and comments it
+// finds. To produce an AST, those non-standard non-AST tokens should be
+// filtered out of the list first.
+//
+// Methods:
+//
+// fn tokenize()    returns a list of tokens
+fn Tokenizer(source) {
+	index := 0
+	line := 1
+	col := 1
+
+	fn TokenAt(type, pos, val) {
+		type: type
+		val: val
+		pos: pos
+	}
+
+	fn Token(type, val) TokenAt(type, [index, line, col], val)
+
+	fn eof? index = len(source)
+	fn peek source.(index)
+	fn peekAhead(n) if index + n >= len(source) {
+		true -> ' '
+		_ -> source.(index + n)
+	}
+	fn next {
+		char := source.(index)
+		if index < len(source) -> index <- index + 1
+		if char {
+			'\n' -> {
+				line <- line + 1
+				col <- 1
+			}
+			_ -> col <- col + 1
+		}
+		char
+	}
+	fn back {
+		if index > 0 -> index <- index - 1
+		if source.(index) {
+			// TODO: reset col correctly on backtrack
+			'\n' -> line <- line - 1
+			_ -> col <- col - 1
+		}
+	}
+
+	fn readUntilChar(c) {
+		fn sub(acc) if !eof?() & peek() != c {
+			true -> sub(acc << next())
+			_ -> acc
+		}
+		sub('')
+	}
+	fn readValidIdentifier {
+		fn sub(acc) if eof?() {
+			true -> acc
+			_ -> {
+				c := next()
+				if word?(c) | c = '_' | c = '?' | c = '!' {
+					true -> sub(acc << c)
+					_ -> {
+						back()
+						acc
+					}
+				}
+			}
+		}
+		sub('')
+	}
+	fn readValidNumeral {
+		sawDot? := false
+		fn sub(acc) if eof?() {
+			true -> acc
+			_ -> {
+				c := next()
+				if {
+					digit?(c) -> sub(acc << c)
+					c = '.' & !sawDot? -> {
+						sawDot? <- true
+						sub(acc << c)
+					}
+					_ -> {
+						back()
+						acc
+					}
+				}
+			}
+		}
+		sub('')
+	}
+	fn nextToken {
+		pos := [index, line, col]
+		if c := next() {
+			',' -> TokenAt(:comma, pos)
+			'.' -> if peek() = '.' & peekAhead(1) = '.' {
+				true -> {
+					next()
+					next()
+					TokenAt(:ellipsis, pos)
+				}
+				_ -> TokenAt(:dot, pos)
+			}
+			'(' -> TokenAt(:leftParen, pos)
+			')' -> TokenAt(:rightParen, pos)
+			'[' -> TokenAt(:leftBracket, pos)
+			']' -> TokenAt(:rightBracket, pos)
+			'{' -> TokenAt(:leftBrace, pos)
+			'}' -> TokenAt(:rightBrace, pos)
+			':' -> if peek() {
+				'=' -> {
+					next()
+					TokenAt(:assign, pos)
+				}
+				_ -> TokenAt(:colon, pos)
+			}
+			'<' -> if peek() {
+				'<' -> {
+					next()
+					TokenAt(:pushArrow, pos)
+				}
+				'-' -> {
+					next()
+					TokenAt(:nonlocalAssign, pos)
+				}
+				'=' -> {
+					next()
+					TokenAt(:leq, pos)
+				}
+				_ -> TokenAt(:less, pos)
+			}
+			'?' -> TokenAt(:qmark, pos)
+			'!' -> if peek() {
+				'=' -> {
+					next()
+					TokenAt(:neq, pos)
+				}
+				_ -> TokenAt(:exclam, pos)
+			}
+			'+' -> TokenAt(:plus, pos)
+			'-' -> if peek() {
+				'>' -> {
+					next()
+					TokenAt(:branchArrow, pos)
+				}
+				_ -> TokenAt(:minus, pos)
+			}
+			'*' -> TokenAt(:times, pos)
+			'/' -> if peek() {
+				'/' -> {
+					// line comment
+					next()
+					commentString := readUntilChar('\n') |> trimEnd()
+					if commentString |> trim() = '' -> commentString <- ''
+					TokenAt(:comment, pos, commentString)
+				}
+				_ -> TokenAt(:divide, pos)
+			}
+			'%' -> TokenAt(:modulus, pos)
+			'^' -> TokenAt(:xor, pos)
+			'&' -> TokenAt(:and, pos)
+			'|' -> if peek() {
+				'>' -> {
+					next()
+					TokenAt(:pipeArrow, pos)
+				}
+				_ -> TokenAt(:or, pos)
+			}
+			'>' -> if peek() {
+				'=' -> {
+					next()
+					TokenAt(:geq, pos)
+				}
+				_ -> TokenAt(:greater, pos)
+			}
+			'=' -> TokenAt(:eq, pos)
+			'\'' -> {
+				fn sub(payload) if charInString := next() {
+					?, '\'' -> payload
+					'\\' -> if c := next() {
+						? -> payload
+						_ -> sub(payload << '\\' << c)
+					}
+					_ -> sub(payload << charInString)
+				}
+				TokenAt(:stringLiteral, pos, sub(''))
+			}
+			_ -> if {
+				digit?(c) -> TokenAt(:numberLiteral, pos, c << readValidNumeral())
+				_ -> if payload := c << readValidIdentifier() {
+					'_' -> TokenAt(:underscore, pos)
+					'if' -> TokenAt(:ifKeyword, pos)
+					'fn' -> TokenAt(:fnKeyword, pos)
+					'with' -> TokenAt(:withKeyword, pos)
+					'cs' -> TokenAt(:csKeyword, pos)
+					'true' -> TokenAt(:trueLiteral, pos)
+					'false' -> TokenAt(:falseLiteral, pos)
+					_ -> TokenAt(:identifier, pos, payload)
+				}
+			}
+		}
+	}
+	fn tokenize {
+		tokens := []
+
+		// the tokenizer itself completely ignores shebang lines, as it is not
+		// a language concern -- it is the responsibility of the caller to
+		// process or ignore shebang lines as necessary
+		if peek() = '#' & peekAhead(1) = '!' -> {
+			readUntilChar('\n')
+			if !eof?() -> next()
+		}
+
+		// snip whitespace before
+		fn eatSpace if space?(sp := peek()) -> {
+			if sp = '\n' -> tokens << Token(:newline)
+			next()
+			eatSpace()
+		}
+		eatSpace()
+
+		lastTok := Token(:comma)
+		fn sub {
+			nextTok := nextToken()
+
+			if !(
+				[:leftParen, :leftBracket, :leftBrace, :comma] |> contains?(lastTok.type)
+			) & [:rightParen, :rightBracket, :rightBrace] |> contains?(nextTok.type) -> tokens << TokenAt(:comma, nextTok.pos)
+
+			tokens << nextTok
+			if nextTok.type = :comment -> nextTok := lastTok
+
+			// snip whitespace after
+			fn eatSpaceAutoInsertComma if space?(peek()) -> {
+				if peek() {
+					'\n' -> {
+						if nextTok.type {
+							:comma, :leftParen, :leftBracket, :leftBrace
+							:plus, :minus, :times, :divide, :modulus, :xor
+							:and, :or, :exclam, :greater, :less, :eq, :geq
+							:leq, :assign, :nonlocalAssign, :dot, :colon
+							:fnKeyword, :ifKeyword, :withKeyword, :csKeyword
+							:pipeArrow, :branchArrow, :pushArrow -> ?
+							_ -> {
+								nextTok <- Token(:comma)
+								tokens << nextTok
+							}
+						}
+						tokens << Token(:newline)
+					}
+				}
+				next()
+				eatSpaceAutoInsertComma()
+			}
+			eatSpaceAutoInsertComma()
+
+			if nextTok.type {
+				:comment -> ?
+				_ -> lastTok <- nextTok
+			}
+
+			if !eof?() -> sub()
+		}
+
+		// do not start tokenizing into empty file
+		if !eof?() -> sub()
+
+		if lastTok.type {
+			:comma -> ?
+			_ -> tokens << TokenAt(:comma, [
+				len(source)
+				line
+				col
+			])
+		}
+
+		tokens
+	}
+
+	{
+		// undocumented API for libsyntax.print
+		readUntilChar: readUntilChar
+		tokenize: tokenize
+	}
+}
+
+// tokenize takes Oak source text and returns a list of tokens
+fn tokenize(text) Tokenizer(text).tokenize()

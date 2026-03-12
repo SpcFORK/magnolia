@@ -73,6 +73,18 @@ var libgpus string
 //go:embed lib/syntax.oak
 var libsyntax string
 
+//go:embed lib/syntax-tokenize.oak
+var libsyntaxtokenize string
+
+//go:embed lib/syntax-parse.oak
+var libsyntaxparse string
+
+//go:embed lib/syntax-macros.oak
+var libsyntaxmacros string
+
+//go:embed lib/syntax-print.oak
+var libsyntaxprint string
+
 //go:embed lib/syntaxfmt.oak
 var libsyntaxfmt string
 
@@ -215,6 +227,10 @@ var stdlibs = map[string]string{
 	"gpu":              libgpu,
 	"gpus":             libgpus,
 	"syntax":           libsyntax,
+	"syntax-tokenize":  libsyntaxtokenize,
+	"syntax-parse":     libsyntaxparse,
+	"syntax-macros":    libsyntaxmacros,
+	"syntax-print":     libsyntaxprint,
 	"syntaxfmt":        libsyntaxfmt,
 	"Virtual":          libvirtual,
 	"VirtualToken":     libvirtualtoken,
