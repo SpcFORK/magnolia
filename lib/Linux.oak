@@ -10,9 +10,24 @@ sys := import('sys')
 	writeU64: writeU64
 } := import('writes')
 
-LibC := ['libc.so.6', 'libc.so']
-LibDL := ['libdl.so.2', 'libdl.so']
-LibX11 := ['libX11.so.6', 'libX11.so']
+LibC := [
+	'/lib/x86_64-linux-gnu/libc.so.6'
+	'/usr/lib/x86_64-linux-gnu/libc.so.6'
+	'libc.so.6'
+	'libc.so'
+]
+LibDL := [
+	'/lib/x86_64-linux-gnu/libdl.so.2'
+	'/usr/lib/x86_64-linux-gnu/libdl.so.2'
+	'libdl.so.2'
+	'libdl.so'
+]
+LibX11 := [
+	'/lib/x86_64-linux-gnu/libX11.so.6'
+	'/usr/lib/x86_64-linux-gnu/libX11.so.6'
+	'libX11.so.6'
+	'libX11.so'
+]
 
 _loadedLibraries := {}
 
@@ -260,7 +275,16 @@ fn callIn(library, symbol, args...) if isLinux?() {
 		resolved := resolveInLoaded(library, symbol)
 		if resolved.type {
 			:ok -> sys.call(resolved.proc, args...)
-			_ -> resolved
+			_ -> {
+				fallback := if type(library) {
+					:list -> _resolveFirst(library, symbol, 0)
+					_ -> sys.resolve(library, symbol)
+				}
+				if fallback.type {
+					:ok -> sys.call(fallback.proc, args...)
+					_ -> resolved
+				}
+			}
 		}
 	}
 	_ -> _platformError('callIn')
@@ -271,7 +295,24 @@ fn x11(symbol, args...) if isLinux?() {
 	_ -> _platformError('x11')
 }
 
-fn callOk?(res) sys.ok?(res) | (res.type = :error & res.r1 > 0)
+fn _r1Positive?(res) if res {
+	? -> false
+	_ -> if res.r1 {
+		? -> false
+		_ -> res.r1 > 0
+	}
+}
+
+fn callOk?(res) if res {
+	? -> false
+	_ -> if sys.ok?(res) {
+		true -> true
+		_ -> if res.type = :error {
+			true -> _r1Positive?(res)
+			_ -> _r1Positive?(res)
+		}
+	}
+}
 
 fn _zeros(n, acc) if n {
 	0 -> acc
@@ -393,7 +434,7 @@ fn nextEvent(display, eventPtr) if isLinux?() {
 
 fn _openWindowFromRoot(display, screen, root, black, white, title, width, height) {
 	win := createSimpleWindow(display, root, 10, 10, width, height, 1, black, white)
-	if callOk?(win) & win.r1 > 0 {
+	if callOk?(win) & _r1Positive?(win) {
 		true -> {
 			storeName(display, win.r1, title)
 			selectInput(display, win.r1, ExposureMask | KeyPressMask | StructureNotifyMask)
@@ -423,7 +464,7 @@ fn _openWindowFromScreen(display, screen, title, width, height) {
 	root := rootWindow(display, screen)
 	black := blackPixel(display, screen)
 	white := whitePixel(display, screen)
-	if callOk?(root) & root.r1 > 0 {
+	if callOk?(root) & _r1Positive?(root) {
 		true -> _openWindowFromRoot(display, screen, root.r1, black.r1, white.r1, title, width, height)
 		_ -> {
 			closeDisplay(display)
@@ -454,7 +495,7 @@ fn _openWindowFromDisplay(display, title, width, height) {
 fn openDefaultWindow(title, width, height) if isLinux?() {
 	true -> {
 		display := openDisplay(?)
-		if callOk?(display) & display.r1 > 0 {
+		if callOk?(display) & _r1Positive?(display) {
 			true -> _openWindowFromDisplay(display.r1, title, width, height)
 			_ -> {
 				{

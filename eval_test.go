@@ -2209,6 +2209,7 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 		AtomValue("function"),
 		AtomValue("function"),
 		AtomValue("function"),
+		AtomValue("function"),
 		oakTrue,
 		oakTrue,
 		AtomValue("object"),

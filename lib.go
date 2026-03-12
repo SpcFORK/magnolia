@@ -190,6 +190,9 @@ var libgui2d string
 //go:embed lib/ai.oak
 var libai string
 
+//go:embed lib/audio.oak
+var libaudio string
+
 var stdlibs = map[string]string{
 	"std":              libstd,
 	"str":              libstr,
@@ -254,6 +257,7 @@ var stdlibs = map[string]string{
 	"GUI":              libgui,
 	"gui":              libgui,
 	"ai":               libai,
+	"audio":            libaudio,
 }
 
 var stdlibAutoLoadOrder = []string{
