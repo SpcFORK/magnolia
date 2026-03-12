@@ -111,6 +111,7 @@ Optional frame batching helpers.
     - `options.vulkanAuto`: allow `auto` to select Vulkan when available (default `false`)
         - `options.layer3D`: `auto` (default), `d3d9`, `cpu`, `none`
     Selected capabilities are exposed on `window.layers` when using the Windows backend.
+    Vulkan selection currently bootstraps Vulkan instance/surface state but still uses a stable fallback presenter for frame display.
 - On Linux/Web they are safe no-ops for API consistency.
 
 ### `close(window)`

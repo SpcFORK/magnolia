@@ -23,10 +23,12 @@ Window state fields
 - `window.layers.threeD.init` — Direct3D9 init attempt result (`:ok`, `:warn`, `:error`, `:skipped`)
 - `window.layers.twoD.fallback` / `window.layers.threeD.fallback` — populated when init errors trigger automatic fallback (`ddraw->gdi`, `d3d9->cpu`)
 - `window.layers.twoD.vulkan` — Vulkan capability probe for 2D selection on Windows.
-- `window.layers.twoD.vulkanInit` — Vulkan initialization attempt result preserved even when runtime falls back to OpenGL/DirectDraw/GDI.
+- `window.layers.twoD.vulkanInit` — Vulkan initialization attempt result preserved even when runtime uses OpenGL/DirectDraw/GDI for presentation.
 - `window.layers.twoD.opengl` — OpenGL capability probe for staged 2D selection on Windows.
 - `window.layers.twoD.openglInit` — OpenGL initialization attempt result preserved even when runtime falls back to DirectDraw/GDI.
 - `window.layers.twoD.staged` — metadata for staged (not yet active) layer selections.
+- `window.layers.twoD.staged.bootstrapped` — indicates whether staged backend bootstrap completed before another presenter became active.
+- `window.layers.twoD.staged.presenter` — active stable presenter used while the staged backend remains inactive.
 - `window.layers.twoD.init.path` / `window.layers.twoD.init.interface` — shows whether `DirectDrawCreateEx` (`IDirectDraw7`) or legacy `DirectDrawCreate` (`IDirectDraw`) was used.
 - `window.layers.twoD.init.primarySurfaceCreated` — indicates whether a primary DirectDraw surface bootstrap succeeded during layer initialization.
 - `window.ddrawPrimarySurface` — cached DirectDraw primary surface pointer (0 when unavailable or after fallback).
@@ -45,6 +47,7 @@ Notes
 - Default 2D auto selection favors stable presenters (`opengl -> ddraw -> gdi`). Set `options.vulkanAuto: true` to allow Vulkan selection through `auto`.
 - Vulkan support initializes an instance with `VK_KHR_surface` + `VK_KHR_win32_surface`, validates at least one physical device, and bootstraps a Win32 surface before activation; presentation still uses the existing OpenGL/DDraw/GDI present paths.
 - Vulkan activation now also requires finding a queue family that supports both graphics and presentation for the created Win32 surface.
+- Even when Vulkan bootstrap succeeds, Magnolia currently stages Vulkan state and uses a stable fallback presenter for actual frame display until swapchain-based Vulkan present is implemented.
 - OpenGL-selected windows currently keep context/bootstrap state but present frames through the stable GDI blit path while full OpenGL present is staged.
 - `SwapBuffers` is intentionally avoided in this staged path; on double-buffered pixel formats it swaps front/back buffers and can expose an unrendered (white) back buffer when actual OpenGL drawing is not yet active.
 - Window classes for Vulkan/OpenGL selection now include `CS_OWNDC` to improve device-context stability on Windows.

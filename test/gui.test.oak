@@ -47,6 +47,37 @@ fn run(t) {
 		true
 	)
 
+	'explicit Vulkan requests preserve staged fallback metadata on Windows' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				window := gui.createWindow('Magnolia Vulkan Stage Test', 240, 140, {
+					layer2D: 'vulkan'
+					layer3D: 'auto'
+				})
+				if window.type {
+					:ok -> {
+						ok :=
+							(window.layers.twoD.requested = 'vulkan') &
+							((type(window.layers.twoD.vulkanInit) = :object) | (type(window.layers.twoD.vulkanInit) = :null)) &
+							((type(window.layers.twoD.staged) = :object) | (type(window.layers.twoD.staged) = :null)) &
+							if (type(window.layers.twoD.staged) = :object) & (window.layers.twoD.staged.requested = :vulkan) & (type(window.layers.twoD.staged.bootstrapped) = :bool) & window.layers.twoD.staged.bootstrapped {
+								true ->
+									(window.layers.twoD.selected != :vulkan) &
+									(type(window.layers.twoD.fallback) = :object) &
+									(window.layers.twoD.fallback.from = :vulkan)
+								_ -> true
+							}
+						gui.close(window)
+						ok
+					}
+					_ -> false
+				}
+			}
+			_ -> true
+		}
+		true
+	)
+
 	// form geometry helpers
 	'formInRect? includes rectangle boundaries' |> t.eq(
 		[
