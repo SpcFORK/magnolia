@@ -1,5 +1,7 @@
 # Magnolia 🌸
 
+<img width="1080" height="1080" alt="🌳 (1)" src="https://github.com/user-attachments/assets/22fadd8f-707e-4279-8ea0-63bd3da6fdba" />
+
 **Magnolia** is an expressive, dynamically typed programming language based on [Oak](https://oaklang.org/). It extends Oak with powerful new features including a transpile middleware system, virtual file system, advanced threading utilities, and GPU computing support, while maintaining the simplicity and elegance of the original language.
 
 Here's an example Magnolia program.
