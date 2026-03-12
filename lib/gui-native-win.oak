@@ -24,6 +24,9 @@ IDirectDrawSurface7_ReleaseDC := 26
 DDSCL_NORMAL := 8
 DDSD_CAPS := 1
 DDSCAPS_PRIMARYSURFACE := 512
+PFD_DRAW_TO_WINDOW := 4
+PFD_SUPPORT_OPENGL := 32
+PFD_DOUBLEBUFFER := 1
 
 fn _probeDdraw() {
 	loaded := windows.loadDll(windows.Ddraw)
@@ -282,7 +285,103 @@ fn _ddrawPresentViaPrimarySurface(window) {
 	}
 }
 
+fn _initOpenGLWithContext(window, hdcHandle, chosen) {
+	ctx := windows.opengl32('wglCreateContext', hdcHandle)
+	if windows.callOk?(ctx) & ctx.r1 > 0 {
+		true -> {
+			mk := windows.opengl32('wglMakeCurrent', hdcHandle, ctx.r1)
+			if windows.callOk?(mk) & mk.r1 > 0 {
+				true -> {
+					windows.opengl32('wglMakeCurrent', 0, 0)
+					windows.releaseDC(window.hwnd, hdcHandle)
+					{
+						type: :ok
+						context: ctx.r1
+						pixelFormat: chosen.r1
+						makeCurrentResult: mk
+					}
+				}
+				_ -> {
+					windows.opengl32('wglDeleteContext', ctx.r1)
+					windows.releaseDC(window.hwnd, hdcHandle)
+					{
+						type: :error
+						error: 'wglMakeCurrent failed during OpenGL initialization'
+						pixelFormat: chosen.r1
+						makeCurrentResult: mk
+					}
+				}
+			}
+		}
+		_ -> {
+			windows.releaseDC(window.hwnd, hdcHandle)
+			{
+				type: :error
+				error: 'wglCreateContext failed'
+				pixelFormat: chosen.r1
+				createContextResult: ctx
+			}
+		}
+	}
+}
+
+fn _initOpenGL2DLayer(window) {
+	hdc := windows.getDC(window.hwnd)
+	if windows.callOk?(hdc) & hdc.r1 > 0 {
+		true -> {
+			pfd := bits({
+				fn zeros(n, acc) if n {
+					0 -> acc
+					_ -> zeros(n - 1, acc << 0)
+				}
+				zeros(40, [])
+			})
+			pfdPtr := addr(pfd)
+
+			windows.writeU32(pfdPtr + 0, 40 + (1 << 16))
+			windows.writeU32(pfdPtr + 4, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER)
+			windows.writeU32(pfdPtr + 8, 32 << 8)
+			windows.writeU32(pfdPtr + 24, 24 + (8 << 8))
+
+			chosen := windows.gdi32('ChoosePixelFormat', hdc.r1, pfdPtr)
+			if windows.callOk?(chosen) & chosen.r1 > 0 {
+				true -> {
+					setpf := windows.gdi32('SetPixelFormat', hdc.r1, chosen.r1, pfdPtr)
+					if windows.callOk?(setpf) & setpf.r1 > 0 {
+						true -> _initOpenGLWithContext(window, hdc.r1, chosen)
+						_ -> {
+							windows.releaseDC(window.hwnd, hdc.r1)
+							{
+								type: :error
+								error: 'SetPixelFormat failed'
+								pixelFormat: chosen.r1
+								setPixelFormatResult: setpf
+							}
+						}
+					}
+				}
+				_ -> {
+					windows.releaseDC(window.hwnd, hdc.r1)
+					{
+						type: :error
+						error: 'ChoosePixelFormat failed'
+						choosePixelFormatResult: chosen
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'GetDC failed during OpenGL initialization'
+				detail: hdc
+			}
+		}
+	}
+}
+
 fn _init2DLayer(window) if window.presenterBackend {
+	:opengl -> _initOpenGL2DLayer(window)
 	:ddraw -> {
 		fn freshOutBuffer() if windows.ptrSize() {
 			8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
@@ -572,6 +671,8 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							frameHeight: 0
 							presenterBackend: layer2D
 							ddrawPrimarySurface: 0
+							openglContext: 0
+							openglPixelFormat: 0
 							ddraw: ddraw
 							d3d9: d3d9
 							layers: {
@@ -593,29 +694,45 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							msgBuf: msgBuf
 							closed: false
 						}
+						state.layers.twoD.init <- _init2DLayer(state)
 						if state.presenterBackend = :opengl {
 							true -> {
-								state.layers.twoD.fallback <- if state.ddraw.available {
+								state.layers.twoD.openglInit <- state.layers.twoD.init
+								if state.layers.twoD.init.type = :ok {
 									true -> {
-										from: :opengl
-										to: :ddraw
-										reason: 'OpenGL layer is staged; using DirectDraw presenter fallback'
+										state.openglContext <- _default(state.layers.twoD.init.context, 0)
+										state.openglPixelFormat <- _default(state.layers.twoD.init.pixelFormat, 0)
+										state.layers.twoD.staged <- {
+											requested: :opengl
+											active: true
+										}
 									}
 									_ -> {
-										from: :opengl
-										to: :gdi
-										reason: 'OpenGL layer is staged; using GDI presenter fallback'
+										state.layers.twoD.fallback <- if state.ddraw.available {
+											true -> {
+												from: :opengl
+												to: :ddraw
+												reason: 'OpenGL initialization failed; using DirectDraw presenter fallback'
+												detail: state.layers.twoD.init
+											}
+											_ -> {
+												from: :opengl
+												to: :gdi
+												reason: 'OpenGL initialization failed; using GDI presenter fallback'
+												detail: state.layers.twoD.init
+											}
+										}
+										state.presenterBackend <- state.layers.twoD.fallback.to
+										state.layers.twoD.selected <- state.layers.twoD.fallback.to
+										state.layers.twoD.staged <- {
+											requested: :opengl
+											active: false
+										}
+										state.layers.twoD.init <- _init2DLayer(state)
 									}
-								}
-								state.presenterBackend <- state.layers.twoD.fallback.to
-								state.layers.twoD.selected <- state.layers.twoD.fallback.to
-								state.layers.twoD.staged <- {
-									requested: :opengl
-									active: false
 								}
 							}
 						}
-						state.layers.twoD.init <- _init2DLayer(state)
 						if state.layers.twoD.init.type = :error | (state.layers.twoD.init.type = :warn & !_default(state.layers.twoD.init.primarySurfaceCreated, false)) {
 							true -> {
 								state.presenterBackend <- :gdi
@@ -785,8 +902,55 @@ fn beginFrame(window) {
 
 fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 	true -> {
+		presentedViaOpenGL := false
 		useDdrawThreadLock := window.presenterBackend = :ddraw & _default(window.ddraw.useThreadLock, false)
 		presentedViaDdraw := false
+		if window.presenterBackend = :opengl & window.openglContext > 0 {
+			true -> {
+				mk := windows.opengl32('wglMakeCurrent', window.frameTargetHdc, window.openglContext)
+				if windows.callOk?(mk) & mk.r1 > 0 {
+					true -> {
+						windows.gdi32(
+							'BitBlt'
+							window.frameTargetHdc
+							0
+							0
+							window.width
+							window.height
+							window.frameHdc
+							0
+							0
+							SRCCOPY
+						)
+						swap := windows.gdi32('SwapBuffers', window.frameTargetHdc)
+						windows.opengl32('wglMakeCurrent', 0, 0)
+						if windows.callOk?(swap) & swap.r1 > 0 {
+							true -> presentedViaOpenGL <- true
+							_ -> {
+								window.presenterBackend <- :gdi
+								window.layers.twoD.selected <- :gdi
+								window.layers.twoD.fallback <- {
+									from: :opengl
+									to: :gdi
+									reason: 'OpenGL present failed at runtime'
+									detail: swap
+								}
+							}
+						}
+					}
+					_ -> {
+						window.presenterBackend <- :gdi
+						window.layers.twoD.selected <- :gdi
+						window.layers.twoD.fallback <- {
+							from: :opengl
+							to: :gdi
+							reason: 'OpenGL make-current failed at runtime'
+							detail: mk
+						}
+					}
+				}
+			}
+		}
 		if window.presenterBackend = :ddraw & window.ddrawPrimarySurface > 0 {
 			true -> {
 				if useDdrawThreadLock {
@@ -817,7 +981,7 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 				}
 			}
 		}
-		if !presentedViaDdraw {
+		if !presentedViaOpenGL & !presentedViaDdraw {
 			true -> windows.gdi32(
 				'BitBlt'
 				window.frameTargetHdc
@@ -892,6 +1056,14 @@ fn close(window) {
 		true -> {
 			_comCall(window.ddrawPrimarySurface, COM_RELEASE)
 			window.ddrawPrimarySurface <- 0
+		}
+	}
+	if window.openglContext > 0 {
+		true -> {
+			windows.opengl32('wglMakeCurrent', 0, 0)
+			windows.opengl32('wglDeleteContext', window.openglContext)
+			window.openglContext <- 0
+			window.openglPixelFormat <- 0
 		}
 	}
 	windows.destroyWindow(window.hwnd)

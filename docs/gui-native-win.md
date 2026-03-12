@@ -22,6 +22,7 @@ Window state fields
 - `window.layers.threeD.init` — Direct3D9 init attempt result (`:ok`, `:warn`, `:error`, `:skipped`)
 - `window.layers.twoD.fallback` / `window.layers.threeD.fallback` — populated when init errors trigger automatic fallback (`ddraw->gdi`, `d3d9->cpu`)
 - `window.layers.twoD.opengl` — OpenGL capability probe for staged 2D selection on Windows.
+- `window.layers.twoD.openglInit` — OpenGL initialization attempt result preserved even when runtime falls back to DirectDraw/GDI.
 - `window.layers.twoD.staged` — metadata for staged (not yet active) layer selections.
 - `window.layers.twoD.init.path` / `window.layers.twoD.init.interface` — shows whether `DirectDrawCreateEx` (`IDirectDraw7`) or legacy `DirectDrawCreate` (`IDirectDraw`) was used.
 - `window.layers.twoD.init.primarySurfaceCreated` — indicates whether a primary DirectDraw surface bootstrap succeeded during layer initialization.
