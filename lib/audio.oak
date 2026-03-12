@@ -170,6 +170,39 @@ fn _readI32LE(s, off) {
 
 // ---- WAV encoding ---------------------------------------------------
 
+// _wavSampleBytes encodes one normalised float sample at the given bit depth.
+fn _wavSampleBytes(sample, bitDepth) {
+	sc := clipF32(sample)
+	if bitDepth {
+		8 -> _byteStr([f32ToU8(sc)])
+		16 -> _byteStr(_i16LE(f32ToI16(sc)))
+		32 -> _byteStr(_u32LE(f32ToI32(sc)))
+		_ -> _byteStr(_i16LE(f32ToI16(sc)))
+	}
+}
+
+// _wavDataChunk encodes all samples into the WAV data sub-chunk body.
+fn _wavDataChunk(samples, bitDepth) {
+	samples |> map(fn(s) _wavSampleBytes(s, bitDepth)) |> join('')
+}
+
+// _wavHeader builds the RIFF/WAVE PCM header prefix.
+fn _wavHeader(fileLen, sampleRate, channels, bitDepth, byteRate, blockAlign, dataLen) {
+	'RIFF' +
+		_byteStr(_u32LE(fileLen)) +
+		'WAVE' +
+		'fmt ' +
+		_byteStr(_u32LE(16)) +          // Subchunk1Size = 16 (PCM)
+		_byteStr(_u16LE(1)) +           // AudioFormat = 1 (PCM, no compression)
+		_byteStr(_u16LE(channels)) +    // NumChannels
+		_byteStr(_u32LE(sampleRate)) +  // SampleRate
+		_byteStr(_u32LE(byteRate)) +    // ByteRate
+		_byteStr(_u16LE(blockAlign)) +  // BlockAlign
+		_byteStr(_u16LE(bitDepth)) +    // BitsPerSample
+		'data' +
+		_byteStr(_u32LE(dataLen))       // Subchunk2Size
+}
+
 // wav encodes a list of normalised float samples into a PCM WAV binary string.
 // `samples` must already be interleaved when channels > 1.
 //
@@ -187,35 +220,56 @@ fn wav(samples, sampleRate, channels, bitDepth) {
 	dataLen := len(samples) * bytesPerSample
 	fileLen := 36 + dataLen
 
-	// Encode each sample to bytes and join into the data sub-chunk body
-	sampleData := samples |> map(fn(s) {
-		sc := clipF32(s)
-		if bitDepth {
-			8 -> _byteStr([f32ToU8(sc)])
-			16 -> _byteStr(_i16LE(f32ToI16(sc)))
-			32 -> _byteStr(_u32LE(f32ToI32(sc)))
-			_ -> _byteStr(_i16LE(f32ToI16(sc)))
-		}
-	}) |> join('')
+	sampleData := _wavDataChunk(samples, bitDepth)
 
-	// RIFF / WAVE / fmt / data header then sample payload
-	'RIFF' +
-		_byteStr(_u32LE(fileLen)) +
-		'WAVE' +
-		'fmt ' +
-		_byteStr(_u32LE(16)) +          // Subchunk1Size = 16 (PCM)
-		_byteStr(_u16LE(1)) +           // AudioFormat = 1 (PCM, no compression)
-		_byteStr(_u16LE(channels)) +    // NumChannels
-		_byteStr(_u32LE(sampleRate)) +  // SampleRate
-		_byteStr(_u32LE(byteRate)) +    // ByteRate
-		_byteStr(_u16LE(blockAlign)) +  // BlockAlign
-		_byteStr(_u16LE(bitDepth)) +    // BitsPerSample
-		'data' +
-		_byteStr(_u32LE(dataLen)) +     // Subchunk2Size
+	// RIFF / WAVE / fmt / data header then sample payload.
+	_wavHeader(fileLen, sampleRate, channels, bitDepth, byteRate, blockAlign, dataLen) +
 		sampleData
 }
 
 // ---- WAV parsing ----------------------------------------------------
+
+// _wavHeaderValid checks for RIFF/WAVE/fmt prefix tags in a WAV blob.
+fn _wavHeaderValid(data) {
+	riff := data.(0) + data.(1) + data.(2) + data.(3)
+	wave := data.(8) + data.(9) + data.(10) + data.(11)
+	fmtTag := data.(12) + data.(13) + data.(14) + data.(15)
+	riff = 'RIFF' & wave = 'WAVE' & fmtTag = 'fmt '
+}
+
+// _wavFindDataChunk locates the data chunk and returns { off, size } or ?.
+fn _wavFindDataChunk(data, off) if off + 8 > len(data) {
+	true -> ?
+	_ -> {
+		tag := data.(off) + data.(off + 1) + data.(off + 2) + data.(off + 3)
+		chunkSize := _readU32LE(data, off + 4)
+		if tag = 'data' {
+			true -> { off: off + 8, size: chunkSize }
+			_ -> _wavFindDataChunk(data, off + 8 + chunkSize)
+		}
+	}
+}
+
+// _wavReadSample decodes one sample at byte offset for the given bit depth.
+fn _wavReadSample(data, off, bitDepth) if bitDepth {
+	8 -> u8ToF32(_readU8(data, off))
+	16 -> i16ToF32(_readI16LE(data, off))
+	32 -> i32ToF32(_readI32LE(data, off))
+	_ -> i16ToF32(_readI16LE(data, off))
+}
+
+// _wavReadSamples decodes a contiguous PCM sample range.
+fn _wavReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth) {
+	fn readSamples(acc, i) if i >= totalSamples {
+		true -> acc
+		_ -> {
+			off := dataOff + i * bytesPerSample
+			s := _wavReadSample(data, off, bitDepth)
+			readSamples(acc << s, i + 1)
+		}
+	}
+	readSamples([], 0)
+}
 
 // parseWav parses a PCM WAV binary string and returns:
 //   { sampleRate, channels, bitDepth, samples }
@@ -229,11 +283,7 @@ fn parseWav(data) {
 	if len(data) < 44 {
 		true -> ?
 		_ -> {
-			riff := data.(0) + data.(1) + data.(2) + data.(3)
-			wave := data.(8) + data.(9) + data.(10) + data.(11)
-			fmtTag := data.(12) + data.(13) + data.(14) + data.(15)
-
-			if riff != 'RIFF' | wave != 'WAVE' | fmtTag != 'fmt ' {
+			if !_wavHeaderValid(data) {
 				true -> ?
 				_ -> {
 					audioFmt := _readU16LE(data, 20)
@@ -244,21 +294,7 @@ fn parseWav(data) {
 							sampleRate := _readU32LE(data, 24)
 							bitDepth := _readU16LE(data, 34)
 
-							// Walk chunks after the fmt block to locate 'data'
-							fn findData(off) if off + 8 > len(data) {
-								true -> ?
-								_ -> {
-									tag := data.(off) + data.(off + 1) +
-										data.(off + 2) + data.(off + 3)
-									chunkSize := _readU32LE(data, off + 4)
-									if tag = 'data' {
-										true -> { off: off + 8, size: chunkSize }
-										_ -> findData(off + 8 + chunkSize)
-									}
-								}
-							}
-
-							chunk := findData(36)
+							chunk := _wavFindDataChunk(data, 36)
 							if chunk = ? {
 								true -> ?
 								_ -> {
@@ -266,25 +302,11 @@ fn parseWav(data) {
 									bytesPerSample := int(bitDepth / 8)
 									totalSamples := int(chunk.size / bytesPerSample)
 
-									fn readSamples(acc, i) if i >= totalSamples {
-										true -> acc
-										_ -> {
-											off := dataOff + i * bytesPerSample
-											s := if bitDepth {
-												8 -> u8ToF32(_readU8(data, off))
-												16 -> i16ToF32(_readI16LE(data, off))
-												32 -> i32ToF32(_readI32LE(data, off))
-												_ -> i16ToF32(_readI16LE(data, off))
-											}
-											readSamples(acc << s, i + 1)
-										}
-									}
-
 									{
 										sampleRate: sampleRate
 										channels: channels
 										bitDepth: bitDepth
-										samples: readSamples([], 0)
+										samples: _wavReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth)
 									}
 								}
 							}
@@ -312,10 +334,14 @@ fn sine(freq, sampleRate, length, phase) {
 //
 // Example:
 //   s := square(440, 44100, 44100)
+fn _oscPhaseTurn(freq, sampleRate, i, phase) {
+	freq * i / sampleRate + phase / TwoPi
+}
+
 fn square(freq, sampleRate, length, phase) {
 	phase := default(phase, 0)
 	range(length) |> map(fn(i) {
-		t := freq * i / sampleRate + phase / TwoPi
+		t := _oscPhaseTurn(freq, sampleRate, i, phase)
 		if (t % 1) < 0.5 { true -> 1, _ -> -1 }
 	})
 }
@@ -327,7 +353,7 @@ fn square(freq, sampleRate, length, phase) {
 fn sawtooth(freq, sampleRate, length, phase) {
 	phase := default(phase, 0)
 	range(length) |> map(fn(i) {
-		t := freq * i / sampleRate + phase / TwoPi
+		t := _oscPhaseTurn(freq, sampleRate, i, phase)
 		2 * (t % 1) - 1
 	})
 }
@@ -339,7 +365,7 @@ fn sawtooth(freq, sampleRate, length, phase) {
 fn triangle(freq, sampleRate, length, phase) {
 	phase := default(phase, 0)
 	range(length) |> map(fn(i) {
-		t := freq * i / sampleRate + phase / TwoPi
+		t := _oscPhaseTurn(freq, sampleRate, i, phase)
 		p := t % 1
 		if p < 0.5 { true -> 4 * p - 1, _ -> 3 - 4 * p }
 	})
@@ -464,6 +490,9 @@ fn deinterleave(samples, nChannels) {
 
 // ---- windowing functions --------------------------------------------
 
+// _windowPhase computes the canonical window angular position for index i.
+fn _windowPhase(i, n) TwoPi * i / (n - 1)
+
 // windowRect returns a rectangular (boxcar) window of length `n` (all ones).
 fn windowRect(n) range(n) |> map(fn(_) 1)
 
@@ -472,7 +501,7 @@ fn windowRect(n) range(n) |> map(fn(_) 1)
 // Example:
 //   w := windowHann(1024)
 fn windowHann(n) range(n) |> map(fn(i) {
-	0.5 * (1 - cos(TwoPi * i / (n - 1)))
+	0.5 * (1 - cos(_windowPhase(i, n)))
 })
 
 // windowHamming returns a Hamming window of length `n`.
@@ -480,7 +509,7 @@ fn windowHann(n) range(n) |> map(fn(i) {
 // Example:
 //   w := windowHamming(1024)
 fn windowHamming(n) range(n) |> map(fn(i) {
-	0.54 - 0.46 * cos(TwoPi * i / (n - 1))
+	0.54 - 0.46 * cos(_windowPhase(i, n))
 })
 
 // windowBlackman returns a Blackman window of length `n`.
@@ -488,8 +517,8 @@ fn windowHamming(n) range(n) |> map(fn(i) {
 // Example:
 //   w := windowBlackman(1024)
 fn windowBlackman(n) range(n) |> map(fn(i) {
-	0.42 - 0.5 * cos(TwoPi * i / (n - 1)) +
-		0.08 * cos(2 * TwoPi * i / (n - 1))
+	ph := _windowPhase(i, n)
+	0.42 - 0.5 * cos(ph) + 0.08 * cos(2 * ph)
 })
 
 // applyWindow multiplies `samples` element-wise by `window`.
@@ -509,18 +538,25 @@ fn applyWindow(samples, window) range(len(samples)) |> map(fn(i) {
 //
 // Example:
 //   filtered := convolve(signal, lowPassFIR(1000, 44100, 63))
+fn _convolveBounds(n, sLen, kLen) {
+	kLo := if n - sLen + 1 > 0 { true -> n - sLen + 1, _ -> 0 }
+	kHi := if n < kLen - 1 { true -> n, _ -> kLen - 1 }
+	{ lo: kLo, hi: kHi }
+}
+
+fn _convolveAt(signal, kernel, n, sLen, kLen) {
+	bounds := _convolveBounds(n, sLen, kLen)
+	range(bounds.hi - bounds.lo + 1) |> reduce(0, fn(acc, ki) {
+		k := ki + bounds.lo
+		acc + kernel.(k) * signal.(n - k)
+	})
+}
+
 fn convolve(signal, kernel) {
 	sLen := len(signal)
 	kLen := len(kernel)
 	outLen := sLen + kLen - 1
-	range(outLen) |> map(fn(n) {
-		kLo := if n - sLen + 1 > 0 { true -> n - sLen + 1, _ -> 0 }
-		kHi := if n < kLen - 1 { true -> n, _ -> kLen - 1 }
-		range(kHi - kLo + 1) |> reduce(0, fn(acc, ki) {
-			k := ki + kLo
-			acc + kernel.(k) * signal.(n - k)
-		})
-	})
+	range(outLen) |> map(fn(n) _convolveAt(signal, kernel, n, sLen, kLen))
 }
 
 // _sincNorm returns the normalised sinc: sin(π x) / (π x).
@@ -565,6 +601,19 @@ fn highPassFIR(cutoff, sampleRate, size) {
 //
 // Example:
 //   shaped := adsr(s, 44100, 0.01, 0.1, 0.7, 0.2)
+fn _adsrEnv(i, aS, dS, sustain, rStart, rS) if {
+	i < aS -> if aS > 0 { true -> i / aS, _ -> 1 }
+	i < aS + dS -> {
+		t := (i - aS) / if dS > 0 { true -> dS, _ -> 1 }
+		1 - t * (1 - sustain)
+	}
+	i < rStart -> sustain
+	_ -> {
+		t := (i - rStart) / if rS > 0 { true -> rS, _ -> 1 }
+		sustain * (1 - t)
+	}
+}
+
 fn adsr(samples, sampleRate, attack, decay, sustain, release) {
 	attack := default(attack, 0.01)
 	decay := default(decay, 0.1)
@@ -575,22 +624,10 @@ fn adsr(samples, sampleRate, attack, decay, sustain, release) {
 	dS := int(decay * sampleRate)
 	rS := int(release * sampleRate)
 	total := len(samples)
-	sStart := aS + dS
 	rStart := total - rS
 
 	range(total) |> map(fn(i) {
-		env := if {
-			i < aS -> if aS > 0 { true -> i / aS, _ -> 1 }
-			i < sStart -> {
-				t := (i - aS) / if dS > 0 { true -> dS, _ -> 1 }
-				1 - t * (1 - sustain)
-			}
-			i < rStart -> sustain
-			_ -> {
-				t := (i - rStart) / if rS > 0 { true -> rS, _ -> 1 }
-				sustain * (1 - t)
-			}
-		}
+		env := _adsrEnv(i, aS, dS, sustain, rStart, rS)
 		samples.(i) * env
 	})
 }
@@ -618,6 +655,53 @@ fn _bitrev(x, bits) {
 	sub(x, bits, 0)
 }
 
+// _fftSwap swaps real/imag values at two indices.
+fn _fftSwap(re, im, i, j) {
+	tmp := re.(i)
+	re.(i) := re.(j)
+	re.(j) := tmp
+	tmp2 := im.(i)
+	im.(i) := im.(j)
+	im.(j) := tmp2
+}
+
+// _fftTwiddle computes the twiddle factor for stage position j.
+fn _fftTwiddle(sign, j, step) {
+	angle := sign * TwoPi * j / step
+	{ wr: cos(angle), wi: sin(angle) }
+}
+
+// _fftButterflyApply applies one radix-2 butterfly operation.
+fn _fftButterflyApply(re, im, u, v, wr, wi) {
+	tr := wr * re.(v) - wi * im.(v)
+	ti := wr * im.(v) + wi * re.(v)
+	re.(v) := re.(u) - tr
+	im.(v) := im.(u) - ti
+	re.(u) := re.(u) + tr
+	im.(u) := im.(u) + ti
+}
+
+// _fftButterflyRange runs all butterfly operations for one group.
+fn _fftButterflyRange(re, im, sign, step, k, half, j) if j >= half {
+	true -> ?
+	_ -> {
+		tw := _fftTwiddle(sign, j, step)
+		u := k + j
+		v := u + half
+		_fftButterflyApply(re, im, u, v, tw.wr, tw.wi)
+		_fftButterflyRange(re, im, sign, step, k, half, j + 1)
+	}
+}
+
+// _fftGroupPass runs grouped butterflies for one FFT stage.
+fn _fftGroupPass(re, im, sign, step, n, k, half) if k >= n {
+	true -> ?
+	_ -> {
+		_fftButterflyRange(re, im, sign, step, k, half, 0)
+		_fftGroupPass(re, im, sign, step, n, k + step, half)
+	}
+}
+
 // _fftCore is the shared forward/inverse implementation.
 // sign = -1 for forward FFT; sign = +1 for inverse.
 fn _fftCore(re, im, sign) {
@@ -630,12 +714,7 @@ fn _fftCore(re, im, sign) {
 	range(n) |> each(fn(i) {
 		j := _bitrev(i, bits)
 		if j > i {
-			tmp := re.(i)
-			re.(i) := re.(j)
-			re.(j) := tmp
-			tmp2 := im.(i)
-			im.(i) := im.(j)
-			im.(j) := tmp2
+			_fftSwap(re, im, i, j)
 		}
 	})
 
@@ -644,31 +723,7 @@ fn _fftCore(re, im, sign) {
 		true -> { re: re, im: im }
 		_ -> {
 			half := int(step / 2)
-			fn group(k) if k >= n {
-				true -> ?
-				_ -> {
-					fn butterfly(j) if j >= half {
-						true -> ?
-						_ -> {
-							angle := sign * TwoPi * j / step
-							wr := cos(angle)
-							wi := sin(angle)
-							u := k + j
-							v := u + half
-							tr := wr * re.(v) - wi * im.(v)
-							ti := wr * im.(v) + wi * re.(v)
-							re.(v) := re.(u) - tr
-							im.(v) := im.(u) - ti
-							re.(u) := re.(u) + tr
-							im.(u) := im.(u) + ti
-							butterfly(j + 1)
-						}
-					}
-					butterfly(0)
-					group(k + step)
-				}
-			}
-			group(0)
+			_fftGroupPass(re, im, sign, step, n, 0, half)
 			pass(step * 2)
 		}
 	}
@@ -708,25 +763,32 @@ fn ifft(re, im) {
 //
 // Example:
 //   mags := magnitude(result.re, result.im)
+fn _complexMag(x, y) sqrt(x * x + y * y)
+
 fn magnitude(re, im) range(len(re)) |> map(fn(i) {
 	r := re.(i)
 	g := im.(i)
-	sqrt(r * r + g * g)
+	_complexMag(r, g)
 })
 
 // phase computes the phase angle (radians) of each complex FFT bin.
 //
 // Example:
 //   phases := phase(result.re, result.im)
-fn phase(re, im) range(len(re)) |> map(fn(i) {
-	x := re.(i)
-	y := im.(i)
+fn _phaseAt(x, y) {
+	m := _complexMag(x, y)
 	if {
-		x > 0 -> 2 * atan(y / (sqrt(x * x + y * y) + x))
-		x <= 0 & y != 0 -> 2 * atan((sqrt(x * x + y * y) - x) / y)
+		x > 0 -> 2 * atan(y / (m + x))
+		x <= 0 & y != 0 -> 2 * atan((m - x) / y)
 		x < 0 & y = 0 -> Pi
 		_ -> 0
 	}
+}
+
+fn phase(re, im) range(len(re)) |> map(fn(i) {
+	x := re.(i)
+	y := im.(i)
+	_phaseAt(x, y)
 })
 
 // powerSpectrum computes magnitude-spectrum bins from a real signal.
