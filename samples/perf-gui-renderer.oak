@@ -27,7 +27,7 @@ fn main() {
 			gui.show(window)
 
 			// Initialize 3D renderer
-			renderer := gui.Renderer3D(window, {
+			rendererStable := gui.Renderer3D(window, {
 				background: gui.rgb(8, 14, 22)
 				lineColor: gui.rgb(96, 190, 255)
 				camera: {
@@ -44,11 +44,41 @@ fn main() {
 				}
 			})
 
+			rendererExp := gui.Renderer3D(window, {
+				background: gui.rgb(8, 14, 22)
+				lineColor: gui.rgb(96, 190, 255)
+				camera: {
+					z: 8
+					fov: 90
+					mode: 'perspective'
+					parallelFaces: true
+					parallelFaceThreshold: 4
+				}
+				light: {
+					x: 0.35
+					y: 0.75
+					z: -1
+					ambient: 0.22
+					diffuse: 0.78
+				}
+				experimental: {
+					materialBatch: true
+					instanceCache: true
+					maxInstanceCache: 128
+				}
+			})
+
+			cubeMesh := gui.CubeMesh(2.0)
+			gridMesh := gui.GridMesh(10, 1)
+			axesMesh := gui.AxesMesh(3)
+
 			// State tracking
 			frameCount := 0
 			totalNs := 0
 			startNs := nanotime()
 			lastReportNs := startNs
+			lastCacheResetNs := startNs
+			modeSwitchNs := 3000000000
 
 			// Demo parameters
 			cubeRotX := 0.0
@@ -62,6 +92,7 @@ fn main() {
 				frameCount <- frameCount + 1
 				nowNs := nanotime()
 				totalNs <- totalNs + int(dt * 1000000000)
+				mode := int((nowNs - startNs) / modeSwitchNs) % 2
 
 				// Update animations (slow rotation for visual interest)
 				cubeRotX <- cubeRotX + 0.3 * dt
@@ -71,12 +102,30 @@ fn main() {
 				circlePhase <- circlePhase + 2 * dt
 
 				// Clear and render frame
-				renderer.clear()
+				rendererStable.clear()
 
-				// Render 3D elements
-				renderer.renderCubeSolid(2.0, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
-				renderer.renderGrid(10, 1, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
-				renderer.renderAxes(3, { tz: 0 })
+				// Render 3D elements (A/B mode every 3 seconds)
+				if mode = 0 {
+					true -> {
+						rendererStable.renderCubeSolid(2.0, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
+						rendererStable.renderGrid(10, 1, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
+						rendererStable.renderAxes(3, { tz: 0 })
+					}
+					_ -> {
+						rendererExp.enqueueMeshSolid(cubeMesh, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
+						rendererExp.enqueueMeshWire(gridMesh, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
+						rendererExp.enqueueMeshWire(axesMesh, { tz: 0 }, gui.rgb(180, 220, 255))
+						rendererExp.flushQueue()
+					}
+				}
+
+				if nowNs - lastCacheResetNs >= 5000000000 {
+					true -> {
+						rendererExp.clearInstanceCache()
+						lastCacheResetNs <- nowNs
+					}
+					_ -> 0
+				}
 
 				// Render 2D elements (circle grid pattern)
 				fn drawCircleGrid(x, y, cols, rows, radius, color) {
@@ -114,7 +163,11 @@ fn main() {
 				if nowNs - lastReportNs >= 1000000000 {
 					true -> {
 						avgMs := totalNs / frameCount / 1000000
-						std.println('Frame ' + string(frameCount) + ': ' + string(avgMs) + ' ms/frame @ ' + string(int(1000 / avgMs)) + ' FPS')
+						modeName := if mode = 0 {
+							true -> 'stable'
+							_ -> 'experimental'
+						}
+						std.println('Frame ' + string(frameCount) + ' [' + modeName + ']: ' + string(avgMs) + ' ms/frame @ ' + string(int(1000 / avgMs)) + ' FPS')
 						lastReportNs <- nowNs
 					}
 					_ -> 0

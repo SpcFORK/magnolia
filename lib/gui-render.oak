@@ -21,12 +21,76 @@ fn Renderer3D(deps, window, options) {
 		ambient: 0.22
 		diffuse: 0.78
 	})
+	experimental := _default(opts.experimental, {})
+	enableMaterialBatch := _default(experimental.materialBatch, false)
+	enableInstanceCache := _default(experimental.instanceCache, false)
+	maxInstanceCache := _default(experimental.maxInstanceCache, 256)
 	cubeMeshCache := {}
 	gridMeshCache := {}
 	axesMeshCache := {}
+	instanceCache := {}
+	instanceCacheOrder := []
+	renderQueue := []
 	axisColorX := deps.rgb(255, 90, 90)
 	axisColorY := deps.rgb(120, 255, 140)
 	axisColorZ := deps.rgb(120, 170, 255)
+
+	fn _cacheKey(transform) if transform {
+		? -> 'identity'
+		_ -> string(_default(transform.rx, 0)) + '|' + string(_default(transform.ry, 0)) + '|' + string(_default(transform.rz, 0)) + '|' + string(_default(transform.scale, 1)) + '|' + string(_default(transform.tx, 0)) + '|' + string(_default(transform.ty, 0)) + '|' + string(_default(transform.tz, 0))
+	}
+
+	fn _queuePush(entry) {
+		renderQueue << entry
+		{type: :ok}
+	}
+
+	fn _queueFlushByOrder(i) if i {
+		len(renderQueue) -> {type: :ok}
+		_ -> {
+			e := renderQueue.(i)
+			if e.kind = 'solid' {
+				true -> deps.drawMeshSolid(window, e.mesh, e.transform, camera, e.color, light)
+				_ -> deps.drawMeshWireframe(window, e.mesh, e.transform, camera, e.color)
+			}
+			_queueFlushByOrder(i + 1)
+		}
+	}
+
+	fn _slice(list, i, end, out) if i {
+		end -> out
+		_ -> _slice(list, i + 1, end, out << list.(i))
+	}
+
+	fn _instanceCacheSet(key, value) {
+		instanceCache.(key) <- value
+		instanceCacheOrder << key
+		if len(instanceCacheOrder) > maxInstanceCache {
+			true -> {
+				oldest := instanceCacheOrder.0
+				instanceCache.(oldest) <- ?
+				instanceCacheOrder <- _slice(instanceCacheOrder, 1, len(instanceCacheOrder), [])
+				{type: :ok}
+			}
+			_ -> {type: :ok}
+		}
+	}
+
+	fn _getCachedTransformMarker(mesh, transform) {
+		if !enableInstanceCache {
+			true -> {mesh: mesh, cacheHit: false}
+			_ -> {
+				key := string(len(mesh.vertices)) + ':' + _cacheKey(transform)
+				if marker := instanceCache.(key) {
+					? -> {
+						_instanceCacheSet(key, true)
+						{mesh: mesh, cacheHit: false}
+					}
+					_ -> {mesh: mesh, cacheHit: true}
+				}
+			}
+		}
+	}
 
 	fn cubeMesh(size) {
 		resolvedSize := _default(size, 2)
@@ -88,7 +152,11 @@ fn Renderer3D(deps, window, options) {
 			backfaceCulling: _default(camera.backfaceCulling, true)
 		}
 		clear: fn() deps.fillRect(window, 0, 0, window.width, window.height, background)
-		renderMeshSolid: fn(mesh, transform, color) deps.drawMeshSolid(window, mesh, transform, camera, _default(color, lineColor), light)
+		renderMeshSolid: fn(mesh, transform, color) {
+			entryColor := _default(color, lineColor)
+			m := _getCachedTransformMarker(mesh, transform)
+			deps.drawMeshSolid(window, m.mesh, transform, camera, entryColor, light)
+		}
 		renderCubeSolid: fn(size, transform, color) deps.drawMeshSolid(window, cubeMesh(size), transform, camera, _default(color, lineColor), light)
 		renderMesh: fn(mesh, transform, color) deps.drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
 		renderCube: fn(size, transform, color) deps.drawMeshWireframe(window, cubeMesh(size), transform, camera, _default(color, lineColor))
@@ -101,5 +169,24 @@ fn Renderer3D(deps, window, options) {
 		}
 		renderVoxels: fn(voxels, voxelSize, transform, color) deps.drawMeshWireframe(window, deps.VoxelMesh(voxels, _default(voxelSize, 1)), transform, camera, _default(color, lineColor))
 		renderVoxelGrid: fn(grid, transform, color) deps.drawMeshWireframe(window, grid.toMesh(), transform, camera, _default(color, lineColor))
+		enqueueMeshSolid: fn(mesh, transform, color) _queuePush({kind: 'solid', mesh: mesh, transform: transform, color: _default(color, lineColor)})
+		enqueueMeshWire: fn(mesh, transform, color) _queuePush({kind: 'wire', mesh: mesh, transform: transform, color: _default(color, lineColor)})
+		flushQueue: fn() {
+			if enableMaterialBatch {
+				true -> _queueFlushByOrder(0)
+				_ -> _queueFlushByOrder(0)
+			}
+			renderQueue <- []
+			{type: :ok}
+		}
+		clearQueue: fn() {
+			renderQueue <- []
+			{type: :ok}
+		}
+		clearInstanceCache: fn() {
+			instanceCache <- {}
+			instanceCacheOrder <- []
+			{type: :ok}
+		}
 	}
 }

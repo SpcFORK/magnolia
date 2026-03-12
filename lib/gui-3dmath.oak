@@ -155,6 +155,60 @@ fn transformVertices(vertices, transform, i, out) {
 	sub(i, out)
 }
 
+fn _transformVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz) {
+	x0 := v.x * scale
+	y0 := v.y * scale
+	z0 := v.z * scale
+
+	y1 := y0 * cx - z0 * sx
+	z1 := y0 * sx + z0 * cx
+
+	x2 := x0 * cy + z1 * sy
+	z2 := 0 - x0 * sy + z1 * cy
+
+	x3 := x2 * cz - y1 * sz
+	y3 := x2 * sz + y1 * cz
+
+	{
+		x: x3 + tx
+		y: y3 + ty
+		z: z2 + tz
+	}
+}
+
+fn transformVerticesBatch(meshes, transforms, i, out) if i {
+	len(meshes) -> out
+	_ -> {
+		mesh := meshes.(i)
+		transform := transforms.(i)
+		ts := _default(transform, {})
+		scale := _default(ts.scale, 1)
+		tx := _default(ts.tx, 0)
+		ty := _default(ts.ty, 0)
+		tz := _default(ts.tz, 0)
+		rx := degToRad(_default(ts.rx, 0))
+		ry := degToRad(_default(ts.ry, 0))
+		rz := degToRad(_default(ts.rz, 0))
+
+		cx := cos(rx)
+		sx := sin(rx)
+		cy := cos(ry)
+		sy := sin(ry)
+		cz := cos(rz)
+		sz := sin(rz)
+
+		fn batchSub(j, acc) if j {
+			len(mesh.vertices) -> acc
+			_ -> {
+				v := mesh.vertices.(j)
+				batchSub(j + 1, acc << _transformVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz))
+			}
+		}
+
+		transformVerticesBatch(meshes, transforms, i + 1, out << batchSub(0, []))
+	}
+}
+
 // Matrix4: 4x4 transformation matrices for advanced 3D transforms
 fn Mat4Identity() [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 

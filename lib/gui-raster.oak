@@ -50,6 +50,17 @@ fn _lerpX(pa, pb, y) if pb.y = pa.y {
 	_ -> pa.x + (y - pa.y) * (pb.x - pa.x) / (pb.y - pa.y)
 }
 
+fn _buildEdgeTable(p0, p1, p2) {
+	miny0 := _min2(p0.y, p1.y)
+	maxy0 := _max2(p0.y, p1.y)
+	miny1 := _min2(p0.y, p2.y)
+	maxy1 := _max2(p0.y, p2.y)
+	{
+		edge0: {p: p0, q: p1, miny: miny0, maxy: maxy0, xAtMin: _lerpX(if p0.y < p1.y {true -> p0, _ -> p1}, if p0.y < p1.y {true -> p1, _ -> p0}, int(miny0))},
+		edge1: {p: p0, q: p2, miny: miny1, maxy: maxy1, xAtMin: _lerpX(if p0.y < p2.y {true -> p0, _ -> p2}, if p0.y < p2.y {true -> p2, _ -> p0}, int(miny1))}
+	}
+}
+
 fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
 	true -> deps.drawLine(window, int(xa), y, int(xb), y, color)
 	_ -> deps.drawLine(window, int(xb), y, int(xa), y, color)
@@ -107,6 +118,22 @@ fn drawTriangleFilled(deps, window, p0, p1, p2, color) {
 fn _slice(list, i, end, out) if i {
 	end -> out
 	_ -> _slice(list, i + 1, end, out << list.(i))
+}
+
+fn _concatLists(left, right, i, out) if i {
+	len(right) -> out
+	_ -> _concatLists(left, right, i + 1, out << right.(i))
+}
+
+fn _compactTris(tris, i, out) if i {
+	len(tris) -> out
+	_ -> {
+		t := tris.(i)
+		if t {
+			? -> _compactTris(tris, i + 1, out)
+			_ -> _compactTris(tris, i + 1, out << t)
+		}
+	}
 }
 
 fn _mergeDepth(left, right, i, j, out) if [i, j] {
@@ -258,6 +285,14 @@ fn _shadeColor(deps, color, intensity) {
 
 fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
 
+fn _computeDepth(pa3, pb3, pc3, pd3) {
+	sumZ := pa3.z + pb3.z + pc3.z
+	if pd3 {
+		? -> sumZ / 3
+		_ -> (sumZ + pd3.z) / 4
+	}
+}
+
 fn _buildTriangle(pa, pb, pc, depth, color) {
 	{
 		type: :tri
@@ -273,7 +308,7 @@ fn _shouldCullTriangle?(backfaceCulling, pa, pb, pc, window) {
 	(!_triVisible?(window, pa, pb, pc)) | (backfaceCulling & (!_frontFacing?(pa, pb, pc)))
 }
 
-fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, acc) {
+fn _processFace(deps, window, i, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, acc) {
 	f := faces.(i)
 	pa3 := verts.(f.0)
 	pb3 := verts.(f.1)
@@ -293,16 +328,10 @@ fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, fac
 
 	faceColor := if i < len(faceColors) {
 		true -> faceColors.(i)
-		_ -> _default(color, deps.rgb(150, 200, 255))
+		_ -> defaultFaceColor
 	}
 
-	depth := (pa3.z + pb3.z + pc3.z + if pd3 {
-		? -> 0
-		_ -> pd3.z
-	}) / if pd3 {
-		? -> 3
-		_ -> 4
-	}
+	depth := _computeDepth(pa3, pb3, pc3, pd3)
 
 	if [pa, pb, pc] {
 		[?, _, _] -> acc
@@ -311,22 +340,22 @@ fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, fac
 		_ -> {
 			if _shouldCullTriangle?(backfaceCulling, pa, pb, pc, window) {
 				true -> acc
-				_ -> if [pd3, pd] {
-					[?, _] -> {
-						litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
-						acc << _buildTriangle(pa, pb, pc, depth, litColor)
-					}
-					[_, ?] -> {
-						litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
-						acc << _buildTriangle(pa, pb, pc, depth, litColor)
-					}
-					_ -> {
-						litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
-						triA := _buildTriangle(pa, pb, pc, depth, litColor)
-						triB := _buildTriangle(pa, pc, pd, depth, litColor)
-						if _shouldCullTriangle?(backfaceCulling, pa, pc, pd, window) {
-							true -> acc << triA
-							_ -> acc << triA << triB
+				_ -> {
+					litColor := _shadeColor(deps, faceColor, faceShade(pa3, pb3, pc3))
+					if [pd3, pd] {
+						[?, _] -> {
+							acc << _buildTriangle(pa, pb, pc, depth, litColor)
+						}
+						[_, ?] -> {
+							acc << _buildTriangle(pa, pb, pc, depth, litColor)
+						}
+						_ -> {
+							triA := _buildTriangle(pa, pb, pc, depth, litColor)
+							triB := _buildTriangle(pa, pc, pd, depth, litColor)
+							if _shouldCullTriangle?(backfaceCulling, pa, pc, pd, window) {
+								true -> acc << triA
+								_ -> acc << triA << triB
+							}
 						}
 					}
 				}
@@ -335,9 +364,14 @@ fn _processFace(deps, window, i, faces, faceColors, verts, projected, color, fac
 	}
 }
 
-fn _collectFaces(deps, window, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, i, acc) if i {
+fn _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, i, acc) if i {
 	len(faces) -> acc
-	_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, i + 1, _processFace(deps, window, i, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, acc))
+	_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, i + 1, _processFace(deps, window, i, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, acc))
+}
+
+fn _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, start, end, acc) if start {
+	end -> acc
+	_ -> _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, start + 1, end, _processFace(deps, window, start, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, acc))
 }
 
 fn _drawTriangles(deps, window, tris, i, drawn) if i {
@@ -356,10 +390,28 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	faceColors := _default(mesh.faceColors, [])
 	cam := _default(camera, {})
 	backfaceCulling := _default(cam.backfaceCulling, true)
+	parallelFaces := _default(cam.parallelFaces, false)
+	parallelFaceThreshold := _default(cam.parallelFaceThreshold, 32)
 	lightParams := computeLightParams(deps, light)
 	faceShade := fn(pa3, pb3, pc3) faceShadeGeneric(deps, lightParams, pa3, pb3, pc3)
+	defaultFaceColor := _default(color, deps.rgb(150, 200, 255))
 
-	tris := _sortDepth(_collectFaces(deps, window, faces, faceColors, verts, projected, color, faceShade, backfaceCulling, 0, []))
+	trisRaw := if parallelFaces & (len(faces) >= parallelFaceThreshold) {
+		true -> {
+			mid := int(len(faces) / 2)
+			rightCh := make_chan(1)
+			go(fn() chan_send(rightCh, _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, mid, len(faces), [])))
+			left := _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, mid, [])
+			rightRaw := chan_recv(rightCh)
+			right := if rightRaw {
+				? -> _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, mid, len(faces), [])
+				_ -> rightRaw
+			}
+			_concatLists(left, right, 0, left)
+		}
+		_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, [])
+	}
+	tris := _sortDepth(_compactTris(trisRaw, 0, []))
 	drawn := _drawTriangles(deps, window, tris, 0, 0)
 
 	{
