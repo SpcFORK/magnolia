@@ -105,6 +105,10 @@ Optional frame batching helpers.
 - On Windows, these reuse one device context (DC) across multiple draw calls
     and flush/release once per frame, which reduces flicker and intermittent
     draw stalls.
+- Windows layer selection options are available via `createWindow(..., options)`:
+    - `options.layer2D`: `auto` (default), `opengl` (staged), `ddraw`, `gdi`
+        - `options.layer3D`: `auto` (default), `d3d9`, `cpu`, `none`
+    Selected capabilities are exposed on `window.layers` when using the Windows backend.
 - On Linux/Web they are safe no-ops for API consistency.
 
 ### `close(window)`

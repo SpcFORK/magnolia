@@ -15,6 +15,407 @@ fn _err(message, detail) {
 	}
 }
 
+D3D_SDK_VERSION := 32
+COM_RELEASE := 2
+IDirectDraw7_CreateSurface := 6
+IDirectDraw7_SetCooperativeLevel := 20
+IDirectDrawSurface7_GetDC := 17
+IDirectDrawSurface7_ReleaseDC := 26
+DDSCL_NORMAL := 8
+DDSD_CAPS := 1
+DDSCAPS_PRIMARYSURFACE := 512
+
+fn _probeDdraw() {
+	loaded := windows.loadDll(windows.Ddraw)
+	if loaded.type {
+		:ok -> {
+			hasDirectDrawCreateEx := windows.resolveInLoaded(windows.Ddraw, 'DirectDrawCreateEx').type = :ok
+			hasDirectDrawCreate := windows.resolveInLoaded(windows.Ddraw, 'DirectDrawCreate').type = :ok
+			hasThreadLockAcquire := windows.resolveInLoaded(windows.Ddraw, 'AcquireDDThreadLock').type = :ok
+			hasThreadLockRelease := windows.resolveInLoaded(windows.Ddraw, 'ReleaseDDThreadLock').type = :ok
+			canUseDdraw := hasDirectDrawCreateEx | hasDirectDrawCreate
+			{
+				available: canUseDdraw
+				library: windows.Ddraw
+				handle: loaded.handle
+				useThreadLock: canUseDdraw & hasThreadLockAcquire & hasThreadLockRelease
+				backend: if canUseDdraw {
+					true -> :ddraw
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.Ddraw
+				useThreadLock: false
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _probeD3d9() {
+	loaded := windows.loadDll(windows.D3d9)
+	if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.D3d9, 'Direct3DCreate9').type = :ok
+			{
+				available: hasCreate
+				library: windows.D3d9
+				handle: loaded.handle
+				backend: if hasCreate {
+					true -> :d3d9
+					_ -> :cpu
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.D3d9
+				backend: :cpu
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _probeOpenGL() {
+	loaded := windows.loadDll(windows.OpenGL32)
+	if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.OpenGL32, 'wglCreateContext').type = :ok
+			hasDelete := windows.resolveInLoaded(windows.OpenGL32, 'wglDeleteContext').type = :ok
+			hasMakeCurrent := windows.resolveInLoaded(windows.OpenGL32, 'wglMakeCurrent').type = :ok
+			canUseOpenGL := hasCreate & hasDelete & hasMakeCurrent
+			{
+				available: canUseOpenGL
+				library: windows.OpenGL32
+				handle: loaded.handle
+				backend: if canUseOpenGL {
+					true -> :opengl
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.OpenGL32
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _select2DLayer(opts, opengl, ddraw) {
+	requested := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
+	if requested {
+		'opengl' -> if opengl.available {
+			true -> :opengl
+			_ -> if ddraw.available {
+				true -> :ddraw
+				_ -> :gdi
+			}
+		}
+		'ddraw' -> if ddraw.available {
+			true -> :ddraw
+			_ -> :gdi
+		}
+		'gdi' -> :gdi
+		_ -> if ddraw.available {
+			true -> if opengl.available {
+				true -> :opengl
+				_ -> :ddraw
+			}
+			_ -> if opengl.available {
+				true -> :opengl
+				_ -> :gdi
+			}
+		}
+	}
+}
+
+fn _select3DLayer(opts, d3d9) {
+	requested := _default(opts.layer3D, _default(opts.layer3d, 'auto'))
+	if requested {
+		'd3d9' -> if d3d9.available {
+			true -> :d3d9
+			_ -> :cpu
+		}
+		'cpu' -> :cpu
+		'none' -> :none
+		_ -> if d3d9.available {
+			true -> :d3d9
+			_ -> :cpu
+		}
+	}
+}
+
+fn _ptrRead(address) if windows.ptrSize() {
+	8 -> windows.readU64(address)
+	_ -> windows.readU32(address)
+}
+
+fn _comCall(comObj, methodIndex, args...) {
+	vtbl := _ptrRead(comObj)
+	methodPtr := _ptrRead(vtbl + methodIndex * windows.ptrSize())
+	windows.call(methodPtr, comObj, args...)
+}
+
+fn _releaseOk?(res) windows.callOk?(res) | (res.type = :error & res.errno = 31)
+
+fn _iidDirectDraw7() bits([
+	192, 94, 230, 21,
+	156, 59,
+	210, 17,
+	185, 47, 0, 96, 151, 151, 234, 91
+])
+
+fn _readOutPointer(outBuf) if windows.ptrSize() {
+	8 -> windows.readU64(addr(outBuf))
+	_ -> windows.readU32(addr(outBuf))
+}
+
+fn _ddrawCreatePrimarySurface(ddrawObj) {
+	// DDSURFACEDESC2 fixed-size header with caps-only request for primary surface.
+	desc := bits({
+		fn zeros(n, acc) if n {
+			0 -> acc
+			_ -> zeros(n - 1, acc << 0)
+		}
+		zeros(124, [])
+	})
+	outBuf := if windows.ptrSize() {
+		8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+		_ -> bits([0, 0, 0, 0])
+	}
+
+	windows.writeU32(addr(desc) + 0, 124)
+	windows.writeU32(addr(desc) + 4, DDSD_CAPS)
+	windows.writeU32(addr(desc) + 104, DDSCAPS_PRIMARYSURFACE)
+
+	create := _comCall(ddrawObj, IDirectDraw7_CreateSurface, addr(desc), addr(outBuf), 0)
+	surfacePtr := _readOutPointer(outBuf)
+	if windows.callOk?(create) & windows.statusOk?(create) & surfacePtr > 0 {
+		true -> {
+			{
+				type: :ok
+				surface: surfacePtr
+				createResult: create
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'CreateSurface for primary surface failed'
+				createResult: create
+			}
+		}
+	}
+}
+
+fn _ddrawPresentViaPrimarySurface(window) {
+	if window.ddrawPrimarySurface > 0 {
+		true -> {
+			hdcOut := if windows.ptrSize() {
+				8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+				_ -> bits([0, 0, 0, 0])
+			}
+
+			getdc := _comCall(window.ddrawPrimarySurface, IDirectDrawSurface7_GetDC, addr(hdcOut))
+			surfaceHdc := _readOutPointer(hdcOut)
+			if windows.callOk?(getdc) & windows.statusOk?(getdc) & surfaceHdc > 0 {
+				true -> {
+					blt := windows.gdi32(
+						'BitBlt'
+						surfaceHdc
+						0
+						0
+						window.width
+						window.height
+						window.frameHdc
+						0
+						0
+						SRCCOPY
+					)
+					reldc := _comCall(window.ddrawPrimarySurface, IDirectDrawSurface7_ReleaseDC, surfaceHdc)
+					if windows.callOk?(blt) & blt.r1 > 0 & windows.callOk?(reldc) & windows.statusOk?(reldc) {
+						true -> {
+							{
+								type: :ok
+								getDcResult: getdc
+								bitBltResult: blt
+								releaseDcResult: reldc
+							}
+						}
+						_ -> {
+							{
+								type: :error
+								error: 'DirectDraw surface present failed'
+								getDcResult: getdc
+								bitBltResult: blt
+								releaseDcResult: reldc
+							}
+						}
+					}
+				}
+				_ -> {
+					{
+						type: :error
+						error: 'IDirectDrawSurface7::GetDC failed'
+						getDcResult: getdc
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'No DirectDraw primary surface is available'
+			}
+		}
+	}
+}
+
+fn _init2DLayer(window) if window.presenterBackend {
+	:ddraw -> {
+		fn freshOutBuffer() if windows.ptrSize() {
+			8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+			_ -> bits([0, 0, 0, 0])
+		}
+
+		iid := _iidDirectDraw7()
+		exOut := freshOutBuffer()
+		createEx := windows.directDrawCreateEx(0, addr(exOut), addr(iid), 0)
+		exObj := _readOutPointer(exOut)
+
+		if windows.callOk?(createEx) & windows.statusOk?(createEx) & exObj > 0 {
+			true -> {
+				coop := _comCall(exObj, IDirectDraw7_SetCooperativeLevel, window.hwnd, DDSCL_NORMAL)
+				surface := if windows.statusOk?(coop) {
+					true -> _ddrawCreatePrimarySurface(exObj)
+					_ -> {
+						{
+							type: :skipped
+							reason: 'SetCooperativeLevel failed; skipping primary surface creation'
+						}
+					}
+				}
+				if surface.type = :ok {
+					true -> _comCall(surface.surface, COM_RELEASE)
+				}
+				rel := _comCall(exObj, COM_RELEASE)
+				{
+					type: if windows.statusOk?(coop) & (surface.type = :ok | surface.type = :skipped) { true -> :ok, _ -> :warn }
+					created: true
+					setCooperativeLevelOk: windows.statusOk?(coop)
+					primarySurfaceCreated: surface.type = :ok
+					surfaceCreateResult: surface
+					releaseOk: _releaseOk?(rel)
+					createResult: createEx
+					cooperativeResult: coop
+					releaseResult: rel
+					interface: :IDirectDraw7
+					path: :DirectDrawCreateEx
+				}
+			}
+			_ -> {
+				legacyOut := freshOutBuffer()
+				createLegacy := windows.directDrawCreate(0, addr(legacyOut), 0)
+				legacyObj := _readOutPointer(legacyOut)
+
+				if windows.callOk?(createLegacy) & windows.statusOk?(createLegacy) & legacyObj > 0 {
+					true -> {
+						surface := _ddrawCreatePrimarySurface(legacyObj)
+						if surface.type = :ok {
+							true -> _comCall(surface.surface, COM_RELEASE)
+						}
+						rel := _comCall(legacyObj, COM_RELEASE)
+						{
+							type: if surface.type = :ok { true -> :ok, _ -> :warn }
+							created: true
+							setCooperativeLevelOk: ?
+							primarySurfaceCreated: surface.type = :ok
+							surfaceCreateResult: surface
+							releaseOk: _releaseOk?(rel)
+							createResult: createLegacy
+							cooperativeResult: ?
+							releaseResult: rel
+							interface: :IDirectDraw
+							path: :DirectDrawCreate
+							primaryFailure: createEx
+						}
+					}
+					_ -> {
+						{
+							type: :error
+							error: 'DirectDraw initialization failed for both DirectDrawCreateEx and DirectDrawCreate'
+							createResult: createEx
+							fallbackCreateResult: createLegacy
+						}
+					}
+				}
+			}
+		}
+	}
+	_ -> {
+		{
+			type: :skipped
+			reason: '2D layer does not require DirectDraw initialization'
+			selected: window.presenterBackend
+		}
+	}
+}
+
+fn _init3DLayer(window) if window.layers.threeD.selected {
+	:d3d9 -> {
+		create := windows.direct3DCreate9(D3D_SDK_VERSION)
+		if windows.callOk?(create) & create.r1 > 0 {
+			true -> {
+				rel := _comCall(create.r1, COM_RELEASE)
+				{
+					type: if _releaseOk?(rel) { true -> :ok, _ -> :warn }
+					created: true
+					releaseOk: _releaseOk?(rel)
+					warning: if _releaseOk?(rel) {
+						true -> ?
+						_ -> 'IDirect3D9 release status is degraded'
+					}
+					createResult: create
+					releaseResult: rel
+					interface: :IDirect3D9
+				}
+			}
+			_ -> {
+				{
+					type: :error
+					error: 'Direct3DCreate9 failed'
+					createResult: create
+				}
+			}
+		}
+	}
+	:none -> {
+		{
+			type: :skipped
+			reason: '3D layer disabled'
+			selected: :none
+		}
+	}
+	_ -> {
+		{
+			type: :skipped
+			reason: '3D layer does not require Direct3D9 initialization'
+			selected: window.layers.threeD.selected
+		}
+	}
+}
+
 SRCCOPY := 13369376
 WM_SETICON := 128
 ICON_SMALL := 0
@@ -127,6 +528,11 @@ fn _applyWindowIcons(hwnd, iconState) {
 
 fn createWindowState(title, width, height, options, className, frameMs, updateOnDispatch) {
 	opts := _default(options, {})
+	opengl := _probeOpenGL()
+	ddraw := _probeDdraw()
+	d3d9 := _probeD3d9()
+	layer2D := _select2DLayer(opts, opengl, ddraw)
+	layer3D := _select3DLayer(opts, d3d9)
 	lock_thread()
 	classIcons := resolveWindowIcons(opts)
 	classBigIcon := classIcons.big
@@ -148,7 +554,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							smallIcon: classSmallIcon
 						}
 						msgBuf := windows.createMsgBuffer()
-						{
+						state := {
 							type: :ok
 							backend: :windows
 							title: title
@@ -164,10 +570,84 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							framePrevBitmap: 0
 							frameWidth: 0
 							frameHeight: 0
+							presenterBackend: layer2D
+							ddrawPrimarySurface: 0
+							ddraw: ddraw
+							d3d9: d3d9
+							layers: {
+								twoD: {
+									requested: _default(opts.layer2D, _default(opts.layer2d, 'auto'))
+									selected: layer2D
+									opengl: opengl
+									ddraw: ddraw
+									gdi: {available: true, backend: :gdi}
+								}
+								threeD: {
+									requested: _default(opts.layer3D, _default(opts.layer3d, 'auto'))
+									selected: layer3D
+									d3d9: d3d9
+									cpu: {available: true, backend: :cpu}
+								}
+							}
 							icons: iconState
 							msgBuf: msgBuf
 							closed: false
 						}
+						if state.presenterBackend = :opengl {
+							true -> {
+								state.layers.twoD.fallback <- if state.ddraw.available {
+									true -> {
+										from: :opengl
+										to: :ddraw
+										reason: 'OpenGL layer is staged; using DirectDraw presenter fallback'
+									}
+									_ -> {
+										from: :opengl
+										to: :gdi
+										reason: 'OpenGL layer is staged; using GDI presenter fallback'
+									}
+								}
+								state.presenterBackend <- state.layers.twoD.fallback.to
+								state.layers.twoD.selected <- state.layers.twoD.fallback.to
+								state.layers.twoD.staged <- {
+									requested: :opengl
+									active: false
+								}
+							}
+						}
+						state.layers.twoD.init <- _init2DLayer(state)
+						if state.layers.twoD.init.type = :error | (state.layers.twoD.init.type = :warn & !_default(state.layers.twoD.init.primarySurfaceCreated, false)) {
+							true -> {
+								state.presenterBackend <- :gdi
+								state.layers.twoD.selected <- :gdi
+								state.layers.twoD.fallback <- {
+									from: :ddraw
+									to: :gdi
+									reason: if state.layers.twoD.init.type = :warn {
+										true -> 'DirectDraw initialization degraded; switching to GDI'
+										_ -> 'DirectDraw initialization failed'
+									}
+								}
+							}
+						}
+						if state.presenterBackend = :ddraw & _default(state.layers.twoD.init.primarySurfaceCreated, false) {
+							true -> state.ddrawPrimarySurface <- _default(state.layers.twoD.init.surfaceCreateResult.surface, 0)
+						}
+						state.layers.threeD.init <- _init3DLayer(state)
+						if state.layers.threeD.init.type = :error | state.layers.threeD.init.type = :warn {
+							true -> {
+								state.layers.threeD.selected <- :cpu
+								state.layers.threeD.fallback <- {
+									from: :d3d9
+									to: :cpu
+									reason: if state.layers.threeD.init.type = :warn {
+										true -> 'Direct3D9 initialization degraded; switching to CPU'
+										_ -> 'Direct3D9 initialization failed'
+									}
+								}
+							}
+						}
+						state
 					}
 					_ -> {
 						unlock_thread()
@@ -305,18 +785,52 @@ fn beginFrame(window) {
 
 fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 	true -> {
-		windows.gdi32(
-			'BitBlt'
-			window.frameTargetHdc
-			0
-			0
-			window.width
-			window.height
-			window.frameHdc
-			0
-			0
-			SRCCOPY
-		)
+		useDdrawThreadLock := window.presenterBackend = :ddraw & _default(window.ddraw.useThreadLock, false)
+		presentedViaDdraw := false
+		if window.presenterBackend = :ddraw & window.ddrawPrimarySurface > 0 {
+			true -> {
+				if useDdrawThreadLock {
+					true -> windows.ddraw('AcquireDDThreadLock')
+				}
+				ddrawPresent := _ddrawPresentViaPrimarySurface(window)
+				if useDdrawThreadLock {
+					true -> windows.ddraw('ReleaseDDThreadLock')
+				}
+				if ddrawPresent.type = :ok {
+					true -> presentedViaDdraw <- true
+					_ -> {
+						window.presenterBackend <- :gdi
+						window.layers.twoD.selected <- :gdi
+						window.layers.twoD.fallback <- {
+							from: :ddraw
+							to: :gdi
+							reason: 'DirectDraw present failed at runtime'
+							detail: ddrawPresent
+						}
+						if window.ddrawPrimarySurface > 0 {
+							true -> {
+								_comCall(window.ddrawPrimarySurface, COM_RELEASE)
+								window.ddrawPrimarySurface <- 0
+							}
+						}
+					}
+				}
+			}
+		}
+		if !presentedViaDdraw {
+			true -> windows.gdi32(
+				'BitBlt'
+				window.frameTargetHdc
+				0
+				0
+				window.width
+				window.height
+				window.frameHdc
+				0
+				0
+				SRCCOPY
+			)
+		}
 		windows.gdi32('GdiFlush')
 		windows.releaseDC(window.hwnd, window.frameTargetHdc)
 		window.frameTargetHdc <- 0
@@ -372,6 +886,12 @@ fn close(window) {
 			window.frameHdc <- 0
 			window.frameWidth <- 0
 			window.frameHeight <- 0
+		}
+	}
+	if window.ddrawPrimarySurface > 0 {
+		true -> {
+			_comCall(window.ddrawPrimarySurface, COM_RELEASE)
+			window.ddrawPrimarySurface <- 0
 		}
 	}
 	windows.destroyWindow(window.hwnd)

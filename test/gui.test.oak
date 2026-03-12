@@ -1,0 +1,244 @@
+gui := import('GUI')
+
+fn run(t) {
+	// color packing
+	'rgb packs channels as little-endian int' |> t.eq(
+		gui.rgb(255, 128, 64)
+		255 | (128 << 8) | (64 << 16)
+	)
+
+	'windows layer state exposes init/fallback metadata' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				window := gui.createWindow('Magnolia Layer Test', 240, 140, {
+					layer2D: 'auto'
+					layer3D: 'auto'
+				})
+				if window.type {
+					:ok -> {
+						ok :=
+							(type(window.layers) = :object) &
+							(type(window.ddrawPrimarySurface) = :int) &
+							(type(window.layers.twoD) = :object) &
+							(type(window.layers.twoD.opengl) = :object) &
+							(type(window.layers.threeD) = :object) &
+							(type(window.layers.twoD.init) = :object) &
+							(type(window.layers.threeD.init) = :object) &
+							((type(window.layers.twoD.init.primarySurfaceCreated) = :bool) | (type(window.layers.twoD.init.primarySurfaceCreated) = :null)) &
+							((type(window.layers.twoD.staged) = :object) | (type(window.layers.twoD.staged) = :null))
+						gui.close(window)
+						ok
+					}
+					_ -> false
+				}
+			}
+			_ -> true
+		}
+		true
+	)
+
+	// form geometry helpers
+	'formInRect? includes rectangle boundaries' |> t.eq(
+		[
+			gui.formInRect?(10, 10, 10, 10, 20, 20)
+			gui.formInRect?(30, 30, 10, 10, 20, 20)
+			gui.formInRect?(31, 30, 10, 10, 20, 20)
+		]
+		[true, true, false]
+	)
+
+	'formClamp clamps to [min, max]' |> t.eq(
+		[
+			gui.formClamp(-1, 0, 10)
+			gui.formClamp(5, 0, 10)
+			gui.formClamp(20, 0, 10)
+		]
+		[0, 5, 10]
+	)
+
+	'formHitListIndex returns hit item or -1' |> t.eq(
+		[
+			gui.formHitListIndex(12, 25, 10, 10, 40, 20, 4)
+			gui.formHitListIndex(2, 25, 10, 10, 40, 20, 4)
+		]
+		[0, -1]
+	)
+
+	{
+		rects := [
+			{ key: :a, x: 0, y: 0, w: 10, h: 10 }
+			{ key: :b, x: 20, y: 0, w: 10, h: 10 }
+		]
+
+		'formHitRectKey returns matching key or null' |> t.eq(
+			[
+				gui.formHitRectKey(5, 5, rects)
+				gui.formHitRectKey(25, 5, rects)
+				gui.formHitRectKey(15, 5, rects)
+			]
+			[:a, :b, ?]
+		)
+
+		'formToggleIfHit toggles only when cursor is inside' |> t.eq(
+			[
+				gui.formToggleIfHit(false, 3, 3, 0, 0, 10, 10)
+				gui.formToggleIfHit(false, 30, 30, 0, 0, 10, 10)
+			]
+			[true, false]
+		)
+
+		'formSelectByHit keeps current value on miss' |> t.eq(
+			[
+				gui.formSelectByHit(:start, 5, 5, rects)
+				gui.formSelectByHit(:start, 50, 50, rects)
+			]
+			[:a, :start]
+		)
+	}
+
+	// form state mutation helpers
+	{
+		state := {
+			a: false
+			b: false
+			hoverA: false
+			hoverB: false
+			choice: :none
+			drag: :vol
+			valueA: 0
+			valueB: 0
+		}
+
+		gui.formSetByAssignments(state, [
+			{ key: :valueA, value: 11 }
+			{ key: :valueB, value: 22 }
+		])
+		'formSetByAssignments writes all values' |> t.eq([state.valueA, state.valueB], [11, 22])
+
+		gui.formResetFlags(state, [:a, :b], true)
+		'formResetFlags sets listed keys to provided value' |> t.eq([state.a, state.b], [true, true])
+
+		gui.formSetHoverFromRects(state, 2, 2, [
+			{ key: :hoverA, x: 0, y: 0, w: 5, h: 5 }
+			{ key: :hoverB, x: 10, y: 10, w: 5, h: 5 }
+		])
+		'formSetHoverFromRects maps rect hits to booleans' |> t.eq([state.hoverA, state.hoverB], [true, false])
+
+		gui.formToggleKeysByHit(state, 2, 2, [
+			{ key: :a, x: 0, y: 0, w: 5, h: 5 }
+			{ key: :b, x: 10, y: 10, w: 5, h: 5 }
+		])
+		'formToggleKeysByHit toggles only matching key' |> t.eq([state.a, state.b], [false, true])
+
+		gui.formSetKeyByHit(state, :choice, 12, 12, [
+			{ key: :low, x: 0, y: 0, w: 10, h: 10 }
+			{ key: :high, x: 10, y: 10, w: 10, h: 10 }
+		])
+		'formSetKeyByHit assigns target key from hit key' |> t.eq(state.choice, :high)
+
+		gui.formApplySliderDrag(state, :drag, 50, 10, 100, 10, 0, 100, [
+			{ drag: :vol, valueKey: :valueA }
+			{ drag: :other, valueKey: :valueB }
+		])
+		'formApplySliderDrag writes value for matching drag key only' |> t.eq(
+			[state.valueA > 0, state.valueB]
+			[true, 22]
+		)
+	}
+
+	// text and notes helpers
+	'formTruncateText appends ellipsis when exceeding max' |> t.eq(
+		[
+			gui.formTruncateText('abcd', 3)
+			gui.formTruncateText('abc', 3)
+		]
+		['abc..', 'abc']
+	)
+
+	'formIsPrintableChar? checks ASCII printable range' |> t.eq(
+		[
+			gui.formIsPrintableChar?(31)
+			gui.formIsPrintableChar?(32)
+			gui.formIsPrintableChar?(126)
+			gui.formIsPrintableChar?(127)
+		]
+		[false, true, true, false]
+	)
+
+	'formNotesAppendChar appends to last line' |> t.eq(
+		gui.formNotesAppendChar(['ab', 'cd'], 'x')
+		['ab', 'cdx']
+	)
+
+	'formNotesBackspace removes char and drops empty trailing line' |> t.eq(
+		[
+			gui.formNotesBackspace(['ab', 'cd'])
+			gui.formNotesBackspace(['ab', ''])
+		]
+		[
+			['ab', 'c']
+			['ab']
+		]
+	)
+
+	'formNotesNewLine respects max lines' |> t.eq(
+		[
+			gui.formNotesNewLine(['a'], 3)
+			gui.formNotesNewLine(['a', 'b', 'c'], 3)
+		]
+		[
+			['a', '']
+			['a', 'b', 'c']
+		]
+	)
+
+	'formSliderValue clamps and maps linearly' |> t.eq(
+		[
+			gui.formSliderValue(10, 10, 100, 10, 0, 100)
+			gui.formSliderValue(55, 10, 100, 10, 0, 100)
+			gui.formSliderValue(500, 10, 100, 10, 0, 100)
+		]
+		[0, 50, 100]
+	)
+
+	'formNextField rotates through focus order' |> t.eq(
+		[
+			gui.formNextField(:a, [:a, :b, :c])
+			gui.formNextField(:c, [:a, :b, :c])
+			gui.formNextField(:missing, [:a, :b, :c])
+		]
+		[:b, :a, :a]
+	)
+
+	'formMaskText returns one mask char per input char' |> t.eq(
+		[
+			gui.formMaskText('')
+			gui.formMaskText('secret')
+		]
+		['', '******']
+	)
+
+	// mesh helper shape
+	{
+		cube := gui.CubeMesh(2)
+		'CubeMesh returns expected vertex/edge/face counts' |> t.eq(
+			[
+				len(cube.vertices)
+				len(cube.edges)
+				len(cube.faces)
+				len(cube.faceColors)
+			]
+			[8, 12, 6, 6]
+		)
+		'CubeMesh for size 2 is centered on origin' |> t.eq(
+			[
+				cube.vertices.(0)
+				cube.vertices.(6)
+			]
+			[
+				{ x: -1, y: -1, z: -1 }
+				{ x: 1, y: 1, z: 1 }
+			]
+		)
+	}
+}
