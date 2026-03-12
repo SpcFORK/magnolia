@@ -2303,6 +2303,48 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 	))
 }
 
+func TestGUIEventBusHelpers(t *testing.T) {
+	expectProgramToReturn(t, `
+		gui := import('GUI')
+		win := {type: :ok}
+		seen := []
+
+		persist := gui.on(win, :dispatch, fn(step, name) {
+			seen << (string(name) + ':' + string(step.type))
+		})
+		gui.once(win, :dispatch, fn(_, name) {
+			seen << (string(name) + ':once')
+		})
+
+		first := gui.emit(win, :dispatch, {type: :dispatch})
+		second := gui.emit(win, :dispatch, {type: :dispatch})
+		removed := gui.off(win, :dispatch, persist)
+		third := gui.emit(win, :dispatch, {type: :dispatch})
+
+		[
+			seen
+			first
+			second
+			removed
+			third
+			gui.listenerCount(win, :dispatch)
+			type(gui.eventBus(win).emitAsync)
+		]
+	`, MakeList(
+		MakeList(
+			MakeString("dispatch:dispatch"),
+			MakeString("dispatch:once"),
+			MakeString("dispatch:dispatch"),
+		),
+		IntValue(2),
+		IntValue(1),
+		IntValue(1),
+		IntValue(0),
+		IntValue(0),
+		AtomValue("function"),
+	))
+}
+
 func TestBuiltinPresenceForRemainingIoAndProcessFeatures(t *testing.T) {
 	expectProgramToReturn(t, `
 		[

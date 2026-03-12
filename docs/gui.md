@@ -236,6 +236,28 @@ Runs a simple loop:
 - on Windows, marks resize/paint-related dispatches as urgent so the next frame is not delayed
 - exits on `:closed`
 
+### Event-Bus integration
+
+Each `:ok` window now carries a lazily initialized event bus at `window.eventBus`.
+The GUI module exposes thin helpers around this bus:
+
+- `eventBus(window)` returns the bus instance
+- `on(window, event, handler)` subscribes and returns a token
+- `once(window, event, handler)` one-shot subscription, returns a token
+- `off(window, event, tokenOrHandler)` unsubscribes and returns removed count
+- `emit(window, event, payload, onDone?)` emits sync/async based on callback presence
+- `listenerCount(window, event)` returns active listener count
+- `clearListeners(window, event?)` clears one event or all listeners
+
+Built-in events emitted by GUI runtime:
+
+- `:runStart` when `run(...)` begins on a window
+- `:dispatch` for each polled dispatch step
+- `:idle` for each idle step
+- `:frame` whenever `onFrame(window, dt)` is invoked (payload includes `dt` and `timeNs`)
+- `:closing` when `close(window)` begins
+- `:closed` after `close(window)` completes or when run loop receives closed step
+
 ## Drawing helpers
 
 ### `drawText(window, x, y, text)`

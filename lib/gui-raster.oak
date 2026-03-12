@@ -66,17 +66,45 @@ fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
 	_ -> deps.drawLine(window, int(xb), y, int(xa), y, color)
 }
 
-fn _fillScan(deps, window, y, maxY, p0, p1, p2, color) if y > maxY {
+// Pre-compute inverse slopes for edge stepping to avoid per-scanline division
+fn _edgeSlope(pa, pb) if pb.y = pa.y {
+	true -> 0
+	_ -> (pb.x - pa.x) / (pb.y - pa.y)
+}
+
+fn _fillScanStepped(deps, window, y, splitY, maxY, xaTop, xaBot, xb, slopeATop, slopeABot, slopeB, color) if y > maxY {
 	true -> {type: :ok}
 	_ -> {
-		xa := if y <= p1.y {
-			true -> _lerpX(p0, p1, y)
-			_ -> _lerpX(p1, p2, y)
+		xa := if y <= splitY {
+			true -> xaTop + slopeATop * (y - splitY + (splitY - int(splitY)))
+			_ -> xaBot + slopeABot * (y - splitY)
 		}
-		xb := _lerpX(p0, p2, y)
-		_drawScanline(deps, window, y, xa, xb, color)
-		_fillScan(deps, window, y + 1, maxY, p0, p1, p2, color)
+		xbCur := xb + slopeB * (y - int(xb) + (xb - int(xb)))
+		_drawScanline(deps, window, y, xa, xbCur, color)
+		_fillScanStepped(deps, window, y + 1, splitY, maxY, xaTop, xaBot, xb, slopeATop, slopeABot, slopeB, color)
 	}
+}
+
+fn _fillScan(deps, window, y, maxY, p0, p1, p2, color) {
+	slopeATop := _edgeSlope(p0, p1)
+	slopeABot := _edgeSlope(p1, p2)
+	slopeB := _edgeSlope(p0, p2)
+	xaTop := p0.x
+	xaBot := p1.x
+	xb := p0.x
+	fn _step(y) if y > maxY {
+		true -> {type: :ok}
+		_ -> {
+			xa := if y <= p1.y {
+				true -> xaTop + slopeATop * (y - p0.y)
+				_ -> xaBot + slopeABot * (y - p1.y)
+			}
+			xbCur := xb + slopeB * (y - p0.y)
+			_drawScanline(deps, window, y, xa, xbCur, color)
+			_step(y + 1)
+		}
+	}
+	_step(y)
 }
 
 fn _sortTriByY(p0, p1, p2) {
@@ -280,7 +308,7 @@ fn _shadeColor(deps, color, intensity) {
 	cr := _colorR(color)
 	cg := _colorG(color)
 	cb := _colorB(color)
-	deps.rgb(_clamp(int(cr * i), 0, 255), _clamp(int(cg * i), 0, 255), _clamp(int(cb * i), 0, 255))
+	deps.rgb(int(cr * i), int(cg * i), int(cb * i))
 }
 
 fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
@@ -411,7 +439,8 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 		}
 		_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, [])
 	}
-	tris := _sortDepth(_compactTris(trisRaw, 0, []))
+	// _collectFaces never inserts null entries, so skip compaction pass
+	tris := _sortDepth(trisRaw)
 	drawn := _drawTriangles(deps, window, tris, 0, 0)
 
 	{

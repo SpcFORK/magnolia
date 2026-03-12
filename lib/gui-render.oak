@@ -35,9 +35,26 @@ fn Renderer3D(deps, window, options) {
 	axisColorY := deps.rgb(120, 255, 140)
 	axisColorZ := deps.rgb(120, 170, 255)
 
+	// FNV-1a inspired numeric hash for transform cache keys — avoids string
+	// allocation on every lookup.
+	fn _hashCombine(h, v) {
+		// Multiply-then-XOR to spread bits; stays numeric.
+		raw := (h * 16777619) + v
+		raw - int(raw / 2147483647) * 2147483647
+	}
 	fn _cacheKey(transform) if transform {
-		? -> 'identity'
-		_ -> string(_default(transform.rx, 0)) + '|' + string(_default(transform.ry, 0)) + '|' + string(_default(transform.rz, 0)) + '|' + string(_default(transform.scale, 1)) + '|' + string(_default(transform.tx, 0)) + '|' + string(_default(transform.ty, 0)) + '|' + string(_default(transform.tz, 0))
+		? -> 0
+		_ -> {
+			h := 2166136261
+			h <- _hashCombine(h, _default(transform.rx, 0) * 10000)
+			h <- _hashCombine(h, _default(transform.ry, 0) * 10000)
+			h <- _hashCombine(h, _default(transform.rz, 0) * 10000)
+			h <- _hashCombine(h, _default(transform.scale, 1) * 10000)
+			h <- _hashCombine(h, _default(transform.tx, 0) * 10000)
+			h <- _hashCombine(h, _default(transform.ty, 0) * 10000)
+			h <- _hashCombine(h, _default(transform.tz, 0) * 10000)
+			h
+		}
 	}
 
 	fn _queuePush(entry) {
@@ -57,22 +74,22 @@ fn Renderer3D(deps, window, options) {
 		}
 	}
 
-	fn _slice(list, i, end, out) if i {
-		end -> out
-		_ -> _slice(list, i + 1, end, out << list.(i))
-	}
-
+	// Circular-buffer eviction: O(1) instead of O(n) array rebuild.
+	cacheInsertIdx := 0
 	fn _instanceCacheSet(key, value) {
 		instanceCache.(key) <- value
-		instanceCacheOrder << key
-		if len(instanceCacheOrder) > maxInstanceCache {
+		if len(instanceCacheOrder) < maxInstanceCache {
 			true -> {
-				oldest := instanceCacheOrder.0
-				instanceCache.(oldest) <- ?
-				instanceCacheOrder <- _slice(instanceCacheOrder, 1, len(instanceCacheOrder), [])
+				instanceCacheOrder << key
 				{type: :ok}
 			}
-			_ -> {type: :ok}
+			_ -> {
+				oldest := instanceCacheOrder.(cacheInsertIdx)
+				instanceCache.(oldest) <- ?
+				instanceCacheOrder.(cacheInsertIdx) <- key
+				cacheInsertIdx <- (cacheInsertIdx + 1) % maxInstanceCache
+				{type: :ok}
+			}
 		}
 	}
 
@@ -80,7 +97,7 @@ fn Renderer3D(deps, window, options) {
 		if !enableInstanceCache {
 			true -> {mesh: mesh, cacheHit: false}
 			_ -> {
-				key := string(len(mesh.vertices)) + ':' + _cacheKey(transform)
+				key := _hashCombine(len(mesh.vertices), _cacheKey(transform))
 				if marker := instanceCache.(key) {
 					? -> {
 						_instanceCacheSet(key, true)

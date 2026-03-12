@@ -17,6 +17,7 @@ guiWeb := import('gui-web')
 guiNativeWin := import('gui-native-win')
 guiNativeLinux := import('gui-native-linux')
 guiDraw := import('gui-draw')
+eventBusLib := import('async/event-bus')
 
 fn backend() if ___runtime_sys_info().os {
 	'windows' -> :windows
@@ -45,6 +46,61 @@ fn _default(value, fallback) if value {
 	_ -> value
 }
 
+fn _ensureEventBus(window) if window.type {
+	:ok -> {
+		bus := window.eventBus
+		if bus {
+			? -> {
+				created := eventBusLib.create()
+				window.eventBus <- created
+				created
+			}
+			_ -> bus
+		}
+	}
+	_ -> ?
+}
+
+fn eventBus(window) _ensureEventBus(window)
+
+fn on(window, event, handler) if bus := _ensureEventBus(window) {
+	? -> ?
+	_ -> bus.on(event, handler)
+}
+
+fn once(window, event, handler) if bus := _ensureEventBus(window) {
+	? -> ?
+	_ -> bus.once(event, handler)
+}
+
+fn off(window, event, tokenOrHandler) if bus := _ensureEventBus(window) {
+	? -> 0
+	_ -> bus.off(event, tokenOrHandler)
+}
+
+fn emit(window, event, payload, onDone) if bus := _ensureEventBus(window) {
+	? -> 0
+	_ -> bus.emit(event, payload, onDone)
+}
+
+fn listenerCount(window, event) if bus := _ensureEventBus(window) {
+	? -> 0
+	_ -> bus.listenerCount(event)
+}
+
+fn clearListeners(window, event) if bus := _ensureEventBus(window) {
+	? -> false
+	_ -> bus.clear(event)
+}
+
+fn _publish(window, event, payload) {
+	bus := _ensureEventBus(window)
+	if bus {
+		? -> 0
+		_ -> bus.emit(event, payload)
+	}
+}
+
 fn rgb(r, g, b) r | (g << 8) | (b << 16)
 
 GL_COLOR_BUFFER_BIT := 16384
@@ -60,7 +116,7 @@ fn createWindow(title, width, height, options) {
 	frameMs := _default(opts.frameMs, 16)
 	updateOnDispatch := _default(opts.updateOnDispatch, false)
 
-	if backend() {
+	created := if backend() {
 		:windows -> {
 			guiNativeWin.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, opts, className, frameMs, updateOnDispatch)
 		}
@@ -69,6 +125,14 @@ fn createWindow(title, width, height, options) {
 			guiWeb.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch, opts)
 		}
 		_ -> _err('Unsupported runtime for GUI window middleware', ___runtime_sys_info())
+	}
+
+	if created.type {
+		:ok -> {
+			_ensureEventBus(created)
+			created
+		}
+		_ -> created
 	}
 }
 
@@ -867,6 +931,11 @@ fn _maybeRunFrame(window, onFrame, force) {
 					dt := float(dtNs) / 1000000000.0
 					window._lastFrameNt <- now
 					onFrame(window, dt)
+					_publish(window, :frame, {
+						type: :frame
+						dt: dt
+						timeNs: now
+					})
 					interval := _frameIntervalNt(window)
 					now2 := nanotime()
 					scheduledBase := if forceNow {
@@ -907,10 +976,17 @@ fn _sleepUntilNextFrame(window) {
 
 fn run(window, onEvent, onFrame) if window.type {
 	:ok -> {
+		if !_default(window._runStarted, false) -> {
+			window._runStarted <- true
+			_publish(window, :runStart, {
+				type: :runStart
+			})
+		}
 		step := poll(window)
 		if step.type {
 			:dispatch -> {
 				_markUrgentFrameIfResizeDispatch(window, step)
+				_publish(window, :dispatch, step)
 				if onEvent {
 					? -> ?
 					_ -> onEvent(window, step)
@@ -923,6 +999,7 @@ fn run(window, onEvent, onFrame) if window.type {
 				run(window, onEvent, onFrame)
 			}
 			:idle -> {
+				_publish(window, :idle, step)
 				_sleepUntilNextFrame(window)
 				_maybeRunFrame(window, onFrame, false)
 				if window.backend = :web {
@@ -930,7 +1007,10 @@ fn run(window, onEvent, onFrame) if window.type {
 					_ -> run(window, onEvent, onFrame)
 				}
 			}
-			:closed -> 0
+			:closed -> {
+				_publish(window, :closed, step)
+				0
+			}
 			_ -> step
 		}
 	}
@@ -940,14 +1020,23 @@ fn run(window, onEvent, onFrame) if window.type {
 fn close(window) if window.type {
 	:ok -> if window.closed {
 		true -> 0
-		_ -> if window.backend {
-			:windows -> guiNativeWin.close(window)
-			:linux -> guiNativeLinux.close(window)
-			:web -> {
-				window.closed <- true
-				0
+		_ -> {
+			_publish(window, :closing, {
+				type: :closing
+			})
+			result := if window.backend {
+				:windows -> guiNativeWin.close(window)
+				:linux -> guiNativeLinux.close(window)
+				:web -> {
+					window.closed <- true
+					0
+				}
+				_ -> _err('Unknown window backend', window)
 			}
-			_ -> _err('Unknown window backend', window)
+			_publish(window, :closed, {
+				type: :closed
+			})
+			result
 		}
 	}
 	_ -> 0
