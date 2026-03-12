@@ -467,6 +467,59 @@ if window.type = :ok & gui.isWeb?() -> {
 }
 ```
 
+### Logging Sample
+
+```oak
+gui := import('GUI')
+
+window := gui.createWindow('GUI Logging Sample', 860, 460, {
+    frameMs: 16
+    layer2D: 'auto'
+})
+
+if window.type = :ok {
+    state := { tick: 0, entries: [] }
+    gui.show(window)
+
+    gui.run(window, fn(_, evt) {
+        if evt.type = :dispatch & (state.tick % 120 = 0) ->
+            state.entries <- state.entries << ('EVENT tick=' + string(state.tick))
+    }, fn(win, _dt) {
+        state.tick <- state.tick + 1
+        if state.tick % 90 = 0 ->
+            state.entries <- state.entries << ('TRACE frame=' + string(state.tick))
+
+        if gui.beginFrame(win).type = :ok -> {
+            gui.fillRect(win, 0, 0, win.width, win.height, gui.rgb(18, 22, 34))
+            gui.drawText(win, 20, 24, 'GUI Logging Sample')
+            gui.drawText(win, 20, 52, 'entries=' + string(len(state.entries)))
+            gui.endFrame(win)
+        }
+    })
+
+    gui.close(window)
+}
+```
+
+See `samples/gui-logging.oak` for a full runnable version with stdout logging.
+
+### Test Sample
+
+```oak
+{ new: new } := import('test')
+
+fn formatLogLine(ts, level, message) '[' + string(ts) + '] ' + level + ' ' + message
+fn shouldLogTick?(tick, every) (every > 0) & (tick % every = 0)
+
+suite := new('GUI Logging Sample Tests')
+suite.eq('format line', formatLogLine(42, 'INFO', 'ready'), '[42] INFO ready')
+suite.eq('tick schedule', [shouldLogTick?(90, 90), shouldLogTick?(91, 90)], [true, false])
+suite.report()
+suite.exit()
+```
+
+See `samples/test_gui_logging.oak` for the complete test sample.
+
 ## Module reference
 
 The GUI middleware is implemented across several focused modules. See the module pages for API details and examples.
@@ -486,6 +539,8 @@ The GUI middleware is implemented across several focused modules. See the module
 
 - `samples/gui-sample.oak` - cross-platform GUI quickstart; on Windows it also displays the requested 2D layer, active presenter, and fallback state
 - `samples/gui-game.oak` - bouncing-box mini game using GUI middleware with frame-rate independent motion and Windows presenter-state overlay
+- `samples/gui-logging.oak` - GUI logging sample with frame/event logs rendered in-window and mirrored to stdout
+- `samples/test_gui_logging.oak` - focused test sample for GUI logging helper functions using the `test` library
 - `samples/gui-3d.oak` - rotating wireframe cube using GUI 3D renderer
 - `samples/windows-higher-renderers.oak` - Windows renderer probe for Vulkan/OpenGL/DDraw/D3D capability and staged fallback metadata
 - `samples/windows-2d-layer-hotload.oak` - Windows-only hotload demo that recreates the window every 2 seconds to cycle `gdi`, `ddraw`, `opengl`, and `vulkan` requests while preserving one animated scene

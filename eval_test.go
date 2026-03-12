@@ -1932,6 +1932,89 @@ func TestWaitBuiltinAsyncCallback(t *testing.T) {
 	}
 }
 
+func TestAsyncEventBusSyncFlow(t *testing.T) {
+	expectProgramToReturn(t, `
+		buslib := import('async/event-bus')
+		bus := buslib.create()
+		seen := []
+		persistId := bus.on('tick', fn(payload) {
+			seen << payload
+		})
+		bus.once('tick', fn(payload) {
+			seen << payload + 100
+		})
+
+		first := bus.emit('tick', 1)
+		second := bus.emitSync('tick', 2)
+		removed := bus.off('tick', persistId)
+		third := bus.emit('tick', 3)
+
+		[
+			seen
+			first
+			second
+			removed
+			third
+			bus.listenerCount('tick')
+		]
+	`, MakeList(
+		MakeList(
+			IntValue(1),
+			IntValue(101),
+			IntValue(2),
+		),
+		IntValue(2),
+		IntValue(1),
+		IntValue(1),
+		IntValue(0),
+		IntValue(0),
+	))
+}
+
+func TestAsyncEventBusAsyncEmit(t *testing.T) {
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+
+	val, err := ctx.Eval(strings.NewReader(`
+		buslib := import('async/event-bus')
+		bus := buslib.create()
+		calls := 0
+		doneCount := -1
+		bus.on(:evt, fn(payload) {
+			calls <- calls + payload
+		})
+		scheduled := bus.emitAsync(:evt, 2, fn(dispatched) {
+			doneCount <- dispatched
+		})
+		[scheduled, calls, doneCount]
+	`))
+	if err != nil {
+		t.Fatalf("Did not expect program to exit with error: %s", err.Error())
+	}
+
+	if val == nil || !val.Eq(MakeList(IntValue(1), IntValue(0), IntValue(-1))) {
+		t.Fatalf("Expected immediate async emit state [1, 0, -1], got %v", val)
+	}
+
+	ctx.Wait()
+
+	calls, scopeErr := ctx.scope.get("calls")
+	if scopeErr != nil {
+		t.Fatalf("Could not read calls from scope: %s", scopeErr.Error())
+	}
+	if !calls.Eq(IntValue(2)) {
+		t.Fatalf("Expected async event handler to run once with payload 2, got %s", calls)
+	}
+
+	doneCount, scopeErr := ctx.scope.get("doneCount")
+	if scopeErr != nil {
+		t.Fatalf("Could not read doneCount from scope: %s", scopeErr.Error())
+	}
+	if !doneCount.Eq(IntValue(1)) {
+		t.Fatalf("Expected async emit done callback to receive dispatched count 1, got %s", doneCount)
+	}
+}
+
 func TestAtomAndCharBuiltins(t *testing.T) {
 	expectProgramToReturn(t, `
 		[

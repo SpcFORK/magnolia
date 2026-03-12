@@ -1,0 +1,117 @@
+// async/event-bus provides a lightweight in-process event bus with
+// synchronous and asynchronous emit APIs.
+
+{
+	default: default
+	append: append
+	filter: filter
+	each: each
+	map: map
+	slice: slice
+	serial: serial
+} := import('std')
+
+fn _eventKey(name) string(name)
+
+fn _withoutToken(entries, token) entries |> filter(fn(entry) entry.token != token)
+
+cs EventBus {
+	entries := []
+	nextToken := 1
+
+	fn allocToken {
+		token := nextToken
+		nextToken <- nextToken + 1
+		token
+	}
+
+	fn addListener(event, handler, once?) if type(handler) {
+		:function -> {
+			token := allocToken()
+			entries << {
+				event: _eventKey(event)
+				token: token
+				handler: handler
+				once?: default(once?, false)
+			}
+			token
+		}
+		_ -> ?
+	}
+
+	fn listenersFor(event) {
+		key := _eventKey(event)
+		entries |> filter(fn(entry) entry.event = key)
+	}
+
+	fn removeListener(event, tokenOrHandler) {
+		key := _eventKey(event)
+		before := len(entries)
+		entries <- if type(tokenOrHandler) {
+			:function -> entries |> filter(fn(entry) !(entry.event = key & entry.handler = tokenOrHandler))
+			_ -> entries |> filter(fn(entry) !(entry.event = key & entry.token = tokenOrHandler))
+		}
+		before - len(entries)
+	}
+
+	fn emitSync(event, payload) {
+		key := _eventKey(event)
+		snapshot := listenersFor(key) |> slice(0)
+		dispatched := 0
+		onceTokens := []
+		snapshot |> each(fn(entry) {
+			entry.handler(payload, key)
+			dispatched <- dispatched + 1
+			if entry.once? -> onceTokens << entry.token
+		})
+		onceTokens |> each(fn(token) {
+			removeListener(key, token)
+		})
+		dispatched
+	}
+
+	fn emitAsync(event, payload, onDone) {
+		key := _eventKey(event)
+		snapshot := listenersFor(key) |> slice(0)
+		onDone := onDone |> default(fn(_) ?)
+
+		serial(snapshot, fn(entry, _, next, _) {
+			with wait(0) fn {
+				entry.handler(payload, key)
+				if entry.once? -> removeListener(key, entry.token)
+				next()
+			}
+		}, fn() {
+			onDone(len(snapshot))
+		})
+
+		len(snapshot)
+	}
+
+	{
+		on: fn(event, handler) addListener(event, handler, false)
+		once: fn(event, handler) addListener(event, handler, true)
+		off: fn(event, tokenOrHandler) removeListener(event, tokenOrHandler)
+		emit: fn(event, payload, onDone) if onDone {
+			? -> emitSync(event, payload)
+			_ -> emitAsync(event, payload, onDone)
+		}
+		emitSync: fn(event, payload) emitSync(event, payload)
+		emitAsync: fn(event, payload, onDone) emitAsync(event, payload, onDone)
+		clear: fn(event) if event {
+			? -> {
+				entries <- []
+				true
+			}
+			_ -> {
+				key := _eventKey(event)
+				entries <- entries |> filter(fn(entry) entry.event != key)
+				true
+			}
+		}
+		listeners: fn(event) listenersFor(event) |> map(fn(entry) entry.handler)
+		listenerCount: fn(event) len(listenersFor(event))
+	}
+}
+
+fn create() EventBus()
