@@ -49,13 +49,16 @@ fn step(state) {
 fn drawNative(window, state) {
 	frame := gui.beginFrame(window)
 	if frame.type = :ok -> {
-        gui.fillRect(window, 0, 0, state.worldW, state.worldH, gui.rgb(10, 18, 28))
-        gui.fillRect(window, state.x, state.y, state.size, state.size, gui.rgb(44, 162, 255))
-        gui.drawText(window, 16, 24, 'GUI Game: Bouncing Box')
-        gui.drawText(window, 16, 46, 'Ticks: ' + string(state.ticks))
-        gui.drawText(window, 16, 68, 'Bounces: ' + string(state.bounces))
-        gui.endFrame(window)
-    }
+		gui.fillRect(window, 0, 0, state.worldW, state.worldH, gui.rgb(10, 18, 28))
+		gui.fillRect(window, state.x, state.y, state.size, state.size, gui.rgb(44, 162, 255))
+		gui.drawText(window, 16, 24, 'GUI Game: Bouncing Box')
+		gui.drawText(window, 16, 46, 'Ticks: ' + string(state.ticks))
+		gui.drawText(window, 16, 68, 'Bounces: ' + string(state.bounces))
+		if state.done {
+			true -> gui.drawText(window, 16, 96, 'Game complete. Close window to exit.')
+		}
+		gui.endFrame(window)
+	}
 }
 
 fn runNative(window) {
@@ -70,33 +73,37 @@ fn runNative(window) {
 		ticks: 0
 		bounces: 0
 		maxTicks: 2400
+		done: false
 	}
 
 	gui.show(window)
 	gui.setTitle(window, 'Magnolia GUI Game')
 	drawNative(window, state)
 
-	with gui.run(window, ?) fn(win) if state.ticks < state.maxTicks {
-        true -> {
-            state.worldW <- win.width
-            state.worldH <- win.height
-            state.ticks <- state.ticks + 1
-            prevVx := state.vx
-            prevVy := state.vy
-            next := step(state)
-            state.x <- next.x
-            state.y <- next.y
-            state.vx <- next.vx
-            state.vy <- next.vy
+	gui.run(window, ?, fn(win, _dt) {
+		state.worldW <- win.width
+		state.worldH <- win.height
 
-            if (prevVx != state.vx) | (prevVy != state.vy) {
-                true -> state.bounces <- state.bounces + 1
-            }
+		if state.ticks < state.maxTicks {
+			true -> {
+				state.ticks <- state.ticks + 1
+				prevVx := state.vx
+				prevVy := state.vy
+				next := step(state)
+				state.x <- next.x
+				state.y <- next.y
+				state.vx <- next.vx
+				state.vy <- next.vy
 
-            drawNative(win, state)
-        }
-        _ -> gui.drawText(win, 16, 96, 'Game complete. Close window to exit.')
-    }
+				if (prevVx != state.vx) | (prevVy != state.vy) {
+					true -> state.bounces <- state.bounces + 1
+				}
+			}
+			_ -> state.done <- true
+		}
+
+		drawNative(win, state)
+	})
 
 	gui.close(window)
 }

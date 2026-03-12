@@ -12,6 +12,7 @@ Behavior
 
 - On native backends these map to platform drawing APIs (GDI/X11).
 - On web backends they record logical draw ops into `window.messages` for host-side rendering.
+- Windows GDI paths now restore previously selected pen/brush objects after each draw call to reduce DC state leakage when mixing custom GDI operations.
 
 Example
 

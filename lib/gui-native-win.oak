@@ -29,8 +29,12 @@ PFD_SUPPORT_OPENGL := 32
 PFD_DOUBLEBUFFER := 1
 VK_STRUCTURE_TYPE_APPLICATION_INFO := 0
 VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO := 1
+VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR := 1000009000
 VK_SUCCESS := 0
 VK_API_VERSION_1_0 := 4194304
+VK_QUEUE_GRAPHICS_BIT := 1
+VK_KHR_SURFACE_EXTENSION_NAME := 'VK_KHR_surface'
+VK_KHR_WIN32_SURFACE_EXTENSION_NAME := 'VK_KHR_win32_surface'
 
 fn _probeDdraw() {
 	loaded := windows.loadDll(windows.Ddraw)
@@ -126,7 +130,11 @@ fn _probeVulkan() {
 			hasCreate := windows.resolveInLoaded(windows.Vulkan1, 'vkCreateInstance').type = :ok
 			hasDestroy := windows.resolveInLoaded(windows.Vulkan1, 'vkDestroyInstance').type = :ok
 			hasEnumerate := windows.resolveInLoaded(windows.Vulkan1, 'vkEnumeratePhysicalDevices').type = :ok
-			canUseVulkan := hasCreate & hasDestroy & hasEnumerate
+			hasCreateSurface := windows.resolveInLoaded(windows.Vulkan1, 'vkCreateWin32SurfaceKHR').type = :ok
+			hasDestroySurface := windows.resolveInLoaded(windows.Vulkan1, 'vkDestroySurfaceKHR').type = :ok
+			hasQueueProps := windows.resolveInLoaded(windows.Vulkan1, 'vkGetPhysicalDeviceQueueFamilyProperties').type = :ok
+			hasSurfaceSupport := windows.resolveInLoaded(windows.Vulkan1, 'vkGetPhysicalDeviceSurfaceSupportKHR').type = :ok
+			canUseVulkan := hasCreate & hasDestroy & hasEnumerate & hasCreateSurface & hasDestroySurface & hasQueueProps & hasSurfaceSupport
 			{
 				available: canUseVulkan
 				library: windows.Vulkan1
@@ -150,6 +158,7 @@ fn _probeVulkan() {
 
 fn _select2DLayer(opts, opengl, ddraw, vulkan) {
 	requested := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
+	vulkanAuto := _default(opts.vulkanAuto, false)
 	if requested {
 		'vulkan' -> if vulkan.available {
 			true -> :vulkan
@@ -173,12 +182,12 @@ fn _select2DLayer(opts, opengl, ddraw, vulkan) {
 			_ -> :gdi
 		}
 		'gdi' -> :gdi
-		_ -> if vulkan.available {
-			true -> :vulkan
-			_ -> if opengl.available {
-				true -> :opengl
-				_ -> if ddraw.available {
-					true -> :ddraw
+		_ -> if opengl.available {
+			true -> :opengl
+			_ -> if ddraw.available {
+				true -> :ddraw
+				_ -> if vulkanAuto & vulkan.available {
+					true -> :vulkan
 					_ -> :gdi
 				}
 			}
@@ -431,6 +440,110 @@ fn _vkZeros(n) {
 	z(n, [])
 }
 
+fn _vkWritePtr(address, value) if windows.ptrSize() {
+	8 -> windows.writeU64(address, value)
+	_ -> windows.writeU32(address, value)
+}
+
+fn _vkFindPresentQueue(physicalDevice, surface, propsPtr, queueCount, idx) if idx < queueCount {
+	true -> {
+		flags := windows.readU32(propsPtr + idx * 24)
+		supportsGraphics := (flags & VK_QUEUE_GRAPHICS_BIT) > 0
+		presentBuf := bits([0, 0, 0, 0])
+		supportRes := windows.vulkan1('vkGetPhysicalDeviceSurfaceSupportKHR', physicalDevice, idx, surface, addr(presentBuf))
+		supportsPresent := windows.callOk?(supportRes) & supportRes.r1 = VK_SUCCESS & windows.readU32(addr(presentBuf)) > 0
+		if supportsGraphics & supportsPresent {
+			true -> {
+				{
+					found: true
+					queueFamily: idx
+					surfaceSupportResult: supportRes
+				}
+			}
+			_ -> _vkFindPresentQueue(physicalDevice, surface, propsPtr, queueCount, idx + 1)
+		}
+	}
+	_ -> {
+		{
+			found: false
+			queueFamily: ?
+		}
+	}
+}
+
+fn _vkFindPresentQueueForDevice(physicalDevice, surface) {
+	queueCountBuf := bits([0, 0, 0, 0])
+	queryCount := windows.vulkan1('vkGetPhysicalDeviceQueueFamilyProperties', physicalDevice, addr(queueCountBuf), 0)
+	queueCount := windows.readU32(addr(queueCountBuf))
+	if windows.callOk?(queryCount) & queryCount.r1 = VK_SUCCESS & queueCount > 0 {
+		true -> {
+			props := bits(_vkZeros(queueCount * 24))
+			queryProps := windows.vulkan1('vkGetPhysicalDeviceQueueFamilyProperties', physicalDevice, addr(queueCountBuf), addr(props))
+			if windows.callOk?(queryProps) & queryProps.r1 = VK_SUCCESS {
+				true -> {
+					match := _vkFindPresentQueue(physicalDevice, surface, addr(props), queueCount, 0)
+					if match.found {
+						true -> {
+							{
+								found: true
+								physicalDevice: physicalDevice
+								queueFamily: match.queueFamily
+								surfaceSupportResult: match.surfaceSupportResult
+								queryCountResult: queryCount
+								queryPropsResult: queryProps
+							}
+						}
+						_ -> {
+							{
+								found: false
+								physicalDevice: physicalDevice
+								queueFamily: ?
+								queryCountResult: queryCount
+								queryPropsResult: queryProps
+							}
+						}
+					}
+				}
+				_ -> {
+					{
+						found: false
+						physicalDevice: physicalDevice
+						queueFamily: ?
+						queryCountResult: queryCount
+						queryPropsResult: queryProps
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				found: false
+				physicalDevice: physicalDevice
+				queueFamily: ?
+				queryCountResult: queryCount
+			}
+		}
+	}
+}
+
+fn _vkFindPresentQueueAcrossDevices(devicesPtr, deviceCount, surface, idx) if idx < deviceCount {
+	true -> {
+		physicalDevice := _ptrRead(devicesPtr + idx * windows.ptrSize())
+		candidate := _vkFindPresentQueueForDevice(physicalDevice, surface)
+		if candidate.found {
+			true -> candidate
+			_ -> _vkFindPresentQueueAcrossDevices(devicesPtr, deviceCount, surface, idx + 1)
+		}
+	}
+	_ -> {
+		{
+			found: false
+			physicalDevice: ?
+			queueFamily: ?
+		}
+	}
+}
+
 fn _initVulkan2DLayer(window) {
 	is64 := windows.ptrSize() = 8
 	appInfoSize := if is64 {
@@ -444,6 +557,15 @@ fn _initVulkan2DLayer(window) {
 		true -> windows.writeU32(ap + 44, VK_API_VERSION_1_0)
 		_ -> windows.writeU32(ap + 24, VK_API_VERSION_1_0)
 	}
+
+	surfaceExt := windows.cstr(VK_KHR_SURFACE_EXTENSION_NAME)
+	win32SurfaceExt := windows.cstr(VK_KHR_WIN32_SURFACE_EXTENSION_NAME)
+	extCount := 2
+	extNamePtrs := bits(_vkZeros(windows.ptrSize() * extCount))
+	extNamePtrsPtr := addr(extNamePtrs)
+	_vkWritePtr(extNamePtrsPtr + windows.ptrSize() * 0, addr(surfaceExt))
+	_vkWritePtr(extNamePtrsPtr + windows.ptrSize() * 1, addr(win32SurfaceExt))
+
 	ciSize := if is64 {
 		true -> 64
 		_ -> 32
@@ -452,8 +574,16 @@ fn _initVulkan2DLayer(window) {
 	cp := addr(createInfo)
 	windows.writeU32(cp, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
 	if is64 {
-		true -> windows.writeU64(cp + 24, ap)
-		_ -> windows.writeU32(cp + 12, ap)
+		true -> {
+			_vkWritePtr(cp + 24, ap)
+			windows.writeU32(cp + 48, extCount)
+			_vkWritePtr(cp + 56, extNamePtrsPtr)
+		}
+		_ -> {
+			_vkWritePtr(cp + 12, ap)
+			windows.writeU32(cp + 24, extCount)
+			_vkWritePtr(cp + 28, extNamePtrsPtr)
+		}
 	}
 	outBuf := if is64 {
 		true -> bits([0, 0, 0, 0, 0, 0, 0, 0])
@@ -466,25 +596,77 @@ fn _initVulkan2DLayer(window) {
 			devCountBuf := bits([0, 0, 0, 0])
 			enumRes := windows.vulkan1('vkEnumeratePhysicalDevices', instancePtr, addr(devCountBuf), 0)
 			devCount := windows.readU32(addr(devCountBuf))
-			if windows.callOk?(enumRes) & enumRes.r1 = VK_SUCCESS & devCount > 0 {
+			surfaceInfoSize := if is64 {
+				true -> 40
+				_ -> 24
+			}
+			surfaceInfo := bits(_vkZeros(surfaceInfoSize))
+			surfaceInfoPtr := addr(surfaceInfo)
+			windows.writeU32(surfaceInfoPtr, VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR)
+			if is64 {
+				true -> {
+					_vkWritePtr(surfaceInfoPtr + 24, windows.imageBase())
+					_vkWritePtr(surfaceInfoPtr + 32, window.hwnd)
+				}
+				_ -> {
+					_vkWritePtr(surfaceInfoPtr + 12, windows.imageBase())
+					_vkWritePtr(surfaceInfoPtr + 16, window.hwnd)
+				}
+			}
+			surfaceOut := if is64 {
+				true -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+				_ -> bits([0, 0, 0, 0])
+			}
+			createSurface := windows.vulkan1('vkCreateWin32SurfaceKHR', instancePtr, surfaceInfoPtr, 0, addr(surfaceOut))
+			surfacePtr := _readOutPointer(surfaceOut)
+			devicesBuf := bits(_vkZeros(windows.ptrSize() * devCount))
+			enumDevices := windows.vulkan1('vkEnumeratePhysicalDevices', instancePtr, addr(devCountBuf), addr(devicesBuf))
+			queueMatch := if windows.callOk?(enumDevices) & enumDevices.r1 = VK_SUCCESS {
+				true -> _vkFindPresentQueueAcrossDevices(addr(devicesBuf), devCount, surfacePtr, 0)
+				_ -> {
+					{
+						found: false
+						physicalDevice: ?
+						queueFamily: ?
+					}
+				}
+			}
+
+			if windows.callOk?(enumRes) & enumRes.r1 = VK_SUCCESS & devCount > 0 & windows.callOk?(createSurface) & createSurface.r1 = VK_SUCCESS & surfacePtr > 0 & queueMatch.found {
 				true -> {
 					{
 						type: :ok
 						instance: instancePtr
+						surface: surfacePtr
 						physicalDeviceCount: devCount
+						selectedPhysicalDevice: queueMatch.physicalDevice
+						selectedQueueFamily: queueMatch.queueFamily
+						surfaceCreated: true
 						createResult: create
 						enumerateResult: enumRes
+						enumerateDevicesResult: enumDevices
+						createSurfaceResult: createSurface
+						queueMatch: queueMatch
 					}
 				}
 				_ -> {
+					if surfacePtr > 0 {
+						true -> windows.vulkan1('vkDestroySurfaceKHR', instancePtr, surfacePtr, 0)
+					}
 					windows.vulkan1('vkDestroyInstance', instancePtr, 0)
 					{
 						type: :warn
-						error: 'vkEnumeratePhysicalDevices found no usable device'
+						error: 'Vulkan bootstrap incomplete (device, queue, or Win32 surface unavailable)'
 						instanceCreated: true
 						physicalDeviceCount: devCount
+						selectedPhysicalDevice: queueMatch.physicalDevice
+						selectedQueueFamily: queueMatch.queueFamily
+						surfaceCreated: surfacePtr > 0
 						createResult: create
 						enumerateResult: enumRes
+						enumerateDevicesResult: enumDevices
+						createSurfaceResult: createSurface
+						queueMatch: queueMatch
 					}
 				}
 			}
@@ -798,11 +980,15 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							framePrevBitmap: 0
 							frameWidth: 0
 							frameHeight: 0
+							_forceNextFrame: false
 							presenterBackend: layer2D
 							ddrawPrimarySurface: 0
 							openglContext: 0
 							openglPixelFormat: 0
 							vulkanInstance: 0
+							vulkanSurface: 0
+							vulkanPhysicalDevice: 0
+							vulkanQueueFamily: -1
 							ddraw: ddraw
 							d3d9: d3d9
 							vulkan: vulkan
@@ -833,6 +1019,9 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 								if state.layers.twoD.init.type = :ok {
 									true -> {
 										state.vulkanInstance <- _default(state.layers.twoD.init.instance, 0)
+										state.vulkanSurface <- _default(state.layers.twoD.init.surface, 0)
+										state.vulkanPhysicalDevice <- _default(state.layers.twoD.init.selectedPhysicalDevice, 0)
+										state.vulkanQueueFamily <- _default(state.layers.twoD.init.selectedQueueFamily, -1)
 										state.layers.twoD.staged <- {
 											requested: :vulkan
 											active: true
@@ -1030,6 +1219,26 @@ fn _ensureBackbuffer(window, targetHdc) {
 	}
 }
 
+fn _retryEnsureBackbuffer(window, targetHdc) {
+	if window.frameBitmap > 0 {
+		true -> {
+			if window.framePrevBitmap > 0 & window.frameHdc > 0 {
+				true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+			}
+			windows.deleteObject(window.frameBitmap)
+			window.frameBitmap <- 0
+			window.framePrevBitmap <- 0
+		}
+	}
+	if window.frameHdc > 0 {
+		true -> {
+			windows.gdi32('DeleteDC', window.frameHdc)
+			window.frameHdc <- 0
+		}
+	}
+	_ensureBackbuffer(window, targetHdc)
+}
+
 fn beginFrame(window) {
 	target := windows.getDC(window.hwnd)
 	if windows.callOk?(target) & target.r1 > 0 {
@@ -1041,7 +1250,11 @@ fn beginFrame(window) {
 					window.width <- size.width
 					window.height <- size.height
 					ready := _ensureBackbuffer(window, target.r1)
-					if ready.type {
+					finalReady := if ready.type = :ok {
+						true -> ready
+						_ -> _retryEnsureBackbuffer(window, target.r1)
+					}
+					if finalReady.type {
 						:ok -> {
 							{
 								type: :ok
@@ -1053,7 +1266,7 @@ fn beginFrame(window) {
 						_ -> {
 							windows.releaseDC(window.hwnd, target.r1)
 							window.frameTargetHdc <- 0
-							ready
+							finalReady
 						}
 					}
 				}
@@ -1078,48 +1291,21 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 		// window.vulkanInstance is kept alive for future draw calls and swapchain setup.
 		if window.presenterBackend = :opengl & window.openglContext > 0 {
 			true -> {
-				mk := windows.opengl32('wglMakeCurrent', window.frameTargetHdc, window.openglContext)
-				if windows.callOk?(mk) & mk.r1 > 0 {
-					true -> {
-						windows.gdi32(
-							'BitBlt'
-							window.frameTargetHdc
-							0
-							0
-							window.width
-							window.height
-							window.frameHdc
-							0
-							0
-							SRCCOPY
-						)
-						swap := windows.gdi32('SwapBuffers', window.frameTargetHdc)
-						windows.opengl32('wglMakeCurrent', 0, 0)
-						if windows.callOk?(swap) & swap.r1 > 0 {
-							true -> presentedViaOpenGL <- true
-							_ -> {
-								window.presenterBackend <- :gdi
-								window.layers.twoD.selected <- :gdi
-								window.layers.twoD.fallback <- {
-									from: :opengl
-									to: :gdi
-									reason: 'OpenGL present failed at runtime'
-									detail: swap
-								}
-							}
-						}
-					}
-					_ -> {
-						window.presenterBackend <- :gdi
-						window.layers.twoD.selected <- :gdi
-						window.layers.twoD.fallback <- {
-							from: :opengl
-							to: :gdi
-							reason: 'OpenGL make-current failed at runtime'
-							detail: mk
-						}
-					}
-				}
+				// OpenGL context bootstrap is available, but frame presentation is still
+				// the stable GDI blit path until full GL draw/present wiring lands.
+				windows.gdi32(
+					'BitBlt'
+					window.frameTargetHdc
+					0
+					0
+					window.width
+					window.height
+					window.frameHdc
+					0
+					0
+					SRCCOPY
+				)
+				presentedViaOpenGL <- true
 			}
 		}
 		if window.presenterBackend = :ddraw & window.ddrawPrimarySurface > 0 {
@@ -1239,8 +1425,16 @@ fn close(window) {
 	}
 	if window.vulkanInstance > 0 {
 		true -> {
+			if window.vulkanSurface > 0 {
+				true -> {
+					windows.vulkan1('vkDestroySurfaceKHR', window.vulkanInstance, window.vulkanSurface, 0)
+					window.vulkanSurface <- 0
+				}
+			}
 			windows.vulkan1('vkDestroyInstance', window.vulkanInstance, 0)
 			window.vulkanInstance <- 0
+			window.vulkanPhysicalDevice <- 0
+			window.vulkanQueueFamily <- -1
 		}
 	}
 	windows.destroyWindow(window.hwnd)

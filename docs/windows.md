@@ -35,6 +35,8 @@ windows := import('windows')
 - `Comctl32`
 - `Wininet`
 - `D3d9`
+- `Ddraw`
+- `Vulkan1`
 - `Msvcrt`
 - `Ucrtbase`
 - `Vcruntime140`
@@ -136,7 +138,7 @@ windows := import('windows')
 
 - `CS_VREDRAW`, `CS_HREDRAW`
 - `WS_OVERLAPPED`, `WS_CAPTION`, `WS_SYSMENU`, `WS_THICKFRAME`
-- `WS_MINIMIZEBOX`, `WS_MAXIMIZEBOX`, `WS_VISIBLE`, `WS_OVERLAPPEDWINDOW`
+- `WS_MINIMIZEBOX`, `WS_MAXIMIZEBOX`, `WS_VISIBLE`, `WS_CLIPSIBLINGS`, `WS_CLIPCHILDREN`, `WS_OVERLAPPEDWINDOW`
 - `CW_USEDEFAULT`
 - `WM_CREATE`, `WM_DESTROY`, `WM_PAINT`, `WM_CLOSE`, `WM_QUIT`, `WM_COMMAND`
 - `SW_HIDE`, `SW_SHOW`
@@ -215,6 +217,8 @@ Load + resolve + call helper for arbitrary DLLs.
 ### `comctl32(symbol, args...)`
 ### `wininet(symbol, args...)`
 ### `d3d9(symbol, args...)`
+### `ddraw(symbol, args...)`
+### `vulkan1(symbol, args...)`
 ### `d3dx9Dll(suffix)`
 ### `d3dx9(suffix, symbol, args...)`
 ### `msvcrt(symbol, args...)`

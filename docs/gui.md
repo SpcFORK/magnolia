@@ -67,6 +67,7 @@ Creates a window state object.
 Useful `options` fields:
 
 - `frameMs` - target idle frame step in milliseconds (default: `16`)
+- `maxFrameDtMs` - clamps per-frame `dt` after stalls (default: `250`)
 - `updateOnDispatch` - whether input/message dispatch should also trigger
     `onFrame` (default: `false`)
 - Windows icon options:
@@ -107,6 +108,7 @@ Optional frame batching helpers.
     draw stalls.
 - Windows layer selection options are available via `createWindow(..., options)`:
     - `options.layer2D`: `auto` (default), `vulkan`, `opengl`, `ddraw`, `gdi`
+    - `options.vulkanAuto`: allow `auto` to select Vulkan when available (default `false`)
         - `options.layer3D`: `auto` (default), `d3d9`, `cpu`, `none`
     Selected capabilities are exposed on `window.layers` when using the Windows backend.
 - On Linux/Web they are safe no-ops for API consistency.
@@ -193,7 +195,9 @@ Runs a simple loop:
 
 - calls `poll(window)`
 - dispatches `onEvent(window, evt)` on `:dispatch`
-- calls `onFrame(window)` on `:dispatch` and `:idle`
+- calls `onFrame(window, dt)` when a frame is due on `:dispatch` and `:idle`
+- applies `frameMs` pacing and clamps `dt` to `maxFrameDtMs` after long stalls
+- on Windows, marks resize/paint-related dispatches as urgent so the next frame is not delayed
 - exits on `:closed`
 
 ## Drawing helpers
@@ -382,8 +386,8 @@ if window.type = :ok {
 
     gui.run(window, fn(win, evt) {
         // inspect events if needed
-    }, fn(win) {
-        // optional frame callback
+    }, fn(win, dt) {
+        // optional frame callback with delta time in seconds
     })
 
     gui.close(window)

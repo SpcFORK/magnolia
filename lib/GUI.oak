@@ -189,6 +189,13 @@ FORM_WM_LBUTTONDOWN := 513
 FORM_WM_LBUTTONUP := 514
 FORM_WM_KEYDOWN := 256
 FORM_WM_CHAR := 258
+GUI_WM_SIZE := 5
+GUI_WM_PAINT := 15
+GUI_WM_ERASEBKGND := 20
+GUI_WM_SIZING := 532
+GUI_WM_WINDOWPOSCHANGED := 71
+GUI_WM_ENTERSIZEMOVE := 561
+GUI_WM_EXITSIZEMOVE := 562
 
 FORM_VK_BACK := 8
 FORM_VK_TAB := 9
@@ -759,42 +766,115 @@ fn poll(window) if window.type {
 	_ -> window
 }
 
+fn _frameIntervalNt(window) _default(window.frameMs, 16) * 1000000
+
+fn _frameMaxDtNt(window) _default(window.maxFrameDtMs, 250) * 1000000
+
+fn _markUrgentFrameIfResizeDispatch(window, step) {
+	if window.backend = :windows & step.type = :dispatch {
+		true -> {
+			msgType := windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+			isResizeRelated :=
+				(msgType = GUI_WM_SIZE) |
+				(msgType = GUI_WM_PAINT) |
+				(msgType = GUI_WM_ERASEBKGND) |
+				(msgType = GUI_WM_SIZING) |
+				(msgType = GUI_WM_WINDOWPOSCHANGED) |
+				(msgType = GUI_WM_ENTERSIZEMOVE) |
+				(msgType = GUI_WM_EXITSIZEMOVE)
+			if isResizeRelated {
+				true -> window._forceNextFrame <- true
+			}
+		}
+	}
+}
+
+fn _maybeRunFrame(window, onFrame, force) {
+	if onFrame {
+		? -> ?
+		_ -> {
+			now := nanotime()
+			next := _default(window._nextFrameNt, now)
+			if window._nextFrameNt {
+				? -> window._nextFrameNt <- next
+			}
+			forceNow := force | _default(window._forceNextFrame, false)
+			if forceNow {
+				true -> window._forceNextFrame <- false
+			}
+			due := forceNow | now >= next
+			if due {
+				true -> {
+					last := _default(window._lastFrameNt, now)
+					rawDt := now - last
+					dtNs := if rawDt < 0 {
+						true -> 0
+						_ -> if rawDt > _frameMaxDtNt(window) {
+							true -> _frameMaxDtNt(window)
+							_ -> rawDt
+						}
+					}
+					dt := float(dtNs) / 1000000000.0
+					window._lastFrameNt <- now
+					onFrame(window, dt)
+					interval := _frameIntervalNt(window)
+					now2 := nanotime()
+					scheduledBase := if forceNow {
+						true -> now2
+						_ -> next
+					}
+					scheduled := scheduledBase + interval
+					if scheduled < now2 - interval {
+						true -> window._nextFrameNt <- now2 + interval
+						_ -> window._nextFrameNt <- scheduled
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _sleepUntilNextFrame(window) {
+	if _default(window._forceNextFrame, false) {
+		true -> 0
+		_ -> {
+	now := nanotime()
+	next := _default(window._nextFrameNt, now + _frameIntervalNt(window))
+	remaining := next - now
+	if remaining > 0 {
+		true -> {
+			sleepMs := int((remaining + 999999) / 1000000)
+			if sleepMs < 1 -> sleepMs <- 1
+			if window.backend {
+				:windows -> windows.kernel32('Sleep', sleepMs)
+				:linux -> guiNativeLinux.sleepFrame(sleepMs)
+			}
+		}
+	}
+		}
+}
+}
+
 fn run(window, onEvent, onFrame) if window.type {
 	:ok -> {
 		step := poll(window)
 		if step.type {
 			:dispatch -> {
+				_markUrgentFrameIfResizeDispatch(window, step)
 				if onEvent {
 					? -> ?
 					_ -> onEvent(window, step)
 				}
 				if _default(window.updateOnDispatch, false) {
-					true -> if onFrame {
-						// compute delta time in seconds
-						now := nanotime()
-						last := _default(window._lastFrameNt, now)
-						dt := float(now - last) / 1000000000.0
-						window._lastFrameNt <- now
-						? -> ?
-						_ -> onFrame(window, dt)
-					}
+					true -> _maybeRunFrame(window, onFrame, false)
 				}
+				// Even without updateOnDispatch, render when due to prevent redraw starvation.
+				_maybeRunFrame(window, onFrame, false)
 				run(window, onEvent, onFrame)
 			}
 			:idle -> {
-				if window.backend {
-					:windows -> windows.kernel32('Sleep', _default(window.frameMs, 16))
-					:linux -> guiNativeLinux.sleepFrame(window.frameMs)
-				}
-				if onFrame {
-					// compute delta time in seconds
-					now := nanotime()
-					last := _default(window._lastFrameNt, now)
-					dt := float(now - last) / 1000000000.0
-					window._lastFrameNt <- now
-					? -> ?
-					_ -> onFrame(window, dt)
-				}
+				_sleepUntilNextFrame(window)
+				_maybeRunFrame(window, onFrame, false)
 				if window.backend = :web {
 					true -> 0
 					_ -> run(window, onEvent, onFrame)

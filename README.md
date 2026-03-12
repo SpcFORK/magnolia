@@ -112,6 +112,16 @@ magnolia help
 
 Magnolia extends Oak with powerful new features for modern development:
 
+### Latest platform updates (March 2026)
+
+- Windows GUI 2D includes Vulkan support, while default `auto` prioritizes stable presenters `opengl -> ddraw -> gdi` (`vulkanAuto` enables Vulkan in auto mode).
+- Vulkan bootstrap on Windows now validates core instance extensions (`VK_KHR_surface`, `VK_KHR_win32_surface`), creates a Win32 surface, and selects a queue family that supports both graphics and present.
+- Window state now exposes Vulkan runtime handles/selection details via `window.vulkanSurface`, `window.vulkanPhysicalDevice`, and `window.vulkanQueueFamily`.
+- Win32 class registration uses a null background brush (`hbrBackground = 0`) to reduce background flash between presents.
+- GUI frame scheduling now supports `maxFrameDtMs` clamping and urgent redraw triggering for resize-related Windows messages.
+
+See [docs/gui-native-win.md](docs/gui-native-win.md) and [docs/gui.md](docs/gui.md) for API details.
+
 ### 🎨 Enhanced Error Display
 
 Beautiful, color-coded error messages with source code context to help you quickly identify and fix issues:
