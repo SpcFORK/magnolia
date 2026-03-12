@@ -973,6 +973,11 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							className: className
 							frameMs: frameMs
 							updateOnDispatch: updateOnDispatch
+							x: 0
+							y: 0
+							visible: true
+							fullscreen: false
+							restoreBounds: ?
 							frameHdc: 0
 							frameTargetHdc: 0
 							frameBitmap: 0
@@ -1140,7 +1145,77 @@ fn showWindow(window) {
 	windows.showWindow(window.hwnd, windows.SW_SHOW)
 	windows.updateWindow(window.hwnd)
 	_applyWindowIcons(window.hwnd, window.icons)
+	window.visible <- true
 	window
+}
+
+fn hideWindow(window) {
+	windows.showWindow(window.hwnd, windows.SW_HIDE)
+	window.visible <- false
+	window
+}
+
+fn moveWindow(window, x, y) {
+	windows.user32(
+		'SetWindowPos'
+		window.hwnd
+		0
+		x
+		y
+		0
+		0
+		SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+	)
+	window.x <- x
+	window.y <- y
+	window
+}
+
+fn resizeWindow(window, width, height) {
+	windows.user32(
+		'SetWindowPos'
+		window.hwnd
+		0
+		window.x
+		window.y
+		width
+		height
+		SWP_NOZORDER | SWP_NOACTIVATE
+	)
+	window.width <- width
+	window.height <- height
+	window
+}
+
+fn setFullscreen(window, enabled) {
+	if enabled {
+		true -> {
+			if !window.fullscreen {
+				true -> window.restoreBounds <- {
+					x: window.x
+					y: window.y
+					width: window.width
+					height: window.height
+				}
+			}
+			windows.showWindow(window.hwnd, windows.SW_MAXIMIZE)
+			windows.updateWindow(window.hwnd)
+			window.fullscreen <- true
+			window.visible <- true
+			window
+		}
+		_ -> {
+			windows.showWindow(window.hwnd, windows.SW_RESTORE)
+			if window.restoreBounds != ? {
+				true -> {
+					resizeWindow(window, window.restoreBounds.width, window.restoreBounds.height)
+					moveWindow(window, window.restoreBounds.x, window.restoreBounds.y)
+				}
+			}
+			window.fullscreen <- false
+			window
+		}
+	}
 }
 
 fn setTitle(window, title) {

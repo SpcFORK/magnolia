@@ -52,6 +52,10 @@ fn createWindowState(title, width, height, frameMs, updateOnDispatch, options) {
 		title: title
 		width: width
 		height: height
+		x: _default(opts.x, 0)
+		y: _default(opts.y, 0)
+		visible: _default(opts.visible, true)
+		fullscreen: _default(opts.fullscreen, false)
 		frameMs: frameMs
 		updateOnDispatch: updateOnDispatch
 		closed: false
@@ -76,6 +80,86 @@ fn createWindowState(title, width, height, frameMs, updateOnDispatch, options) {
 			commands: []
 		}
 	}
+}
+
+fn showWindow(window) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.visible <- true
+			_webRecord(window, {
+				type: :window_show
+			})
+			window
+		}
+		_ -> _err('showWindow is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn hideWindow(window) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.visible <- false
+			_webRecord(window, {
+				type: :window_hide
+			})
+			window
+		}
+		_ -> _err('hideWindow is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn moveWindow(window, x, y) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.x <- x
+			window.y <- y
+			_webRecord(window, {
+				type: :window_move
+				x: x
+				y: y
+			})
+			window
+		}
+		_ -> _err('moveWindow is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn resizeWindow(window, width, height) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.width <- width
+			window.height <- height
+			window.canvas.width <- width
+			window.canvas.height <- height
+			window.webgl.viewport <- [0, 0, width, height]
+			_webRecord(window, {
+				type: :window_resize
+				width: width
+				height: height
+			})
+			window
+		}
+		_ -> _err('resizeWindow is only available on web backend', window.backend)
+	}
+	_ -> window
+}
+
+fn setFullscreen(window, enabled) if window.type {
+	:ok -> if window.backend {
+		:web -> {
+			window.fullscreen <- enabled
+			_webRecord(window, {
+				type: :window_fullscreen
+				enabled: enabled
+			})
+			window
+		}
+		_ -> _err('setFullscreen is only available on web backend', window.backend)
+	}
+	_ -> window
 }
 
 fn createCanvas(window, id, options) if window.type {

@@ -5,6 +5,10 @@ Win32-specific window lifecycle, event loop, and drawing helpers.
 Key exports
 
 - `createWindowState(title, width, height, frameMs, updateOnDispatch)` — create native Win32 window state
+- `showWindow(window)` / `hideWindow(window)` — show or hide a native window
+- `moveWindow(window, x, y)` — move a native window without resizing
+- `resizeWindow(window, width, height)` — resize native window bounds
+- `setFullscreen(window, enabled)` — maximize/restore fullscreen-like mode
 - helper constants and icon handling utilities
 - platform-specific frame batching to reuse device contexts
 

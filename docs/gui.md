@@ -95,6 +95,41 @@ Returns:
 
 Shows/maps the window where supported.
 
+### `hide(window)`
+
+Hides/unmaps the window where supported.
+
+### `move(window, x, y)`
+
+Moves the window top-left position where supported.
+
+- Windows: uses Win32 `SetWindowPos` without resizing.
+- Linux: uses X11 `XMoveWindow`.
+- Web: records `:window_move` middleware op and updates window state.
+
+### `resize(window, width, height)`
+
+Resizes the window where supported.
+
+- Windows: uses Win32 `SetWindowPos` with current position.
+- Linux: uses X11 `XResizeWindow`.
+- Web: updates middleware state and records `:window_resize`.
+
+### `scale(window, scaleX, scaleY?)`
+
+Scales the current window size by multipliers and applies `resize(...)`.
+
+- `scaleY` is optional; when omitted it uses `scaleX`.
+- Output dimensions are clamped to at least `1x1`.
+
+### `fullscreen(window, enabled?)`
+
+Toggles fullscreen-like behavior (default `enabled = true`).
+
+- Windows: maximize/restore via `ShowWindow`.
+- Linux: best-effort fullscreen by moving to `(0,0)` and resizing to display dimensions.
+- Web: updates middleware fullscreen state and records `:window_fullscreen`.
+
 ### `setTitle(window, title)`
 
 Sets the title where supported.

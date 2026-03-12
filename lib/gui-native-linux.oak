@@ -26,6 +26,11 @@ fn createWindowState(title, width, height, frameMs, updateOnDispatch) {
 				title: title
 				width: width
 				height: height
+				x: 10
+				y: 10
+				visible: true
+				fullscreen: false
+				restoreBounds: ?
 				display: state.display
 				window: state.window
 				screen: state.screen
@@ -44,7 +49,87 @@ fn createWindowState(title, width, height, frameMs, updateOnDispatch) {
 fn showWindow(window) {
 	linux.mapWindow(window.display, window.window)
 	linux.flush(window.display)
+	window.visible <- true
 	window
+}
+
+fn hideWindow(window) {
+	linux.unmapWindow(window.display, window.window)
+	linux.flush(window.display)
+	window.visible <- false
+	window
+}
+
+fn moveWindow(window, x, y) {
+	linux.moveWindow(window.display, window.window, x, y)
+	linux.flush(window.display)
+	window.x <- x
+	window.y <- y
+	window
+}
+
+fn resizeWindow(window, width, height) {
+	linux.resizeWindow(window.display, window.window, width, height)
+	linux.flush(window.display)
+	window.width <- width
+	window.height <- height
+	window
+}
+
+fn _displaySize(window) {
+	sw := linux.displayWidth(window.display, window.screen)
+	sh := linux.displayHeight(window.display, window.screen)
+	if linux.callOk?(sw) & linux.callOk?(sh) & sw.r1 > 0 & sh.r1 > 0 {
+		true -> {
+			type: :ok
+			width: sw.r1
+			height: sh.r1
+		}
+		_ -> {
+			type: :error
+			error: 'Could not query Linux display size'
+			detail: {
+				displayWidth: sw
+				displayHeight: sh
+			}
+		}
+	}
+}
+
+fn setFullscreen(window, enabled) {
+	if enabled {
+		true -> {
+			if !window.fullscreen {
+				true -> window.restoreBounds <- {
+					x: window.x
+					y: window.y
+					width: window.width
+					height: window.height
+				}
+			}
+			size := _displaySize(window)
+			if size.type = :ok {
+				true -> {
+					moveWindow(window, 0, 0)
+					resizeWindow(window, size.width, size.height)
+					window.fullscreen <- true
+					window.visible <- true
+					window
+				}
+				_ -> size
+			}
+		}
+		_ -> {
+			if window.restoreBounds != ? {
+				true -> {
+					resizeWindow(window, window.restoreBounds.width, window.restoreBounds.height)
+					moveWindow(window, window.restoreBounds.x, window.restoreBounds.y)
+				}
+			}
+			window.fullscreen <- false
+			window
+		}
+	}
 }
 
 fn setTitle(window, title) {
