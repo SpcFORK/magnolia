@@ -1,0 +1,224 @@
+// Windows GUI sample that hotloads each 2D layer request every 2 seconds.
+//
+// Because presenter selection is currently decided at window creation time,
+// this sample recreates the window on a timer while preserving one animated
+// scene state across transitions.
+
+{
+	println: println
+	string: string
+	int: int
+	len: len
+} := import('std')
+
+GUI := import('GUI')
+
+LAYER_DURATION := 2.0
+
+fn clampDt(dt) if dt < 0 {
+	true -> 0
+	_ -> if dt > 0.05 {
+		true -> 0.05
+		_ -> dt
+	}
+}
+
+fn stepBody(pos, vel, size, limit, scale) {
+	nextPos := pos + vel * scale
+	nextVel := vel
+	bounced := false
+	if nextPos < 0 {
+		true -> {
+			nextPos <- 0
+			nextVel <- 0 - nextVel
+			bounced <- true
+		}
+	}
+	if nextPos + size > limit {
+		true -> {
+			nextPos <- limit - size
+			nextVel <- 0 - nextVel
+			bounced <- true
+		}
+	}
+	{
+		pos: nextPos
+		vel: nextVel
+		bounced: bounced
+	}
+}
+
+fn updateScene(state, window, dt) {
+	useDt := clampDt(dt)
+	scale := useDt / 0.016
+	state.t <- state.t + useDt
+	state.layerElapsed <- state.layerElapsed + useDt
+	state.worldW <- window.width
+	state.worldH <- window.height
+
+	b1x := stepBody(state.box1x, state.box1vx, state.box1w, state.worldW, scale)
+	b1y := stepBody(state.box1y, state.box1vy, state.box1h, state.worldH, scale)
+	state.box1x <- b1x.pos
+	state.box1y <- b1y.pos
+	state.box1vx <- b1x.vel
+	state.box1vy <- b1y.vel
+	if b1x.bounced | b1y.bounced {
+		true -> state.bounces <- state.bounces + 1
+	}
+
+	b2x := stepBody(state.box2x, state.box2vx, state.box2w, state.worldW, scale)
+	b2y := stepBody(state.box2y, state.box2vy, state.box2h, state.worldH, scale)
+	state.box2x <- b2x.pos
+	state.box2y <- b2y.pos
+	state.box2vx <- b2x.vel
+	state.box2vy <- b2y.vel
+	if b2x.bounced | b2y.bounced {
+		true -> state.bounces <- state.bounces + 1
+	}
+
+	b3x := stepBody(state.box3x, state.box3vx, state.box3w, state.worldW, scale)
+	b3y := stepBody(state.box3y, state.box3vy, state.box3h, state.worldH, scale)
+	state.box3x <- b3x.pos
+	state.box3y <- b3y.pos
+	state.box3vx <- b3x.vel
+	state.box3vy <- b3y.vel
+	if b3x.bounced | b3y.bounced {
+		true -> state.bounces <- state.bounces + 1
+	}
+}
+
+fn drawScene(window, state, requestedLayer) {
+	frame := GUI.beginFrame(window)
+	if frame.type = :ok -> {
+		cx := int(state.worldW / 2)
+		cy := int(state.worldH / 2)
+		orbitX := cx + int(cos(state.t * 1.6) * 150)
+		orbitY := cy + int(sin(state.t * 1.2) * 92)
+		orbitX2 := cx + int(cos(state.t * 0.7 + 1.2) * 210)
+		orbitY2 := cy + int(sin(state.t * 1.9 + 0.6) * 40)
+		remainingMs := int((LAYER_DURATION - state.layerElapsed) * 1000)
+		if remainingMs < 0 -> remainingMs <- 0
+
+		GUI.fillRect(window, 0, 0, state.worldW, state.worldH, GUI.rgb(10, 16, 28))
+		GUI.drawGrid2D(window, 40, GUI.rgb(28, 44, 70), 0, 0)
+
+		GUI.fillRect(window, int(state.box1x), int(state.box1y), state.box1w, state.box1h, GUI.rgb(52, 168, 255))
+		GUI.fillRect(window, int(state.box2x), int(state.box2y), state.box2w, state.box2h, GUI.rgb(255, 162, 58))
+		GUI.fillRect(window, int(state.box3x), int(state.box3y), state.box3w, state.box3h, GUI.rgb(112, 224, 140))
+
+		GUI.drawLine(window, cx, cy, orbitX, orbitY, GUI.rgb(255, 220, 120))
+		GUI.drawLine(window, cx, cy, orbitX2, orbitY2, GUI.rgb(160, 210, 255))
+		GUI.drawCircle2D(window, orbitX, orbitY, 18, GUI.rgb(255, 220, 120), true)
+		GUI.drawCircle2D(window, orbitX2, orbitY2, 10, GUI.rgb(160, 210, 255), false)
+		GUI.drawRect2D(window, cx - 90, cy - 56, 180, 112, GUI.rgb(200, 120, 255), false)
+
+		GUI.drawText(window, 16, 22, 'Windows 2D Layer Hotload Sample')
+		GUI.drawText(window, 16, 46, 'requested layer: ' + requestedLayer)
+		GUI.drawText(window, 16, 70, 'active presenter: ' + string(window.layers.twoD.selected))
+		GUI.drawText(window, 16, 94, 'next hotload in ms: ' + string(remainingMs))
+		GUI.drawText(window, 16, 118, 'bounces: ' + string(state.bounces) + ' | loops: ' + string(state.loopCount))
+		if window.layers.twoD.fallback {
+			? -> ?
+			_ -> GUI.drawText(window, 16, 142,
+				'fallback: ' + string(window.layers.twoD.fallback.from) + ' -> ' + string(window.layers.twoD.fallback.to))
+		}
+		if window.layers.twoD.staged {
+			? -> ?
+			_ -> GUI.drawText(window, 16, 166,
+				'staged: ' + string(window.layers.twoD.staged.requested))
+		}
+
+		GUI.endFrame(window)
+	}
+}
+
+fn nextLayerIndex(state) {
+	next := state.layerIndex + 1
+	if next >= len(state.layers) {
+		true -> 0
+		_ -> next
+	}
+}
+
+fn runLayerWindow(state) {
+	requestedLayer := state.layers.(state.layerIndex)
+	window := GUI.createWindow('Magnolia 2D Hotload - ' + requestedLayer, 980, 600, {
+		layer2D: requestedLayer
+		frameMs: 16
+		icon: './build/magnolia.ico'
+		taskbarIcon: './build/magnolia.ico'
+		windowIcon: './build/magnolia.ico'
+	})
+
+	if window.type {
+		:ok -> {
+			GUI.show(window)
+			state.layerElapsed <- 0
+			state.advance <- false
+			drawScene(window, state, requestedLayer)
+
+			GUI.run(window, ?, fn(win, dt) {
+				updateScene(state, win, dt)
+				drawScene(win, state, requestedLayer)
+				if state.layerElapsed >= LAYER_DURATION {
+					true -> {
+						nextIndex := nextLayerIndex(state)
+						if nextIndex = 0 {
+							true -> state.loopCount <- state.loopCount + 1
+						}
+						state.layerIndex <- nextIndex
+						state.advance <- true
+						GUI.close(win)
+					}
+				}
+			})
+
+			if state.advance {
+				true -> runLayerWindow(state)
+				_ -> GUI.close(window)
+			}
+		}
+		_ -> {
+			println('Could not create window for layer: ' + requestedLayer)
+			println(string(window))
+		}
+	}
+}
+
+println('== Windows 2D Layer Hotload Sample ==')
+
+if GUI.backend() = :windows {
+	true -> {
+		state := {
+			layers: ['gdi', 'ddraw', 'opengl', 'vulkan']
+			layerIndex: 0
+			layerElapsed: 0.0
+			loopCount: 0
+			advance: false
+			t: 0.0
+			worldW: 980
+			worldH: 600
+			bounces: 0
+			box1x: 60.0
+			box1y: 90.0
+			box1vx: 4.4
+			box1vy: 3.6
+			box1w: 72
+			box1h: 72
+			box2x: 320.0
+			box2y: 220.0
+			box2vx: -3.8
+			box2vy: 4.8
+			box2w: 54
+			box2h: 54
+			box3x: 720.0
+			box3y: 160.0
+			box3vx: -5.1
+			box3vy: -3.2
+			box3w: 88
+			box3h: 42
+		}
+		runLayerWindow(state)
+	}
+	_ -> println('This sample is Windows-only.')
+}

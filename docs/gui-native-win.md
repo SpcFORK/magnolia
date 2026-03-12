@@ -54,3 +54,11 @@ Notes
 - The registered Win32 window class uses a null background brush (`hbrBackground = 0`) so frame clears are controlled by the renderer and do not flash the system background between presents.
 - When DirectDraw has a primary surface, `endFrame` attempts present via `IDirectDrawSurface7::GetDC` and GDI blit to that surface. If this per-frame present fails, the backend immediately falls back to GDI blit path for subsequent frames.
 - If Direct3D9 initialization is degraded (for example, release status is not healthy), the backend now automatically falls back to CPU for stable 3D behavior.
+
+Related samples
+
+- `samples/windows-higher-renderers.oak` — probes Vulkan/OpenGL/DDraw/D3D capability, initialization state, staged metadata, and presenter fallback.
+- `samples/windows-2d-layer-hotload.oak` — recreates the window every 2 seconds to cycle Windows 2D layer requests while keeping one animated scene alive.
+- `samples/windows-2d-layer-hotload-game.oak` — recreates the window every 2 seconds while preserving the bouncing-box game scene across Windows 2D layer requests.
+- `samples/gui-sample.oak` — cross-platform quickstart; on Windows it displays the active presenter and fallback state in the scene.
+- `samples/gui-game.oak` — bouncing-box sample with frame-rate independent motion and Windows presenter-state overlay.

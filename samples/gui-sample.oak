@@ -13,14 +13,48 @@
 
 gui := import('GUI')
 
+fn drawNative(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> {
+		gui.fillRect(window, 0, 0, window.width, window.height, gui.rgb(12, 18, 30))
+		gui.fillRect(window, 24, 52, 320, 180, gui.rgb(35, 122, 224))
+		gui.drawLine(window, 24, 260, 344, 260, gui.rgb(255, 210, 120))
+		gui.drawText(window, 24, 28, 'Hello from GUI middleware')
+		gui.drawText(window, 24, 250, 'Close the window to exit.')
+		if window.backend = :windows {
+			true -> {
+				gui.drawText(window, 390, 34, 'requested 2D layer: ' + string(window.layers.twoD.requested))
+				gui.drawText(window, 390, 58, 'active presenter: ' + string(window.layers.twoD.selected))
+				if window.layers.twoD.fallback {
+					? -> ?
+					_ -> gui.drawText(window, 390, 82,
+						'fallback: ' + string(window.layers.twoD.fallback.from) + ' -> ' + string(window.layers.twoD.fallback.to))
+				}
+				if window.layers.twoD.staged {
+					? -> ?
+					_ -> gui.drawText(window, 390, 106,
+						'staged backend: ' + string(window.layers.twoD.staged.requested))
+				}
+			}
+		}
+		gui.drawText(window, 390, 154, 'ticks: ' + string(state.ticks))
+		gui.endFrame(window)
+	}
+}
+
 fn runNative(window) {
+	state := {
+		ticks: 0
+	}
+
 	gui.show(window)
 	gui.setTitle(window, 'Magnolia GUI Middleware Sample')
-	gui.fillRect(window, 24, 52, 320, 180, gui.rgb(35, 122, 224))
-	gui.drawText(window, 24, 28, 'Hello from GUI middleware')
-	gui.drawText(window, 24, 250, 'Close the window to exit.')
+	drawNative(window, state)
 
-	loopResult := gui.run(window, ?, ?)
+	loopResult := gui.run(window, ?, fn(win, _dt) {
+		state.ticks <- state.ticks + 1
+		drawNative(win, state)
+	})
 	printf('Native loop ended with: {{ 0 }}', string(loopResult))
 	gui.close(window)
 }
@@ -60,6 +94,11 @@ println('== GUI Middleware Sample ==')
 
 window := gui.createWindow('Magnolia GUI Sample', 900, 560, {
 	canvasId: 'magnolia-gui-canvas'
+	layer2D: 'auto'
+	frameMs: 16
+	icon: './build/magnolia.ico'
+	taskbarIcon: './build/magnolia.ico'
+	windowIcon: './build/magnolia.ico'
 })
 
 if window.type {

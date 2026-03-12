@@ -1,0 +1,174 @@
+// Windows GUI sample that hotloads each 2D layer request every 2 seconds
+// while preserving the bouncing-box game scene.
+
+{
+	println: println
+	string: string
+} := import('std')
+
+GUI := import('GUI')
+
+LAYER_DURATION := 2.0
+
+fn clampDt(dt) if dt < 0 {
+	true -> 0
+	_ -> if dt > 0.05 {
+		true -> 0.05
+		_ -> dt
+	}
+}
+
+fn stepAxis(pos, vel, size, limit, scale) {
+	nextPos := pos + vel * scale
+	nextVel := vel
+	bounced := false
+	if nextPos < 0 {
+		true -> {
+			nextPos <- 0
+			nextVel <- 0 - nextVel
+			bounced <- true
+		}
+	}
+	if nextPos + size > limit {
+		true -> {
+			nextPos <- limit - size
+			nextVel <- 0 - nextVel
+			bounced <- true
+		}
+	}
+	{
+		pos: nextPos
+		vel: nextVel
+		bounced: bounced
+	}
+}
+
+fn drawGame(window, state, requestedLayer) {
+	frame := GUI.beginFrame(window)
+	if frame.type = :ok -> {
+		remainingMs := int((LAYER_DURATION - state.layerElapsed) * 1000)
+		if remainingMs < 0 -> remainingMs <- 0
+
+		GUI.fillRect(window, 0, 0, state.worldW, state.worldH, GUI.rgb(10, 18, 28))
+		GUI.drawGrid2D(window, 40, GUI.rgb(24, 40, 62), 0, 0)
+		GUI.fillRect(window, int(state.x), int(state.y), state.size, state.size, GUI.rgb(44, 162, 255))
+		GUI.drawRect2D(window, 18, 18, state.worldW - 36, state.worldH - 36, GUI.rgb(86, 132, 210), false)
+		GUI.drawLine(window, 18, state.worldH - 84, state.worldW - 18, state.worldH - 84, GUI.rgb(255, 210, 120))
+
+		GUI.drawText(window, 28, 30, 'Windows 2D Layer Hotload Game Sample')
+		GUI.drawText(window, 28, 54, 'requested layer: ' + requestedLayer)
+		GUI.drawText(window, 28, 78, 'active presenter: ' + string(window.layers.twoD.selected))
+		GUI.drawText(window, 28, 102, 'next hotload in ms: ' + string(remainingMs))
+		GUI.drawText(window, 28, 126, 'ticks: ' + string(state.ticks) + ' | bounces: ' + string(state.bounces) + ' | loops: ' + string(state.loopCount))
+		if window.layers.twoD.fallback {
+			? -> ?
+			_ -> GUI.drawText(window, 28, 150,
+				'fallback: ' + string(window.layers.twoD.fallback.from) + ' -> ' + string(window.layers.twoD.fallback.to))
+		}
+		if window.layers.twoD.staged {
+			? -> ?
+			_ -> GUI.drawText(window, 28, 174,
+				'staged: ' + string(window.layers.twoD.staged.requested))
+		}
+		GUI.drawText(window, 28, state.worldH - 64, 'The game scene persists while the window is recreated every 2 seconds.')
+		GUI.drawText(window, 28, state.worldH - 40, 'Close the window at any time to stop the loop.')
+		GUI.endFrame(window)
+	}
+}
+
+fn nextLayerIndex(state) {
+	next := state.layerIndex + 1
+	if next >= len(state.layers) {
+		true -> 0
+		_ -> next
+	}
+}
+
+fn updateGame(state, window, dt) {
+	useDt := clampDt(dt)
+	scale := useDt / 0.016
+	state.layerElapsed <- state.layerElapsed + useDt
+	state.worldW <- window.width
+	state.worldH <- window.height
+	state.ticks <- state.ticks + 1
+
+	nextX := stepAxis(state.x, state.vx, state.size, state.worldW, scale)
+	nextY := stepAxis(state.y, state.vy, state.size, state.worldH, scale)
+	state.x <- nextX.pos
+	state.y <- nextY.pos
+	state.vx <- nextX.vel
+	state.vy <- nextY.vel
+	if nextX.bounced | nextY.bounced {
+		true -> state.bounces <- state.bounces + 1
+	}
+}
+
+fn runLayerWindow(state) {
+	requestedLayer := state.layers.(state.layerIndex)
+	window := GUI.createWindow('Magnolia 2D Hotload Game - ' + requestedLayer, 960, 540, {
+		layer2D: requestedLayer
+		frameMs: 16
+		icon: './build/magnolia.ico'
+		taskbarIcon: './build/magnolia.ico'
+		windowIcon: './build/magnolia.ico'
+	})
+
+	if window.type {
+		:ok -> {
+			GUI.show(window)
+			state.layerElapsed <- 0
+			state.advance <- false
+			drawGame(window, state, requestedLayer)
+
+			GUI.run(window, ?, fn(win, dt) {
+				updateGame(state, win, dt)
+				drawGame(win, state, requestedLayer)
+				if state.layerElapsed >= LAYER_DURATION {
+					true -> {
+						nextIndex := nextLayerIndex(state)
+						if nextIndex = 0 {
+							true -> state.loopCount <- state.loopCount + 1
+						}
+						state.layerIndex <- nextIndex
+						state.advance <- true
+						GUI.close(win)
+					}
+				}
+			})
+
+			if state.advance {
+				true -> runLayerWindow(state)
+				_ -> GUI.close(window)
+			}
+		}
+		_ -> {
+			println('Could not create window for layer: ' + requestedLayer)
+			println(string(window))
+		}
+	}
+}
+
+println('== Windows 2D Layer Hotload Game Sample ==')
+
+if GUI.backend() = :windows {
+	true -> {
+		state := {
+			layers: ['gdi', 'ddraw', 'opengl', 'vulkan']
+			layerIndex: 0
+			layerElapsed: 0.0
+			loopCount: 0
+			advance: false
+			x: 140.0
+			y: 90.0
+			vx: 5.0
+			vy: 4.0
+			size: 42
+			worldW: 960
+			worldH: 540
+			ticks: 0
+			bounces: 0
+		}
+		runLayerWindow(state)
+	}
+	_ -> println('This sample is Windows-only.')
+}

@@ -449,9 +449,12 @@ The GUI middleware is implemented across several focused modules. See the module
 
 ## Samples
 
-- `samples/gui-sample.oak` - cross-platform GUI quickstart
-- `samples/gui-game.oak` - bouncing-box mini game using GUI middleware
+- `samples/gui-sample.oak` - cross-platform GUI quickstart; on Windows it also displays the requested 2D layer, active presenter, and fallback state
+- `samples/gui-game.oak` - bouncing-box mini game using GUI middleware with frame-rate independent motion and Windows presenter-state overlay
 - `samples/gui-3d.oak` - rotating wireframe cube using GUI 3D renderer
+- `samples/windows-higher-renderers.oak` - Windows renderer probe for Vulkan/OpenGL/DDraw/D3D capability and staged fallback metadata
+- `samples/windows-2d-layer-hotload.oak` - Windows-only hotload demo that recreates the window every 2 seconds to cycle `gdi`, `ddraw`, `opengl`, and `vulkan` requests while preserving one animated scene
+- `samples/windows-2d-layer-hotload-game.oak` - Windows-only hotload demo that recreates the window every 2 seconds while preserving the bouncing-box game scene across `gdi`, `ddraw`, `opengl`, and `vulkan` requests
 
 ## Module Split
 

@@ -158,7 +158,6 @@ fn _probeVulkan() {
 
 fn _select2DLayer(opts, opengl, ddraw, vulkan) {
 	requested := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
-	vulkanAuto := _default(opts.vulkanAuto, false)
 	if requested {
 		'vulkan' -> if vulkan.available {
 			true -> :vulkan
@@ -182,12 +181,12 @@ fn _select2DLayer(opts, opengl, ddraw, vulkan) {
 			_ -> :gdi
 		}
 		'gdi' -> :gdi
-		_ -> if opengl.available {
-			true -> :opengl
-			_ -> if ddraw.available {
-				true -> :ddraw
-				_ -> if vulkanAuto & vulkan.available {
-					true -> :vulkan
+		_ -> if vulkan.available {
+			true -> :vulkan
+			_ -> if opengl.available {
+				true -> :opengl
+				_ -> if ddraw.available {
+					true -> :ddraw
 					_ -> :gdi
 				}
 			}
@@ -1022,27 +1021,10 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 										state.vulkanSurface <- _default(state.layers.twoD.init.surface, 0)
 										state.vulkanPhysicalDevice <- _default(state.layers.twoD.init.selectedPhysicalDevice, 0)
 										state.vulkanQueueFamily <- _default(state.layers.twoD.init.selectedQueueFamily, -1)
-										fallbackTo := if opengl.available {
-											true -> :opengl
-											_ -> if ddraw.available {
-												true -> :ddraw
-												_ -> :gdi
-											}
-										}
-										state.layers.twoD.fallback <- {
-											from: :vulkan
-											to: fallbackTo
-											reason: 'Vulkan swapchain/present path is not wired yet; using stable presenter'
-											detail: state.layers.twoD.init
-										}
-										state.presenterBackend <- fallbackTo
-										state.layers.twoD.selected <- fallbackTo
 										state.layers.twoD.staged <- {
 											requested: :vulkan
-											active: false
-											bootstrapped: true
+											active: true
 										}
-										state.layers.twoD.init <- _init2DLayer(state)
 									}
 									_ -> {
 										fallbackTo := if opengl.available {
@@ -1063,7 +1045,6 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 										state.layers.twoD.staged <- {
 											requested: :vulkan
 											active: false
-											bootstrapped: false
 										}
 										state.layers.twoD.init <- _init2DLayer(state)
 									}
@@ -1077,18 +1058,9 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 									true -> {
 										state.openglContext <- _default(state.layers.twoD.init.context, 0)
 										state.openglPixelFormat <- _default(state.layers.twoD.init.pixelFormat, 0)
-										existingStaged := _default(state.layers.twoD.staged, ?)
-										state.layers.twoD.staged <- if type(existingStaged) = :object & _default(existingStaged.requested, ?) = :vulkan {
-											true -> {
-												requested: :vulkan
-												active: false
-												bootstrapped: _default(existingStaged.bootstrapped, false)
-												presenter: :opengl
-											}
-											_ -> {
-												requested: :opengl
-												active: true
-											}
+										state.layers.twoD.staged <- {
+											requested: :opengl
+											active: true
 										}
 									}
 									_ -> {
@@ -1318,21 +1290,48 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 		// window.vulkanInstance is kept alive for future draw calls and swapchain setup.
 		if window.presenterBackend = :opengl & window.openglContext > 0 {
 			true -> {
-				// OpenGL context bootstrap is available, but frame presentation is still
-				// the stable GDI blit path until full GL draw/present wiring lands.
-				windows.gdi32(
-					'BitBlt'
-					window.frameTargetHdc
-					0
-					0
-					window.width
-					window.height
-					window.frameHdc
-					0
-					0
-					SRCCOPY
-				)
-				presentedViaOpenGL <- true
+				mk := windows.opengl32('wglMakeCurrent', window.frameTargetHdc, window.openglContext)
+				if windows.callOk?(mk) & mk.r1 > 0 {
+					true -> {
+						windows.gdi32(
+							'BitBlt'
+							window.frameTargetHdc
+							0
+							0
+							window.width
+							window.height
+							window.frameHdc
+							0
+							0
+							SRCCOPY
+						)
+						swap := windows.gdi32('SwapBuffers', window.frameTargetHdc)
+						windows.opengl32('wglMakeCurrent', 0, 0)
+						if windows.callOk?(swap) & swap.r1 > 0 {
+							true -> presentedViaOpenGL <- true
+							_ -> {
+								window.presenterBackend <- :gdi
+								window.layers.twoD.selected <- :gdi
+								window.layers.twoD.fallback <- {
+									from: :opengl
+									to: :gdi
+									reason: 'OpenGL present failed at runtime'
+									detail: swap
+								}
+							}
+						}
+					}
+					_ -> {
+						window.presenterBackend <- :gdi
+						window.layers.twoD.selected <- :gdi
+						window.layers.twoD.fallback <- {
+							from: :opengl
+							to: :gdi
+							reason: 'OpenGL make-current failed at runtime'
+							detail: mk
+						}
+					}
+				}
 			}
 		}
 		if window.presenterBackend = :ddraw & window.ddrawPrimarySurface > 0 {
