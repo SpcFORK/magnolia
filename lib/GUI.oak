@@ -310,14 +310,53 @@ fn formDrawSecondaryButton(window, x, y, w, h, label, hover, press, baseColor, h
 	drawText(window, lx, int(y + (h / 2) - 6), label)
 }
 
-fn formDrawSlider(window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor) {
-	fillRect(window, x, y + 6, w, 4, trackColor)
-	filled := (value * (w - 12)) / maxVal
-	fillRect(window, x, y + 6, filled + 6, 4, fillColor)
-	tx := x + filled
-	fillRect(window, tx, y, 12, 16, thumbColor)
-	formDrawBorder(window, tx, y, 12, 16, thumbBorderColor)
-	drawText(window, x + w + 8, y, string(value))
+fn formDrawSlider(window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, options) {
+	opts := _default(options, {})
+	showHandle := _default(opts.showHandle, true)
+	showPercentRect := _default(opts.showPercentRect, false)
+	showTrackFill := _default(opts.showTrackFill, true)
+	handleW := _default(opts.handleWidth, 12)
+	percentRectW := _default(opts.percentRectWidth, 44)
+	percentRectColor := _default(opts.percentRectColor, fillColor)
+
+	safeMax := if maxVal > 0 { true -> maxVal, _ -> 1 }
+	clamped := if value < 0 {
+		true -> 0
+		_ -> if value > safeMax { true -> safeMax, _ -> value }
+	}
+
+	if handleW < 4 -> handleW <- 4
+	pct := int((clamped * 100) / safeMax)
+	fillW := int((pct * w) / 100)
+	if clamped > 0 & fillW < 1 -> fillW <- 1
+	if fillW > w -> fillW <- w
+
+	trackY := y + 6
+	trackH := 4
+	fillRect(window, x, trackY, w, trackH, trackColor)
+	if showTrackFill {
+		true -> if fillW > 0 -> fillRect(window, x, trackY, fillW, trackH, fillColor)
+	}
+
+	if showHandle {
+		true -> {
+			tx := x + fillW - int(handleW / 2)
+			if tx < x -> tx <- x
+			if tx > x + w - handleW -> tx <- x + w - handleW
+			fillRect(window, tx, y, handleW, 16, thumbColor)
+			formDrawBorder(window, tx, y, handleW, 16, thumbBorderColor)
+		}
+	}
+
+	if showPercentRect {
+		true -> {
+			rx := x + w + 8
+			fillRect(window, rx, y, percentRectW, 16, percentRectColor)
+			formDrawBorder(window, rx, y, percentRectW, 16, thumbBorderColor)
+			drawText(window, rx + 6, y + 2, string(pct) + '%')
+		}
+		_ -> drawText(window, x + w + 8, y, string(clamped))
+	}
 }
 
 fn formDrawNotes(window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
