@@ -173,6 +173,187 @@ fn _transformVertices(vertices, transform, i, out) gui3dmath.transformVertices(v
 
 fn drawLine(window, x1, y1, x2, y2, color) guiDraw.drawLine(window, x1, y1, x2, y2, color, rgb(215, 235, 255))
 
+fn formDrawBorder(window, x, y, w, h, color) {
+	drawLine(window, x, y, x + w, y, color)
+	drawLine(window, x, y + h, x + w, y + h, color)
+	drawLine(window, x, y, x, y + h, color)
+	drawLine(window, x + w, y, x + w, y + h, color)
+}
+
+MSG_OFF_TYPE := 8
+MSG_OFF_WPARAM := 16
+MSG_OFF_LPARAM := 24
+
+FORM_WM_MOUSEMOVE := 512
+FORM_WM_LBUTTONDOWN := 513
+FORM_WM_LBUTTONUP := 514
+FORM_WM_KEYDOWN := 256
+FORM_WM_CHAR := 258
+
+FORM_VK_BACK := 8
+FORM_VK_TAB := 9
+FORM_VK_RETURN := 13
+FORM_VK_ESCAPE := 27
+
+fn formInRect?(mx, my, rx, ry, rw, rh) {
+	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
+}
+
+fn formMsgType(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+fn formMsgWParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
+fn formMsgLParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+fn formLoWord(v) v & 65535
+fn formHiWord(v) (v >> 16) & 65535
+
+fn formPopChar(s) if len(s) > 0 {
+	true -> std.slice(s, 0, len(s) - 1)
+	_ -> ''
+}
+
+fn formNextField(current, order) {
+	fn loop(i) if i < len(order) {
+		true -> if order.(i) = current {
+			true -> if i + 1 < len(order) {
+				true -> order.(i + 1)
+				_ -> order.(0)
+			}
+			_ -> loop(i + 1)
+		}
+		_ -> order.(0)
+	}
+	loop(0)
+}
+
+fn formMaskText(s) {
+	fn loop(i, acc) if i < len(s) {
+		true -> loop(i + 1, acc + '*')
+		_ -> acc
+	}
+	loop(0, '')
+}
+
+fn formDrawField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	fillRect(window, x, y, w, h, bg)
+	formDrawBorder(window, x, y, w, h, bd)
+	display := if text = '' { true -> placeholder, _ -> text }
+	drawText(window, x + 10, int(y + (h / 2) - 6), display)
+	if focused & text != '' {
+		true -> {
+			cx := x + 10 + len(text) * 7 + 2
+			if cx < x + w - 6 {
+				true -> drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
+			}
+		}
+	}
+}
+
+fn formDrawPasswordField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	fillRect(window, x, y, w, h, bg)
+	formDrawBorder(window, x, y, w, h, bd)
+	display := if text = '' { true -> placeholder, _ -> formMaskText(text) }
+	drawText(window, x + 10, int(y + (h / 2) - 6), display)
+	if focused & text != '' {
+		true -> {
+			cx := x + 10 + len(text) * 7 + 2
+			if cx < x + w - 6 {
+				true -> drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
+			}
+		}
+	}
+}
+
+fn formDrawCheckbox(window, x, y, checked, label, fieldColor, borderColor, checkColor) {
+	fillRect(window, x, y, 16, 16, fieldColor)
+	formDrawBorder(window, x, y, 16, 16, borderColor)
+	if checked {
+		true -> fillRect(window, x + 3, y + 3, 10, 10, checkColor)
+	}
+	drawText(window, x + 24, y + 1, label)
+}
+
+fn formDrawRadio(window, x, y, selected, label, fieldColor, borderColor, accentColor) {
+	fillRect(window, x + 2, y, 12, 16, fieldColor)
+	fillRect(window, x, y + 2, 16, 12, fieldColor)
+	drawLine(window, x + 2, y, x + 14, y, borderColor)
+	drawLine(window, x + 2, y + 16, x + 14, y + 16, borderColor)
+	drawLine(window, x, y + 2, x, y + 14, borderColor)
+	drawLine(window, x + 16, y + 2, x + 16, y + 14, borderColor)
+	if selected {
+		true -> fillRect(window, x + 5, y + 5, 7, 7, accentColor)
+	}
+	drawText(window, x + 24, y + 1, label)
+}
+
+fn formDrawPrimaryButton(window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, bottomLineColor) {
+	c := if press {
+		true -> pressColor
+		_ -> if hover { true -> hoverColor, _ -> baseColor }
+	}
+	fillRect(window, x, y, w, h, c)
+	drawLine(window, x, y + h, x + w, y + h, bottomLineColor)
+	lx := int(x + (w - len(label) * 7) / 2)
+	drawText(window, lx, int(y + (h / 2) - 6), label)
+}
+
+fn formDrawSecondaryButton(window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, borderColor) {
+	c := if press {
+		true -> pressColor
+		_ -> if hover { true -> hoverColor, _ -> baseColor }
+	}
+	fillRect(window, x, y, w, h, c)
+	formDrawBorder(window, x, y, w, h, borderColor)
+	lx := int(x + (w - len(label) * 7) / 2)
+	drawText(window, lx, int(y + (h / 2) - 6), label)
+}
+
+fn formDrawSlider(window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor) {
+	fillRect(window, x, y + 6, w, 4, trackColor)
+	filled := (value * (w - 12)) / maxVal
+	fillRect(window, x, y + 6, filled + 6, 4, fillColor)
+	tx := x + filled
+	fillRect(window, tx, y, 12, 16, thumbColor)
+	formDrawBorder(window, tx, y, 12, 16, thumbBorderColor)
+	drawText(window, x + w + 8, y, string(value))
+}
+
+fn formDrawNotes(window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	fillRect(window, x, y, w, h, bg)
+	formDrawBorder(window, x, y, w, h, bd)
+	if !focused & len(lines) > 0 & lines.(0) = '' {
+		true -> drawText(window, x + 8, y + 8, placeholder)
+	}
+	fn drawLines(i) if i < len(lines) & i < 3 {
+		true -> {
+			drawText(window, x + 8, y + 8 + i * 18, lines.(i))
+			drawLines(i + 1)
+		}
+	}
+	drawLines(0)
+	if focused {
+		true -> {
+			lastIdx := if len(lines) > 0 { true -> len(lines) - 1, _ -> 0 }
+			lastLine := if len(lines) > 0 { true -> lines.(lastIdx), _ -> '' }
+			vis := if lastIdx < 3 { true -> lastIdx, _ -> 2 }
+			cx := x + 8 + len(lastLine) * 7 + 2
+			drawLine(window, cx, y + 8 + vis * 18, cx, y + 8 + vis * 18 + 13, cursorColor)
+		}
+	}
+}
+
+fn formDrawStatusBanner(window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor) {
+	accent := if ok { true -> successColor, _ -> errorColor }
+	fillRect(window, x, y, w, h, fieldColor)
+	fillRect(window, x, y, 4, h, accent)
+	formDrawBorder(window, x, y, w, h, borderColor)
+	drawText(window, x + 12, y + 8, message)
+}
+
 fn Vec2(x, y) gui2d.Vec2(x, y)
 fn Rect2(x, y, width, height) gui2d.Rect2(x, y, width, height)
 fn vec2Add(a, b) gui2d.vec2Add(a, b)

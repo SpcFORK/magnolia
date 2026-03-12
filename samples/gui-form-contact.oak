@@ -22,7 +22,6 @@
 } := import('std')
 
 gui     := import('GUI')
-windows := import('windows')
 
 // ─── Colours ───────────────────────────────────────────────────────────────
 
@@ -31,7 +30,7 @@ C_PANEL      := gui.rgb(28, 34, 48)
 C_HEADER     := gui.rgb(34, 56, 130)
 C_FIELD      := gui.rgb(14, 17, 26)
 C_FIELD_FOC  := gui.rgb(17, 23, 42)
-C_BORDER     := gui.rgb(48, 58, 82)
+C_BORDER     := gui.rgb(66, 78, 106)
 C_BORDER_FOC := gui.rgb(68, 126, 250)
 C_BTN_P      := gui.rgb(46, 98, 222)
 C_BTN_PH     := gui.rgb(66, 124, 255)
@@ -46,41 +45,10 @@ C_CURSOR     := gui.rgb(118, 178, 255)
 C_ROW_A      := gui.rgb(24, 30, 44)
 C_ROW_B      := gui.rgb(30, 38, 56)
 C_SUCCESS    := gui.rgb(68, 208, 116)
+C_ERROR      := gui.rgb(240, 78, 82)
 C_CHECK_ON   := gui.rgb(46, 98, 222)
 
-// ─── Win32 MSG layout ──────────────────────────────────────────────────────
-
-MSG_OFF_TYPE   := 8
-MSG_OFF_WPARAM := 16
-MSG_OFF_LPARAM := 24
-
-WM_MOUSEMOVE   := 512
-WM_LBUTTONDOWN := 513
-WM_LBUTTONUP   := 514
-WM_CHAR        := 258
-WM_KEYDOWN     := 256
-
-VK_BACK   := 8
-VK_TAB    := 9
-VK_RETURN := 13
-VK_ESCAPE := 27
-
-fn msgType(w)   windows.readU32(addr(w.msgBuf) + MSG_OFF_TYPE)
-fn msgWParam(w) windows.readU32(addr(w.msgBuf) + MSG_OFF_WPARAM)
-fn msgLParam(w) windows.readU32(addr(w.msgBuf) + MSG_OFF_LPARAM)
-fn loword(v)    v & 65535
-fn hiword(v)    (v >> 16) & 65535
-
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-fn inRect?(mx, my, rx, ry, rw, rh) {
-	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
-}
-
-fn popChar(s) if len(s) > 0 {
-	true -> slice(s, 0, len(s) - 1)
-	_    -> ''
-}
 
 fn truncate(s, maxChars) if len(s) > maxChars {
 	true -> slice(s, 0, maxChars) + '..'
@@ -90,105 +58,6 @@ fn truncate(s, maxChars) if len(s) > maxChars {
 // Ordered list of focusable field keys
 FIELD_ORDER := [:first, :last, :email, :phone, :company, :notes]
 
-fn nextField(current) {
-	fn loop(i) if i < len(FIELD_ORDER) {
-		true -> if FIELD_ORDER.(i) = current {
-			true -> if i + 1 < len(FIELD_ORDER) {
-				true -> FIELD_ORDER.(i + 1)
-				_ -> FIELD_ORDER.(0)
-			}
-			_ -> loop(i + 1)
-		}
-		_ -> FIELD_ORDER.(0)
-	}
-	loop(0)
-}
-
-// ─── Drawing primitives ────────────────────────────────────────────────────
-
-fn drawBorder(window, x, y, w, h, color) {
-	gui.drawLine(window, x,     y,     x + w, y,     color)
-	gui.drawLine(window, x,     y + h, x + w, y + h, color)
-	gui.drawLine(window, x,     y,     x,     y + h, color)
-	gui.drawLine(window, x + w, y,     x + w, y + h, color)
-}
-
-fn drawFieldBox(window, x, y, w, h, text, placeholder, focused) {
-	bg     := if focused { true -> C_FIELD_FOC, _ -> C_FIELD }
-	border := if focused { true -> C_BORDER_FOC, _ -> C_BORDER }
-	gui.fillRect(window, x, y, w, h, bg)
-	drawBorder(window, x, y, w, h, border)
-	display := if text = '' { true -> placeholder, _ -> text }
-	gui.drawText(window, x + 8, y + (h / 2) - 6, display)
-	if focused & text != '' {
-		true -> {
-			cx := x + 8 + len(text) * 7 + 2
-			if cx < x + w - 6 {
-				true -> gui.drawLine(window, cx, y + 6, cx, y + h - 7, C_CURSOR)
-			}
-		}
-	}
-}
-
-fn drawNotesBox(window, x, y, w, h, lines, focused) {
-	bg     := if focused { true -> C_FIELD_FOC, _ -> C_FIELD }
-	border := if focused { true -> C_BORDER_FOC, _ -> C_BORDER }
-	gui.fillRect(window, x, y, w, h, bg)
-	drawBorder(window, x, y, w, h, border)
-	fn drawLines(i) if i < len(lines) & i < 3 {
-		true -> {
-			gui.drawText(window, x + 8, y + 8 + i * 18, lines.(i))
-			drawLines(i + 1)
-		}
-	}
-	drawLines(0)
-	// Cursor after last line
-	if focused {
-		true -> {
-			lastIdx := if len(lines) > 0 { true -> len(lines) - 1, _ -> 0 }
-			lastLine := if len(lines) > 0 { true -> lines.(lastIdx), _ -> '' }
-			vis := if lastIdx < 3 { true -> lastIdx, _ -> 2 }
-			cx  := x + 8 + len(lastLine) * 7 + 2
-			gui.drawLine(window, cx, y + 8 + vis * 18, cx, y + 8 + vis * 18 + 13, C_CURSOR)
-		}
-	}
-}
-
-fn drawRadio(window, x, y, selected, label) {
-	gui.fillRect(window, x + 2, y,     12, 16, C_FIELD)
-	gui.fillRect(window, x,     y + 2, 16, 12, C_FIELD)
-	gui.drawLine(window, x + 2, y,      x + 14, y,      C_BORDER)
-	gui.drawLine(window, x + 2, y + 16, x + 14, y + 16, C_BORDER)
-	gui.drawLine(window, x,     y + 2,  x,      y + 14, C_BORDER)
-	gui.drawLine(window, x + 16, y + 2, x + 16, y + 14, C_BORDER)
-	if selected {
-		true -> gui.fillRect(window, x + 5, y + 5, 7, 7, C_ACCENT)
-	}
-	gui.drawText(window, x + 24, y + 1, label)
-}
-
-fn drawPrimaryBtn(window, x, y, w, h, label, hover, press) {
-	c := if press {
-		true -> C_BTN_PP
-		_ -> if hover { true -> C_BTN_PH, _ -> C_BTN_P }
-	}
-	gui.fillRect(window, x, y, w, h, c)
-	gui.drawLine(window, x, y + h, x + w, y + h, gui.rgb(18, 54, 145))
-	lx := x + (w - len(label) * 7) / 2
-	gui.drawText(window, lx, y + (h / 2) - 6, label)
-}
-
-fn drawSecondaryBtn(window, x, y, w, h, label, hover, press) {
-	c := if press {
-		true -> C_BTN_SP
-		_ -> if hover { true -> C_BTN_SH, _ -> C_BTN_S }
-	}
-	gui.fillRect(window, x, y, w, h, c)
-	drawBorder(window, x, y, w, h, C_BORDER)
-	lx := x + (w - len(label) * 7) / 2
-	gui.drawText(window, lx, y + (h / 2) - 6, label)
-}
-
 // ─── Full form render ──────────────────────────────────────────────────────
 
 fn drawForm(window, state) {
@@ -197,94 +66,101 @@ fn drawForm(window, state) {
 
 	W := window.width
 	H := window.height
+	lo := layout(W, H)
 
 	// Background
 	gui.fillRect(window, 0, 0, W, H, C_BG)
 
 	// ── Header
 	gui.fillRect(window, 0, 0, W, 46, C_HEADER)
-	gui.drawText(window, 14, 16, 'M  MAGNOLIA APP  –  New Contact')
+	gui.drawText(window, 14, 16, 'M  MAGNOLIA APP  |  New Contact')
 
-	// ── Form panel (left / centre)
-	px := 12
-	py := 54
-	pw := W - 24
-	ph := 310
-	gui.fillRect(window, px, py, pw, ph, C_PANEL)
-	drawBorder(window, px, py, pw, ph, C_BORDER)
-
-	fy := py + 12
-	col1x := px + 12
-	col2x := px + pw / 2 + 6
-	colW  := pw / 2 - 18
+	// ── Form panel
+	gui.fillRect(window, lo.px, lo.py, lo.pw, lo.ph, C_PANEL)
+	gui.formDrawBorder(window, lo.px, lo.py, lo.pw, lo.ph, C_BORDER)
+	gui.drawText(window, lo.col1x, lo.py + 14, 'Contact Details')
+	gui.drawLine(window, lo.col1x, lo.py + 28, lo.px + lo.pw - 12, lo.py + 28, C_BORDER)
 
 	// Row 1: First Name / Last Name
-	gui.drawText(window, col1x, fy, 'First Name')
-	drawFieldBox(window, col1x, fy + 16, colW, 28, state.first, 'John', state.focus = :first)
+	gui.drawText(window, lo.col1x, lo.fFirst.y - 16, 'First Name')
+	gui.formDrawField(window, lo.fFirst.x, lo.fFirst.y, lo.fFirst.w, lo.fFirst.h,
+		state.first, 'John', state.focus = :first,
+		C_FIELD, C_FIELD_FOC, C_BORDER, C_BORDER_FOC, C_CURSOR)
 
-	gui.drawText(window, col2x, fy, 'Last Name')
-	drawFieldBox(window, col2x, fy + 16, colW, 28, state.last, 'Doe', state.focus = :last)
+	gui.drawText(window, lo.col2x, lo.fLast.y - 16, 'Last Name')
+	gui.formDrawField(window, lo.fLast.x, lo.fLast.y, lo.fLast.w, lo.fLast.h,
+		state.last, 'Doe', state.focus = :last,
+		C_FIELD, C_FIELD_FOC, C_BORDER, C_BORDER_FOC, C_CURSOR)
 
 	// Row 2: Email / Phone
-	fy <- fy + 60
-	gui.drawText(window, col1x, fy, 'Email')
-	drawFieldBox(window, col1x, fy + 16, colW, 28, state.email, 'user@example.com', state.focus = :email)
+	gui.drawText(window, lo.col1x, lo.fEmail.y - 16, 'Email')
+	gui.formDrawField(window, lo.fEmail.x, lo.fEmail.y, lo.fEmail.w, lo.fEmail.h,
+		state.email, 'user@example.com', state.focus = :email,
+		C_FIELD, C_FIELD_FOC, C_BORDER, C_BORDER_FOC, C_CURSOR)
 
-	gui.drawText(window, col2x, fy, 'Phone')
-	drawFieldBox(window, col2x, fy + 16, colW, 28, state.phone, '+1 555 000 0000', state.focus = :phone)
+	gui.drawText(window, lo.col2x, lo.fPhone.y - 16, 'Phone')
+	gui.formDrawField(window, lo.fPhone.x, lo.fPhone.y, lo.fPhone.w, lo.fPhone.h,
+		state.phone, '+1 555 000 0000', state.focus = :phone,
+		C_FIELD, C_FIELD_FOC, C_BORDER, C_BORDER_FOC, C_CURSOR)
 
 	// Row 3: Company (full width)
-	fy <- fy + 60
-	gui.drawText(window, col1x, fy, 'Company')
-	drawFieldBox(window, col1x, fy + 16, pw - 24, 28, state.company, 'Acme Corp', state.focus = :company)
+	gui.drawText(window, lo.col1x, lo.fCompany.y - 16, 'Company')
+	gui.formDrawField(window, lo.fCompany.x, lo.fCompany.y, lo.fCompany.w, lo.fCompany.h,
+		state.company, 'Acme Corp', state.focus = :company,
+		C_FIELD, C_FIELD_FOC, C_BORDER, C_BORDER_FOC, C_CURSOR)
 
 	// Row 4: Role radio group
-	fy <- fy + 60
-	gui.drawText(window, col1x, fy, 'Role')
-	radioGap := 130
-	drawRadio(window, col1x,              fy + 16, state.role = :dev,     'Developer')
-	drawRadio(window, col1x + radioGap,   fy + 16, state.role = :design,  'Designer')
-	drawRadio(window, col1x + radioGap*2, fy + 16, state.role = :mgr,     'Manager')
-	drawRadio(window, col1x + radioGap*3, fy + 16, state.role = :other,   'Other')
+	gui.drawText(window, lo.col1x, lo.rDevY - 16, 'Role')
+	gui.formDrawRadio(window, lo.rDevX,  lo.rDevY,  state.role = :dev,    'Developer', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, lo.rDesgX, lo.rDesgY, state.role = :design, 'Designer', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, lo.rMgrX,  lo.rMgrY,  state.role = :mgr,    'Manager', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, lo.rOthX,  lo.rOthY,  state.role = :other,  'Other', C_FIELD, C_BORDER, C_ACCENT)
 
 	// Row 5: Notes (multi-line)
-	fy <- fy + 52
-	gui.drawText(window, col1x, fy, 'Notes')
-	drawNotesBox(window, col1x, fy + 16, pw - 24, 62, state.notesLines, state.focus = :notes)
+	gui.drawText(window, lo.col1x, lo.fNotes.y - 16, 'Notes')
+	gui.formDrawNotes(window, lo.fNotes.x, lo.fNotes.y, lo.fNotes.w, lo.fNotes.h,
+		state.notesLines, state.focus = :notes, 'Add optional notes...',
+		C_FIELD, C_FIELD_FOC, C_BORDER, C_BORDER_FOC, C_CURSOR)
 
 	// ── Action buttons
-	btnY := py + ph + 12
-	bW   := 110
-	bH   := 34
-	drawPrimaryBtn(window, col1x, btnY, bW, bH, 'SAVE', state.hoverSave, state.pressSave)
-	drawSecondaryBtn(window, col1x + bW + 12, btnY, bW, bH, 'RESET', state.hoverReset, state.pressReset)
+	gui.formDrawPrimaryButton(window, lo.bSavX, lo.bBtnY, lo.bW, lo.bH, 'SAVE', state.hoverSave, state.pressSave,
+		C_BTN_P, C_BTN_PH, C_BTN_PP, gui.rgb(18, 54, 145))
+	gui.formDrawSecondaryButton(window, lo.bResX, lo.bBtnY, lo.bW, lo.bH, 'RESET', state.hoverReset, state.pressReset,
+		C_BTN_S, C_BTN_SH, C_BTN_SP, C_BORDER)
 
 	if state.status != '' {
-		true -> gui.drawText(window, col1x + bW * 2 + 32, btnY + 10, state.status)
+		true -> {
+			gui.formDrawStatusBanner(window, lo.statusX, lo.statusY, lo.statusW, lo.statusH,
+				state.status, state.statusOk, C_FIELD, C_BORDER, C_SUCCESS, C_ERROR)
+		}
 	}
 
 	// ── Saved contacts list
-	listY := btnY + bH + 14
-	gui.drawText(window, px + 12, listY, 'Saved Contacts  (' + string(len(state.contacts)) + ')')
-	gui.drawLine(window, px + 12, listY + 16, px + pw - 12, listY + 16, C_BORDER)
+	gui.fillRect(window, lo.listX, lo.listY, lo.listW, lo.listH, C_PANEL)
+	gui.formDrawBorder(window, lo.listX, lo.listY, lo.listW, lo.listH, C_BORDER)
+	gui.drawText(window, lo.listX + 12, lo.listY + 10, 'Saved Contacts  (' + string(len(state.contacts)) + ')')
+	gui.fillRect(window, lo.listX + 1, lo.listY + 26, lo.listW - 2, 22, C_ROW_B)
+	gui.drawText(window, lo.listNameX, lo.listY + 32, 'Name')
+	gui.drawText(window, lo.listEmailX, lo.listY + 32, 'Email')
+	gui.drawText(window, lo.listRoleX, lo.listY + 32, 'Role')
 
 	rowH := 22
 	fn drawContacts(i) if i < len(state.contacts) {
 		true -> {
 			contact := state.contacts.(i)
-			rowY    := listY + 20 + i * rowH
-			if rowY + rowH < H - 4 {
+			rowY    := lo.listY + 50 + i * rowH
+			if rowY + rowH < lo.listY + lo.listH - 4 {
 				true -> {
 					rowBg := if i % 2 = 0 { true -> C_ROW_A, _ -> C_ROW_B }
-					gui.fillRect(window, px + 1, rowY, pw - 2, rowH, rowBg)
-					nameStr  := truncate(contact.first + ' ' + contact.last, 22)
-					emailStr := truncate(contact.email, 26)
+					gui.fillRect(window, lo.listX + 1, rowY, lo.listW - 2, rowH, rowBg)
+					nameStr  := truncate(contact.first + ' ' + contact.last, 24)
+					emailStr := truncate(contact.email, 30)
 					roleStr  := if contact.role = :dev    { true -> 'Developer', _ ->
 					            if contact.role = :design { true -> 'Designer',  _ ->
 					            if contact.role = :mgr    { true -> 'Manager',   _ -> 'Other' }}}
-					gui.drawText(window, px + 12, rowY + 5, nameStr)
-					gui.drawText(window, px + 200, rowY + 5, emailStr)
-					gui.drawText(window, px + 430, rowY + 5, roleStr)
+					gui.drawText(window, lo.listNameX, rowY + 5, nameStr)
+					gui.drawText(window, lo.listEmailX, rowY + 5, emailStr)
+					gui.drawText(window, lo.listRoleX, rowY + 5, roleStr)
 				}
 			}
 			drawContacts(i + 1)
@@ -293,7 +169,7 @@ fn drawForm(window, state) {
 	drawContacts(0)
 
 	if len(state.contacts) = 0 {
-		true -> gui.drawText(window, px + 12, listY + 26, 'No contacts saved yet.')
+		true -> gui.drawText(window, lo.listX + 12, lo.listY + 56, 'No contacts saved yet.')
 	}
 
 	gui.endFrame(window)
@@ -305,24 +181,34 @@ fn layout(W, H) {
 	px   := 12
 	py   := 54
 	pw   := W - 24
-	ph   := 310
-	fy0  := py + 12
+	ph   := 332
+	fy0  := py + 34
 	col1x := px + 12
-	col2x := px + pw / 2 + 6
-	colW := pw / 2 - 18
+	col2x := px + int(pw / 2) + 6
+	colW := int(pw / 2) - 18
 	btnY := py + ph + 12
 	bW   := 110
 	bH   := 34
+	listY := btnY + bH + 14
+	listH := H - listY - 10
+	listNameX := px + 12
+	listEmailX := px + int(pw / 2) - 76
+	listRoleX := px + pw - 116
+	statusX := px + 250
+	statusY := btnY
+	statusW := pw - 262
+	statusH := bH
 
 	// Row y-positions
 	row1Y := fy0 + 16
-	row2Y := fy0 + 60 + 16
-	row3Y := fy0 + 120 + 16
-	row4Y := fy0 + 180 + 16
-	row5Y := fy0 + 232 + 16
+	row2Y := row1Y + 58
+	row3Y := row2Y + 58
+	row4Y := row3Y + 56
+	row5Y := row4Y + 52
 
 	{
-		col1x: col1x, col2x: col2x, colW: colW, pw: pw
+		px: px, py: py, pw: pw, ph: ph
+		col1x: col1x, col2x: col2x, colW: colW
 		// field rects (x, y, w, h)
 		fFirst:   { x: col1x, y: row1Y, w: colW,    h: 28 }
 		fLast:    { x: col2x, y: row1Y, w: colW,    h: 28 }
@@ -339,6 +225,11 @@ fn layout(W, H) {
 		// buttons
 		bSavX: col1x,         bResX: col1x + bW + 12
 		bBtnY: btnY,          bW: bW, bH: bH
+		// contacts list panel
+		listX: px, listY: listY, listW: pw, listH: listH
+		listNameX: listNameX, listEmailX: listEmailX, listRoleX: listRoleX
+		// status banner
+		statusX: statusX, statusY: statusY, statusW: statusW, statusH: statusH
 	}
 }
 
@@ -375,6 +266,7 @@ fn initState(W, H) {
 		hoverReset: false
 		pressReset: false
 		status:     ''
+		statusOk:   true
 		lo:         lo
 	}
 }
@@ -406,7 +298,7 @@ fn notesBackspace(lines) {
 				true -> {
 					line := lines.(i)
 					if i = last {
-						true -> build(i + 1, acc << popChar(line))
+						true -> build(i + 1, acc << gui.formPopChar(line))
 						_ -> build(i + 1, acc << line)
 					}
 				}
@@ -454,12 +346,12 @@ fn validContact?(state) {
 // ─── Field key from rect hit ───────────────────────────────────────────────
 
 fn focusFromClick(mx, my, lo) {
-	if inRect?(mx, my, lo.fFirst.x,   lo.fFirst.y,   lo.fFirst.w,   lo.fFirst.h)   -> :first
-	if inRect?(mx, my, lo.fLast.x,    lo.fLast.y,    lo.fLast.w,    lo.fLast.h)    -> :last
-	if inRect?(mx, my, lo.fEmail.x,   lo.fEmail.y,   lo.fEmail.w,   lo.fEmail.h)   -> :email
-	if inRect?(mx, my, lo.fPhone.x,   lo.fPhone.y,   lo.fPhone.w,   lo.fPhone.h)   -> :phone
-	if inRect?(mx, my, lo.fCompany.x, lo.fCompany.y, lo.fCompany.w, lo.fCompany.h) -> :company
-	if inRect?(mx, my, lo.fNotes.x,   lo.fNotes.y,   lo.fNotes.w,   lo.fNotes.h)  -> :notes
+	if gui.formInRect?(mx, my, lo.fFirst.x,   lo.fFirst.y,   lo.fFirst.w,   lo.fFirst.h)   -> :first
+	if gui.formInRect?(mx, my, lo.fLast.x,    lo.fLast.y,    lo.fLast.w,    lo.fLast.h)    -> :last
+	if gui.formInRect?(mx, my, lo.fEmail.x,   lo.fEmail.y,   lo.fEmail.w,   lo.fEmail.h)   -> :email
+	if gui.formInRect?(mx, my, lo.fPhone.x,   lo.fPhone.y,   lo.fPhone.w,   lo.fPhone.h)   -> :phone
+	if gui.formInRect?(mx, my, lo.fCompany.x, lo.fCompany.y, lo.fCompany.w, lo.fCompany.h) -> :company
+	if gui.formInRect?(mx, my, lo.fNotes.x,   lo.fNotes.y,   lo.fNotes.w,   lo.fNotes.h)  -> :notes
 	?
 }
 
@@ -475,42 +367,42 @@ fn appendChar(state, c) {
 }
 
 fn backspaceField(state) {
-	if state.focus = :first   -> state.first   <- popChar(state.first)
-	if state.focus = :last    -> state.last    <- popChar(state.last)
-	if state.focus = :email   -> state.email   <- popChar(state.email)
-	if state.focus = :phone   -> state.phone   <- popChar(state.phone)
-	if state.focus = :company -> state.company <- popChar(state.company)
+	if state.focus = :first   -> state.first   <- gui.formPopChar(state.first)
+	if state.focus = :last    -> state.last    <- gui.formPopChar(state.last)
+	if state.focus = :email   -> state.email   <- gui.formPopChar(state.email)
+	if state.focus = :phone   -> state.phone   <- gui.formPopChar(state.phone)
+	if state.focus = :company -> state.company <- gui.formPopChar(state.company)
 	if state.focus = :notes   -> state.notesLines <- notesBackspace(state.notesLines)
 }
 
 // ─── Event handler ─────────────────────────────────────────────────────────
 
 fn onEvent(window, step, state) if step.type = :dispatch -> {
-	mt := msgType(window)
-	wp := msgWParam(window)
-	lp := msgLParam(window)
-	mx := loword(lp)
-	my := hiword(lp)
-	lo := state.lo
+	mt := gui.formMsgType(window)
+	wp := gui.formMsgWParam(window)
+	lp := gui.formMsgLParam(window)
+	mx := gui.formLoWord(lp)
+	my := gui.formHiWord(lp)
+	lo := layout(window.width, window.height)
 
-	if mt = WM_MOUSEMOVE -> {
-		state.hoverSave  <- inRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH)
-		state.hoverReset <- inRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH)
+	if mt = gui.FORM_WM_MOUSEMOVE -> {
+		state.hoverSave  <- gui.formInRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH)
+		state.hoverReset <- gui.formInRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH)
 	}
 
-	if mt = WM_LBUTTONDOWN -> {
+	if mt = gui.FORM_WM_LBUTTONDOWN -> {
 		// Field focus
 		foc := focusFromClick(mx, my, lo)
 		if foc != ? -> state.focus <- foc
 
 		// Role radios
-		if inRect?(mx, my, lo.rDevX,  lo.rDevY,  40, 16) -> state.role <- :dev
-		if inRect?(mx, my, lo.rDesgX, lo.rDesgY, 40, 16) -> state.role <- :design
-		if inRect?(mx, my, lo.rMgrX,  lo.rMgrY,  40, 16) -> state.role <- :mgr
-		if inRect?(mx, my, lo.rOthX,  lo.rOthY,  40, 16) -> state.role <- :other
+		if gui.formInRect?(mx, my, lo.rDevX,  lo.rDevY,  40, 16) -> state.role <- :dev
+		if gui.formInRect?(mx, my, lo.rDesgX, lo.rDesgY, 40, 16) -> state.role <- :design
+		if gui.formInRect?(mx, my, lo.rMgrX,  lo.rMgrY,  40, 16) -> state.role <- :mgr
+		if gui.formInRect?(mx, my, lo.rOthX,  lo.rOthY,  40, 16) -> state.role <- :other
 
 		// SAVE
-		if inRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH) -> {
+		if gui.formInRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH) -> {
 			state.pressSave <- true
 			if validContact?(state) {
 				true -> {
@@ -525,15 +417,17 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 					state.notesLines <- ['']
 					state.focus      <- :first
 					state.status     <- 'Contact saved!'
+					state.statusOk   <- true
 				}
 				_ -> {
 					state.status <- 'First name, last name, and email are required.'
+					state.statusOk <- false
 				}
 			}
 		}
 
 		// RESET
-		if inRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH) -> {
+		if gui.formInRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH) -> {
 			state.pressReset <- true
 			state.first      <- ''
 			state.last       <- ''
@@ -544,32 +438,36 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 			state.notesLines <- ['']
 			state.focus      <- :first
 			state.status     <- ''
+			state.statusOk   <- true
 		}
 	}
 
-	if mt = WM_LBUTTONUP -> {
+	if mt = gui.FORM_WM_LBUTTONUP -> {
 		state.pressSave  <- false
 		state.pressReset <- false
 	}
 
 	// Printable character
-	if mt = WM_CHAR & wp >= 32 & wp < 127 -> {
-		appendChar(state, codepoint(wp))
+	if mt = gui.FORM_WM_CHAR -> {
+		if wp != ? & wp >= 32 & wp < 127 {
+			true -> appendChar(state, char(wp))
+		}
 	}
 
 	// Control keys
-	if mt = WM_KEYDOWN -> {
-		if wp = VK_BACK -> backspaceField(state)
-		if wp = VK_TAB  -> state.focus <- nextField(state.focus)
-		if wp = VK_RETURN & state.focus = :notes -> {
+	if mt = gui.FORM_WM_KEYDOWN -> {
+		if wp = gui.FORM_VK_BACK -> backspaceField(state)
+		if wp = gui.FORM_VK_TAB  -> state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
+		if wp = gui.FORM_VK_RETURN & state.focus = :notes -> {
 			state.notesLines <- notesNewLine(state.notesLines)
 		}
-		if wp = VK_RETURN & state.focus != :notes -> {
-			state.focus <- nextField(state.focus)
+		if wp = gui.FORM_VK_RETURN & state.focus != :notes -> {
+			state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
 		}
-		if wp = VK_ESCAPE -> {
+		if wp = gui.FORM_VK_ESCAPE -> {
 			state.focus  <- :first
 			state.status <- ''
+			state.statusOk <- true
 		}
 	}
 }

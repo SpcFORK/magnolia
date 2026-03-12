@@ -18,7 +18,6 @@
 } := import('std')
 
 gui     := import('GUI')
-windows := import('windows')
 
 // ─── Colours ───────────────────────────────────────────────────────────────
 
@@ -41,103 +40,15 @@ C_LABEL      := gui.rgb(142, 162, 196)
 C_ACCENT     := gui.rgb(106, 162, 255)
 C_CHECK_ON   := gui.rgb(46, 98, 222)
 C_SUCCESS    := gui.rgb(68, 208, 116)
+C_ERROR      := gui.rgb(240, 78, 82)
 C_SLIDER_TRK := gui.rgb(40, 50, 72)
 C_SLIDER_THB := gui.rgb(80, 138, 255)
 
-// ─── Win32 MSG layout ──────────────────────────────────────────────────────
-
-MSG_OFF_TYPE   := 8
-MSG_OFF_WPARAM := 16
-MSG_OFF_LPARAM := 24
-
-WM_MOUSEMOVE   := 512
-WM_LBUTTONDOWN := 513
-WM_LBUTTONUP   := 514
-
-fn msgType(w)   windows.readU32(addr(w.msgBuf) + MSG_OFF_TYPE)
-fn msgLParam(w) windows.readU32(addr(w.msgBuf) + MSG_OFF_LPARAM)
-fn loword(v)    v & 65535
-fn hiword(v)    (v >> 16) & 65535
-
 // ─── Geometry ──────────────────────────────────────────────────────────────
-
-fn inRect?(mx, my, rx, ry, rw, rh) {
-	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
-}
 
 fn clamp(v, lo, hi) if v < lo {
 	true -> lo
 	_ -> if v > hi { true -> hi, _ -> v }
-}
-
-// ─── Drawing primitives ────────────────────────────────────────────────────
-
-fn drawBorder(window, x, y, w, h, color) {
-	gui.drawLine(window, x,     y,     x + w, y,     color)
-	gui.drawLine(window, x,     y + h, x + w, y + h, color)
-	gui.drawLine(window, x,     y,     x,     y + h, color)
-	gui.drawLine(window, x + w, y,     x + w, y + h, color)
-}
-
-fn drawCheckbox(window, x, y, checked, label) {
-	gui.fillRect(window, x, y, 16, 16, C_FIELD)
-	drawBorder(window, x, y, 16, 16, C_BORDER)
-	if checked {
-		true -> gui.fillRect(window, x + 3, y + 3, 10, 10, C_CHECK_ON)
-	}
-	gui.drawText(window, x + 24, y + 1, label)
-}
-
-fn drawRadio(window, x, y, selected, label) {
-	// draw circle approximation as a square with corners
-	gui.fillRect(window, x + 2, y,     12, 16, C_FIELD)
-	gui.fillRect(window, x,     y + 2, 16, 12, C_FIELD)
-	gui.drawLine(window, x + 2, y,           x + 14, y,           C_BORDER)
-	gui.drawLine(window, x + 2, y + 16,      x + 14, y + 16,      C_BORDER)
-	gui.drawLine(window, x,     y + 2,        x,      y + 14,      C_BORDER)
-	gui.drawLine(window, x + 16, y + 2,       x + 16, y + 14,     C_BORDER)
-	if selected {
-		true -> {
-			gui.fillRect(window, x + 5, y + 5, 7, 7, C_ACCENT)
-		}
-	}
-	gui.drawText(window, x + 24, y + 1, label)
-}
-
-fn drawSlider(window, x, y, w, value, maxVal) {
-	// Track
-	gui.fillRect(window, x, y + 6, w, 4, C_SLIDER_TRK)
-	// Filled portion
-	filled := (value * (w - 12)) / maxVal
-	gui.fillRect(window, x, y + 6, filled + 6, 4, C_ACCENT)
-	// Thumb
-	tx := x + filled
-	gui.fillRect(window, tx, y, 12, 16, C_SLIDER_THB)
-	drawBorder(window, tx, y, 12, 16, gui.rgb(50, 100, 200))
-	// Value label
-	gui.drawText(window, x + w + 8, y, string(value))
-}
-
-fn drawPrimaryBtn(window, x, y, w, h, label, hover, press) {
-	c := if press {
-		true -> C_BTN_PP
-		_ -> if hover { true -> C_BTN_PH, _ -> C_BTN_P }
-	}
-	gui.fillRect(window, x, y, w, h, c)
-	gui.drawLine(window, x, y + h, x + w, y + h, gui.rgb(18, 54, 145))
-	lx := x + (w - len(label) * 7) / 2
-	gui.drawText(window, lx, y + (h / 2) - 6, label)
-}
-
-fn drawSecondaryBtn(window, x, y, w, h, label, hover, press) {
-	c := if press {
-		true -> C_BTN_SP
-		_ -> if hover { true -> C_BTN_SH, _ -> C_BTN_S }
-	}
-	gui.fillRect(window, x, y, w, h, c)
-	drawBorder(window, x, y, w, h, C_BORDER)
-	lx := x + (w - len(label) * 7) / 2
-	gui.drawText(window, lx, y + (h / 2) - 6, label)
 }
 
 // ─── Content panels ────────────────────────────────────────────────────────
@@ -146,69 +57,72 @@ fn drawGeneralPanel(window, cx, cy, cw, ch, state) {
 	gui.drawText(window, cx + 16, cy + 16, 'General Settings')
 	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
 
-	drawCheckbox(window, cx + 16, cy + 48, state.autoSave,      'Auto-save changes')
-	drawCheckbox(window, cx + 16, cy + 74, state.autoUpdate,    'Check for updates automatically')
-	drawCheckbox(window, cx + 16, cy + 100, state.sendTelemetry, 'Send anonymous usage data')
-	drawCheckbox(window, cx + 16, cy + 126, state.showWelcome,   'Show welcome screen on startup')
+	gui.formDrawCheckbox(window, cx + 16, cy + 48, state.autoSave, 'Auto-save changes', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 74, state.autoUpdate, 'Check for updates automatically', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 100, state.sendTelemetry, 'Send anonymous usage data', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 126, state.showWelcome, 'Show welcome screen on startup', C_FIELD, C_BORDER, C_CHECK_ON)
 
 	gui.drawLine(window, cx + 16, cy + 158, cx + cw - 16, cy + 158, C_BORDER)
 	gui.drawText(window, cx + 16, cy + 170, 'Language')
 
-	drawRadio(window, cx + 16, cy + 190, state.lang = :en, 'English')
-	drawRadio(window, cx + 16, cy + 214, state.lang = :es, 'Espanol')
-	drawRadio(window, cx + 16, cy + 238, state.lang = :fr, 'Francais')
+	gui.formDrawRadio(window, cx + 16, cy + 190, state.lang = :en, 'English', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, cx + 16, cy + 214, state.lang = :es, 'Espanol', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, cx + 16, cy + 238, state.lang = :fr, 'Francais', C_FIELD, C_BORDER, C_ACCENT)
 }
 
 fn drawDisplayPanel(window, cx, cy, cw, ch, state) {
 	gui.drawText(window, cx + 16, cy + 16, 'Display Settings')
 	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
 
-	drawCheckbox(window, cx + 16, cy + 48,  state.fullscreen,  'Fullscreen mode')
-	drawCheckbox(window, cx + 16, cy + 74,  state.showFPS,     'Show FPS counter')
-	drawCheckbox(window, cx + 16, cy + 100, state.vsync,       'Enable VSync')
-	drawCheckbox(window, cx + 16, cy + 126, state.hiDPI,       'High-DPI scaling')
+	gui.formDrawCheckbox(window, cx + 16, cy + 48, state.fullscreen, 'Fullscreen mode', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 74, state.showFPS, 'Show FPS counter', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 100, state.vsync, 'Enable VSync', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 126, state.hiDPI, 'High-DPI scaling', C_FIELD, C_BORDER, C_CHECK_ON)
 
 	gui.drawLine(window, cx + 16, cy + 158, cx + cw - 16, cy + 158, C_BORDER)
 	gui.drawText(window, cx + 16, cy + 170, 'Theme')
 
-	drawRadio(window, cx + 16, cy + 190, state.theme = :dark,   'Dark')
-	drawRadio(window, cx + 16, cy + 214, state.theme = :light,  'Light')
-	drawRadio(window, cx + 16, cy + 238, state.theme = :system, 'System default')
+	gui.formDrawRadio(window, cx + 16, cy + 190, state.theme = :dark, 'Dark', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, cx + 16, cy + 214, state.theme = :light, 'Light', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, cx + 16, cy + 238, state.theme = :system, 'System default', C_FIELD, C_BORDER, C_ACCENT)
 }
 
 fn drawAudioPanel(window, cx, cy, cw, ch, state) {
 	gui.drawText(window, cx + 16, cy + 16, 'Audio Settings')
 	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
 
-	drawCheckbox(window, cx + 16, cy + 48,  state.soundEnabled, 'Enable sound effects')
-	drawCheckbox(window, cx + 16, cy + 74,  state.musicEnabled, 'Enable background music')
-	drawCheckbox(window, cx + 16, cy + 100, state.notifSound,   'Notification sounds')
+	gui.formDrawCheckbox(window, cx + 16, cy + 48, state.soundEnabled, 'Enable sound effects', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 74, state.musicEnabled, 'Enable background music', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 100, state.notifSound, 'Notification sounds', C_FIELD, C_BORDER, C_CHECK_ON)
 
 	gui.drawLine(window, cx + 16, cy + 132, cx + cw - 16, cy + 132, C_BORDER)
 	gui.drawText(window, cx + 16, cy + 144, 'Master Volume')
-	drawSlider(window, cx + 16, cy + 164, cw - 80, state.masterVol, 100)
+	gui.formDrawSlider(window, cx + 16, cy + 164, cw - 80, state.masterVol, 100,
+		C_SLIDER_TRK, C_ACCENT, C_SLIDER_THB, gui.rgb(50, 100, 200))
 
 	gui.drawText(window, cx + 16, cy + 196, 'Music Volume')
-	drawSlider(window, cx + 16, cy + 216, cw - 80, state.musicVol, 100)
+	gui.formDrawSlider(window, cx + 16, cy + 216, cw - 80, state.musicVol, 100,
+		C_SLIDER_TRK, C_ACCENT, C_SLIDER_THB, gui.rgb(50, 100, 200))
 
 	gui.drawText(window, cx + 16, cy + 248, 'Effects Volume')
-	drawSlider(window, cx + 16, cy + 268, cw - 80, state.effectsVol, 100)
+	gui.formDrawSlider(window, cx + 16, cy + 268, cw - 80, state.effectsVol, 100,
+		C_SLIDER_TRK, C_ACCENT, C_SLIDER_THB, gui.rgb(50, 100, 200))
 }
 
 fn drawNetworkPanel(window, cx, cy, cw, ch, state) {
 	gui.drawText(window, cx + 16, cy + 16, 'Network Settings')
 	gui.drawLine(window, cx + 16, cy + 32, cx + cw - 16, cy + 32, C_BORDER)
 
-	drawCheckbox(window, cx + 16, cy + 48,  state.netEnabled,   'Enable network access')
-	drawCheckbox(window, cx + 16, cy + 74,  state.syncCloud,    'Sync settings to cloud')
-	drawCheckbox(window, cx + 16, cy + 100, state.offlineMode,  'Offline mode')
+	gui.formDrawCheckbox(window, cx + 16, cy + 48, state.netEnabled, 'Enable network access', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 74, state.syncCloud, 'Sync settings to cloud', C_FIELD, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, cx + 16, cy + 100, state.offlineMode, 'Offline mode', C_FIELD, C_BORDER, C_CHECK_ON)
 
 	gui.drawLine(window, cx + 16, cy + 132, cx + cw - 16, cy + 132, C_BORDER)
 	gui.drawText(window, cx + 16, cy + 144, 'Connection')
 
-	drawRadio(window, cx + 16, cy + 164, state.connType = :auto,     'Automatic')
-	drawRadio(window, cx + 16, cy + 188, state.connType = :wifi,     'Wi-Fi only')
-	drawRadio(window, cx + 16, cy + 212, state.connType = :ethernet, 'Ethernet only')
+	gui.formDrawRadio(window, cx + 16, cy + 164, state.connType = :auto, 'Automatic', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, cx + 16, cy + 188, state.connType = :wifi, 'Wi-Fi only', C_FIELD, C_BORDER, C_ACCENT)
+	gui.formDrawRadio(window, cx + 16, cy + 212, state.connType = :ethernet, 'Ethernet only', C_FIELD, C_BORDER, C_ACCENT)
 }
 
 // ─── Full form render ──────────────────────────────────────────────────────
@@ -227,7 +141,7 @@ fn drawForm(window, state) {
 
 	// ── Header strip
 	gui.fillRect(window, 0, 0, W, 46, C_HEADER)
-	gui.drawText(window, 14, 16, 'M  MAGNOLIA APP  –  Settings')
+	gui.drawText(window, 14, 16, 'M  MAGNOLIA APP  |  Settings')
 
 	// ── Sidebar
 	sideW := 160
@@ -253,7 +167,7 @@ fn drawForm(window, state) {
 					true -> gui.fillRect(window, sideX, ny, sideW, navH, C_NAV_HOVER)
 				}
 			}
-			gui.drawText(window, sideX + 16, ny + (navH / 2) - 6, cat)
+			gui.drawText(window, sideX + 16, int(ny + (navH / 2) - 6), cat)
 			i <- i + 1
 			drawNavItems()
 		}
@@ -283,11 +197,20 @@ fn drawForm(window, state) {
 	bCanX := W - 16 - btnW * 2 - 12
 	bBtnY := footY + 10
 
-	drawPrimaryBtn(window, bSavX, bBtnY, btnW, btnH, 'SAVE', state.hoverSave, state.pressSave)
-	drawSecondaryBtn(window, bCanX, bBtnY, btnW, btnH, 'CANCEL', state.hoverCancel, state.pressCancel)
+	gui.formDrawPrimaryButton(window, bSavX, bBtnY, btnW, btnH, 'SAVE', state.hoverSave, state.pressSave,
+		C_BTN_P, C_BTN_PH, C_BTN_PP, gui.rgb(18, 54, 145))
+	gui.formDrawSecondaryButton(window, bCanX, bBtnY, btnW, btnH, 'CANCEL', state.hoverCancel, state.pressCancel,
+		C_BTN_S, C_BTN_SH, C_BTN_SP, C_BORDER)
 
 	if state.status != '' {
-		true -> gui.drawText(window, 16, footY + 18, state.status)
+		true -> {
+			stX := 16
+			stY := bBtnY
+			stW := bCanX - 28
+			stH := btnH
+			gui.formDrawStatusBanner(window, stX, stY, stW, stH, state.status,
+				state.statusOk, C_FIELD, C_BORDER, C_SUCCESS, C_ERROR)
+		}
 	}
 
 	gui.endFrame(window)
@@ -337,6 +260,7 @@ fn initState(W, H) {
 		hoverCancel:  false
 		pressCancel:  false
 		status:       ''
+		statusOk:     true
 		// Layout
 		sideW: sideW
 		navH:  navH
@@ -361,7 +285,7 @@ fn catHitIndex(mx, my, sideW, navH, sideY, count) {
 	fn loop(i) if i < count {
 		true -> {
 			ny := sideY + i * navH
-			if inRect?(mx, my, 0, ny, sideW, navH) {
+			if gui.formInRect?(mx, my, 0, ny, sideW, navH) {
 				true -> i
 				_ -> loop(i + 1)
 			}
@@ -372,124 +296,133 @@ fn catHitIndex(mx, my, sideW, navH, sideY, count) {
 }
 
 // Determine which slider is under mx, if any (returns :vol_master / :vol_music / :vol_effects / :none)
-fn sliderHit(mx, my, state) if state.category = 2 {
+fn sliderHit(mx, my, category, sliderCX, sliderW) if category = 2 {
 	true -> {
-		cx  := state.sideW + 1
 		cy  := 46
-		sw  := state.sliderW
-		scx := state.sliderCX
-		if inRect?(mx, my, scx, cy + 164, sw, 16) { true -> :master, _ ->
-		if inRect?(mx, my, scx, cy + 216, sw, 16) { true -> :music, _ ->
-		if inRect?(mx, my, scx, cy + 268, sw, 16) { true -> :effects, _ -> :none }}}
+		if gui.formInRect?(mx, my, sliderCX, cy + 164, sliderW, 16) { true -> :master, _ ->
+		if gui.formInRect?(mx, my, sliderCX, cy + 216, sliderW, 16) { true -> :music, _ ->
+		if gui.formInRect?(mx, my, sliderCX, cy + 268, sliderW, 16) { true -> :effects, _ -> :none }}}
 	}
 	_ -> :none
 }
 
-fn sliderValue(mx, state, sliderX) {
-	sw := state.sliderW
-	v  := ((mx - sliderX) * 100) / (sw - 12)
+fn sliderValue(mx, sliderX, sliderW) {
+	v  := ((mx - sliderX) * 100) / (sliderW - 12)
 	clamp(v, 0, 100)
 }
 
 // ─── Event handler ─────────────────────────────────────────────────────────
 
 fn onEvent(window, step, state) if step.type = :dispatch -> {
-	mt := msgType(window)
-	lp := msgLParam(window)
-	mx := loword(lp)
-	my := hiword(lp)
+	mt := gui.formMsgType(window)
+	lp := gui.formMsgLParam(window)
+	mx := gui.formLoWord(lp)
+	my := gui.formHiWord(lp)
 
+	W := window.width
+	H := window.height
+	sideW := 160
+	navH := 38
 	sideY := 46
-	footY := state.footY
+	footY := H - 50
+	btnW := 110
+	btnH := 30
+	bSavX := W - 16 - btnW
+	bCanX := W - 16 - btnW * 2 - 12
+	bBtnY := footY + 10
+	sliderCX := sideW + 1 + 16
+	sliderW := W - sideW - 1 - 80
 
-	if mt = WM_MOUSEMOVE -> {
-		hovIdx := catHitIndex(mx, my, state.sideW, state.navH, sideY, len(CATEGORIES))
+	if mt = gui.FORM_WM_MOUSEMOVE -> {
+		hovIdx := catHitIndex(mx, my, sideW, navH, sideY, len(CATEGORIES))
 		state.hovCat <- hovIdx
 
-		state.hoverSave   <- inRect?(mx, my, state.bSavX, state.bBtnY, state.btnW, state.btnH)
-		state.hoverCancel <- inRect?(mx, my, state.bCanX, state.bBtnY, state.btnW, state.btnH)
+		state.hoverSave   <- gui.formInRect?(mx, my, bSavX, bBtnY, btnW, btnH)
+		state.hoverCancel <- gui.formInRect?(mx, my, bCanX, bBtnY, btnW, btnH)
 
 		// Slider dragging
 		if state.dragSlider = :master -> {
-			state.masterVol <- sliderValue(mx, state, state.sliderCX)
+			state.masterVol <- sliderValue(mx, sliderCX, sliderW)
 		}
 		if state.dragSlider = :music -> {
-			state.musicVol <- sliderValue(mx, state, state.sliderCX)
+			state.musicVol <- sliderValue(mx, sliderCX, sliderW)
 		}
 		if state.dragSlider = :effects -> {
-			state.effectsVol <- sliderValue(mx, state, state.sliderCX)
+			state.effectsVol <- sliderValue(mx, sliderCX, sliderW)
 		}
 	}
 
-	if mt = WM_LBUTTONDOWN -> {
+	if mt = gui.FORM_WM_LBUTTONDOWN -> {
 		// Category nav click
-		navIdx := catHitIndex(mx, my, state.sideW, state.navH, sideY, len(CATEGORIES))
+		navIdx := catHitIndex(mx, my, sideW, navH, sideY, len(CATEGORIES))
 		if navIdx >= 0 -> state.category <- navIdx
 
 		// Save button
-		if inRect?(mx, my, state.bSavX, state.bBtnY, state.btnW, state.btnH) -> {
+		if gui.formInRect?(mx, my, bSavX, bBtnY, btnW, btnH) -> {
 			state.pressSave <- true
 			state.status    <- 'Settings saved.'
+			state.statusOk  <- true
 		}
 
 		// Cancel button
-		if inRect?(mx, my, state.bCanX, state.bBtnY, state.btnW, state.btnH) -> {
+		if gui.formInRect?(mx, my, bCanX, bBtnY, btnW, btnH) -> {
 			state.pressCancel <- true
 			state.status      <- ''
+			state.statusOk    <- true
 		}
 
 		// General: checkboxes
 		if state.category = 0 -> {
-			cx := state.sideW + 1 + 16
+			cx := sideW + 1 + 16
 			cy := 46
-			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.autoSave      <- !state.autoSave
-			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.autoUpdate    <- !state.autoUpdate
-			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.sendTelemetry <- !state.sendTelemetry
-			if inRect?(mx, my, cx, cy + 126, 16, 16) -> state.showWelcome   <- !state.showWelcome
-			if inRect?(mx, my, cx, cy + 190, 40, 16) -> state.lang <- :en
-			if inRect?(mx, my, cx, cy + 214, 40, 16) -> state.lang <- :es
-			if inRect?(mx, my, cx, cy + 238, 40, 16) -> state.lang <- :fr
+			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.autoSave      <- !state.autoSave
+			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.autoUpdate    <- !state.autoUpdate
+			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.sendTelemetry <- !state.sendTelemetry
+			if gui.formInRect?(mx, my, cx, cy + 126, 16, 16) -> state.showWelcome   <- !state.showWelcome
+			if gui.formInRect?(mx, my, cx, cy + 190, 40, 16) -> state.lang <- :en
+			if gui.formInRect?(mx, my, cx, cy + 214, 40, 16) -> state.lang <- :es
+			if gui.formInRect?(mx, my, cx, cy + 238, 40, 16) -> state.lang <- :fr
 		}
 
 		// Display: checkboxes + theme radios
 		if state.category = 1 -> {
-			cx := state.sideW + 1 + 16
+			cx := sideW + 1 + 16
 			cy := 46
-			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.fullscreen <- !state.fullscreen
-			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.showFPS    <- !state.showFPS
-			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.vsync      <- !state.vsync
-			if inRect?(mx, my, cx, cy + 126, 16, 16) -> state.hiDPI      <- !state.hiDPI
-			if inRect?(mx, my, cx, cy + 190, 40, 16) -> state.theme <- :dark
-			if inRect?(mx, my, cx, cy + 214, 40, 16) -> state.theme <- :light
-			if inRect?(mx, my, cx, cy + 238, 40, 16) -> state.theme <- :system
+			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.fullscreen <- !state.fullscreen
+			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.showFPS    <- !state.showFPS
+			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.vsync      <- !state.vsync
+			if gui.formInRect?(mx, my, cx, cy + 126, 16, 16) -> state.hiDPI      <- !state.hiDPI
+			if gui.formInRect?(mx, my, cx, cy + 190, 40, 16) -> state.theme <- :dark
+			if gui.formInRect?(mx, my, cx, cy + 214, 40, 16) -> state.theme <- :light
+			if gui.formInRect?(mx, my, cx, cy + 238, 40, 16) -> state.theme <- :system
 		}
 
 		// Audio: checkboxes + slider grab
 		if state.category = 2 -> {
-			cx := state.sideW + 1 + 16
+			cx := sideW + 1 + 16
 			cy := 46
-			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.soundEnabled <- !state.soundEnabled
-			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.musicEnabled <- !state.musicEnabled
-			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.notifSound   <- !state.notifSound
+			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.soundEnabled <- !state.soundEnabled
+			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.musicEnabled <- !state.musicEnabled
+			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.notifSound   <- !state.notifSound
 			// Slider grab
-			hit := sliderHit(mx, my, state)
+			hit := sliderHit(mx, my, state.category, sliderCX, sliderW)
 			if hit != :none -> state.dragSlider <- hit
 		}
 
 		// Network: checkboxes + radios
 		if state.category = 3 -> {
-			cx := state.sideW + 1 + 16
+			cx := sideW + 1 + 16
 			cy := 46
-			if inRect?(mx, my, cx, cy + 48, 16, 16)  -> state.netEnabled  <- !state.netEnabled
-			if inRect?(mx, my, cx, cy + 74, 16, 16)  -> state.syncCloud   <- !state.syncCloud
-			if inRect?(mx, my, cx, cy + 100, 16, 16) -> state.offlineMode <- !state.offlineMode
-			if inRect?(mx, my, cx, cy + 164, 40, 16) -> state.connType <- :auto
-			if inRect?(mx, my, cx, cy + 188, 40, 16) -> state.connType <- :wifi
-			if inRect?(mx, my, cx, cy + 212, 40, 16) -> state.connType <- :ethernet
+			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.netEnabled  <- !state.netEnabled
+			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.syncCloud   <- !state.syncCloud
+			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.offlineMode <- !state.offlineMode
+			if gui.formInRect?(mx, my, cx, cy + 164, 40, 16) -> state.connType <- :auto
+			if gui.formInRect?(mx, my, cx, cy + 188, 40, 16) -> state.connType <- :wifi
+			if gui.formInRect?(mx, my, cx, cy + 212, 40, 16) -> state.connType <- :ethernet
 		}
 	}
 
-	if mt = WM_LBUTTONUP -> {
+	if mt = gui.FORM_WM_LBUTTONUP -> {
 		state.pressSave    <- false
 		state.pressCancel  <- false
 		state.dragSlider   <- :none
