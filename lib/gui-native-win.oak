@@ -27,6 +27,10 @@ DDSCAPS_PRIMARYSURFACE := 512
 PFD_DRAW_TO_WINDOW := 4
 PFD_SUPPORT_OPENGL := 32
 PFD_DOUBLEBUFFER := 1
+VK_STRUCTURE_TYPE_APPLICATION_INFO := 0
+VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO := 1
+VK_SUCCESS := 0
+VK_API_VERSION_1_0 := 4194304
 
 fn _probeDdraw() {
 	loaded := windows.loadDll(windows.Ddraw)
@@ -115,9 +119,48 @@ fn _probeOpenGL() {
 	}
 }
 
-fn _select2DLayer(opts, opengl, ddraw) {
+fn _probeVulkan() {
+	loaded := windows.loadDll(windows.Vulkan1)
+	if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.Vulkan1, 'vkCreateInstance').type = :ok
+			hasDestroy := windows.resolveInLoaded(windows.Vulkan1, 'vkDestroyInstance').type = :ok
+			hasEnumerate := windows.resolveInLoaded(windows.Vulkan1, 'vkEnumeratePhysicalDevices').type = :ok
+			canUseVulkan := hasCreate & hasDestroy & hasEnumerate
+			{
+				available: canUseVulkan
+				library: windows.Vulkan1
+				handle: loaded.handle
+				backend: if canUseVulkan {
+					true -> :vulkan
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.Vulkan1
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _select2DLayer(opts, opengl, ddraw, vulkan) {
 	requested := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
 	if requested {
+		'vulkan' -> if vulkan.available {
+			true -> :vulkan
+			_ -> if opengl.available {
+				true -> :opengl
+				_ -> if ddraw.available {
+					true -> :ddraw
+					_ -> :gdi
+				}
+			}
+		}
 		'opengl' -> if opengl.available {
 			true -> :opengl
 			_ -> if ddraw.available {
@@ -130,14 +173,14 @@ fn _select2DLayer(opts, opengl, ddraw) {
 			_ -> :gdi
 		}
 		'gdi' -> :gdi
-		_ -> if ddraw.available {
-			true -> if opengl.available {
-				true -> :opengl
-				_ -> :ddraw
-			}
+		_ -> if vulkan.available {
+			true -> :vulkan
 			_ -> if opengl.available {
 				true -> :opengl
-				_ -> :gdi
+				_ -> if ddraw.available {
+					true -> :ddraw
+					_ -> :gdi
+				}
 			}
 		}
 	}
@@ -380,7 +423,88 @@ fn _initOpenGL2DLayer(window) {
 	}
 }
 
+fn _vkZeros(n) {
+	fn z(n, acc) if n {
+		0 -> acc
+		_ -> z(n - 1, acc << 0)
+	}
+	z(n, [])
+}
+
+fn _initVulkan2DLayer(window) {
+	is64 := windows.ptrSize() = 8
+	appInfoSize := if is64 {
+		true -> 48
+		_ -> 28
+	}
+	appInfo := bits(_vkZeros(appInfoSize))
+	ap := addr(appInfo)
+	windows.writeU32(ap, VK_STRUCTURE_TYPE_APPLICATION_INFO)
+	if is64 {
+		true -> windows.writeU32(ap + 44, VK_API_VERSION_1_0)
+		_ -> windows.writeU32(ap + 24, VK_API_VERSION_1_0)
+	}
+	ciSize := if is64 {
+		true -> 64
+		_ -> 32
+	}
+	createInfo := bits(_vkZeros(ciSize))
+	cp := addr(createInfo)
+	windows.writeU32(cp, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
+	if is64 {
+		true -> windows.writeU64(cp + 24, ap)
+		_ -> windows.writeU32(cp + 12, ap)
+	}
+	outBuf := if is64 {
+		true -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+		_ -> bits([0, 0, 0, 0])
+	}
+	create := windows.vulkan1('vkCreateInstance', cp, 0, addr(outBuf))
+	instancePtr := _readOutPointer(outBuf)
+	if windows.callOk?(create) & create.r1 = VK_SUCCESS & instancePtr > 0 {
+		true -> {
+			devCountBuf := bits([0, 0, 0, 0])
+			enumRes := windows.vulkan1('vkEnumeratePhysicalDevices', instancePtr, addr(devCountBuf), 0)
+			devCount := windows.readU32(addr(devCountBuf))
+			if windows.callOk?(enumRes) & enumRes.r1 = VK_SUCCESS & devCount > 0 {
+				true -> {
+					{
+						type: :ok
+						instance: instancePtr
+						physicalDeviceCount: devCount
+						createResult: create
+						enumerateResult: enumRes
+					}
+				}
+				_ -> {
+					windows.vulkan1('vkDestroyInstance', instancePtr, 0)
+					{
+						type: :warn
+						error: 'vkEnumeratePhysicalDevices found no usable device'
+						instanceCreated: true
+						physicalDeviceCount: devCount
+						createResult: create
+						enumerateResult: enumRes
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'vkCreateInstance failed'
+				createResult: create
+				vkResult: if windows.callOk?(create) {
+					true -> create.r1
+					_ -> ?
+				}
+			}
+		}
+	}
+}
+
 fn _init2DLayer(window) if window.presenterBackend {
+	:vulkan -> _initVulkan2DLayer(window)
 	:opengl -> _initOpenGL2DLayer(window)
 	:ddraw -> {
 		fn freshOutBuffer() if windows.ptrSize() {
@@ -628,15 +752,20 @@ fn _applyWindowIcons(hwnd, iconState) {
 fn createWindowState(title, width, height, options, className, frameMs, updateOnDispatch) {
 	opts := _default(options, {})
 	opengl := _probeOpenGL()
+	vulkan := _probeVulkan()
 	ddraw := _probeDdraw()
 	d3d9 := _probeD3d9()
-	layer2D := _select2DLayer(opts, opengl, ddraw)
+	layer2D := _select2DLayer(opts, opengl, ddraw, vulkan)
 	layer3D := _select3DLayer(opts, d3d9)
+	classStyle := windows.CS_HREDRAW | windows.CS_VREDRAW | if layer2D = :opengl | layer2D = :vulkan {
+		true -> windows.CS_OWNDC
+		_ -> 0
+	}
 	lock_thread()
 	classIcons := resolveWindowIcons(opts)
 	classBigIcon := classIcons.big
 	classSmallIcon := classIcons.small
-	reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?)
+	reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?, classStyle)
 	if windows.callOk?(reg) & reg.r1 = 0 {
 		true -> {
 			unlock_thread()
@@ -673,12 +802,15 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							ddrawPrimarySurface: 0
 							openglContext: 0
 							openglPixelFormat: 0
+							vulkanInstance: 0
 							ddraw: ddraw
 							d3d9: d3d9
+							vulkan: vulkan
 							layers: {
 								twoD: {
 									requested: _default(opts.layer2D, _default(opts.layer2d, 'auto'))
 									selected: layer2D
+									vulkan: vulkan
 									opengl: opengl
 									ddraw: ddraw
 									gdi: {available: true, backend: :gdi}
@@ -695,6 +827,42 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							closed: false
 						}
 						state.layers.twoD.init <- _init2DLayer(state)
+						if state.presenterBackend = :vulkan {
+							true -> {
+								state.layers.twoD.vulkanInit <- state.layers.twoD.init
+								if state.layers.twoD.init.type = :ok {
+									true -> {
+										state.vulkanInstance <- _default(state.layers.twoD.init.instance, 0)
+										state.layers.twoD.staged <- {
+											requested: :vulkan
+											active: true
+										}
+									}
+									_ -> {
+										fallbackTo := if opengl.available {
+											true -> :opengl
+											_ -> if ddraw.available {
+												true -> :ddraw
+												_ -> :gdi
+											}
+										}
+										state.layers.twoD.fallback <- {
+											from: :vulkan
+											to: fallbackTo
+											reason: 'Vulkan initialization failed; using fallback presenter'
+											detail: state.layers.twoD.init
+										}
+										state.presenterBackend <- fallbackTo
+										state.layers.twoD.selected <- fallbackTo
+										state.layers.twoD.staged <- {
+											requested: :vulkan
+											active: false
+										}
+										state.layers.twoD.init <- _init2DLayer(state)
+									}
+								}
+							}
+						}
 						if state.presenterBackend = :opengl {
 							true -> {
 								state.layers.twoD.openglInit <- state.layers.twoD.init
@@ -905,6 +1073,9 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 		presentedViaOpenGL := false
 		useDdrawThreadLock := window.presenterBackend = :ddraw & _default(window.ddraw.useThreadLock, false)
 		presentedViaDdraw := false
+		presentedViaVulkan := false
+		// Vulkan present: swapchain-based present is not yet wired.
+		// window.vulkanInstance is kept alive for future draw calls and swapchain setup.
 		if window.presenterBackend = :opengl & window.openglContext > 0 {
 			true -> {
 				mk := windows.opengl32('wglMakeCurrent', window.frameTargetHdc, window.openglContext)
@@ -981,7 +1152,7 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 				}
 			}
 		}
-		if !presentedViaOpenGL & !presentedViaDdraw {
+		if !presentedViaOpenGL & !presentedViaDdraw & !presentedViaVulkan {
 			true -> windows.gdi32(
 				'BitBlt'
 				window.frameTargetHdc
@@ -1064,6 +1235,12 @@ fn close(window) {
 			windows.opengl32('wglDeleteContext', window.openglContext)
 			window.openglContext <- 0
 			window.openglPixelFormat <- 0
+		}
+	}
+	if window.vulkanInstance > 0 {
+		true -> {
+			windows.vulkan1('vkDestroyInstance', window.vulkanInstance, 0)
+			window.vulkanInstance <- 0
 		}
 	}
 	windows.destroyWindow(window.hwnd)

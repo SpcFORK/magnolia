@@ -23,6 +23,7 @@ Ws2_32 := 'ws2_32.dll'
 Comctl32 := 'comctl32.dll'
 Wininet := 'wininet.dll'
 OpenGL32 := 'opengl32.dll'
+Vulkan1 := 'vulkan-1.dll'
 D3d9 := 'd3d9.dll'
 Ddraw := 'ddraw.dll'
 Msvcrt := 'msvcrt.dll'
@@ -180,6 +181,7 @@ REG_QWORD := 11
 // Window class / style flags
 CS_VREDRAW := 1
 CS_HREDRAW := 2
+CS_OWNDC := 32
 
 WS_OVERLAPPED := 0
 WS_CAPTION := 12582912
@@ -455,6 +457,11 @@ fn wininet(symbol, args...) if isWindows?() {
 fn opengl32(symbol, args...) if isWindows?() {
 	true -> callIn(OpenGL32, symbol, args...)
 	_ -> _platformError('opengl32')
+}
+
+fn vulkan1(symbol, args...) if isWindows?() {
+	true -> callIn(Vulkan1, symbol, args...)
+	_ -> _platformError('vulkan1')
 }
 
 fn d3d9(symbol, args...) if isWindows?() {
@@ -1488,7 +1495,8 @@ fn pumpWindowMessage(hwnd, msgPtr) if isWindows?() {
 }
 
 // Registers a top-level window class using DefWindowProcW.
-fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle) if isWindows?() {
+// classStyle can override default CS_HREDRAW|CS_VREDRAW.
+fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, classStyle) if isWindows?() {
 	true -> {
 		size := if ptrSize() {
 			8 -> 80
@@ -1522,11 +1530,15 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle) i
 			? -> resolvedIcon
 			_ -> smallIconHandle
 		}
+		resolvedClassStyle := if classStyle {
+			? -> CS_HREDRAW | CS_VREDRAW
+			_ -> classStyle
+		}
 		classWide := wstr(className)
 		classWidePtr := ptrInt(addr(classWide))
 
 		writeU32(wcPtr + 0, size)
-		writeU32(wcPtr + 4, CS_HREDRAW | CS_VREDRAW)
+		writeU32(wcPtr + 4, resolvedClassStyle)
 		writePtr(wcPtr + 8, defProcAddr)
 		writeU32(wcPtr + 16, 0)
 		writeU32(wcPtr + 20, 0)
@@ -1545,7 +1557,7 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle) i
 
 // Registers a top-level window class using DefWindowProcW.
 fn registerDefaultWindowClass(className) if isWindows?() {
-	true -> registerWindowClassEx(className, ?, ?, ?)
+	true -> registerWindowClassEx(className, ?, ?, ?, ?)
 	_ -> _platformError('registerDefaultWindowClass')
 }
 
