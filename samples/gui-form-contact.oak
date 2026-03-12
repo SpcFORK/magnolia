@@ -17,7 +17,6 @@
 	string:  string
 	int:     int
 	len:     len
-	slice:   slice
 	reduce:  reduce
 } := import('std')
 
@@ -48,15 +47,18 @@ C_SUCCESS    := gui.rgb(68, 208, 116)
 C_ERROR      := gui.rgb(240, 78, 82)
 C_CHECK_ON   := gui.rgb(46, 98, 222)
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-fn truncate(s, maxChars) if len(s) > maxChars {
-	true -> slice(s, 0, maxChars) + '..'
-	_    -> s
-}
-
 // Ordered list of focusable field keys
 FIELD_ORDER := [:first, :last, :email, :phone, :company, :notes]
+
+CONTACT_TEXT_FIELDS := [
+	{ key: :first, max: 30 }
+	{ key: :last, max: 30 }
+	{ key: :email, max: 40 }
+	{ key: :phone, max: 20 }
+	{ key: :company, max: 40 }
+]
+
+CONTACT_TEXT_KEYS := [:first, :last, :email, :phone, :company]
 
 // ─── Full form render ──────────────────────────────────────────────────────
 
@@ -153,8 +155,8 @@ fn drawForm(window, state) {
 				true -> {
 					rowBg := if i % 2 = 0 { true -> C_ROW_A, _ -> C_ROW_B }
 					gui.fillRect(window, lo.listX + 1, rowY, lo.listW - 2, rowH, rowBg)
-					nameStr  := truncate(contact.first + ' ' + contact.last, 24)
-					emailStr := truncate(contact.email, 30)
+					nameStr  := gui.formTruncateText(contact.first + ' ' + contact.last, 24)
+					emailStr := gui.formTruncateText(contact.email, 30)
 					roleStr  := if contact.role = :dev    { true -> 'Developer', _ ->
 					            if contact.role = :design { true -> 'Designer',  _ ->
 					            if contact.role = :mgr    { true -> 'Manager',   _ -> 'Other' }}}
@@ -271,60 +273,6 @@ fn initState(W, H) {
 	}
 }
 
-// ─── Notes line helpers ────────────────────────────────────────────────────
-
-fn notesAppendChar(lines, c) {
-	last := len(lines) - 1
-	fn build(i, acc) if i < len(lines) {
-		true -> {
-			line := lines.(i)
-			if i = last {
-				true -> build(i + 1, acc << (line + c))
-				_ -> build(i + 1, acc << line)
-			}
-		}
-		_ -> acc
-	}
-	build(0, [])
-}
-
-fn notesBackspace(lines) {
-	last := len(lines) - 1
-	if last < 0 -> ['']
-	lastLine := lines.(last)
-	if len(lastLine) > 0 {
-		true -> {
-			fn build(i, acc) if i < len(lines) {
-				true -> {
-					line := lines.(i)
-					if i = last {
-						true -> build(i + 1, acc << gui.formPopChar(line))
-						_ -> build(i + 1, acc << line)
-					}
-				}
-				_ -> acc
-			}
-			build(0, [])
-		}
-		_ -> if last > 0 {
-			// remove empty last line (undo Enter)
-			true -> {
-				fn drop(i, acc) if i < last {
-					true -> drop(i + 1, acc << lines.(i))
-					_ -> acc
-				}
-				drop(0, [])
-			}
-			_ -> lines
-		}
-	}
-}
-
-fn notesNewLine(lines) if len(lines) < 3 {
-	true -> lines << ''
-	_ -> lines
-}
-
 // ─── Validate + build contact ──────────────────────────────────────────────
 
 fn buildContact(state) {
@@ -343,38 +291,6 @@ fn validContact?(state) {
 	state.first != '' & state.last != '' & state.email != ''
 }
 
-// ─── Field key from rect hit ───────────────────────────────────────────────
-
-fn focusFromClick(mx, my, lo) {
-	if gui.formInRect?(mx, my, lo.fFirst.x,   lo.fFirst.y,   lo.fFirst.w,   lo.fFirst.h)   -> :first
-	if gui.formInRect?(mx, my, lo.fLast.x,    lo.fLast.y,    lo.fLast.w,    lo.fLast.h)    -> :last
-	if gui.formInRect?(mx, my, lo.fEmail.x,   lo.fEmail.y,   lo.fEmail.w,   lo.fEmail.h)   -> :email
-	if gui.formInRect?(mx, my, lo.fPhone.x,   lo.fPhone.y,   lo.fPhone.w,   lo.fPhone.h)   -> :phone
-	if gui.formInRect?(mx, my, lo.fCompany.x, lo.fCompany.y, lo.fCompany.w, lo.fCompany.h) -> :company
-	if gui.formInRect?(mx, my, lo.fNotes.x,   lo.fNotes.y,   lo.fNotes.w,   lo.fNotes.h)  -> :notes
-	?
-}
-
-// ─── Typed text append to focused field ───────────────────────────────────
-
-fn appendChar(state, c) {
-	if state.focus = :first   & len(state.first)   < 30 -> state.first   <- state.first   + c
-	if state.focus = :last    & len(state.last)    < 30 -> state.last    <- state.last    + c
-	if state.focus = :email   & len(state.email)   < 40 -> state.email   <- state.email   + c
-	if state.focus = :phone   & len(state.phone)   < 20 -> state.phone   <- state.phone   + c
-	if state.focus = :company & len(state.company) < 40 -> state.company <- state.company + c
-	if state.focus = :notes -> state.notesLines <- notesAppendChar(state.notesLines, c)
-}
-
-fn backspaceField(state) {
-	if state.focus = :first   -> state.first   <- gui.formPopChar(state.first)
-	if state.focus = :last    -> state.last    <- gui.formPopChar(state.last)
-	if state.focus = :email   -> state.email   <- gui.formPopChar(state.email)
-	if state.focus = :phone   -> state.phone   <- gui.formPopChar(state.phone)
-	if state.focus = :company -> state.company <- gui.formPopChar(state.company)
-	if state.focus = :notes   -> state.notesLines <- notesBackspace(state.notesLines)
-}
-
 // ─── Event handler ─────────────────────────────────────────────────────────
 
 fn onEvent(window, step, state) if step.type = :dispatch -> {
@@ -386,20 +302,30 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 	lo := layout(window.width, window.height)
 
 	if mt = gui.FORM_WM_MOUSEMOVE -> {
-		state.hoverSave  <- gui.formInRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH)
-		state.hoverReset <- gui.formInRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH)
+		gui.formSetHoverFromRects(state, mx, my, [
+			{ key: :hoverSave, x: lo.bSavX, y: lo.bBtnY, w: lo.bW, h: lo.bH }
+			{ key: :hoverReset, x: lo.bResX, y: lo.bBtnY, w: lo.bW, h: lo.bH }
+		])
 	}
 
 	if mt = gui.FORM_WM_LBUTTONDOWN -> {
 		// Field focus
-		foc := focusFromClick(mx, my, lo)
-		if foc != ? -> state.focus <- foc
+		gui.formSetKeyByHit(state, :focus, mx, my, [
+			{ key: :first,   x: lo.fFirst.x,   y: lo.fFirst.y,   w: lo.fFirst.w,   h: lo.fFirst.h }
+			{ key: :last,    x: lo.fLast.x,    y: lo.fLast.y,    w: lo.fLast.w,    h: lo.fLast.h }
+			{ key: :email,   x: lo.fEmail.x,   y: lo.fEmail.y,   w: lo.fEmail.w,   h: lo.fEmail.h }
+			{ key: :phone,   x: lo.fPhone.x,   y: lo.fPhone.y,   w: lo.fPhone.w,   h: lo.fPhone.h }
+			{ key: :company, x: lo.fCompany.x, y: lo.fCompany.y, w: lo.fCompany.w, h: lo.fCompany.h }
+			{ key: :notes,   x: lo.fNotes.x,   y: lo.fNotes.y,   w: lo.fNotes.w,   h: lo.fNotes.h }
+		])
 
 		// Role radios
-		if gui.formInRect?(mx, my, lo.rDevX,  lo.rDevY,  40, 16) -> state.role <- :dev
-		if gui.formInRect?(mx, my, lo.rDesgX, lo.rDesgY, 40, 16) -> state.role <- :design
-		if gui.formInRect?(mx, my, lo.rMgrX,  lo.rMgrY,  40, 16) -> state.role <- :mgr
-		if gui.formInRect?(mx, my, lo.rOthX,  lo.rOthY,  40, 16) -> state.role <- :other
+		gui.formSetKeyByHit(state, :role, mx, my, [
+			{ key: :dev,    x: lo.rDevX,  y: lo.rDevY,  w: 40, h: 16 }
+			{ key: :design, x: lo.rDesgX, y: lo.rDesgY, w: 40, h: 16 }
+			{ key: :mgr,    x: lo.rMgrX,  y: lo.rMgrY,  w: 40, h: 16 }
+			{ key: :other,  x: lo.rOthX,  y: lo.rOthY,  w: 40, h: 16 }
+		])
 
 		// SAVE
 		if gui.formInRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH) -> {
@@ -407,17 +333,18 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 			if validContact?(state) {
 				true -> {
 					state.contacts <- state.contacts << buildContact(state)
-					// Reset fields
-					state.first      <- ''
-					state.last       <- ''
-					state.email      <- ''
-					state.phone      <- ''
-					state.company    <- ''
-					state.role       <- :dev
-					state.notesLines <- ['']
-					state.focus      <- :first
-					state.status     <- 'Contact saved!'
-					state.statusOk   <- true
+					gui.formSetByAssignments(state, [
+						{ key: :first, value: '' }
+						{ key: :last, value: '' }
+						{ key: :email, value: '' }
+						{ key: :phone, value: '' }
+						{ key: :company, value: '' }
+						{ key: :role, value: :dev }
+						{ key: :notesLines, value: [''] }
+						{ key: :focus, value: :first }
+						{ key: :status, value: 'Contact saved!' }
+						{ key: :statusOk, value: true }
+					])
 				}
 				_ -> {
 					state.status <- 'First name, last name, and email are required.'
@@ -429,45 +356,48 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 		// RESET
 		if gui.formInRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH) -> {
 			state.pressReset <- true
-			state.first      <- ''
-			state.last       <- ''
-			state.email      <- ''
-			state.phone      <- ''
-			state.company    <- ''
-			state.role       <- :dev
-			state.notesLines <- ['']
-			state.focus      <- :first
-			state.status     <- ''
-			state.statusOk   <- true
+			gui.formSetByAssignments(state, [
+				{ key: :first, value: '' }
+				{ key: :last, value: '' }
+				{ key: :email, value: '' }
+				{ key: :phone, value: '' }
+				{ key: :company, value: '' }
+				{ key: :role, value: :dev }
+				{ key: :notesLines, value: [''] }
+				{ key: :focus, value: :first }
+				{ key: :status, value: '' }
+				{ key: :statusOk, value: true }
+			])
 		}
 	}
 
 	if mt = gui.FORM_WM_LBUTTONUP -> {
-		state.pressSave  <- false
-		state.pressReset <- false
+		gui.formResetFlags(state, [:pressSave, :pressReset], false)
 	}
 
 	// Printable character
 	if mt = gui.FORM_WM_CHAR -> {
-		if wp != ? & wp >= 32 & wp < 127 {
-			true -> appendChar(state, char(wp))
+		if gui.formIsPrintableChar?(wp) {
+			true -> gui.formAppendByFocus(state, state.focus, char(wp), CONTACT_TEXT_FIELDS, :notes)
 		}
 	}
 
 	// Control keys
 	if mt = gui.FORM_WM_KEYDOWN -> {
-		if wp = gui.FORM_VK_BACK -> backspaceField(state)
+		if wp = gui.FORM_VK_BACK -> gui.formBackspaceByFocus(state, state.focus, CONTACT_TEXT_KEYS, :notes)
 		if wp = gui.FORM_VK_TAB  -> state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
 		if wp = gui.FORM_VK_RETURN & state.focus = :notes -> {
-			state.notesLines <- notesNewLine(state.notesLines)
+			state.notesLines <- gui.formNotesNewLine(state.notesLines, 3)
 		}
 		if wp = gui.FORM_VK_RETURN & state.focus != :notes -> {
 			state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
 		}
 		if wp = gui.FORM_VK_ESCAPE -> {
-			state.focus  <- :first
-			state.status <- ''
-			state.statusOk <- true
+			gui.formSetByAssignments(state, [
+				{ key: :focus, value: :first }
+				{ key: :status, value: '' }
+				{ key: :statusOk, value: true }
+			])
 		}
 	}
 }

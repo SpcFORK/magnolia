@@ -210,6 +210,201 @@ fn formPopChar(s) if len(s) > 0 {
 	_ -> ''
 }
 
+fn formClamp(v, minVal, maxVal) if v < minVal {
+	true -> minVal
+	_ -> if v > maxVal { true -> maxVal, _ -> v }
+}
+
+fn formHitListIndex(mx, my, x, y, itemW, itemH, count) {
+	fn loop(i) if i < count {
+		true -> {
+			iy := y + i * itemH
+			if formInRect?(mx, my, x, iy, itemW, itemH) {
+				true -> i
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> -1
+	}
+	loop(0)
+}
+
+fn formHitRectKey(mx, my, rects) {
+	fn loop(i) if i < len(rects) {
+		true -> {
+			r := rects.(i)
+			if formInRect?(mx, my, r.x, r.y, r.w, r.h) {
+				true -> r.key
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
+fn formToggleIfHit(value, mx, my, x, y, w, h) if formInRect?(mx, my, x, y, w, h) {
+	true -> !value
+	_ -> value
+}
+
+fn formSelectByHit(current, mx, my, rects) {
+	hit := formHitRectKey(mx, my, rects)
+	if hit != ? {
+		true -> hit
+		_ -> current
+	}
+}
+
+fn formSetByAssignments(state, assignments) {
+	fn loop(i) if i < len(assignments) {
+		true -> {
+			a := assignments.(i)
+			state.(a.key) <- a.value
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formResetFlags(state, keys, value) {
+	v := _default(value, false)
+	fn loop(i) if i < len(keys) {
+		true -> {
+			state.(keys.(i)) <- v
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formSetHoverFromRects(state, mx, my, rects) {
+	fn loop(i) if i < len(rects) {
+		true -> {
+			r := rects.(i)
+			state.(r.key) <- formInRect?(mx, my, r.x, r.y, r.w, r.h)
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formToggleKeysByHit(state, mx, my, rects) {
+	fn loop(i) if i < len(rects) {
+		true -> {
+			r := rects.(i)
+			state.(r.key) <- formToggleIfHit(state.(r.key), mx, my, r.x, r.y, r.w, r.h)
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formSetKeyByHit(state, targetKey, mx, my, rects) {
+	hit := formHitRectKey(mx, my, rects)
+	if hit != ? -> state.(targetKey) <- hit
+}
+
+fn formTruncateText(s, maxChars) if len(s) > maxChars {
+	true -> std.slice(s, 0, maxChars) + '..'
+	_ -> s
+}
+
+fn formIsPrintableChar?(code) code != ? & code >= 32 & code < 127
+
+fn formAppendByFocus(state, focus, c, fieldSpecs, notesKey) {
+	fn loop(i) if i < len(fieldSpecs) {
+		true -> {
+			spec := fieldSpecs.(i)
+			if focus = spec.key {
+				true -> {
+					v := state.(spec.key)
+					if len(v) < spec.max -> state.(spec.key) <- v + c
+				}
+				_ -> loop(i + 1)
+			}
+		}
+	}
+	loop(0)
+	if notesKey != ? & focus = notesKey -> state.(notesKey) <- formNotesAppendChar(state.(notesKey), c)
+}
+
+fn formBackspaceByFocus(state, focus, fieldKeys, notesKey) {
+	fn loop(i) if i < len(fieldKeys) {
+		true -> {
+			k := fieldKeys.(i)
+			if focus = k {
+				true -> state.(k) <- formPopChar(state.(k))
+				_ -> loop(i + 1)
+			}
+		}
+	}
+	loop(0)
+	if notesKey != ? & focus = notesKey -> state.(notesKey) <- formNotesBackspace(state.(notesKey))
+}
+
+fn formNotesAppendChar(lines, c) {
+	last := len(lines) - 1
+	fn build(i, acc) if i < len(lines) {
+		true -> {
+			line := lines.(i)
+			if i = last {
+				true -> build(i + 1, acc << (line + c))
+				_ -> build(i + 1, acc << line)
+			}
+		}
+		_ -> acc
+	}
+	build(0, [])
+}
+
+fn formNotesBackspace(lines) {
+	last := len(lines) - 1
+	if last < 0 -> ['']
+	lastLine := lines.(last)
+	if len(lastLine) > 0 {
+		true -> {
+			fn build(i, acc) if i < len(lines) {
+				true -> {
+					line := lines.(i)
+					if i = last {
+						true -> build(i + 1, acc << formPopChar(line))
+						_ -> build(i + 1, acc << line)
+					}
+				}
+				_ -> acc
+			}
+			build(0, [])
+		}
+		_ -> if last > 0 {
+			true -> {
+				fn drop(i, acc) if i < last {
+					true -> drop(i + 1, acc << lines.(i))
+					_ -> acc
+				}
+				drop(0, [])
+			}
+			_ -> lines
+		}
+	}
+}
+
+fn formNotesNewLine(lines, maxLines) if len(lines) < _default(maxLines, 3) {
+	true -> lines << ''
+	_ -> lines
+}
+
+fn formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal) {
+	hw := _default(handleW, 12)
+	if hw < 1 -> hw <- 1
+	span := _default(maxVal, 100) - _default(minVal, 0)
+	if span < 1 -> span <- 1
+	den := sliderW - hw
+	if den < 1 -> den <- 1
+	raw := _default(minVal, 0) + ((mx - sliderX) * span) / den
+	formClamp(raw, _default(minVal, 0), _default(maxVal, 100))
+}
+
 fn formNextField(current, order) {
 	fn loop(i) if i < len(order) {
 		true -> if order.(i) = current {

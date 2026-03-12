@@ -44,13 +44,6 @@ C_ERROR      := gui.rgb(240, 78, 82)
 C_SLIDER_TRK := gui.rgb(40, 50, 72)
 C_SLIDER_THB := gui.rgb(80, 138, 255)
 
-// ─── Geometry ──────────────────────────────────────────────────────────────
-
-fn clamp(v, lo, hi) if v < lo {
-	true -> lo
-	_ -> if v > hi { true -> hi, _ -> v }
-}
-
 // ─── Content panels ────────────────────────────────────────────────────────
 
 fn drawGeneralPanel(window, cx, cy, cw, ch, state) {
@@ -297,38 +290,6 @@ fn initState(W, H) {
 	}
 }
 
-// ─── Hit-test helpers ──────────────────────────────────────────────────────
-
-fn catHitIndex(mx, my, sideW, navH, sideY, count) {
-	fn loop(i) if i < count {
-		true -> {
-			ny := sideY + i * navH
-			if gui.formInRect?(mx, my, 0, ny, sideW, navH) {
-				true -> i
-				_ -> loop(i + 1)
-			}
-		}
-		_ -> -1
-	}
-	loop(0)
-}
-
-// Determine which slider is under mx, if any (returns :vol_master / :vol_music / :vol_effects / :none)
-fn sliderHit(mx, my, category, sliderCX, sliderW) if category = 2 {
-	true -> {
-		cy  := 46
-		if gui.formInRect?(mx, my, sliderCX, cy + 164, sliderW, 16) { true -> :master, _ ->
-		if gui.formInRect?(mx, my, sliderCX, cy + 216, sliderW, 16) { true -> :music, _ ->
-		if gui.formInRect?(mx, my, sliderCX, cy + 268, sliderW, 16) { true -> :effects, _ -> :none }}}
-	}
-	_ -> :none
-}
-
-fn sliderValue(mx, sliderX, sliderW) {
-	v  := ((mx - sliderX) * 100) / (sliderW - 12)
-	clamp(v, 0, 100)
-}
-
 // ─── Event handler ─────────────────────────────────────────────────────────
 
 fn onEvent(window, step, state) if step.type = :dispatch -> {
@@ -352,98 +313,120 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 	sliderW := W - sideW - 1 - 80
 
 	if mt = gui.FORM_WM_MOUSEMOVE -> {
-		hovIdx := catHitIndex(mx, my, sideW, navH, sideY, len(CATEGORIES))
+		hovIdx := gui.formHitListIndex(mx, my, 0, sideY, sideW, navH, len(CATEGORIES))
 		state.hovCat <- hovIdx
 
-		state.hoverSave   <- gui.formInRect?(mx, my, bSavX, bBtnY, btnW, btnH)
-		state.hoverCancel <- gui.formInRect?(mx, my, bCanX, bBtnY, btnW, btnH)
+		gui.formSetHoverFromRects(state, mx, my, [
+			{ key: :hoverSave, x: bSavX, y: bBtnY, w: btnW, h: btnH }
+			{ key: :hoverCancel, x: bCanX, y: bBtnY, w: btnW, h: btnH }
+		])
 
 		// Slider dragging
 		if state.dragSlider = :master -> {
-			state.masterVol <- sliderValue(mx, sliderCX, sliderW)
+			state.masterVol <- gui.formSliderValue(mx, sliderCX, sliderW, 12, 0, 100)
 		}
 		if state.dragSlider = :music -> {
-			state.musicVol <- sliderValue(mx, sliderCX, sliderW)
+			state.musicVol <- gui.formSliderValue(mx, sliderCX, sliderW, 12, 0, 100)
 		}
 		if state.dragSlider = :effects -> {
-			state.effectsVol <- sliderValue(mx, sliderCX, sliderW)
+			state.effectsVol <- gui.formSliderValue(mx, sliderCX, sliderW, 12, 0, 100)
 		}
 	}
 
 	if mt = gui.FORM_WM_LBUTTONDOWN -> {
 		// Category nav click
-		navIdx := catHitIndex(mx, my, sideW, navH, sideY, len(CATEGORIES))
+		navIdx := gui.formHitListIndex(mx, my, 0, sideY, sideW, navH, len(CATEGORIES))
 		if navIdx >= 0 -> state.category <- navIdx
 
 		// Save button
 		if gui.formInRect?(mx, my, bSavX, bBtnY, btnW, btnH) -> {
 			state.pressSave <- true
-			state.status    <- 'Settings saved.'
-			state.statusOk  <- true
+			gui.formSetByAssignments(state, [
+				{ key: :status, value: 'Settings saved.' }
+				{ key: :statusOk, value: true }
+			])
 		}
 
 		// Cancel button
 		if gui.formInRect?(mx, my, bCanX, bBtnY, btnW, btnH) -> {
 			state.pressCancel <- true
-			state.status      <- ''
-			state.statusOk    <- true
+			gui.formSetByAssignments(state, [
+				{ key: :status, value: '' }
+				{ key: :statusOk, value: true }
+			])
 		}
 
 		// General: checkboxes
 		if state.category = 0 -> {
 			cx := sideW + 1 + 16
 			cy := 46
-			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.autoSave      <- !state.autoSave
-			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.autoUpdate    <- !state.autoUpdate
-			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.sendTelemetry <- !state.sendTelemetry
-			if gui.formInRect?(mx, my, cx, cy + 126, 16, 16) -> state.showWelcome   <- !state.showWelcome
-			if gui.formInRect?(mx, my, cx, cy + 190, 40, 16) -> state.lang <- :en
-			if gui.formInRect?(mx, my, cx, cy + 214, 40, 16) -> state.lang <- :es
-			if gui.formInRect?(mx, my, cx, cy + 238, 40, 16) -> state.lang <- :fr
+			gui.formToggleKeysByHit(state, mx, my, [
+				{ key: :autoSave, x: cx, y: cy + 48, w: 16, h: 16 }
+				{ key: :autoUpdate, x: cx, y: cy + 74, w: 16, h: 16 }
+				{ key: :sendTelemetry, x: cx, y: cy + 100, w: 16, h: 16 }
+				{ key: :showWelcome, x: cx, y: cy + 126, w: 16, h: 16 }
+			])
+			gui.formSetKeyByHit(state, :lang, mx, my, [
+				{ key: :en, x: cx, y: cy + 190, w: 40, h: 16 }
+				{ key: :es, x: cx, y: cy + 214, w: 40, h: 16 }
+				{ key: :fr, x: cx, y: cy + 238, w: 40, h: 16 }
+			])
 		}
 
 		// Display: checkboxes + theme radios
 		if state.category = 1 -> {
 			cx := sideW + 1 + 16
 			cy := 46
-			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.fullscreen <- !state.fullscreen
-			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.showFPS    <- !state.showFPS
-			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.vsync      <- !state.vsync
-			if gui.formInRect?(mx, my, cx, cy + 126, 16, 16) -> state.hiDPI      <- !state.hiDPI
-			if gui.formInRect?(mx, my, cx, cy + 190, 40, 16) -> state.theme <- :dark
-			if gui.formInRect?(mx, my, cx, cy + 214, 40, 16) -> state.theme <- :light
-			if gui.formInRect?(mx, my, cx, cy + 238, 40, 16) -> state.theme <- :system
+			gui.formToggleKeysByHit(state, mx, my, [
+				{ key: :fullscreen, x: cx, y: cy + 48, w: 16, h: 16 }
+				{ key: :showFPS, x: cx, y: cy + 74, w: 16, h: 16 }
+				{ key: :vsync, x: cx, y: cy + 100, w: 16, h: 16 }
+				{ key: :hiDPI, x: cx, y: cy + 126, w: 16, h: 16 }
+			])
+			gui.formSetKeyByHit(state, :theme, mx, my, [
+				{ key: :dark,   x: cx, y: cy + 190, w: 40, h: 16 }
+				{ key: :light,  x: cx, y: cy + 214, w: 40, h: 16 }
+				{ key: :system, x: cx, y: cy + 238, w: 40, h: 16 }
+			])
 		}
 
 		// Audio: checkboxes + slider grab
 		if state.category = 2 -> {
 			cx := sideW + 1 + 16
 			cy := 46
-			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.soundEnabled <- !state.soundEnabled
-			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.musicEnabled <- !state.musicEnabled
-			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.notifSound   <- !state.notifSound
+			gui.formToggleKeysByHit(state, mx, my, [
+				{ key: :soundEnabled, x: cx, y: cy + 48, w: 16, h: 16 }
+				{ key: :musicEnabled, x: cx, y: cy + 74, w: 16, h: 16 }
+				{ key: :notifSound, x: cx, y: cy + 100, w: 16, h: 16 }
+			])
 			// Slider grab
-			hit := sliderHit(mx, my, state.category, sliderCX, sliderW)
-			if hit != :none -> state.dragSlider <- hit
+			gui.formSetKeyByHit(state, :dragSlider, mx, my, [
+				{ key: :master,  x: sliderCX, y: cy + 164, w: sliderW, h: 16 }
+				{ key: :music,   x: sliderCX, y: cy + 216, w: sliderW, h: 16 }
+				{ key: :effects, x: sliderCX, y: cy + 268, w: sliderW, h: 16 }
+			])
 		}
 
 		// Network: checkboxes + radios
 		if state.category = 3 -> {
 			cx := sideW + 1 + 16
 			cy := 46
-			if gui.formInRect?(mx, my, cx, cy + 48, 16, 16)  -> state.netEnabled  <- !state.netEnabled
-			if gui.formInRect?(mx, my, cx, cy + 74, 16, 16)  -> state.syncCloud   <- !state.syncCloud
-			if gui.formInRect?(mx, my, cx, cy + 100, 16, 16) -> state.offlineMode <- !state.offlineMode
-			if gui.formInRect?(mx, my, cx, cy + 164, 40, 16) -> state.connType <- :auto
-			if gui.formInRect?(mx, my, cx, cy + 188, 40, 16) -> state.connType <- :wifi
-			if gui.formInRect?(mx, my, cx, cy + 212, 40, 16) -> state.connType <- :ethernet
+			gui.formToggleKeysByHit(state, mx, my, [
+				{ key: :netEnabled, x: cx, y: cy + 48, w: 16, h: 16 }
+				{ key: :syncCloud, x: cx, y: cy + 74, w: 16, h: 16 }
+				{ key: :offlineMode, x: cx, y: cy + 100, w: 16, h: 16 }
+			])
+			gui.formSetKeyByHit(state, :connType, mx, my, [
+				{ key: :auto, x: cx, y: cy + 164, w: 40, h: 16 }
+				{ key: :wifi, x: cx, y: cy + 188, w: 40, h: 16 }
+				{ key: :ethernet, x: cx, y: cy + 212, w: 40, h: 16 }
+			])
 		}
 	}
 
 	if mt = gui.FORM_WM_LBUTTONUP -> {
-		state.pressSave    <- false
-		state.pressCancel  <- false
-		state.dragSlider   <- :none
+		gui.formResetFlags(state, [:pressSave, :pressCancel], false)
+		state.dragSlider <- :none
 	}
 }
 

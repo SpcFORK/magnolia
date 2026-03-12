@@ -42,6 +42,13 @@ C_ERROR       := gui.rgb(240, 78, 82)
 C_CURSOR      := gui.rgb(118, 178, 255)
 C_CHECK_FILL  := gui.rgb(46, 98, 222)
 
+LOGIN_TEXT_FIELDS := [
+	{ key: :username, max: 36 }
+	{ key: :password, max: 36 }
+]
+
+LOGIN_TEXT_KEYS := [:username, :password]
+
 // ─── Shared form primitives are provided by lib/GUI form helpers ──────────
 
 // ─── Full form render ──────────────────────────────────────────────────────
@@ -180,17 +187,21 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 	lo := layout(window.width, window.height)
 
 	if mt = gui.FORM_WM_MOUSEMOVE -> {
-		state.hoverLogin <- gui.formInRect?(mx, my, lo.b1x, lo.bY, lo.bW, lo.bH)
-		state.hoverClear <- gui.formInRect?(mx, my, lo.b2x, lo.bY, lo.bW, lo.bH)
+		gui.formSetHoverFromRects(state, mx, my, [
+			{ key: :hoverLogin, x: lo.b1x, y: lo.bY, w: lo.bW, h: lo.bH }
+			{ key: :hoverClear, x: lo.b2x, y: lo.bY, w: lo.bW, h: lo.bH }
+		])
 	}
 
 	if mt = gui.FORM_WM_LBUTTONDOWN -> {
 		// Focus fields
-		if gui.formInRect?(mx, my, lo.ux, lo.uy, lo.uw, lo.uh) -> state.focus <- :username
-		if gui.formInRect?(mx, my, lo.px, lo.py, lo.pw, lo.ph) -> state.focus <- :password
+		gui.formSetKeyByHit(state, :focus, mx, my, [
+			{ key: :username, x: lo.ux, y: lo.uy, w: lo.uw, h: lo.uh }
+			{ key: :password, x: lo.px, y: lo.py, w: lo.pw, h: lo.ph }
+		])
 
 		// Checkbox
-		if gui.formInRect?(mx, my, lo.rmx, lo.rmy, 16, 16) -> state.remember <- !state.remember
+		state.remember <- gui.formToggleIfHit(state.remember, mx, my, lo.rmx, lo.rmy, 16, 16)
 
 		// LOGIN button
 		if gui.formInRect?(mx, my, lo.b1x, lo.bY, lo.bW, lo.bH) -> {
@@ -201,49 +212,41 @@ fn onEvent(window, step, state) if step.type = :dispatch -> {
 		// CLEAR button
 		if gui.formInRect?(mx, my, lo.b2x, lo.bY, lo.bW, lo.bH) -> {
 			state.pressClear <- true
-			state.username   <- ''
-			state.password   <- ''
-			state.status     <- ''
-			state.focus      <- :username
+			gui.formSetByAssignments(state, [
+				{ key: :username, value: '' }
+				{ key: :password, value: '' }
+				{ key: :status, value: '' }
+				{ key: :focus, value: :username }
+			])
 		}
 	}
 
 	if mt = gui.FORM_WM_LBUTTONUP -> {
-		state.pressLogin <- false
-		state.pressClear <- false
+		gui.formResetFlags(state, [:pressLogin, :pressClear], false)
 	}
 
 	// Printable character typed (WM_CHAR)
 	if mt = gui.FORM_WM_CHAR -> {
-		if wp != ? & wp >= 32 & wp < 127 {
-			true -> {
-				c := char(wp)
-				if state.focus = :username & len(state.username) < 36 -> {
-					state.username <- state.username + c
-				}
-				if state.focus = :password & len(state.password) < 36 -> {
-					state.password <- state.password + c
-				}
-			}
+		if gui.formIsPrintableChar?(wp) {
+			true -> gui.formAppendByFocus(state, state.focus, char(wp), LOGIN_TEXT_FIELDS, ?)
 		}
 	}
 
 	// Control keys (WM_KEYDOWN)
 	if mt = gui.FORM_WM_KEYDOWN -> {
-		if wp = gui.FORM_VK_BACK -> {
-			if state.focus = :username -> state.username <- gui.formPopChar(state.username)
-			if state.focus = :password -> state.password <- gui.formPopChar(state.password)
-		}
+		if wp = gui.FORM_VK_BACK -> gui.formBackspaceByFocus(state, state.focus, LOGIN_TEXT_KEYS, ?)
 		if wp = gui.FORM_VK_TAB -> {
 			state.focus <- if state.focus = :username { true -> :password, _ -> :username }
 		}
 		if wp = gui.FORM_VK_RETURN & state.focus = :username -> state.focus <- :password
 		if wp = gui.FORM_VK_RETURN & state.focus = :password -> submitLogin(state)
 		if wp = gui.FORM_VK_ESCAPE -> {
-			state.username <- ''
-			state.password <- ''
-			state.status   <- ''
-			state.focus    <- :username
+			gui.formSetByAssignments(state, [
+				{ key: :username, value: '' }
+				{ key: :password, value: '' }
+				{ key: :status, value: '' }
+				{ key: :focus, value: :username }
+			])
 		}
 	}
 }
