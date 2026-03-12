@@ -205,6 +205,22 @@ fn formMsgLParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
 fn formLoWord(v) v & 65535
 fn formHiWord(v) (v >> 16) & 65535
 
+fn formEventContext(window) {
+	lp := formMsgLParam(window)
+	{
+		mt: formMsgType(window)
+		wp: formMsgWParam(window)
+		lp: lp
+		mx: formLoWord(lp)
+		my: formHiWord(lp)
+	}
+}
+
+fn formSetStatus(state, message, ok) {
+	state.status <- message
+	state.statusOk <- _default(ok, true)
+}
+
 fn formPopChar(s) if len(s) > 0 {
 	true -> std.slice(s, 0, len(s) - 1)
 	_ -> ''
@@ -403,6 +419,19 @@ fn formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal) {
 	if den < 1 -> den <- 1
 	raw := _default(minVal, 0) + ((mx - sliderX) * span) / den
 	formClamp(raw, _default(minVal, 0), _default(maxVal, 100))
+}
+
+fn formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings) {
+	fn loop(i) if i < len(bindings) {
+		true -> {
+			b := bindings.(i)
+			if state.(dragKey) = b.drag {
+				true -> state.(b.valueKey) <- formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal)
+				_ -> loop(i + 1)
+			}
+		}
+	}
+	loop(0)
 }
 
 fn formNextField(current, order) {
