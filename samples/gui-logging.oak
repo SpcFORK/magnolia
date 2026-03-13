@@ -43,32 +43,35 @@ window := gui.createWindow('GUI Logging Sample', 860, 460, {
 })
 
 if window.type = :ok {
-	state := {
-		tick: 0
-		entries: []
+	true -> {
+		state := {
+			tick: 0
+			entries: []
+		}
+
+		gui.show(window)
+		pushLog(state, 'INFO', 'window created; backend=' + string(window.backend))
+		gui.onDispatch(window, fn(_) {
+			if state.tick % 120 = 0 ->
+				pushLog(state, 'EVENT', 'dispatch tick=' + string(state.tick))
+		})
+		gui.onceClosed(window, fn(_) {
+			pushLog(state, 'INFO', 'window received closed event')
+		})
+
+		result := gui.run(window, ?, fn(win, _dt) {
+			state.tick <- state.tick + 1
+			if state.tick % 90 = 0 ->
+				pushLog(state, 'TRACE', 'frame tick=' + string(state.tick))
+			drawFrame(win, state)
+		})
+
+		pushLog(state, 'INFO', 'loop ended with status=' + string(result.type))
+		gui.close(window)
+		printf('logged {{ 0 }} entries\n', string(len(state.entries)))
+	} 
+	_ ->  {
+		println('failed to create window:')
+		println(string(window))
 	}
-
-	gui.show(window)
-	pushLog(state, 'INFO', 'window created; backend=' + string(window.backend))
-	gui.on(window, :dispatch, fn(evt) {
-		if evt.type = :dispatch & (state.tick % 120 = 0) ->
-			pushLog(state, 'EVENT', 'dispatch tick=' + string(state.tick))
-	})
-	gui.once(window, :closed, fn(_) {
-		pushLog(state, 'INFO', 'window received closed event')
-	})
-
-	result := gui.run(window, ?, fn(win, _dt) {
-		state.tick <- state.tick + 1
-		if state.tick % 90 = 0 ->
-			pushLog(state, 'TRACE', 'frame tick=' + string(state.tick))
-		drawFrame(win, state)
-	})
-
-	pushLog(state, 'INFO', 'loop ended with status=' + string(result.type))
-	gui.close(window)
-	printf('logged {{ 0 }} entries\n', string(len(state.entries)))
-} else {
-	println('failed to create window:')
-	println(string(window))
 }

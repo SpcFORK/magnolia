@@ -291,122 +291,6 @@ fn validContact?(state) {
 	state.first != '' & state.last != '' & state.email != ''
 }
 
-// ─── Event handler ─────────────────────────────────────────────────────────
-
-fn onEvent(window, step, state) if step.type = :dispatch -> {
-	evt := gui.formEventContext(window)
-	mt := evt.mt
-	wp := evt.wp
-	mx := evt.mx
-	my := evt.my
-	lo := layout(window.width, window.height)
-
-	if mt = gui.FORM_WM_MOUSEMOVE -> {
-		gui.formSetHoverFromRects(state, mx, my, [
-			{ key: :hoverSave, x: lo.bSavX, y: lo.bBtnY, w: lo.bW, h: lo.bH }
-			{ key: :hoverReset, x: lo.bResX, y: lo.bBtnY, w: lo.bW, h: lo.bH }
-		])
-	}
-
-	if mt = gui.FORM_WM_LBUTTONDOWN -> {
-		// Field focus
-		gui.formSetKeyByHit(state, :focus, mx, my, [
-			{ key: :first,   x: lo.fFirst.x,   y: lo.fFirst.y,   w: lo.fFirst.w,   h: lo.fFirst.h }
-			{ key: :last,    x: lo.fLast.x,    y: lo.fLast.y,    w: lo.fLast.w,    h: lo.fLast.h }
-			{ key: :email,   x: lo.fEmail.x,   y: lo.fEmail.y,   w: lo.fEmail.w,   h: lo.fEmail.h }
-			{ key: :phone,   x: lo.fPhone.x,   y: lo.fPhone.y,   w: lo.fPhone.w,   h: lo.fPhone.h }
-			{ key: :company, x: lo.fCompany.x, y: lo.fCompany.y, w: lo.fCompany.w, h: lo.fCompany.h }
-			{ key: :notes,   x: lo.fNotes.x,   y: lo.fNotes.y,   w: lo.fNotes.w,   h: lo.fNotes.h }
-		])
-
-		// Role radios
-		gui.formSetKeyByHit(state, :role, mx, my, [
-			{ key: :dev,    x: lo.rDevX,  y: lo.rDevY,  w: 40, h: 16 }
-			{ key: :design, x: lo.rDesgX, y: lo.rDesgY, w: 40, h: 16 }
-			{ key: :mgr,    x: lo.rMgrX,  y: lo.rMgrY,  w: 40, h: 16 }
-			{ key: :other,  x: lo.rOthX,  y: lo.rOthY,  w: 40, h: 16 }
-		])
-
-		// SAVE
-		if gui.formInRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH) -> {
-			state.pressSave <- true
-			if validContact?(state) {
-				true -> {
-					state.contacts <- state.contacts << buildContact(state)
-					gui.formSetByAssignments(state, [
-						{ key: :first, value: '' }
-						{ key: :last, value: '' }
-						{ key: :email, value: '' }
-						{ key: :phone, value: '' }
-						{ key: :company, value: '' }
-						{ key: :role, value: :dev }
-						{ key: :notesLines, value: [''] }
-						{ key: :focus, value: :first }
-						{ key: :status, value: 'Contact saved!' }
-						{ key: :statusOk, value: true }
-					])
-				}
-				_ -> {
-					gui.formSetStatus(state, 'First name, last name, and email are required.', false)
-				}
-			}
-		}
-
-		// RESET
-		if gui.formInRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH) -> {
-			state.pressReset <- true
-			gui.formSetByAssignments(state, [
-				{ key: :first, value: '' }
-				{ key: :last, value: '' }
-				{ key: :email, value: '' }
-				{ key: :phone, value: '' }
-				{ key: :company, value: '' }
-				{ key: :role, value: :dev }
-				{ key: :notesLines, value: [''] }
-				{ key: :focus, value: :first }
-				{ key: :status, value: '' }
-				{ key: :statusOk, value: true }
-			])
-		}
-	}
-
-	if mt = gui.FORM_WM_LBUTTONUP -> {
-		gui.formResetFlags(state, [:pressSave, :pressReset], false)
-	}
-
-	// Printable character
-	if mt = gui.FORM_WM_CHAR -> {
-		if gui.formIsPrintableChar?(wp) {
-			true -> gui.formAppendByFocus(state, state.focus, char(wp), CONTACT_TEXT_FIELDS, {
-				focusKey: :notes
-				valueKey: :notesLines
-			})
-		}
-	}
-
-	// Control keys
-	if mt = gui.FORM_WM_KEYDOWN -> {
-		if wp = gui.FORM_VK_BACK -> gui.formBackspaceByFocus(state, state.focus, CONTACT_TEXT_KEYS, {
-			focusKey: :notes
-			valueKey: :notesLines
-		})
-		if wp = gui.FORM_VK_TAB  -> state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
-		if wp = gui.FORM_VK_RETURN & state.focus = :notes -> {
-			state.notesLines <- gui.formNotesNewLine(state.notesLines, 3)
-		}
-		if wp = gui.FORM_VK_RETURN & state.focus != :notes -> {
-			state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
-		}
-		if wp = gui.FORM_VK_ESCAPE -> {
-			gui.formSetByAssignments(state, [
-				{ key: :focus, value: :first }
-				{ key: :status, value: '' }
-				{ key: :statusOk, value: true }
-			])
-		}
-	}
-}
-
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 println('== Magnolia New Contact Form ==')
@@ -422,7 +306,95 @@ if window.type {
 	:ok -> {
 		state := initState(640, 580)
 		gui.show(window)
-		gui.on(window, :dispatch, fn(step) onEvent(window, step, state))
+		gui.onMouseMove(window, fn(mx, my) {
+			lo := layout(window.width, window.height)
+			gui.formSetHoverFromRects(state, mx, my, [
+				{ key: :hoverSave,  x: lo.bSavX, y: lo.bBtnY, w: lo.bW, h: lo.bH }
+				{ key: :hoverReset, x: lo.bResX, y: lo.bBtnY, w: lo.bW, h: lo.bH }
+			])
+		})
+		gui.onLButtonDown(window, fn(mx, my) {
+			lo := layout(window.width, window.height)
+			gui.formSetKeyByHit(state, :focus, mx, my, [
+				{ key: :first,   x: lo.fFirst.x,   y: lo.fFirst.y,   w: lo.fFirst.w,   h: lo.fFirst.h }
+				{ key: :last,    x: lo.fLast.x,    y: lo.fLast.y,    w: lo.fLast.w,    h: lo.fLast.h }
+				{ key: :email,   x: lo.fEmail.x,   y: lo.fEmail.y,   w: lo.fEmail.w,   h: lo.fEmail.h }
+				{ key: :phone,   x: lo.fPhone.x,   y: lo.fPhone.y,   w: lo.fPhone.w,   h: lo.fPhone.h }
+				{ key: :company, x: lo.fCompany.x, y: lo.fCompany.y, w: lo.fCompany.w, h: lo.fCompany.h }
+				{ key: :notes,   x: lo.fNotes.x,   y: lo.fNotes.y,   w: lo.fNotes.w,   h: lo.fNotes.h }
+			])
+			gui.formSetKeyByHit(state, :role, mx, my, [
+				{ key: :dev,    x: lo.rDevX,  y: lo.rDevY,  w: 40, h: 16 }
+				{ key: :design, x: lo.rDesgX, y: lo.rDesgY, w: 40, h: 16 }
+				{ key: :mgr,    x: lo.rMgrX,  y: lo.rMgrY,  w: 40, h: 16 }
+				{ key: :other,  x: lo.rOthX,  y: lo.rOthY,  w: 40, h: 16 }
+			])
+			if gui.formInRect?(mx, my, lo.bSavX, lo.bBtnY, lo.bW, lo.bH) -> {
+				state.pressSave <- true
+				if validContact?(state) {
+					true -> {
+						state.contacts <- state.contacts << buildContact(state)
+						gui.formSetByAssignments(state, [
+							{ key: :first,     value: '' }
+							{ key: :last,      value: '' }
+							{ key: :email,     value: '' }
+							{ key: :phone,     value: '' }
+							{ key: :company,   value: '' }
+							{ key: :role,      value: :dev }
+							{ key: :notesLines, value: [''] }
+							{ key: :focus,     value: :first }
+							{ key: :status,    value: 'Contact saved!' }
+							{ key: :statusOk,  value: true }
+						])
+					}
+					_ -> gui.formSetStatus(state, 'First name, last name, and email are required.', false)
+				}
+			}
+			if gui.formInRect?(mx, my, lo.bResX, lo.bBtnY, lo.bW, lo.bH) -> {
+				state.pressReset <- true
+				gui.formSetByAssignments(state, [
+					{ key: :first,     value: '' }
+					{ key: :last,      value: '' }
+					{ key: :email,     value: '' }
+					{ key: :phone,     value: '' }
+					{ key: :company,   value: '' }
+					{ key: :role,      value: :dev }
+					{ key: :notesLines, value: [''] }
+					{ key: :focus,     value: :first }
+					{ key: :status,    value: '' }
+					{ key: :statusOk,  value: true }
+				])
+			}
+		})
+		gui.onLButtonUp(window, fn(mx, my) {
+			gui.formResetFlags(state, [:pressSave, :pressReset], false)
+		})
+		gui.onChar(window, fn(wp) {
+			if gui.formIsPrintableChar?(wp) -> gui.formAppendByFocus(state, state.focus, char(wp), CONTACT_TEXT_FIELDS, {
+				focusKey: :notes
+				valueKey: :notesLines
+			})
+		})
+		gui.onKeyDown(window, fn(vk) {
+			if vk = gui.FORM_VK_BACK -> gui.formBackspaceByFocus(state, state.focus, CONTACT_TEXT_KEYS, {
+				focusKey: :notes
+				valueKey: :notesLines
+			})
+			if vk = gui.FORM_VK_TAB  -> state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
+			if vk = gui.FORM_VK_RETURN & state.focus = :notes -> {
+				state.notesLines <- gui.formNotesNewLine(state.notesLines, 3)
+			}
+			if vk = gui.FORM_VK_RETURN & state.focus != :notes -> {
+				state.focus <- gui.formNextField(state.focus, FIELD_ORDER)
+			}
+			if vk = gui.FORM_VK_ESCAPE -> {
+				gui.formSetByAssignments(state, [
+					{ key: :focus,    value: :first }
+					{ key: :status,   value: '' }
+					{ key: :statusOk, value: true }
+				])
+			}
+		})
 		drawForm(window, state)
 		gui.run(
 			window

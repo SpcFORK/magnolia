@@ -272,136 +272,6 @@ fn initState(W, H) {
 	}
 }
 
-// ─── Event handler ─────────────────────────────────────────────────────────
-
-fn onEvent(window, step, state) if step.type = :dispatch -> {
-	evt := gui.formEventContext(window)
-	mt := evt.mt
-	mx := evt.mx
-	my := evt.my
-
-	W := window.width
-	H := window.height
-	sideW := 160
-	navH := 38
-	sideY := 46
-	footY := H - 50
-	btnW := 110
-	btnH := 30
-	bSavX := W - 16 - btnW
-	bCanX := W - 16 - btnW * 2 - 12
-	bBtnY := footY + 10
-	sliderCX := sideW + 1 + 16
-	sliderW := W - sideW - 1 - 80
-
-	if mt = gui.FORM_WM_MOUSEMOVE -> {
-		hovIdx := gui.formHitListIndex(mx, my, 0, sideY, sideW, navH, len(CATEGORIES))
-		state.hovCat <- hovIdx
-
-		gui.formSetHoverFromRects(state, mx, my, [
-			{ key: :hoverSave, x: bSavX, y: bBtnY, w: btnW, h: btnH }
-			{ key: :hoverCancel, x: bCanX, y: bBtnY, w: btnW, h: btnH }
-		])
-
-		// Slider dragging
-		gui.formApplySliderDrag(state, :dragSlider, mx, sliderCX, sliderW, 12, 0, 100, [
-			{ drag: :master, valueKey: :masterVol }
-			{ drag: :music, valueKey: :musicVol }
-			{ drag: :effects, valueKey: :effectsVol }
-		])
-	}
-
-	if mt = gui.FORM_WM_LBUTTONDOWN -> {
-		// Category nav click
-		navIdx := gui.formHitListIndex(mx, my, 0, sideY, sideW, navH, len(CATEGORIES))
-		if navIdx >= 0 -> state.category <- navIdx
-
-		// Save button
-		if gui.formInRect?(mx, my, bSavX, bBtnY, btnW, btnH) -> {
-			state.pressSave <- true
-			gui.formSetStatus(state, 'Settings saved.', true)
-		}
-
-		// Cancel button
-		if gui.formInRect?(mx, my, bCanX, bBtnY, btnW, btnH) -> {
-			state.pressCancel <- true
-			gui.formSetStatus(state, '', true)
-		}
-
-		// General: checkboxes
-		if state.category = 0 -> {
-			cx := sideW + 1 + 16
-			cy := 46
-			gui.formToggleKeysByHit(state, mx, my, [
-				{ key: :autoSave, x: cx, y: cy + 48, w: 16, h: 16 }
-				{ key: :autoUpdate, x: cx, y: cy + 74, w: 16, h: 16 }
-				{ key: :sendTelemetry, x: cx, y: cy + 100, w: 16, h: 16 }
-				{ key: :showWelcome, x: cx, y: cy + 126, w: 16, h: 16 }
-			])
-			gui.formSetKeyByHit(state, :lang, mx, my, [
-				{ key: :en, x: cx, y: cy + 190, w: 40, h: 16 }
-				{ key: :es, x: cx, y: cy + 214, w: 40, h: 16 }
-				{ key: :fr, x: cx, y: cy + 238, w: 40, h: 16 }
-			])
-		}
-
-		// Display: checkboxes + theme radios
-		if state.category = 1 -> {
-			cx := sideW + 1 + 16
-			cy := 46
-			gui.formToggleKeysByHit(state, mx, my, [
-				{ key: :fullscreen, x: cx, y: cy + 48, w: 16, h: 16 }
-				{ key: :showFPS, x: cx, y: cy + 74, w: 16, h: 16 }
-				{ key: :vsync, x: cx, y: cy + 100, w: 16, h: 16 }
-				{ key: :hiDPI, x: cx, y: cy + 126, w: 16, h: 16 }
-			])
-			gui.formSetKeyByHit(state, :theme, mx, my, [
-				{ key: :dark,   x: cx, y: cy + 190, w: 40, h: 16 }
-				{ key: :light,  x: cx, y: cy + 214, w: 40, h: 16 }
-				{ key: :system, x: cx, y: cy + 238, w: 40, h: 16 }
-			])
-		}
-
-		// Audio: checkboxes + slider grab
-		if state.category = 2 -> {
-			cx := sideW + 1 + 16
-			cy := 46
-			gui.formToggleKeysByHit(state, mx, my, [
-				{ key: :soundEnabled, x: cx, y: cy + 48, w: 16, h: 16 }
-				{ key: :musicEnabled, x: cx, y: cy + 74, w: 16, h: 16 }
-				{ key: :notifSound, x: cx, y: cy + 100, w: 16, h: 16 }
-			])
-			// Slider grab
-			gui.formSetKeyByHit(state, :dragSlider, mx, my, [
-				{ key: :master,  x: sliderCX, y: cy + 164, w: sliderW, h: 16 }
-				{ key: :music,   x: sliderCX, y: cy + 216, w: sliderW, h: 16 }
-				{ key: :effects, x: sliderCX, y: cy + 268, w: sliderW, h: 16 }
-			])
-		}
-
-		// Network: checkboxes + radios
-		if state.category = 3 -> {
-			cx := sideW + 1 + 16
-			cy := 46
-			gui.formToggleKeysByHit(state, mx, my, [
-				{ key: :netEnabled, x: cx, y: cy + 48, w: 16, h: 16 }
-				{ key: :syncCloud, x: cx, y: cy + 74, w: 16, h: 16 }
-				{ key: :offlineMode, x: cx, y: cy + 100, w: 16, h: 16 }
-			])
-			gui.formSetKeyByHit(state, :connType, mx, my, [
-				{ key: :auto, x: cx, y: cy + 164, w: 40, h: 16 }
-				{ key: :wifi, x: cx, y: cy + 188, w: 40, h: 16 }
-				{ key: :ethernet, x: cx, y: cy + 212, w: 40, h: 16 }
-			])
-		}
-	}
-
-	if mt = gui.FORM_WM_LBUTTONUP -> {
-		gui.formResetFlags(state, [:pressSave, :pressCancel], false)
-		state.dragSlider <- :none
-	}
-}
-
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 println('== Magnolia Settings Panel ==')
@@ -416,7 +286,87 @@ if window.type {
 	:ok -> {
 		state := initState(640, 520)
 		gui.show(window)
-		gui.on(window, :dispatch, fn(step) onEvent(window, step, state))
+		gui.onMouseMove(window, fn(mx, my) {
+			hovIdx := gui.formHitListIndex(mx, my, 0, 46, state.sideW, state.navH, len(CATEGORIES))
+			state.hovCat <- hovIdx
+			gui.formSetHoverFromRects(state, mx, my, [
+				{ key: :hoverSave,   x: state.bSavX, y: state.bBtnY, w: state.btnW, h: state.btnH }
+				{ key: :hoverCancel, x: state.bCanX, y: state.bBtnY, w: state.btnW, h: state.btnH }
+			])
+			gui.formApplySliderDrag(state, :dragSlider, mx, state.sliderCX, state.sliderW, 12, 0, 100, [
+				{ drag: :master,  valueKey: :masterVol }
+				{ drag: :music,   valueKey: :musicVol }
+				{ drag: :effects, valueKey: :effectsVol }
+			])
+		})
+		gui.onLButtonDown(window, fn(mx, my) {
+			navIdx := gui.formHitListIndex(mx, my, 0, 46, state.sideW, state.navH, len(CATEGORIES))
+			if navIdx >= 0 -> state.category <- navIdx
+			if gui.formInRect?(mx, my, state.bSavX, state.bBtnY, state.btnW, state.btnH) -> {
+				state.pressSave <- true
+				gui.formSetStatus(state, 'Settings saved.', true)
+			}
+			if gui.formInRect?(mx, my, state.bCanX, state.bBtnY, state.btnW, state.btnH) -> {
+				state.pressCancel <- true
+				gui.formSetStatus(state, '', true)
+			}
+			cx := state.sliderCX
+			cy := 46
+			if state.category = 0 -> {
+				gui.formToggleKeysByHit(state, mx, my, [
+					{ key: :autoSave,      x: cx, y: cy + 48,  w: 16, h: 16 }
+					{ key: :autoUpdate,    x: cx, y: cy + 74,  w: 16, h: 16 }
+					{ key: :sendTelemetry, x: cx, y: cy + 100, w: 16, h: 16 }
+					{ key: :showWelcome,   x: cx, y: cy + 126, w: 16, h: 16 }
+				])
+				gui.formSetKeyByHit(state, :lang, mx, my, [
+					{ key: :en, x: cx, y: cy + 190, w: 40, h: 16 }
+					{ key: :es, x: cx, y: cy + 214, w: 40, h: 16 }
+					{ key: :fr, x: cx, y: cy + 238, w: 40, h: 16 }
+				])
+			}
+			if state.category = 1 -> {
+				gui.formToggleKeysByHit(state, mx, my, [
+					{ key: :fullscreen, x: cx, y: cy + 48,  w: 16, h: 16 }
+					{ key: :showFPS,    x: cx, y: cy + 74,  w: 16, h: 16 }
+					{ key: :vsync,      x: cx, y: cy + 100, w: 16, h: 16 }
+					{ key: :hiDPI,      x: cx, y: cy + 126, w: 16, h: 16 }
+				])
+				gui.formSetKeyByHit(state, :theme, mx, my, [
+					{ key: :dark,   x: cx, y: cy + 190, w: 40, h: 16 }
+					{ key: :light,  x: cx, y: cy + 214, w: 40, h: 16 }
+					{ key: :system, x: cx, y: cy + 238, w: 40, h: 16 }
+				])
+			}
+			if state.category = 2 -> {
+				gui.formToggleKeysByHit(state, mx, my, [
+					{ key: :soundEnabled, x: cx, y: cy + 48,  w: 16, h: 16 }
+					{ key: :musicEnabled, x: cx, y: cy + 74,  w: 16, h: 16 }
+					{ key: :notifSound,   x: cx, y: cy + 100, w: 16, h: 16 }
+				])
+				gui.formSetKeyByHit(state, :dragSlider, mx, my, [
+					{ key: :master,  x: state.sliderCX, y: cy + 164, w: state.sliderW, h: 16 }
+					{ key: :music,   x: state.sliderCX, y: cy + 216, w: state.sliderW, h: 16 }
+					{ key: :effects, x: state.sliderCX, y: cy + 268, w: state.sliderW, h: 16 }
+				])
+			}
+			if state.category = 3 -> {
+				gui.formToggleKeysByHit(state, mx, my, [
+					{ key: :netEnabled,  x: cx, y: cy + 48,  w: 16, h: 16 }
+					{ key: :syncCloud,   x: cx, y: cy + 74,  w: 16, h: 16 }
+					{ key: :offlineMode, x: cx, y: cy + 100, w: 16, h: 16 }
+				])
+				gui.formSetKeyByHit(state, :connType, mx, my, [
+					{ key: :auto,     x: cx, y: cy + 164, w: 40, h: 16 }
+					{ key: :wifi,     x: cx, y: cy + 188, w: 40, h: 16 }
+					{ key: :ethernet, x: cx, y: cy + 212, w: 40, h: 16 }
+				])
+			}
+		})
+		gui.onLButtonUp(window, fn(mx, my) {
+			gui.formResetFlags(state, [:pressSave, :pressCancel], false)
+			state.dragSlider <- :none
+		})
 		drawForm(window, state)
 		gui.run(
 			window

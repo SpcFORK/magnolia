@@ -93,6 +93,54 @@ fn clearListeners(window, event) if bus := _ensureEventBus(window) {
 	_ -> bus.clear(event)
 }
 
+fn onDispatch(window, handler) on(window, :dispatch, handler)
+
+fn onceDispatch(window, handler) once(window, :dispatch, handler)
+
+fn onRunStart(window, handler) on(window, :runStart, handler)
+
+fn onceRunStart(window, handler) once(window, :runStart, handler)
+
+fn onIdle(window, handler) on(window, :idle, handler)
+
+fn onceIdle(window, handler) once(window, :idle, handler)
+
+fn onFrame(window, handler) on(window, :frame, handler)
+
+fn onceFrame(window, handler) once(window, :frame, handler)
+
+fn onClosing(window, handler) on(window, :closing, handler)
+
+fn onceClosing(window, handler) once(window, :closing, handler)
+
+fn onClosed(window, handler) on(window, :closed, handler)
+
+fn onceClosed(window, handler) once(window, :closed, handler)
+
+fn onKeyDownEvent(window, handler) {
+	on(window, :dispatch, fn(evt) if evt.type = :keyDown -> {
+		handler(evt.key, evt)
+	})
+}
+
+fn onceKeyDownEvent(window, handler) {
+	once(window, :dispatch, fn(evt) if evt.type = :keyDown -> {
+		handler(evt.key, evt)
+	})
+}
+
+fn onKeyUpEvent(window, handler) {
+	on(window, :dispatch, fn(evt) if evt.type = :keyUp -> {
+		handler(evt.key, evt)
+	})
+}
+
+fn onceKeyUpEvent(window, handler) {
+	once(window, :dispatch, fn(evt) if evt.type = :keyUp -> {
+		handler(evt.key, evt)
+	})
+}
+
 fn _publish(window, event, payload) {
 	bus := _ensureEventBus(window)
 	if bus {
@@ -315,6 +363,9 @@ FORM_VK_BACK := 8
 FORM_VK_TAB := 9
 FORM_VK_RETURN := 13
 FORM_VK_ESCAPE := 27
+FORM_WM_KEYUP       := 257
+FORM_WM_RBUTTONDOWN := 516
+FORM_WM_RBUTTONUP   := 517
 
 fn formInRect?(mx, my, rx, ry, rw, rh) {
 	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
@@ -335,6 +386,71 @@ fn formEventContext(window) {
 		mx: formLoWord(lp)
 		my: formHiWord(lp)
 	}
+}
+
+// ─── On<Event> typed dispatch subscribers ─────────────────────────────────
+// Each helper subscribes to :dispatch and fires handler only when the
+// Windows message type matches.  Returns the subscription token so the
+// caller can unsubscribe with gui.off().
+
+fn onMouseMove(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MOUSEMOVE -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onLButtonDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONDOWN -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onLButtonUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONUP -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onRButtonDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONDOWN -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onRButtonUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONUP -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onKeyDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYDOWN -> {
+		handler(formMsgWParam(window))
+	})
+}
+
+fn onKeyUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYUP -> {
+		handler(formMsgWParam(window))
+	})
+}
+
+fn onChar(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_CHAR -> {
+		handler(formMsgWParam(window))
+	})
+}
+
+fn onResize(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_SIZE -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
 }
 
 fn formSetStatus(state, message, ok) {

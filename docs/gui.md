@@ -248,6 +248,20 @@ The GUI module exposes thin helpers around this bus:
 - `emit(window, event, payload, onDone?)` emits sync/async based on callback presence
 - `listenerCount(window, event)` returns active listener count
 - `clearListeners(window, event?)` clears one event or all listeners
+- `onDispatch(window, fn(step){...})` convenience wrapper over `on(window, :dispatch, ...)`
+- `onceDispatch(window, fn(step){...})` one-shot dispatch subscription
+- `onKeyDownEvent(window, fn(key, evt){...})` filters dispatch events to `:keyDown`
+- `onKeyUpEvent(window, fn(key, evt){...})` filters dispatch events to `:keyUp`
+- `onceKeyDownEvent(window, fn(key, evt){...})` one-shot `:keyDown` subscription
+- `onceKeyUpEvent(window, fn(key, evt){...})` one-shot `:keyUp` subscription
+
+Lifecycle aliases:
+
+- `onRunStart/onceRunStart(window, handler)` for `:runStart`
+- `onIdle/onceIdle(window, handler)` for `:idle`
+- `onFrame/onceFrame(window, handler)` for `:frame`
+- `onClosing/onceClosing(window, handler)` for `:closing`
+- `onClosed/onceClosed(window, handler)` for `:closed`
 
 Built-in events emitted by GUI runtime:
 
@@ -257,6 +271,24 @@ Built-in events emitted by GUI runtime:
 - `:frame` whenever `onFrame(window, dt)` is invoked (payload includes `dt` and `timeNs`)
 - `:closing` when `close(window)` begins
 - `:closed` after `close(window)` completes or when run loop receives closed step
+
+### Typed dispatch helpers (`On<Event>`)
+
+For native Windows message handling, GUI exposes typed subscribers that wrap
+`on(window, :dispatch, ...)` and filter by message type for you.
+
+- `onMouseMove(window, fn(mx, my) {...})`
+- `onLButtonDown(window, fn(mx, my) {...})`
+- `onLButtonUp(window, fn(mx, my) {...})`
+- `onRButtonDown(window, fn(mx, my) {...})`
+- `onRButtonUp(window, fn(mx, my) {...})`
+- `onKeyDown(window, fn(vk) {...})`
+- `onKeyUp(window, fn(vk) {...})`
+- `onChar(window, fn(code) {...})`
+- `onResize(window, fn(width, height) {...})`
+
+Each helper returns the same subscription token as `on(...)`, so you can remove
+handlers with `off(window, :dispatch, token)`.
 
 ## Drawing helpers
 

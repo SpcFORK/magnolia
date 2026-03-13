@@ -170,81 +170,6 @@ fn submitLogin(state) {
 	}
 }
 
-// ─── Event handler ─────────────────────────────────────────────────────────
-
-fn onEvent(window, step, state) if step.type = :dispatch -> {
-	evt := gui.formEventContext(window)
-	mt := evt.mt
-	wp := evt.wp
-	mx := evt.mx
-	my := evt.my
-	lo := layout(window.width, window.height)
-
-	if mt = gui.FORM_WM_MOUSEMOVE -> {
-		gui.formSetHoverFromRects(state, mx, my, [
-			{ key: :hoverLogin, x: lo.b1x, y: lo.bY, w: lo.bW, h: lo.bH }
-			{ key: :hoverClear, x: lo.b2x, y: lo.bY, w: lo.bW, h: lo.bH }
-		])
-	}
-
-	if mt = gui.FORM_WM_LBUTTONDOWN -> {
-		// Focus fields
-		gui.formSetKeyByHit(state, :focus, mx, my, [
-			{ key: :username, x: lo.ux, y: lo.uy, w: lo.uw, h: lo.uh }
-			{ key: :password, x: lo.px, y: lo.py, w: lo.pw, h: lo.ph }
-		])
-
-		// Checkbox
-		state.remember <- gui.formToggleIfHit(state.remember, mx, my, lo.rmx, lo.rmy, 16, 16)
-
-		// LOGIN button
-		if gui.formInRect?(mx, my, lo.b1x, lo.bY, lo.bW, lo.bH) -> {
-			state.pressLogin <- true
-			submitLogin(state)
-		}
-
-		// CLEAR button
-		if gui.formInRect?(mx, my, lo.b2x, lo.bY, lo.bW, lo.bH) -> {
-			state.pressClear <- true
-			gui.formSetByAssignments(state, [
-				{ key: :username, value: '' }
-				{ key: :password, value: '' }
-				{ key: :status, value: '' }
-				{ key: :focus, value: :username }
-			])
-		}
-	}
-
-	if mt = gui.FORM_WM_LBUTTONUP -> {
-		gui.formResetFlags(state, [:pressLogin, :pressClear], false)
-	}
-
-	// Printable character typed (WM_CHAR)
-	if mt = gui.FORM_WM_CHAR -> {
-		if gui.formIsPrintableChar?(wp) {
-			true -> gui.formAppendByFocus(state, state.focus, char(wp), LOGIN_TEXT_FIELDS, ?)
-		}
-	}
-
-	// Control keys (WM_KEYDOWN)
-	if mt = gui.FORM_WM_KEYDOWN -> {
-		if wp = gui.FORM_VK_BACK -> gui.formBackspaceByFocus(state, state.focus, LOGIN_TEXT_KEYS, ?)
-		if wp = gui.FORM_VK_TAB -> {
-			state.focus <- if state.focus = :username { true -> :password, _ -> :username }
-		}
-		if wp = gui.FORM_VK_RETURN & state.focus = :username -> state.focus <- :password
-		if wp = gui.FORM_VK_RETURN & state.focus = :password -> submitLogin(state)
-		if wp = gui.FORM_VK_ESCAPE -> {
-			gui.formSetByAssignments(state, [
-				{ key: :username, value: '' }
-				{ key: :password, value: '' }
-				{ key: :status, value: '' }
-				{ key: :focus, value: :username }
-			])
-		}
-	}
-}
-
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 println('== Magnolia Login Form ==')
@@ -259,7 +184,56 @@ if window.type {
 	:ok -> {
 		state := initState(480, 520)
 		gui.show(window)
-		gui.on(window, :dispatch, fn(step) onEvent(window, step, state))
+		gui.onMouseMove(window, fn(mx, my) {
+			lo := layout(window.width, window.height)
+			gui.formSetHoverFromRects(state, mx, my, [
+				{ key: :hoverLogin, x: lo.b1x, y: lo.bY, w: lo.bW, h: lo.bH }
+				{ key: :hoverClear, x: lo.b2x, y: lo.bY, w: lo.bW, h: lo.bH }
+			])
+		})
+		gui.onLButtonDown(window, fn(mx, my) {
+			lo := layout(window.width, window.height)
+			gui.formSetKeyByHit(state, :focus, mx, my, [
+				{ key: :username, x: lo.ux, y: lo.uy, w: lo.uw, h: lo.uh }
+				{ key: :password, x: lo.px, y: lo.py, w: lo.pw, h: lo.ph }
+			])
+			state.remember <- gui.formToggleIfHit(state.remember, mx, my, lo.rmx, lo.rmy, 16, 16)
+			if gui.formInRect?(mx, my, lo.b1x, lo.bY, lo.bW, lo.bH) -> {
+				state.pressLogin <- true
+				submitLogin(state)
+			}
+			if gui.formInRect?(mx, my, lo.b2x, lo.bY, lo.bW, lo.bH) -> {
+				state.pressClear <- true
+				gui.formSetByAssignments(state, [
+					{ key: :username, value: '' }
+					{ key: :password, value: '' }
+					{ key: :status,   value: '' }
+					{ key: :focus,    value: :username }
+				])
+			}
+		})
+		gui.onLButtonUp(window, fn(mx, my) {
+			gui.formResetFlags(state, [:pressLogin, :pressClear], false)
+		})
+		gui.onChar(window, fn(wp) {
+			if gui.formIsPrintableChar?(wp) -> gui.formAppendByFocus(state, state.focus, char(wp), LOGIN_TEXT_FIELDS, ?)
+		})
+		gui.onKeyDown(window, fn(vk) {
+			if vk = gui.FORM_VK_BACK -> gui.formBackspaceByFocus(state, state.focus, LOGIN_TEXT_KEYS, ?)
+			if vk = gui.FORM_VK_TAB -> {
+				state.focus <- if state.focus = :username { true -> :password, _ -> :username }
+			}
+			if vk = gui.FORM_VK_RETURN & state.focus = :username -> state.focus <- :password
+			if vk = gui.FORM_VK_RETURN & state.focus = :password -> submitLogin(state)
+			if vk = gui.FORM_VK_ESCAPE -> {
+				gui.formSetByAssignments(state, [
+					{ key: :username, value: '' }
+					{ key: :password, value: '' }
+					{ key: :status,   value: '' }
+					{ key: :focus,    value: :username }
+				])
+			}
+		})
 		drawForm(window, state)
 		gui.run(
 			window
