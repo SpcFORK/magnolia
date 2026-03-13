@@ -318,6 +318,71 @@ Draws a line segment in the target window.
 - Linux: X11 `XDrawLine`
 - Web: records a logical `:line` draw op in `window.messages`
 
+## Graphing helpers
+
+GUI now includes lightweight graph drawing helpers built on top of
+`drawLine(...)`, `fillRect(...)`, and `drawText(...)`.
+
+### `graphRange(values, options?)`
+
+Computes a display range for numeric series.
+
+- `options.min` optional fixed minimum
+- `options.max` optional fixed maximum
+- `options.padding` optional padding applied to both sides
+
+Returns `{min, max, span}`.
+
+### `graphMapX(index, count, x, width)`
+
+Maps a sample index to an X coordinate in a graph rect.
+
+### `graphMapY(value, y, height, range)`
+
+Maps a numeric value to a Y coordinate in a graph rect using a
+`graphRange(...)` result.
+
+### `drawGraphAxes(window, x, y, width, height, options?)`
+
+Draws graph background, grid, and border axes.
+
+- `options.gridColor`
+- `options.axisColor`
+- `options.backgroundColor`
+- `options.xTicks` (default `5`)
+- `options.yTicks` (default `4`)
+- `options.showGrid` (default `true`)
+
+### `drawLineGraph(window, x, y, width, height, values, options?)`
+
+Draws a line graph with optional points and min/max labels.
+
+- `options.lineColor`
+- `options.pointColor`
+- `options.showPoints` (default `true`)
+- `options.showLabels` (default `true`)
+- `options.min`, `options.max`, `options.rangePadding`
+- `options.axis` nested options forwarded to `drawGraphAxes(...)`
+
+### `drawBarGraph(window, x, y, width, height, values, options?)`
+
+Draws a bar graph.
+
+- `options.barColor`
+- `options.barBorderColor`
+- `options.barGap` (default `2`)
+- `options.showLabels` (default `true`)
+- `options.min`, `options.max`, `options.rangePadding`
+- `options.axis` nested options forwarded to `drawGraphAxes(...)`
+
+### `drawSparkline(window, x, y, width, height, values, options?)`
+
+Draws a compact line-only graph for dashboards and small stat cards.
+
+- `options.lineColor`
+- `options.backgroundColor`
+- `options.min`, `options.max`, `options.rangePadding`
+
 ## 2D Tooling
 
 GUI now includes a 2D helper suite for math, transforms, camera mapping, and

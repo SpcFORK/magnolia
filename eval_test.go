@@ -2345,6 +2345,93 @@ func TestGUIEventBusHelpers(t *testing.T) {
 	))
 }
 
+func TestGUIGraphingHelpers(t *testing.T) {
+	expectProgramToReturn(t, `
+		gui := import('GUI')
+		win := {
+			type: :ok
+			backend: :web
+			messages: []
+			width: 320
+			height: 200
+		}
+
+		values := [2, 5, 9, 4, 7]
+		range := gui.graphRange(values, {padding: 1})
+		x2 := gui.graphMapX(2, len(values), 10, 100)
+		yTop := gui.graphMapY(range.max, 20, 70, range)
+
+		gui.drawGraphAxes(win, 10, 10, 180, 90, {
+			showGrid: true
+			xTicks: 3
+			yTicks: 2
+		})
+		gui.drawLineGraph(win, 10, 120, 180, 60, values, {
+			showPoints: true
+			showLabels: true
+		})
+		gui.drawBarGraph(win, 200, 120, 100, 60, values, {
+			showLabels: true
+			barGap: 2
+		})
+		gui.drawSparkline(win, 200, 20, 100, 40, values, {
+			rangePadding: 1
+		})
+
+		fn countType(i, target, acc) if i < len(win.messages) {
+			true -> {
+				msg := win.messages.(i)
+				next := if msg.type = target {
+					true -> acc + 1
+					_ -> acc
+				}
+				countType(i + 1, target, next)
+			}
+			_ -> acc
+		}
+
+		lineCount := countType(0, :line, 0)
+		rectCount := countType(0, :rect, 0)
+		textCount := countType(0, :text, 0)
+
+		[
+			type(gui.graphRange)
+			type(gui.graphMapX)
+			type(gui.graphMapY)
+			type(gui.drawGraphAxes)
+			type(gui.drawLineGraph)
+			type(gui.drawBarGraph)
+			type(gui.drawSparkline)
+			range.min = 1
+			range.max = 10
+			range.span = 9
+			x2 = 60
+			yTop = 20
+			len(win.messages) > 0
+			lineCount > 0
+			rectCount > 0
+			textCount > 0
+		]
+	`, MakeList(
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		AtomValue("function"),
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+	))
+}
+
 func TestBuiltinPresenceForRemainingIoAndProcessFeatures(t *testing.T) {
 	expectProgramToReturn(t, `
 		[

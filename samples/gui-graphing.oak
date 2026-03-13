@@ -1,0 +1,103 @@
+// gui-graphing.oak
+// Run: magnolia run samples/gui-graphing.oak
+
+{
+	println: println
+	string: string
+} := import('std')
+
+gui := import('GUI')
+
+fn makeSeries(t, count, phaseStep, amplitude, baseline) {
+	fn loop(i, acc) if i < count {
+		true -> {
+			v := baseline + sin(t + float(i) * phaseStep) * amplitude
+			loop(i + 1, acc << int(v))
+		}
+		_ -> acc
+	}
+	loop(0, [])
+}
+
+fn drawFrame(window, t) {
+	lineSeries := makeSeries(t * 1.4, 40, 0.32, 42, 50)
+	barSeries := makeSeries(t * 0.8, 18, 0.48, 36, 46)
+	sparkSeries := makeSeries(t * 2.2, 30, 0.26, 18, 28)
+
+	gui.fillRect(window, 0, 0, window.width, window.height, gui.rgb(9, 14, 24))
+	gui.drawText(window, 24, 20, 'Magnolia GUI Graphing Sample')
+	gui.drawText(window, 24, 42, 'line graph, bar graph, and sparkline helpers')
+
+	gui.drawLineGraph(window, 24, 72, 640, 220, lineSeries, {
+		lineColor: gui.rgb(95, 204, 255)
+		pointColor: gui.rgb(170, 238, 255)
+		showPoints: true
+		showLabels: true
+		axis: {
+			backgroundColor: gui.rgb(12, 22, 36)
+			gridColor: gui.rgb(32, 56, 84)
+			axisColor: gui.rgb(120, 164, 212)
+			xTicks: 8
+			yTicks: 6
+		}
+	})
+
+	gui.drawBarGraph(window, 24, 320, 640, 220, barSeries, {
+		barColor: gui.rgb(104, 228, 154)
+		barBorderColor: gui.rgb(70, 170, 118)
+		barGap: 4
+		showLabels: true
+		axis: {
+			backgroundColor: gui.rgb(11, 25, 31)
+			gridColor: gui.rgb(26, 62, 60)
+			axisColor: gui.rgb(122, 204, 178)
+			xTicks: 9
+			yTicks: 5
+		}
+	})
+
+	gui.drawText(window, 700, 94, 'CPU load trend')
+	gui.drawSparkline(window, 700, 120, 250, 56, sparkSeries, {
+		lineColor: gui.rgb(255, 180, 96)
+		backgroundColor: gui.rgb(25, 20, 14)
+		rangePadding: 2
+	})
+
+	gui.drawText(window, 700, 196, 'network jitter')
+	gui.drawSparkline(window, 700, 222, 250, 56, makeSeries(t * 2.7, 30, 0.51, 12, 18), {
+		lineColor: gui.rgb(255, 120, 130)
+		backgroundColor: gui.rgb(30, 14, 18)
+		rangePadding: 1
+	})
+
+	gui.drawText(window, 700, 300, 'tips:')
+	gui.drawText(window, 700, 324, '- use axis.min/max for fixed scale')
+	gui.drawText(window, 700, 348, '- use drawSparkline for compact dashboards')
+	gui.drawText(window, 700, 372, '- combine with gui.onResize for responsive layout')
+}
+
+window := gui.createWindow('Magnolia GUI Graphing', 980, 580, {
+	frameMs: 16
+	updateOnDispatch: false
+	icon: './build/magnolia.ico'
+	taskbarIcon: './build/magnolia.ico'
+	windowIcon: './build/magnolia.ico'
+})
+
+if window.type {
+	:ok -> {
+		t := 0.0
+		gui.show(window)
+		gui.run(window, ?, fn(win, dt) {
+			t <- float(t) + float(dt)
+			if gui.beginFrame(win).type = :ok -> {
+				drawFrame(win, t)
+				gui.endFrame(win)
+			}
+		})
+		gui.close(window)
+	}
+	_ -> {
+		println('Could not create graphing sample window: ' + string(window))
+	}
+}

@@ -380,6 +380,232 @@ fn _transformVertices(vertices, transform, i, out) gui3dmath.transformVertices(v
 
 fn drawLine(window, x1, y1, x2, y2, color) guiDraw.drawLine(window, x1, y1, x2, y2, color, rgb(215, 235, 255))
 
+fn graphRange(values, options) {
+	opts := _default(options, {})
+	fixedMin := _default(opts.min, ?)
+	fixedMax := _default(opts.max, ?)
+	padding := _default(opts.padding, 0)
+
+	if len(values) = 0 {
+		true -> {
+			baseMin := if fixedMin { ? -> 0, _ -> fixedMin }
+			baseMax := if fixedMax { ? -> 1, _ -> fixedMax }
+			if baseMax <= baseMin -> baseMax <- baseMin + 1
+			{
+				min: baseMin
+				max: baseMax
+				span: baseMax - baseMin
+			}
+		}
+		_ -> {
+			autoMin := values.(0)
+			autoMax := values.(0)
+			fn loop(i, minV, maxV) if i < len(values) {
+				true -> {
+					v := values.(i)
+					nextMin := if v < minV { true -> v, _ -> minV }
+					nextMax := if v > maxV { true -> v, _ -> maxV }
+					loop(i + 1, nextMin, nextMax)
+				}
+				_ -> {
+					rawMin := if fixedMin { ? -> minV, _ -> fixedMin }
+					rawMax := if fixedMax { ? -> maxV, _ -> fixedMax }
+					resolvedMin := rawMin - padding
+					resolvedMax := rawMax + padding
+					if resolvedMax <= resolvedMin -> resolvedMax <- resolvedMin + 1
+					{
+						min: resolvedMin
+						max: resolvedMax
+						span: resolvedMax - resolvedMin
+					}
+				}
+			}
+			loop(1, autoMin, autoMax)
+		}
+	}
+}
+
+fn graphMapX(index, count, x, width) if count <= 1 {
+	true -> x
+	_ -> x + int((float(index) * float(width)) / float(count - 1))
+}
+
+fn graphMapY(value, y, height, range) {
+	rawT := float(value - range.min) / float(range.span)
+	t := if rawT < 0 {
+		true -> 0.0
+		_ -> if rawT > 1 { true -> 1.0, _ -> rawT }
+	}
+	y + height - int(t * float(height))
+}
+
+fn _graphDrawBorder(window, x, y, width, height, color) {
+	drawLine(window, x, y, x + width, y, color)
+	drawLine(window, x, y + height, x + width, y + height, color)
+	drawLine(window, x, y, x, y + height, color)
+	drawLine(window, x + width, y, x + width, y + height, color)
+}
+
+fn drawGraphAxes(window, x, y, width, height, options) {
+	opts := _default(options, {})
+	gridColor := _default(opts.gridColor, rgb(78, 94, 112))
+	axisColor := _default(opts.axisColor, rgb(158, 186, 220))
+	backgroundColor := _default(opts.backgroundColor, ?)
+	xTicks := _default(opts.xTicks, 5)
+	yTicks := _default(opts.yTicks, 4)
+	showGrid := _default(opts.showGrid, true)
+
+	if backgroundColor != ? -> fillRect(window, x, y, width, height, backgroundColor)
+
+	if showGrid {
+		true -> {
+			if xTicks < 1 -> xTicks <- 1
+			if yTicks < 1 -> yTicks <- 1
+
+			fn drawXGrid(i) if i <= xTicks {
+				true -> {
+					gx := x + int((float(i) * float(width)) / float(xTicks))
+					drawLine(window, gx, y, gx, y + height, gridColor)
+					drawXGrid(i + 1)
+				}
+			}
+			drawXGrid(0)
+
+			fn drawYGrid(i) if i <= yTicks {
+				true -> {
+					gy := y + int((float(i) * float(height)) / float(yTicks))
+					drawLine(window, x, gy, x + width, gy, gridColor)
+					drawYGrid(i + 1)
+				}
+			}
+			drawYGrid(0)
+		}
+	}
+
+	_graphDrawBorder(window, x, y, width, height, axisColor)
+}
+
+fn drawLineGraph(window, x, y, width, height, values, options) {
+	opts := _default(options, {})
+	lineColor := _default(opts.lineColor, rgb(92, 200, 255))
+	pointColor := _default(opts.pointColor, lineColor)
+	showPoints := _default(opts.showPoints, true)
+	showLabels := _default(opts.showLabels, true)
+	axisOptions := _default(opts.axis, opts)
+
+	drawGraphAxes(window, x, y, width, height, axisOptions)
+
+	if len(values) > 0 {
+		true -> {
+			range := graphRange(values, {
+				min: _default(opts.min, ?)
+				max: _default(opts.max, ?)
+				padding: _default(opts.rangePadding, 0)
+			})
+
+			fn drawSegments(i, px, py) if i < len(values) {
+				true -> {
+					vx := graphMapX(i, len(values), x, width)
+					vy := graphMapY(values.(i), y, height, range)
+					drawLine(window, px, py, vx, vy, lineColor)
+					if showPoints -> fillRect(window, vx - 1, vy - 1, 3, 3, pointColor)
+					drawSegments(i + 1, vx, vy)
+				}
+			}
+
+			x0 := graphMapX(0, len(values), x, width)
+			y0 := graphMapY(values.(0), y, height, range)
+			if showPoints -> fillRect(window, x0 - 1, y0 - 1, 3, 3, pointColor)
+			drawSegments(1, x0, y0)
+
+			if showLabels {
+				true -> {
+					drawText(window, x + 4, y + 4, 'max ' + string(range.max))
+					drawText(window, x + 4, y + height - 14, 'min ' + string(range.min))
+				}
+			}
+		}
+	}
+}
+
+fn drawBarGraph(window, x, y, width, height, values, options) {
+	opts := _default(options, {})
+	barColor := _default(opts.barColor, rgb(84, 176, 255))
+	barBorderColor := _default(opts.barBorderColor, ?)
+	barGap := _default(opts.barGap, 2)
+	showLabels := _default(opts.showLabels, true)
+	axisOptions := _default(opts.axis, opts)
+
+	drawGraphAxes(window, x, y, width, height, axisOptions)
+
+	if len(values) > 0 {
+		true -> {
+			range := graphRange(values, {
+				min: _default(opts.min, ?)
+				max: _default(opts.max, ?)
+				padding: _default(opts.rangePadding, 0)
+			})
+			if barGap < 0 -> barGap <- 0
+
+			slotW := int(float(width) / float(len(values)))
+			if slotW < 1 -> slotW <- 1
+			barW := slotW - barGap
+			if barW < 1 -> barW <- 1
+
+			fn drawBars(i) if i < len(values) {
+				true -> {
+					v := values.(i)
+					bx := x + i * slotW + int(barGap / 2)
+					by := graphMapY(v, y, height, range)
+					bh := y + height - by
+					if bh < 1 -> bh <- 1
+					fillRect(window, bx, by, barW, bh, barColor)
+					if barBorderColor != ? -> _graphDrawBorder(window, bx, by, barW, bh, barBorderColor)
+					drawBars(i + 1)
+				}
+			}
+			drawBars(0)
+
+			if showLabels {
+				true -> {
+					drawText(window, x + 4, y + 4, 'max ' + string(range.max))
+					drawText(window, x + 4, y + height - 14, 'min ' + string(range.min))
+				}
+			}
+		}
+	}
+}
+
+fn drawSparkline(window, x, y, width, height, values, options) {
+	opts := _default(options, {})
+	lineColor := _default(opts.lineColor, rgb(108, 214, 172))
+	backgroundColor := _default(opts.backgroundColor, ?)
+	range := graphRange(values, {
+		min: _default(opts.min, ?)
+		max: _default(opts.max, ?)
+		padding: _default(opts.rangePadding, 0)
+	})
+
+	if backgroundColor != ? -> fillRect(window, x, y, width, height, backgroundColor)
+
+	if len(values) > 1 {
+		true -> {
+			fn drawSegments(i, px, py) if i < len(values) {
+				true -> {
+					vx := graphMapX(i, len(values), x, width)
+					vy := graphMapY(values.(i), y, height, range)
+					drawLine(window, px, py, vx, vy, lineColor)
+					drawSegments(i + 1, vx, vy)
+				}
+			}
+
+			x0 := graphMapX(0, len(values), x, width)
+			y0 := graphMapY(values.(0), y, height, range)
+			drawSegments(1, x0, y0)
+		}
+	}
+}
+
 fn formDrawBorder(window, x, y, w, h, color) {
 	drawLine(window, x, y, x + w, y, color)
 	drawLine(window, x, y + h, x + w, y + h, color)
