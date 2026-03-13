@@ -70,6 +70,8 @@ Useful `options` fields:
 - `maxFrameDtMs` - clamps per-frame `dt` after stalls (default: `250`)
 - `updateOnDispatch` - whether input/message dispatch should also trigger
     `onFrame` (default: `false`)
+- `className` (Windows) - override the Win32 class name used during
+    registration. Defaults to a generated unique class name.
 - Windows icon options:
     - `icon` - base icon spec used for both big/small icon when specific values
         are not provided

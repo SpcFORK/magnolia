@@ -4,13 +4,20 @@ Win32-specific window lifecycle, event loop, and drawing helpers.
 
 Key exports
 
-- `createWindowState(title, width, height, frameMs, updateOnDispatch)` — create native Win32 window state
+- `createWindowState(title, width, height, options, className, frameMs, updateOnDispatch)` — create native Win32 window state
 - `showWindow(window)` / `hideWindow(window)` — show or hide a native window
 - `moveWindow(window, x, y)` — move a native window without resizing
 - `resizeWindow(window, width, height)` — resize native window bounds
 - `setFullscreen(window, enabled)` — maximize/restore fullscreen-like mode
 - helper constants and icon handling utilities
 - platform-specific frame batching to reuse device contexts
+
+Parameters
+
+- `options` - full GUI options object (layer selection, icons, and related backend flags)
+- `className` - explicit Win32 class name to register for this window
+- `frameMs` - target frame step in milliseconds
+- `updateOnDispatch` - whether dispatch events should also drive frame updates
 
 Layer options
 
@@ -20,6 +27,7 @@ Layer options
 
 Window state fields
 
+- `window.className` — registered Win32 class name used by the window instance
 - `window.presenterBackend` — selected 2D presenter backend (`:vulkan`, `:opengl`, `:ddraw`, or `:gdi`)
 - `window.layers.twoD` — requested/selected 2D layer plus capability details
 - `window.layers.threeD` — requested/selected 3D layer plus capability details
