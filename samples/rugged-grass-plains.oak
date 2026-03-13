@@ -1,5 +1,5 @@
 // Rugged Grass Plains - first-person sample
-// WASD movement: W/S forward/back, A/D rotate camera (yaw)
+// WASD movement: W/S forward/back, A/D strafe, Q/E (or arrows) turn camera
 
 { println: println, string: string, int: int } := import('std')
 
@@ -72,52 +72,84 @@ if window.type {
         // Camera / player state
         cam := { x: 0.0, y: 1.4, z: 8.0, yaw: 180.0, pitch: 0.0 }
 
-        // Key state map (initialize known keys to avoid undefined '?')
+        // Canonical movement key state
         keys := {
-            'w': false
-            'W': false
-            'a': false
-            'A': false
-            's': false
-            'S': false
-            'd': false
-            'D': false
+            forward: false
+            back: false
+            strafeLeft: false
+            strafeRight: false
+            turnLeft: false
+            turnRight: false
         }
 
-        speed := 0.18
-        turnSpeed := 2.6
+        moveSpeed := 6.8
+        turnSpeed := 140.0
 
-        gui.onKeyDownEvent(window, fn(key, _evt) {
-            keys.(key) <- true
-            // toggle pointer lock with P maybe (optional)
-            if key = 'p' | key = 'P' {
-                true -> 0
+        fn setByName(key, down) {
+            if key = 'w' | key = 'W' -> keys.forward <- down
+            if key = 's' | key = 'S' -> keys.back <- down
+            if key = 'a' | key = 'A' -> keys.strafeLeft <- down
+            if key = 'd' | key = 'D' -> keys.strafeRight <- down
+            if key = 'q' | key = 'Q' | key = 'ArrowLeft' | key = 'left' -> keys.turnLeft <- down
+            if key = 'e' | key = 'E' | key = 'ArrowRight' | key = 'right' -> keys.turnRight <- down
+        }
+
+        fn setByVk(vk, down) {
+            if vk = 87 -> keys.forward <- down
+            if vk = 83 -> keys.back <- down
+            if vk = 65 -> keys.strafeLeft <- down
+            if vk = 68 -> keys.strafeRight <- down
+            if vk = 81 | vk = 37 -> keys.turnLeft <- down
+            if vk = 69 | vk = 39 -> keys.turnRight <- down
+        }
+
+        if window.backend = :windows {
+            true -> {
+                gui.onKeyDown(window, fn(vk) setByVk(vk, true))
+                gui.onKeyUp(window, fn(vk) setByVk(vk, false))
             }
-        })
-        gui.onKeyUpEvent(window, fn(key, _evt) {
-            keys.(key) <- false
-        })
+            _ -> {
+                gui.onKeyDownEvent(window, fn(key, _evt) setByName(key, true))
+                gui.onKeyUpEvent(window, fn(key, _evt) setByName(key, false))
+            }
+        }
 
         // Frame loop: update camera from keys and render scene
-        onFrame := fn(win) {
-            // movement: W forward, S back; A/D rotate yaw
+        onFrame := fn(win, dt) {
+            dtSec := float(dt)
+            if dtSec < 0.001 -> dtSec <- 0.001
+            if dtSec > 0.050 -> dtSec <- 0.050
+
+            // movement: W/S forward-back, A/D strafe, Q/E (or arrows) turn yaw
             yawRad := cam.yaw * 3.141592653589793 / 180.0
             forwardX := sin(yawRad)
             forwardZ := cos(yawRad)
+            rightX := cos(yawRad)
+            rightZ := 0 - sin(yawRad)
+            moveStep := moveSpeed * dtSec
+            turnStep := turnSpeed * dtSec
 
-            if keys.('w') | keys.('W') -> {
-                cam.x <- cam.x + forwardX * speed
-                cam.z <- cam.z + forwardZ * speed
+            if keys.forward -> {
+                cam.x <- cam.x + forwardX * moveStep
+                cam.z <- cam.z + forwardZ * moveStep
             }
-            if keys.('s') | keys.('S') -> {
-                cam.x <- cam.x - forwardX * speed
-                cam.z <- cam.z - forwardZ * speed
+            if keys.back -> {
+                cam.x <- cam.x - forwardX * moveStep
+                cam.z <- cam.z - forwardZ * moveStep
             }
-            if keys.('a') | keys.('A') -> {
-                cam.yaw <- cam.yaw - turnSpeed
+            if keys.strafeLeft -> {
+                cam.x <- cam.x - rightX * moveStep
+                cam.z <- cam.z - rightZ * moveStep
             }
-            if keys.('d') | keys.('D') -> {
-                cam.yaw <- cam.yaw + turnSpeed
+            if keys.strafeRight -> {
+                cam.x <- cam.x + rightX * moveStep
+                cam.z <- cam.z + rightZ * moveStep
+            }
+            if keys.turnLeft -> {
+                cam.yaw <- cam.yaw - turnStep
+            }
+            if keys.turnRight -> {
+                cam.yaw <- cam.yaw + turnStep
             }
 
             // keep yaw in 0..360
@@ -149,7 +181,7 @@ if window.type {
             renderer.renderCubeSolid(0.2, {tx: 0, ty: -cam.y + 0.12, tz: 0}, gui.rgb(255, 220, 120))
 
             // HUD
-            gui.drawText(win, 16, 18, 'Rugged Grass Plains - WASD to move, A/D rotate')
+            gui.drawText(win, 16, 18, 'Rugged Grass Plains - WASD move, Q/E or arrows turn')
             gui.drawText(win, 16, 40, 'Position: ' + string(cam.x) + ', ' + string(cam.y) + ', ' + string(cam.z))
             gui.drawText(win, 16, 62, 'Yaw: ' + string(int(cam.yaw)))
 

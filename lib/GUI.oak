@@ -117,28 +117,73 @@ fn onClosed(window, handler) on(window, :closed, handler)
 
 fn onceClosed(window, handler) once(window, :closed, handler)
 
+fn _vkKeyName(vk) {
+	if vk >= 65 & vk <= 90 -> char(vk)
+	if vk >= 48 & vk <= 57 -> char(vk)
+	if vk = 37 -> 'left'
+	if vk = 38 -> 'up'
+	if vk = 39 -> 'right'
+	if vk = 40 -> 'down'
+	if vk = 32 -> ' '
+	if vk = FORM_VK_TAB -> 'tab'
+	if vk = FORM_VK_RETURN -> 'enter'
+	if vk = FORM_VK_ESCAPE -> 'escape'
+	if vk = FORM_VK_BACK -> 'backspace'
+	'vk-' + string(vk)
+}
+
+fn _extractKeyEvent(window, evt, expectedMsgType, expectedEvtType) {
+	if evt.type = expectedEvtType {
+		true -> {
+			{matched: true, key: _default(evt.key, ?), evt: evt}
+		}
+		_ -> if formMsgType(window) = expectedMsgType {
+			true -> {
+				vk := formMsgWParam(window)
+				key := _vkKeyName(vk)
+				{matched: true, key: key, evt: {type: expectedEvtType, key: key, vk: vk, raw: evt}}
+			}
+			_ -> {matched: false, key: ?, evt: evt}
+		}
+	}
+}
+
 fn onKeyDownEvent(window, handler) {
-	on(window, :dispatch, fn(evt) if evt.type = :keyDown -> {
-		handler(evt.key, evt)
+	on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYDOWN, :keyDown)
+		if extracted.matched -> handler(extracted.key, extracted.evt)
 	})
 }
 
 fn onceKeyDownEvent(window, handler) {
-	once(window, :dispatch, fn(evt) if evt.type = :keyDown -> {
-		handler(evt.key, evt)
+	token := ?
+	token <- on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYDOWN, :keyDown)
+		if extracted.matched -> {
+			off(window, :dispatch, token)
+			handler(extracted.key, extracted.evt)
+		}
 	})
+	token
 }
 
 fn onKeyUpEvent(window, handler) {
-	on(window, :dispatch, fn(evt) if evt.type = :keyUp -> {
-		handler(evt.key, evt)
+	on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYUP, :keyUp)
+		if extracted.matched -> handler(extracted.key, extracted.evt)
 	})
 }
 
 fn onceKeyUpEvent(window, handler) {
-	once(window, :dispatch, fn(evt) if evt.type = :keyUp -> {
-		handler(evt.key, evt)
+	token := ?
+	token <- on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYUP, :keyUp)
+		if extracted.matched -> {
+			off(window, :dispatch, token)
+			handler(extracted.key, extracted.evt)
+		}
 	})
+	token
 }
 
 fn _publish(window, event, payload) {
