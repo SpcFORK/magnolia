@@ -1,0 +1,127 @@
+// CLI-driven relay-style P2P sample.
+//
+// Run in separate terminals:
+//   magnolia samples/p2p-cli.oak host --port 9411 --path /mesh
+//   magnolia samples/p2p-cli.oak peer --id alice --url ws://127.0.0.1:9411/mesh --broadcast --text "hello room"
+//   magnolia samples/p2p-cli.oak peer --id bob --url ws://127.0.0.1:9411/mesh --to alice --text "hello alice"
+
+{
+	default: default
+	println: println
+	string: string
+	wait: wait
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+{
+	parse: parse
+} := import('cli')
+
+p2p := import('p2p')
+
+fn usage() {
+	println('Usage:')
+	println('  magnolia samples/p2p-cli.oak host [--port 9411] [--path /mesh]')
+	println('  magnolia samples/p2p-cli.oak peer --id <peer-id> [--url ws://127.0.0.1:9411/mesh]')
+	println('      [--to <peer-id>] [--broadcast] [--text "hello"] [--channel chat] [--stay] [--wait 2]')
+}
+
+fn log(label, evt) if evt.type {
+	:ready -> printf('[{{ 0 }}] ready peers={{ 1 }}', label, string(evt.peers))
+	:peer_joined -> printf('[{{ 0 }}] peer joined: {{ 1 }} {{ 2 }}', label, evt.peerId, string(evt.meta))
+	:peer_left -> printf('[{{ 0 }}] peer left: {{ 1 }} ({{ 2 }})', label, evt.peerId, evt.reason)
+	:message -> printf('[{{ 0 }}] message from {{ 1 }} on {{ 2 }}: {{ 3 }}', label, evt.from, evt.channel, string(evt.payload))
+	:error -> printf('[{{ 0 }}] error: {{ 1 }}', label, evt.error)
+	:closed -> printf('[{{ 0 }}] closed: {{ 1 }}', label, evt.reason)
+	_ -> printf('[{{ 0 }}] event: {{ 1 }}', label, string(evt))
+}
+
+fn keepAlive {
+	fn loop {
+		wait(1)
+		loop()
+	}
+	loop()
+}
+
+fn runHost(cli) {
+	port := default(cli.opts.port, '9411')
+	path := default(cli.opts.path, '/mesh')
+	hostAddr := '127.0.0.1:' + string(port)
+
+	printf('Starting host on ws://{{ 0 }}{{ 1 }}', hostAddr, path)
+	p2p.Host(hostAddr, path, fn(evt) log('host', evt))
+	println('Host running. Press Ctrl+C to stop.')
+
+	keepAlive()
+}
+
+fn runPeer(cli) {
+	peerId := cli.opts.id
+	if peerId = ? -> {
+		println('Missing --id for peer mode.')
+		usage()
+		exit(1)
+	}
+
+	url := default(cli.opts.url, 'ws://127.0.0.1:9411/mesh')
+	toPeerId := cli.opts.to
+	channel := default(cli.opts.channel, 'chat')
+	text := default(cli.opts.text, 'hello from ' + string(peerId))
+	broadcast? := cli.opts.broadcast = true
+	stay? := cli.opts.stay = true
+	waitSeconds := default(float(cli.opts.wait), 2)
+
+	printf('Joining {{ 0 }} as {{ 1 }}', url, peerId)
+	peer := p2p.join(url, peerId, fn(evt) log(peerId, evt), {
+		cli: true
+	})
+	if peer.type = :error -> {
+		printf('Could not join peer: {{ 0 }}', peer.error)
+		exit(1)
+	}
+
+	wait(0.2)
+
+	if broadcast? {
+		true -> {
+			printf('Broadcasting on {{ 0 }}: {{ 1 }}', channel, text)
+			peer.broadcast({ from: peerId, text: text }, channel)
+		}
+		_ -> if toPeerId {
+			? -> {
+				printf('No --to provided. Defaulting to broadcast on {{ 0 }}: {{ 1 }}', channel, text)
+				peer.broadcast({ from: peerId, text: text }, channel)
+			}
+			_ -> {
+				printf('Sending direct message to {{ 0 }} on {{ 1 }}: {{ 2 }}', toPeerId, channel, text)
+				peer.send(toPeerId, { from: peerId, text: text }, channel)
+			}
+		}
+	}
+
+	if stay? {
+		true -> {
+			println('Peer staying connected. Press Ctrl+C to stop.')
+			keepAlive()
+		}
+		_ -> {
+			printf('Waiting {{ 0 }}s for responses before closing...', waitSeconds)
+			wait(waitSeconds)
+			peer.close('peer finished')
+			wait(0.1)
+		}
+	}
+}
+
+cli := parse()
+
+if cli.verb {
+	'host' -> runHost(cli)
+	'peer' -> runPeer(cli)
+	_ -> {
+		usage()
+		exit(1)
+	}
+}

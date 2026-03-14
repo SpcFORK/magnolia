@@ -39,8 +39,8 @@ Returns an object with:
 
 Host events include:
 
-- `{type: :peer-joined, peerId: 'alice', meta: {...}}`
-- `{type: :peer-left, peerId: 'alice', reason: '...'}`
+- `{type: :peer_joined, peerId: 'alice', meta: {...}}`
+- `{type: :peer_left, peerId: 'alice', reason: '...'}`
 - `{type: :message, mode: :broadcast|:direct, from: 'alice', ...}`
 - `{type: :error, scope: :host, error: '...'}`
 
@@ -80,8 +80,8 @@ Failure returns the WebSocket error object:
 Peer events include:
 
 - `{type: :ready, peerId: 'alice', peers: [...]}`
-- `{type: :peer-joined, peerId: 'bob', meta: {...}}`
-- `{type: :peer-left, peerId: 'bob', reason: '...'}`
+- `{type: :peer_joined, peerId: 'bob', meta: {...}}`
+- `{type: :peer_left, peerId: 'bob', reason: '...'}`
 - `{type: :message, from: 'bob', channel: 'chat', payload: {...}}`
 - `{type: :error, scope: :peer|:remote, error: '...'}`
 - `{type: :closed, peerId: 'alice', code: 1000, reason: '...'}`
@@ -113,7 +113,27 @@ alice.broadcast({ text: 'hello everyone' }, 'chat')
 bob.send('alice', { text: 'private hello' }, 'dm')
 
 wait(0.2)
-alice.close('done')
-bob.close('done')
 host.close()
+```
+
+## Multi-Process CLI Sample
+
+Use [samples/p2p-cli.oak](samples/p2p-cli.oak) to run a host and peers in separate terminals.
+
+Host terminal:
+
+```sh
+magnolia samples/p2p-cli.oak host --port 9411 --path /mesh
+```
+
+Peer terminal (broadcast):
+
+```sh
+magnolia samples/p2p-cli.oak peer --id alice --url ws://127.0.0.1:9411/mesh --broadcast --text "hello room"
+```
+
+Peer terminal (direct):
+
+```sh
+magnolia samples/p2p-cli.oak peer --id bob --url ws://127.0.0.1:9411/mesh --to alice --text "hello alice"
 ```

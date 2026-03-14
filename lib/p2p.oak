@@ -7,6 +7,9 @@
 	filter: filter
 	map: map
 } := import('std')
+{
+	contains?: contains?
+} := import('str')
 
 thread := import('thread')
 json := import('json')
@@ -20,6 +23,12 @@ fn _packet(kind, body) json.serialize({
 })
 
 fn _sendPacket(socket, kind, body) ws.send(socket, _packet(kind, body))
+
+fn _terminalPeerError?(evt) if evt.error {
+	? -> false
+	_ -> contains?(evt.error, 'not available') |
+		contains?(evt.error, 'use of closed network connection')
+}
 
 fn _decodePacket(evt) if evt.type {
 	:message -> {
@@ -113,12 +122,12 @@ fn _peerEvent(packetType, body) if packetType {
 		path: body.path
 	}
 	'peer-joined' -> {
-		type: :peer-joined
+		type: :peer_joined
 		peerId: body.peerId
 		meta: default(body.meta, {})
 	}
 	'peer-left' -> {
-		type: :peer-left
+		type: :peer_left
 		peerId: body.peerId
 		reason: default(body.reason, '')
 	}
@@ -210,7 +219,7 @@ fn _hostLoop(state, mutex, peerId, socket, onEvent) {
 							reason: evt.reason
 						})
 						onEvent({
-							type: :peer-left
+							type: :peer_left
 							peerId: peerId
 							reason: evt.reason
 						})
@@ -226,13 +235,13 @@ fn _hostLoop(state, mutex, peerId, socket, onEvent) {
 							reason: evt.error
 						})
 						onEvent({
-							type: :peer-left
+							type: :peer_left
 							peerId: peerId
 							reason: evt.error
 						})
 					}
 				}
-				_hostError(onEvent, peerId, evt.error)
+				if !state.closing? -> _hostError(onEvent, peerId, evt.error)
 			}
 		}
 	}
@@ -277,7 +286,7 @@ fn _acceptPeer(state, mutex, host, path, socket, req, onEvent) {
 									meta: meta
 								})
 								onEvent({
-									type: :peer-joined
+									type: :peer_joined
 									peerId: peerId
 									meta: meta
 									req: req
@@ -321,6 +330,7 @@ fn _acceptPeer(state, mutex, host, path, socket, req, onEvent) {
 fn Host(host, path, onEvent) {
 	onEvent := default(onEvent, _noop)
 	state := {
+		closing?: false
 		peers: []
 	}
 	mutex := thread.Mutex()
@@ -357,6 +367,7 @@ fn Host(host, path, onEvent) {
 			payload: payload
 		})
 		close: fn() {
+			state.closing? <- true
 			mutex.lock()
 			sockets := _peerSockets(state.peers, ?)
 			state.peers <- []
@@ -411,8 +422,9 @@ fn join(url, peerId, onEvent, meta) {
 									})
 								}
 								:error -> {
+									connectedBefore := state.connected?
 									state.connected? <- false
-									onEvent({
+									if connectedBefore & !_terminalPeerError?(evt) -> onEvent({
 										type: :error
 										scope: :peer
 										peerId: peerId
