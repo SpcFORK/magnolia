@@ -79,6 +79,8 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("codepoint", c.oakCodepoint)
 	c.LoadFunc("char", c.oakChar)
 	c.LoadFunc("type", c.oakType)
+	c.LoadFunc("name", c.oakName)
+	c.LoadFunc("csof", c.oakClassMatch)
 	c.LoadFunc("len", c.oakLen)
 	c.LoadFunc("keys", c.oakKeys)
 	c.LoadFunc("___stdlibs", c.oakStdlibs)
@@ -643,6 +645,56 @@ func (c *Context) oakType(args []Value) (Value, *runtimeError) {
 	panic("Unreachable: unknown runtime value")
 }
 
+func (c *Context) oakName(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("name", args, 1); err != nil {
+		return nil, err
+	}
+
+	switch arg := args[0].(type) {
+	case AtomValue:
+		return arg, nil
+	case *StringValue:
+		return AtomValue(arg.stringContent()), nil
+	case ClassValue:
+		return AtomValue(arg.defn.name), nil
+	case FnValue:
+		return AtomValue(arg.defn.name), nil
+	case BuiltinFnValue:
+		return AtomValue(arg.name), nil
+	case PointerValue:
+		c.eng.nameRefLock.Lock()
+		nameVal, ok := c.eng.nameRefs[uintptr(arg)]
+		c.eng.nameRefLock.Unlock()
+		if ok {
+			return AtomValue(nameVal.stringContent()), nil
+		}
+	}
+
+	return AtomValue(args[0].String()), nil
+}
+
+func (c *Context) oakClassMatch(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("csof", args, 2); err != nil {
+		return nil, err
+	}
+
+	leftClass, leftIsClass := args[0].(ClassValue)
+	rightClass, rightIsClass := args[1].(ClassValue)
+	leftAtom, leftIsAtom := args[0].(AtomValue)
+	rightAtom, rightIsAtom := args[1].(AtomValue)
+
+	switch {
+	case leftIsClass && rightIsClass:
+		return BoolValue(leftClass.Eq(rightClass)), nil
+	case leftIsClass && rightIsAtom:
+		return BoolValue(leftClass.defn.name == string(rightAtom)), nil
+	case leftIsAtom && rightIsClass:
+		return BoolValue(string(leftAtom) == rightClass.defn.name), nil
+	default:
+		return BoolValue(false), nil
+	}
+}
+
 func (c *Context) oakLen(args []Value) (Value, *runtimeError) {
 	if err := c.requireArgLen("string", args, 1); err != nil {
 		return nil, err
@@ -957,11 +1009,26 @@ func (c *Context) oakPointer(args []Value) (Value, *runtimeError) {
 			return PointerValue(0), nil
 		}
 		return PointerValue(uintptr(unsafe.Pointer(&(*arg)[0]))), nil
+	case AtomValue:
+		buf := StringValue([]byte(string(arg)))
+		if len(buf) == 0 {
+			return PointerValue(0), nil
+		}
+
+		ptr := uintptr(unsafe.Pointer(&buf[0]))
+		c.eng.nameRefLock.Lock()
+		if c.eng.nameRefs == nil {
+			c.eng.nameRefs = map[uintptr]*StringValue{}
+		}
+		c.eng.nameRefs[ptr] = &buf
+		c.eng.nameRefLock.Unlock()
+
+		return PointerValue(ptr), nil
 	case PointerValue:
 		return arg, nil
 	default:
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("pointer() expects int or byte string, got %s", args[0]),
+			reason: fmt.Sprintf("pointer() expects int, atom, or byte string, got %s", args[0]),
 		}
 	}
 }

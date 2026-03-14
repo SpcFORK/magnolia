@@ -261,4 +261,52 @@ func TestOakConversionAndTypeHelpers(t *testing.T) {
 	if v, err := ctx.oakType([]Value{BuiltinFnValue{name: "x"}}); err != nil || v != AtomValue("function") {
 		t.Fatalf("unexpected oakType(function) result: v=%v err=%v", v, err)
 	}
+
+	if v, err := ctx.oakName([]Value{BuiltinFnValue{name: "demo"}}); err != nil || v != AtomValue("demo") {
+		t.Fatalf("unexpected oakName(builtin) result: v=%v err=%v", v, err)
+	}
+	alphaNode := classNode{name: "Alpha"}
+	if v, err := ctx.oakName([]Value{ClassValue{defn: &alphaNode}}); err != nil || v != AtomValue("Alpha") {
+		t.Fatalf("unexpected oakName(class) result: v=%v err=%v", v, err)
+	}
+
+	ptrVal, err := ctx.oakPointer([]Value{AtomValue("Alpha")})
+	if err != nil {
+		t.Fatalf("unexpected pointer(:atom) error: %v", err)
+	}
+	ptr, ok := ptrVal.(PointerValue)
+	if !ok || ptr == 0 {
+		t.Fatalf("expected non-zero pointer from pointer(:atom), got %v", ptrVal)
+	}
+	if v, err := ctx.oakName([]Value{ptr}); err != nil || v != AtomValue("Alpha") {
+		t.Fatalf("unexpected oakName(pointer(:atom)) result: v=%v err=%v", v, err)
+	}
+}
+
+func TestOakClassMatch(t *testing.T) {
+	ctx := NewContext(".")
+
+	alphaNode := classNode{name: "Alpha"}
+	betaNode := classNode{name: "Beta"}
+	alpha := ClassValue{defn: &alphaNode}
+	beta := ClassValue{defn: &betaNode}
+
+	if v, err := ctx.oakClassMatch([]Value{alpha, alpha}); err != nil || v != BoolValue(true) {
+		t.Fatalf("expected csof(class, same class) == true, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakClassMatch([]Value{alpha, beta}); err != nil || v != BoolValue(false) {
+		t.Fatalf("expected csof(class, other class) == false, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakClassMatch([]Value{alpha, AtomValue("Alpha")}); err != nil || v != BoolValue(true) {
+		t.Fatalf("expected csof(class, :name) == true, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakClassMatch([]Value{alpha, AtomValue("Beta")}); err != nil || v != BoolValue(false) {
+		t.Fatalf("expected csof(class, different :name) == false, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakClassMatch([]Value{AtomValue("Alpha"), alpha}); err != nil || v != BoolValue(true) {
+		t.Fatalf("expected csof(:name, class) == true, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakClassMatch([]Value{IntValue(1), AtomValue("Alpha")}); err != nil || v != BoolValue(false) {
+		t.Fatalf("expected csof(non-class/atom pair) == false, got v=%v err=%v", v, err)
+	}
 }

@@ -1631,6 +1631,29 @@ func TestClassSupportsMultipleParentsAndStaticMembers(t *testing.T) {
 	))
 }
 
+func TestClassMatchBuiltin(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Alpha {}
+		cs Beta {}
+
+		[
+			csof(Alpha, Alpha)
+			csof(Alpha, Beta)
+			csof(Alpha, :Alpha)
+			csof(:Alpha, Alpha)
+			csof(:Alpha, Beta)
+			csof(1, :Alpha)
+		]
+	`, MakeList(
+		BoolValue(true),
+		BoolValue(false),
+		BoolValue(true),
+		BoolValue(true),
+		BoolValue(false),
+		BoolValue(false),
+	))
+}
+
 func TestBitsBuiltinRoundTrip(t *testing.T) {
 	expectProgramToReturn(t, `
 		bits(bits([65, 66, 67]))
@@ -1681,6 +1704,24 @@ func TestPointerBuiltinAndArithmetic(t *testing.T) {
 
 func TestIntFromPointerBuiltin(t *testing.T) {
 	expectProgramToReturn(t, `int(pointer(123))`, IntValue(123))
+}
+
+func TestNameBuiltinAndAtomPointerRefs(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Alpha {}
+		p := pointer(:Alpha)
+		[
+			name(Alpha)
+			name(:Beta)
+			type(p)
+			name(p)
+		]
+	`, MakeList(
+		AtomValue("Alpha"),
+		AtomValue("Beta"),
+		AtomValue("pointer"),
+		AtomValue("Alpha"),
+	))
 }
 
 func TestBuildLibraryParseIncludesFromString(t *testing.T) {

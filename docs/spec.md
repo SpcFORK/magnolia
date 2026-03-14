@@ -88,6 +88,8 @@ block
 - `codepoint(c)`: Returns the Unicode code point of the character `c`.
 - `char(n)`: Converts the Unicode code point `n` to a character.
 - `type(x)`: Returns the type of the argument `x`.
+- `name(x)`: Returns an atom name for `x` (for example class and function names).
+- `csof(a, b)`: Returns `true` when `a` and `b` refer to the same class, or when one is a class and the other is an atom matching that class name.
 - `len(x)`: Returns the length of the argument `x`.
 - `keys(x)`: Returns an array of keys of the argument `x`.
 
@@ -111,7 +113,7 @@ block
 - `chan_recv(ch, callback?)`: Receives a value from a channel with an optional callback.
 - `bits(x)`: Converts between list of bytes and byte string.
 - `addr(bits)`: Gets the address from bits.
-- `pointer(x)`: Converts an integer or byte string to a pointer type.
+- `pointer(x)`: Converts an integer, atom name, or byte string to a pointer type.
 - `memread(address, length)`: Reads memory at the specified address.
 - `memwrite(address, bits)`: Writes bits to memory at the specified address.
 
