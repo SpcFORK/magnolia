@@ -9,6 +9,15 @@
 - LZW for dictionary-based phrase compression
 
 The default `compress()` and `decompress()` functions keep using RLE for backward compatibility.
+The implementation is split internally across `compression-rle`, `compression-huffman`, and `compression-lzw`, while `compression` remains the public facade.
+
+Codec-specific docs:
+- [RLE codec](compression-rle.md)
+- [Huffman codec](compression-huffman.md)
+- [LZW codec](compression-lzw.md)
+
+Benchmark sample:
+- `samples/compression-benchmark.oak`
 
 ## Import
 
@@ -107,13 +116,12 @@ restored := compression.rleDecompress(packed)
 
 ## Huffman Codec
 
-Huffman compression builds a character frequency table, derives a binary tree, and packs the resulting bitstream into bytes.
+Huffman compression builds a character frequency table, derives a binary tree, and stores the resulting bitstream as a text-safe payload.
 
 ### Constants
 
 ```oak
-HuffmanMagic := 'HUF1'
-HeaderWidth := 12
+HuffmanMagic := 'HUF1:'
 ```
 
 ### `huffmanCompress(input)`
@@ -121,15 +129,15 @@ HeaderWidth := 12
 Compresses `input` using a Huffman tree derived from the input character frequencies.
 
 Implementation notes:
-- The output includes a serialized frequency header.
-- The payload bitstream is packed into raw bytes.
+- The output stores a serialized frequency header followed by `|` and the encoded bitstring.
+- Header entries are encoded as `<hex-codepoint>:<count>` and joined with commas.
 - Small inputs may grow due to the header cost.
 
 ### `huffmanDecompress(encoded)`
 
 Decompresses Huffman data created by `huffmanCompress()`.
 
-Returns `:error` for invalid envelopes, invalid JSON headers, or malformed bitstreams.
+Returns `:error` for invalid packets, malformed frequency headers, or malformed bitstreams.
 
 ### `huffmanCompressed?(encoded)`
 
@@ -148,8 +156,7 @@ LZW compression builds a dictionary of repeated phrases and emits integer codes.
 ### Constants
 
 ```oak
-LZWMagic := 'LZW1'
-HeaderWidth := 12
+LZWMagic := 'LZW1:'
 ```
 
 ### `lzwCompress(input)`
@@ -157,15 +164,15 @@ HeaderWidth := 12
 Compresses `input` using an LZW dictionary.
 
 Implementation notes:
-- The output includes a serialized alphabet header.
-- Codes are stored as 16-bit values.
+- The output stores a serialized alphabet header followed by `|` and a comma-separated integer code list.
+- Alphabet entries are encoded as hexadecimal codepoints.
 - Returns `:error` if the dictionary would exceed 65535 entries.
 
 ### `lzwDecompress(encoded)`
 
 Decompresses data created by `lzwCompress()`.
 
-Returns `:error` for malformed envelopes, invalid headers, invalid code streams, or unsupported dictionary growth.
+Returns `:error` for malformed packets, invalid headers, invalid code streams, or unsupported dictionary growth.
 
 ### `lzwCompressed?(encoded)`
 
@@ -214,4 +221,4 @@ fn decodePacket(packet, codec) if codec {
 - RLE is best for repeated character runs.
 - Huffman is best when the data has a skewed character distribution.
 - LZW is best when the data contains recurring phrases or substrings.
-- Huffman and LZW output formats are self-framed with magic prefixes plus serialized headers.
+- Huffman and LZW output formats are self-framed with magic prefixes plus explicit text-safe payload sections.

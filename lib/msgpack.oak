@@ -1,15 +1,21 @@
-// libmsgpack provides MessagePack-style binary serialization for Oak values.
+// libmsgpack provides MessagePack binary serialization and deserialization for
+// Oak values.
 //
-// This module focuses on producing wire-format bytes (packet payloads).
-// Supported in serializeSafe: null, bool, int (up to signed 32-bit / unsigned
-// 32-bit), string, list (array), object (map with string keys), and Binary(...).
-// Floats and functions currently return :error in serializeSafe.
+// Encoding (serializeSafe / serialize / serializePacket): null, bool, int
+// (signed 32-bit / unsigned 32-bit), float (float32 + float64), string, atom,
+// list (array), object (map with string keys), and Binary(...).
+//
+// Decoding (parse / parsePacket): all format families above, returning `:error`
+// for malformed or truncated streams.
 
 {
 	append: append
+	default: default
 	keys: keys
 	map: map
 	range: range
+	reduce: reduce
+	slice: slice
 } := import('std')
 {
 	join: join
@@ -178,6 +184,7 @@ fn _encodeToPacket(value) if binary?(value) {
 		:null -> [0xC0]
 		:bool -> if value { true -> [0xC3], _ -> [0xC2] }
 		:int -> _encodeInt(value)
+		:float -> _f64ToPacket(value)
 		:string -> _encodeString(value)
 		:atom -> _encodeString(string(value))
 		:list -> _encodeList(value)
@@ -185,6 +192,309 @@ fn _encodeToPacket(value) if binary?(value) {
 		_ -> :error
 	}
 }
+
+// ---- float encoding -------------------------------------------------------
+//
+// IEEE 754 helpers implemented in pure Oak integer arithmetic.
+// float32 / float64 are both supported; encode always emits float64 (0xCB)
+// for full precision.  encodeFloat32 is provided for explicit 32-bit output.
+
+fn _f64ToPacket(f) {
+	sign := if f < 0 { true -> 1, _ -> 0 }
+	absF := if f < 0 { true -> -f, _ -> f }
+	if absF = 0 {
+		true -> [0xCB, 0, 0, 0, 0, 0, 0, 0, 0]
+		_ -> {
+			exp := 0
+			m := absF
+			fn goUp {
+				if m < 1 { true -> { m <- m * 2, exp <- exp - 1, goUp() } }
+			}
+			fn goDown {
+				if m >= 2 { true -> { m <- m / 2, exp <- exp + 1, goDown() } }
+			}
+			goUp()
+			goDown()
+			biasedExp := exp + 1023
+			frac := m - 1
+			fn fracBitsF64(bits, n) if n {
+				0 -> bits
+				_ -> {
+					frac <- frac * 2
+					bit := if frac >= 1 {
+						true -> {
+							frac <- frac - 1
+							1
+						}
+						_ -> 0
+					}
+					fracBitsF64(bits |> append([bit]), n - 1)
+				}
+			}
+			fb := fracBitsF64([], 52)
+			b0 := (sign << 7) | ((biasedExp >> 4) & 0x7F)
+			b1 := ((biasedExp & 0xF) << 4) + default(fb.0, 0) * 8 + default(fb.1, 0) * 4 + default(fb.2, 0) * 2 + default(fb.3, 0)
+			fn fracByteF64(s) range(8) |> reduce(0, fn(acc, i) (acc << 1) | default(fb.(s + i), 0))
+			[0xCB, b0, b1, fracByteF64(4), fracByteF64(12), fracByteF64(20), fracByteF64(28), fracByteF64(36), fracByteF64(44)]
+		}
+	}
+}
+
+fn _f32ToPacket(f) {
+	sign := if f < 0 { true -> 1, _ -> 0 }
+	absF := if f < 0 { true -> -f, _ -> f }
+	if absF = 0 {
+		true -> [0xCA, 0, 0, 0, 0]
+		_ -> {
+			exp := 0
+			m := absF
+			fn goUp32 {
+				if m < 1 { true -> { m <- m * 2, exp <- exp - 1, goUp32() } }
+			}
+			fn goDown32 {
+				if m >= 2 { true -> { m <- m / 2, exp <- exp + 1, goDown32() } }
+			}
+			goUp32()
+			goDown32()
+			biasedExp := exp + 127
+			frac := m - 1
+			fn fracBitsF32(bits, n) if n {
+				0 -> bits
+				_ -> {
+					frac <- frac * 2
+					bit := if frac >= 1 {
+						true -> {
+							frac <- frac - 1
+							1
+						}
+						_ -> 0
+					}
+					fracBitsF32(bits |> append([bit]), n - 1)
+				}
+			}
+			fb := fracBitsF32([], 23)
+			b0 := (sign << 7) | ((biasedExp >> 1) & 0x7F)
+			b1 := ((biasedExp & 1) << 7) + (range(7) |> reduce(0, fn(acc, i) acc * 2 + default(fb.(i), 0)))
+			fn fracByteF32(s) range(8) |> reduce(0, fn(acc, i) (acc << 1) | default(fb.(s + i), 0))
+			[0xCA, b0, b1, fracByteF32(7), fracByteF32(15)]
+		}
+	}
+}
+
+// _encodeFloat64 encodes a float value to msgpack float64 packet bytes.
+fn _encodeFloat64(f) _f64ToPacket(float(f))
+
+// encodeFloat64 encodes a float value as msgpack float64 (0xCB).
+fn encodeFloat64(f) fromPacket(_f64ToPacket(float(f)))
+
+// encodeFloat32 encodes a float value as msgpack float32 (0xCA) with clipped
+// precision.
+fn encodeFloat32(f) fromPacket(_f32ToPacket(float(f)))
+
+// ---- decoder ---------------------------------------------------------------
+
+fn _readU8(pkt, i) if i < len(pkt) {
+	true -> pkt.(i)
+	_ -> :error
+}
+
+fn _readU16(pkt, i) if i + 1 < len(pkt) {
+	true -> (pkt.(i) << 8) | pkt.(i + 1)
+	_ -> :error
+}
+
+fn _readU32(pkt, i) if i + 3 < len(pkt) {
+	true -> ((pkt.(i) << 24) | (pkt.(i + 1) << 16) | (pkt.(i + 2) << 8) | pkt.(i + 3)) & 0xFFFFFFFF
+	_ -> :error
+}
+
+fn _readI8(pkt, i) if b := _readU8(pkt, i) {
+	:error -> :error
+	_ -> if b > 127 { true -> b - 256, _ -> b }
+}
+
+fn _readI16(pkt, i) if v := _readU16(pkt, i) {
+	:error -> :error
+	_ -> if v > 32767 { true -> v - 65536, _ -> v }
+}
+
+fn _readI32(pkt, i) if v := _readU32(pkt, i) {
+	:error -> :error
+	_ -> if v > 2147483647 { true -> v - 4294967296, _ -> v }
+}
+
+fn _readBits64(pkt, i) if i + 7 < len(pkt) {
+	true -> range(8) |> map(fn(j) pkt.(i + j))
+	_ -> :error
+}
+
+fn _ieee754f64(bs) {
+	sign := (bs.0 >> 7) & 1
+	biasedExp := ((bs.0 & 0x7F) << 4) | ((bs.1 >> 4) & 0xF)
+	// top 20 bits of the 52-bit mantissa fraction (bits 0-19)
+	fracHi := ((bs.1 & 0xF) << 16) | (bs.2 << 8) | bs.3
+	// next 24 bits (bits 20-43); last 8 bits (bs.7) discarded for simplicity
+	fracLo := (bs.4 << 16) | (bs.5 << 8) | bs.6
+	// Use direct value matching on biasedExp to avoid boolean-operator edge cases
+	if biasedExp {
+		0 -> 0.0
+		0x7FF -> if fracHi | fracLo {
+			0 -> if sign = 1 { true -> -1 / 0, _ -> 1 / 0 }
+			_ -> 0 / 0
+		}
+		_ -> {
+			exp := biasedExp - 1023
+			// fracHi / 2^20 + fracLo / 2^44
+			mantissa := 1.0 + float(fracHi) / 1048576.0 + float(fracLo) / 17592186044416.0
+			p := 1.0
+			fn mpow(n) if n { 0 -> ?, _ -> { p <- p * 2, mpow(n - 1) } }
+			if exp >= 0 { true -> mpow(exp), _ -> mpow(-exp) }
+			result := if exp >= 0 { true -> mantissa * p, _ -> mantissa / p }
+			if sign = 1 { true -> -result, _ -> result }
+		}
+	}
+}
+
+fn _ieee754f32(bs) {
+	sign := (bs.0 >> 7) & 1
+	biasedExp := ((bs.0 & 0x7F) << 1) | ((bs.1 >> 7) & 1)
+	// 23-bit mantissa fraction: low 7 bits of bs.1 + bs.2 + bs.3
+	frac := ((bs.1 & 0x7F) << 16) | (bs.2 << 8) | bs.3
+	if biasedExp {
+		0 -> 0.0
+		0xFF -> if frac {
+			0 -> if sign = 1 { true -> -1 / 0, _ -> 1 / 0 }
+			_ -> 0 / 0
+		}
+		_ -> {
+			exp := biasedExp - 127
+			mantissa := 1.0 + float(frac) / 8388608.0
+			p := 1.0
+			fn mpow(n) if n { 0 -> ?, _ -> { p <- p * 2, mpow(n - 1) } }
+			if exp >= 0 { true -> mpow(exp), _ -> mpow(-exp) }
+			result := if exp >= 0 { true -> mantissa * p, _ -> mantissa / p }
+			if sign = 1 { true -> -result, _ -> result }
+		}
+	}
+}
+
+// _decode returns [value, nextIndex] or :error
+fn _decode(pkt, i) if b := _readU8(pkt, i) {
+	:error -> :error
+	_ -> if b <= 0x7F {
+		// positive fixint 0x00-0x7F
+		true -> [b, i + 1]
+		_ -> if b >= 0x80 & b <= 0x8F {
+			// fixmap 0x80-0x8F
+			true -> _decodeMap(pkt, i + 1, b & 0x0F)
+			_ -> if b >= 0x90 & b <= 0x9F {
+				// fixarray 0x90-0x9F
+				true -> _decodeArray(pkt, i + 1, b & 0x0F)
+				_ -> if b >= 0xA0 & b <= 0xBF {
+					// fixstr 0xA0-0xBF
+					true -> _decodeStr(pkt, i + 1, b & 0x1F)
+					_ -> if b >= 0xE0 {
+						// negative fixint 0xE0-0xFF
+						true -> [b - 256, i + 1]
+						// 0xC0-0xDF individual format bytes
+						_ -> if b {
+							0xC0 -> [?, i + 1]
+							0xC2 -> [false, i + 1]
+							0xC3 -> [true, i + 1]
+							// bin8/bin16/bin32
+							0xC4 -> if n := _readU8(pkt, i + 1) { :error -> :error, _ -> _decodeBin(pkt, i + 2, n) }
+							0xC5 -> if n := _readU16(pkt, i + 1) { :error -> :error, _ -> _decodeBin(pkt, i + 3, n) }
+							0xC6 -> if n := _readU32(pkt, i + 1) { :error -> :error, _ -> _decodeBin(pkt, i + 5, n) }
+							// float32 (4 payload bytes)
+							0xCA -> if i + 4 < len(pkt) {
+								true -> [_ieee754f32([pkt.(i+1), pkt.(i+2), pkt.(i+3), pkt.(i+4)]), i + 5]
+								_ -> :error
+							}
+							// float64 (8 payload bytes)
+							0xCB -> if i + 8 < len(pkt) {
+								true -> [_ieee754f64(range(8) |> map(fn(j) pkt.(i + 1 + j))), i + 9]
+								_ -> :error
+							}
+							// uint8/16/32
+							0xCC -> if n := _readU8(pkt, i + 1) { :error -> :error, _ -> [n, i + 2] }
+							0xCD -> if n := _readU16(pkt, i + 1) { :error -> :error, _ -> [n, i + 3] }
+							0xCE -> if n := _readU32(pkt, i + 1) { :error -> :error, _ -> [n, i + 5] }
+							// int8/16/32
+							0xD0 -> if n := _readI8(pkt, i + 1) { :error -> :error, _ -> [n, i + 2] }
+							0xD1 -> if n := _readI16(pkt, i + 1) { :error -> :error, _ -> [n, i + 3] }
+							0xD2 -> if n := _readI32(pkt, i + 1) { :error -> :error, _ -> [n, i + 5] }
+							// str8/16/32
+							0xD9 -> if n := _readU8(pkt, i + 1) { :error -> :error, _ -> _decodeStr(pkt, i + 2, n) }
+							0xDA -> if n := _readU16(pkt, i + 1) { :error -> :error, _ -> _decodeStr(pkt, i + 3, n) }
+							0xDB -> if n := _readU32(pkt, i + 1) { :error -> :error, _ -> _decodeStr(pkt, i + 5, n) }
+							// array16/32
+							0xDC -> if n := _readU16(pkt, i + 1) { :error -> :error, _ -> _decodeArray(pkt, i + 3, n) }
+							0xDD -> if n := _readU32(pkt, i + 1) { :error -> :error, _ -> _decodeArray(pkt, i + 5, n) }
+							// map16/32
+							0xDE -> if n := _readU16(pkt, i + 1) { :error -> :error, _ -> _decodeMap(pkt, i + 3, n) }
+							0xDF -> if n := _readU32(pkt, i + 1) { :error -> :error, _ -> _decodeMap(pkt, i + 5, n) }
+							_ -> :error
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _decodeStr(pkt, i, n) if i + n > len(pkt) {
+	true -> :error
+	_ -> [pkt |> slice(i, i + n) |> map(fn(b) char(b)) |> join(''), i + n]
+}
+
+fn _decodeBin(pkt, i, n) if i + n > len(pkt) {
+	true -> :error
+	_ -> [Binary(pkt |> slice(i, i + n) |> map(fn(b) char(b)) |> join('')), i + n]
+}
+
+fn _decodeArray(pkt, i, n) {
+	fn sub(j, count, acc) if count {
+		0 -> [acc, j]
+		_ -> if result := _decode(pkt, j) {
+			:error -> :error
+			_ -> sub(result.1, count - 1, acc << result.0)
+		}
+	}
+	sub(i, n, [])
+}
+
+fn _decodeMap(pkt, i, n) {
+	fn sub(j, count, acc) if count {
+		0 -> [acc, j]
+		_ -> if kResult := _decode(pkt, j) {
+			:error -> :error
+			_ -> if vResult := _decode(pkt, kResult.1) {
+				:error -> :error
+				_ -> sub(vResult.1, count - 1, acc.(string(kResult.0)) := vResult.0)
+			}
+		}
+	}
+	sub(i, n, {})
+}
+
+fn _slicePkt(pkt, a, b) {
+	fn sub(i, acc) if i {
+		b -> acc
+		_ -> sub(i + 1, acc << pkt.(i))
+	}
+	sub(a, [])
+}
+
+// parsePacket decodes a MessagePack byte list into an Oak value.
+// Returns :error for malformed or truncated streams.
+fn parsePacket(pkt) if result := _decode(pkt, 0) {
+	:error -> :error
+	_ -> result.0
+}
+
+// parse decodes a MessagePack byte string into an Oak value.
+// Returns :error for malformed or truncated streams.
+fn parse(data) parsePacket(packet(data))
 
 // serializeSafe returns a MessagePack byte string for supported values,
 // or :error when the value cannot be represented by this implementation.
@@ -204,4 +514,18 @@ fn serialize(value) if out := serializeSafe(value) {
 fn serializePacket(value) if encoded := _encodeToPacket(value) {
 	:error -> :error
 	_ -> encoded
+}
+
+{
+	Binary: Binary
+	binary?: binary?
+	packet: packet
+	fromPacket: fromPacket
+	encodeFloat32: encodeFloat32
+	encodeFloat64: encodeFloat64
+	serialize: serialize
+	serializeSafe: serializeSafe
+	serializePacket: serializePacket
+	parse: parse
+	parsePacket: parsePacket
 }

@@ -1,0 +1,198 @@
+// compression-huffman implements text-safe Huffman coding for Oak strings.
+
+{
+	default: default
+	each: each
+	entries: entries
+	fromHex: fromHex
+	map: map
+	reduce: reduce
+	toHex: toHex
+	slice: slice
+} := import('std')
+{
+	contains?: contains?
+	cut: cut
+	join: join
+	split: split
+	startsWith?: startsWith?
+} := import('str')
+{
+	sort: sort
+} := import('sort')
+
+Magic := 'HUF1:'
+HeaderSep := '|'
+PairSep := ','
+ValueSep := ':'
+
+fn _freqPairs(input) {
+	freqs := {}
+	input |> each(fn(c) freqs.(c) := default(freqs.(c), 0) + 1)
+	freqs |> entries() |> map(fn(entry) [string(entry.0), int(entry.1)])
+}
+
+fn _nodeKey(node) string(node.weight) + ':' + string(node.rank)
+
+fn _buildTree(freqPairs) {
+	nodes := freqPairs |> map(fn(pair) {
+		char := string(pair.0)
+		weight := int(pair.1)
+		{
+			weight: weight
+			char: char
+			rank: codepoint(char)
+		}
+	})
+
+	fn sub(pool) if len(pool) {
+		0 -> ?
+		1 -> pool.0
+		_ -> {
+			pool := pool |> sort(_nodeKey)
+			left := pool.0
+			right := pool.1
+			sub((pool |> slice(2)) << {
+				weight: left.weight + right.weight
+				left: left
+				right: right
+				rank: if left.rank < right.rank {
+					true -> left.rank
+					_ -> right.rank
+				}
+			})
+		}
+	}
+
+	sub(nodes)
+}
+
+fn _buildCodes(tree) {
+	codes := {}
+
+	fn sub(node, prefix) if node.char {
+		? -> {
+			sub(node.left, prefix + '0')
+			sub(node.right, prefix + '1')
+		}
+		_ -> codes.(node.char) := if prefix {
+			'' -> '0'
+			_ -> prefix
+		}
+	}
+
+	if tree != ? -> sub(tree, '')
+	codes
+}
+
+fn _validBits?(bits) bits |> reduce(true, fn(ok, bit) ok & if bit {
+	'0', '1' -> true
+	_ -> false
+})
+
+fn _decodeBits(tree, bits) if tree {
+	? -> if bits {
+		'' -> ''
+		_ -> :error
+	}
+	_ -> if tree.char {
+		? -> {
+			node := tree
+			out := ''
+
+			fn sub(i) if i {
+				len(bits) -> if node = tree {
+					true -> out
+					_ -> :error
+				}
+				_ -> {
+					node <- if bits.(i) {
+						'0' -> node.left
+						'1' -> node.right
+						_ -> ?
+					}
+
+					if node = ? -> :error
+					if node.char != ? -> {
+						out <- out << node.char
+						node <- tree
+					}
+					sub(i + 1)
+				}
+			}
+
+			sub(0)
+		}
+		_ -> if bits |> _validBits?() {
+			true -> if len(bits) = tree.weight {
+				true -> bits |> reduce('', fn(acc, _bit) acc << tree.char)
+				_ -> :error
+			}
+			_ -> :error
+		}
+	}
+}
+
+fn _encodePair(pair) {
+	toHex(codepoint(string(pair.0))) + ValueSep + string(pair.1)
+}
+
+fn _decodePairs(header) if header {
+	'' -> []
+	_ -> {
+		parts := header |> split(PairSep)
+		fn sub(i, acc) if i {
+			len(parts) -> acc
+			_ -> {
+				[tokenChar, tokenCount] := parts.(i) |> cut(ValueSep)
+				if {
+					tokenChar = ''
+					tokenCount = ''
+					? = cp := fromHex(tokenChar)
+					? = count := int(tokenCount)
+					count <= 0 -> :error
+					_ -> sub(i + 1, acc << [char(cp), count])
+				}
+			}
+		}
+		sub(0, [])
+	}
+}
+
+fn compress(input) {
+	input := string(default(input, ''))
+	freqPairs := _freqPairs(input)
+	tree := _buildTree(freqPairs)
+	codes := _buildCodes(tree)
+	bits := input |> reduce('', fn(acc, c) acc << default(codes.(c), ''))
+	Magic + (freqPairs |> map(_encodePair) |> join(PairSep)) + HeaderSep + bits
+}
+
+fn decompress(encoded) {
+	encoded := string(default(encoded, ''))
+	if !startsWith?(encoded, Magic) {
+		true -> :error
+		_ -> {
+			body := encoded |> slice(len(Magic), len(encoded))
+			if !contains?(body, HeaderSep) {
+				true -> :error
+				_ -> {
+					[header, bits] := body |> cut(HeaderSep)
+					if :error = freqPairs := _decodePairs(header) {
+						true -> :error
+						_ -> _decodeBits(_buildTree(freqPairs), bits)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn compressed?(encoded) startsWith?(string(default(encoded, '')), Magic)
+
+{
+	Magic: Magic
+	compress: compress
+	decompress: decompress
+	compressed?: compressed?
+}

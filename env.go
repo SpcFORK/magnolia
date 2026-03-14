@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -363,7 +364,8 @@ func (c *Context) getGoChan(arg Value, fnName string) (chan Value, *runtimeError
 }
 
 func rawMemoryRegion(addr uintptr, length int) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(addr)), length)
+	hdr := reflect.SliceHeader{Data: addr, Len: length, Cap: length}
+	return *(*[]byte)(unsafe.Pointer(&hdr))
 }
 
 func (c *Context) callbackify(syncFn builtinFn) builtinFn {

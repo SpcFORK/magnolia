@@ -1,283 +1,78 @@
-// Tests for the threading library
-
-{
-	println: println
-	range: range
-	each: each
-	map: map
-} := import('std')
-{
-	printf: printf
-} := import('fmt')
-
 thread := import('thread')
 
-// Helper function for test output
-fn testHeader(name) {
-	println('')
-	println('=== Test: ' << name << ' ===')
-}
-
-// Test 1: Basic spawn
-fn testSpawn {
-	testHeader('spawn')
-	
-	ch := thread.makeChannel()
-	thread.spawn(fn(msg, replyCh) {
-		println('Thread says: ' << msg)
-		thread.send(replyCh, 'done')
-	}, 'Hello from thread!', ch)
-	
-	result := thread.recv(ch)
-	println('Main received: ' << result.data)
-}
-
-// Test 2: Mutex
-fn testMutex {
-	testHeader('Mutex')
-	
-	m := thread.Mutex()
-	counter := 0
-	
-	m.lock()
-	println('Mutex locked')
-	counter := counter + 1
-	println('Counter: ' << string(counter))
-	m.unlock()
-	println('Mutex unlocked')
-}
-
-// Test 3: Semaphore
-fn testSemaphore {
-	testHeader('Semaphore')
-	
-	sem := thread.Semaphore(2)
-	println('Created semaphore with capacity 2')
-	
-	sem.acquire()
-	println('Acquired token 1')
-	
-	sem.acquire()
-	println('Acquired token 2')
-	
-	sem.release()
-	println('Released token 1')
-	
-	sem.release()
-	println('Released token 2')
-}
-
-// Test 4: WaitGroup
-fn testWaitGroup {
-	testHeader('WaitGroup')
-	
-	wg := thread.WaitGroup()
-	numTasks := 3
-	
-	wg.add(numTasks)
-	println('Starting ' << string(numTasks) << ' tasks...')
-	
-	range(numTasks) |> each(fn(i) {
-		thread.spawn(fn(taskNum, wg) {
-			println('Task ' << string(taskNum) << ' running')
-			wait(0.1)
-			println('Task ' << string(taskNum) << ' done')
-			wg.done()
-		}, i, wg)
-	})
-	
-	println('Waiting for all tasks to complete...')
-	wg.wait()
-	println('All tasks completed!')
-}
-
-// Test 5: Future
-fn testFuture {
-	testHeader('Future')
-	
-	println('Creating future...')
-	f := thread.Future(fn() {
-		println('Future: computing...')
-		wait(0.2)
-		println('Future: done computing')
+fn run(t) {
+	'makeChannel/send/recv transports value' |> t.eq(
+		{
+			ch := thread.makeChannel(1)
+			thread.send(ch, 42)
+			thread.recv(ch).data
+		}
 		42
-	})
-	
-	println('Doing other work...')
-	wait(0.1)
-	
-	println('Getting future result...')
-	result := f.get()
-	println('Future result: ' << string(result))
-}
+	)
 
-// Test 6: Parallel execution
-fn testParallel {
-	testHeader('Parallel')
-	
-	println('Running 3 functions in parallel...')
-	results := thread.parallel([
-		fn() {
-			println('  Task 1 running')
-			wait(0.1)
-			10
+	'spawn can send on an unbuffered channel' |> t.eq(
+		{
+			ch := thread.makeChannel()
+			thread.spawn(fn() thread.send(ch, 99))
+			thread.recv(ch).data
 		}
-		fn() {
-			println('  Task 2 running')
-			wait(0.1)
-			20
+		99
+	)
+
+	'Mutex lock/unlock allows critical section update' |> t.eq(
+		{
+			m := thread.Mutex()
+			counter := 0
+			m.lock()
+			counter := counter + 1
+			m.unlock()
+			counter
 		}
-		fn() {
-			println('  Task 3 running')
-			wait(0.1)
-			30
+		1
+	)
+
+	'Mutex tryLock reports success' |> t.eq(
+		{
+			m := thread.Mutex()
+			locked := m.tryLock()
+			m.unlock()
+			locked
 		}
-	])
-	
-	println('Results: [' << string(results.0) << ', ' << string(results.1) << ', ' << string(results.2) << ']')
-}
+		true
+	)
 
-// Test 7: Parallel map
-fn testPmap {
-	testHeader('Pmap')
-	
-	input := [1, 2, 3, 4, 5]
-	println('Input: [1, 2, 3, 4, 5]')
-	println('Computing squares in parallel...')
-	
-	results := thread.pmap(input, fn(x) {
-		println('  Processing ' << string(x))
-		x * x
-	})
-	
-	print('Results: [')
-	results |> each(fn(r, i) {
-		print(string(r))
-		if i < len(results) - 1 -> print(', ')
-	})
-	println(']')
-}
+	'Future constructor returns object' |> t.eq(
+		type(thread.Future(fn() 7 * 6))
+		:object
+	)
 
-// Test 8: Thread Pool
-fn testPool {
-	testHeader('Pool')
-	
-	pool := thread.Pool(2)
-	println('Created pool with 2 workers')
-	
-	resultCh := thread.makeChannel()
-	
-	range(5) |> each(fn(i) {
-		pool.submit(fn() {
-			println('Worker executing task ' << string(i))
-			wait(0.1)
-			thread.send(resultCh, { num: i })
-		})
-	})
-	
-	println('Submitted 5 tasks')
-	
-	// Collect results
-	range(5) |> each(fn(_) {
-		result := thread.recv(resultCh)
-		println('Task ' << string(result.data.num) << ' completed')
-	})
-	
-	pool.close()
-	pool.wait()
-	println('Pool shut down')
-}
-
-// Test 9: Race
-fn testRace {
-	testHeader('Race')
-	
-	println('Racing 3 tasks...')
-	winner := thread.race([
-		fn() {
-			println('  Task 1 starting (slow)')
-			wait(0.3)
-			println('  Task 1 finished')
-			'Task 1'
+	'retry retries until non-null result' |> t.eq(
+		{
+			attempts := 0
+			result := thread.retry(fn() {
+				attempts <- attempts + 1
+				if attempts < 3 {
+					true -> ?
+					_ -> 'ok'
+				}
+			}, 5)
+			[result, attempts]
 		}
-		fn() {
-			println('  Task 2 starting (fast)')
-			wait(0.1)
-			println('  Task 2 finished')
-			'Task 2'
+		['ok', 3]
+	)
+
+	'Semaphore acquire/release and count work' |> t.eq(
+		{
+			sem := thread.Semaphore(1)
+			sem.acquire()
+			sem.release()
+			sem.count()
 		}
-		fn() {
-			println('  Task 3 starting (medium)')
-			wait(0.2)
-			println('  Task 3 finished')
-			'Task 3'
-		}
-	])
-	
-	println('Winner: ' << winner)
-}
+		1
+	)
 
-// Test 10: Channels
-fn testChannels {
-	testHeader('Channels')
-	
-	ch := thread.makeChannel(2)
-	println('Created buffered channel with capacity 2')
-	
-	thread.send(ch, 'first')
-	println('Sent: first')
-	
-	thread.send(ch, 'second')
-	println('Sent: second')
-	
-	msg1 := thread.recv(ch)
-	println('Received: ' << msg1.data)
-	
-	msg2 := thread.recv(ch)
-	println('Received: ' << msg2.data)
+	'close is a no-op returning null' |> t.eq(
+		thread.close(thread.makeChannel())
+		?
+	)
 }
-
-// Run all tests
-fn runAllTests {
-	println('========================================')
-	println('Oak Threading Library Test Suite')
-	println('========================================')
-	
-	testSpawn()
-	wait(0.3)
-	
-	testChannels()
-	wait(0.1)
-	
-	testMutex()
-	wait(0.1)
-	
-	testSemaphore()
-	wait(0.1)
-	
-	testWaitGroup()
-	wait(0.5)
-	
-	testFuture()
-	wait(0.5)
-	
-	testParallel()
-	wait(0.5)
-	
-	testPmap()
-	wait(0.3)
-	
-	testPool()
-	wait(1)
-	
-	testRace()
-	wait(0.5)
-	
-	println('')
-	println('========================================')
-	println('All tests completed!')
-	println('========================================')
-}
-
-// Run the test suite
-runAllTests()

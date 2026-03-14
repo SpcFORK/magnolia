@@ -1,0 +1,183 @@
+// compression-lzw implements text-safe LZW coding for Oak strings.
+
+{
+	contains?: contains?
+	default: default
+	fromHex: fromHex
+	indexOf: indexOf
+	map: map
+	reduce: reduce
+	toHex: toHex
+	slice: slice
+} := import('std')
+{
+	contains?: strContains?
+	cut: cut
+	join: join
+	split: split
+	startsWith?: startsWith?
+} := import('str')
+
+Magic := 'LZW1:'
+HeaderSep := '|'
+ListSep := ','
+
+fn _alphabet(input) input |> reduce([], fn(acc, c) if acc |> contains?(c) {
+	true -> acc
+	_ -> acc << c
+})
+
+fn _dict(alphabet) alphabet |> reduce([], fn(acc, phrase) acc << string(phrase))
+
+fn _validInts?(xs) xs |> reduce(true, fn(ok, x) ok & type(x) = :int)
+
+fn _encodeAlphabet(alphabet) alphabet |> map(fn(c) codepoint(string(c)) |> toHex()) |> join(ListSep)
+
+fn _decodeAlphabet(header) if header {
+	'' -> []
+	_ -> {
+		parts := header |> split(ListSep)
+		fn sub(i, acc) if i {
+			len(parts) -> acc
+			_ -> if ? = cp := fromHex(parts.(i)) {
+				true -> :error
+				_ -> sub(i + 1, acc << char(cp))
+			}
+		}
+		sub(0, [])
+	}
+}
+
+fn _encodeCodes(codes) codes |> map(string) |> join(ListSep)
+
+fn _decodeCodes(header) if header {
+	'' -> []
+	_ -> {
+		parts := header |> split(ListSep)
+		codes := parts |> map(int)
+		if !_validInts?(codes) {
+			true -> :error
+			_ -> codes
+		}
+	}
+}
+
+fn compress(input) {
+	input := string(default(input, ''))
+	alphabet := _alphabet(input)
+	dict := _dict(alphabet)
+	codes := []
+	failed? := false
+
+	if len(input) > 0 -> {
+		fn sub(i, phrase) if failed? {
+			true -> :error
+			_ -> if i {
+				len(input) -> if phrase {
+					'' -> codes
+					_ -> codes << (dict |> indexOf(phrase))
+				}
+				_ -> {
+					c := input.(i)
+					nextPhrase := phrase + c
+					if idx := dict |> indexOf(nextPhrase) {
+						-1 -> {
+							codes << (dict |> indexOf(phrase))
+							if len(dict) >= 65536 {
+								true -> failed? <- true
+								_ -> {
+									dict << nextPhrase
+									sub(i + 1, c)
+								}
+							}
+						}
+						_ -> sub(i + 1, nextPhrase)
+					}
+				}
+			}
+		}
+
+		sub(1, input.0)
+	}
+
+	if failed? {
+		true -> :error
+		_ -> Magic + _encodeAlphabet(alphabet) + HeaderSep + _encodeCodes(codes)
+	}
+}
+
+fn decompress(encoded) {
+	encoded := string(default(encoded, ''))
+	if !startsWith?(encoded, Magic) {
+		true -> :error
+		_ -> {
+			body := encoded |> slice(len(Magic), len(encoded))
+			if !strContains?(body, HeaderSep) {
+				true -> :error
+				_ -> {
+					[alphabetHeader, codeHeader] := body |> cut(HeaderSep)
+					if :error = alphabet := _decodeAlphabet(alphabetHeader) {
+						true -> :error
+						_ -> if :error = codes := _decodeCodes(codeHeader) {
+							true -> :error
+							_ -> if len(codes) {
+								0 -> ''
+								_ -> {
+									dict := _dict(alphabet)
+									prev := dict.(codes.0)
+
+									if prev = ? {
+										true -> :error
+										_ -> {
+											out := '' << prev
+
+											fn sub(i) if i {
+												len(codes) -> out
+												_ -> {
+													code := codes.(i)
+													entry := if dict.(code) {
+														? -> if code = len(dict) {
+															true -> prev + prev.0
+															_ -> :error
+														}
+														_ -> dict.(code)
+													}
+
+													if entry = :error {
+														true -> :error
+														_ -> {
+															out <- out << entry
+															if len(dict) >= 65536 {
+																true -> :error
+																_ -> {
+																	dict << (prev + entry.0)
+																	prev <- entry
+																	sub(i + 1)
+																}
+															}
+														}
+													}
+												}
+											}
+
+											sub(1)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn compressed?(encoded) startsWith?(string(default(encoded, '')), Magic)
+
+{
+	Magic: Magic
+	compress: compress
+	decompress: decompress
+	compressed?: compressed?
+}

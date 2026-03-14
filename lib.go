@@ -43,6 +43,15 @@ var libpath string
 //go:embed lib/compression.oak
 var libcompression string
 
+//go:embed lib/compression-rle.oak
+var libcompressionrle string
+
+//go:embed lib/compression-huffman.oak
+var libcompressionhuffman string
+
+//go:embed lib/compression-lzw.oak
+var libcompressionlzw string
+
 //go:embed lib/dataprot.oak
 var libdataprot string
 
@@ -233,6 +242,9 @@ var stdlibs = map[string]string{
 	"datetime":         libdatetime,
 	"path":             libpath,
 	"compression":      libcompression,
+	"compression-rle":  libcompressionrle,
+	"compression-huffman": libcompressionhuffman,
+	"compression-lzw":  libcompressionlzw,
 	"dataprot":         libdataprot,
 	"http":             libhttp,
 	"test":             libtest,

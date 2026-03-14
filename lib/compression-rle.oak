@@ -1,0 +1,138 @@
+// compression-rle implements escape-safe run-length encoding for Oak strings.
+
+{
+	default: default
+} := import('std')
+{
+	digit?: digit?
+} := import('str')
+
+Marker := '\x1d'
+RunPrefix := '#'
+RunSep := ':'
+
+fn _int?(n) type(n) = :int
+
+fn _digitCount(n) {
+	n := int(n)
+	fn sub(v, count) if v < 10 {
+		true -> count
+		_ -> sub(int(v / 10), count + 1)
+	}
+	sub(n, 1)
+}
+
+fn _literalLen(c, count) if c {
+	Marker -> count * 2
+	_ -> count
+}
+
+fn _runLen(count) 4 + _digitCount(count)
+
+fn _appendLiteral(out, c) if c {
+	Marker -> out << Marker << Marker
+	_ -> out << c
+}
+
+fn _appendRun(out, c, count) {
+	out << Marker << RunPrefix << string(count) << RunSep << c
+}
+
+fn _flush(out, c, count) if count {
+	0 -> out
+	_ -> if _runLen(count) < _literalLen(c, count) {
+		true -> _appendRun(out, c, count)
+		_ -> {
+			fn sub(i, acc) if i {
+				count -> acc
+				_ -> sub(i + 1, _appendLiteral(acc, c))
+			}
+			sub(0, out)
+		}
+	}
+}
+
+fn _readDigits(s, start) {
+	fn sub(i, digits) if c := s.(i) {
+		? -> [digits, i]
+		_ -> if digit?(c) {
+			true -> sub(i + 1, digits << c)
+			_ -> [digits, i]
+		}
+	}
+	sub(start, '')
+}
+
+fn _repeatChar(c, count) {
+	fn sub(i, acc) if i {
+		count -> acc
+		_ -> sub(i + 1, acc << c)
+	}
+	sub(0, '')
+}
+
+fn compress(input) {
+	input := string(default(input, ''))
+	if len(input) {
+		0 -> ''
+		_ -> {
+			fn sub(i, last, count, out) if i {
+				len(input) -> _flush(out, last, count)
+				_ -> if c := input.(i) {
+					last -> sub(i + 1, last, count + 1, out)
+					_ -> sub(i + 1, c, 1, _flush(out, last, count))
+				}
+			}
+			sub(1, input.0, 1, '')
+		}
+	}
+}
+
+fn decompress(encoded) {
+	encoded := string(default(encoded, ''))
+
+	fn sub(i, out) if i {
+		len(encoded) -> out
+		_ -> if c := encoded.(i) {
+			Marker -> if next := encoded.(i + 1) {
+				Marker -> sub(i + 2, out << Marker)
+				RunPrefix -> {
+					[digits, j] := _readDigits(encoded, i + 2)
+					if {
+						digits = ''
+						encoded.(j) != RunSep
+						!_int?(count := int(digits))
+						count <= 0
+						encoded.(j + 1) = ? -> :error
+						_ -> sub(j + 2, out << _repeatChar(encoded.(j + 1), count))
+					}
+				}
+				_ -> :error
+			}
+			_ -> sub(i + 1, out << c)
+		}
+	}
+
+	sub(0, '')
+}
+
+fn compressed?(encoded) {
+	encoded := string(default(encoded, ''))
+	fn sub(i) if i {
+		len(encoded) -> false
+		_ -> if encoded.(i) = Marker {
+			true -> true
+			_ -> sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+{
+	Marker: Marker
+	RunPrefix: RunPrefix
+	RunSep: RunSep
+	compress: compress
+	decompress: decompress
+	compressed?: compressed?
+}

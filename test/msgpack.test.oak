@@ -78,12 +78,77 @@ fn run(t) {
 	)
 
 	'serializeSafe rejects unsupported value' |> t.eq(
-		type(msgpack.serializeSafe(3.14))
+		type(msgpack.serializeSafe(fn() 0))
 		:atom
 	)
 
 	'serialize fallback for unsupported value is nil' |> t.eq(
-		msgpack.serialize(3.14) |> bytesOf()
+		msgpack.serialize(fn() 0) |> bytesOf()
 		[0xC0]
+	)
+
+	'float64 tag byte is 0xCB' |> t.eq(
+		(msgpack.serializePacket(1.5)).0
+		0xCB
+	)
+
+	'float64 1.5 bytes' |> t.eq(
+		msgpack.encodeFloat64(1.5) |> bytesOf()
+		[0xCB, 0x3F, 0xF8, 0, 0, 0, 0, 0, 0]
+	)
+
+	'float32 tag byte is 0xCA' |> t.eq(
+		(msgpack.encodeFloat32(1.5) |> bytesOf()).0
+		0xCA
+	)
+
+	'float32 1.5 bytes' |> t.eq(
+		msgpack.encodeFloat32(1.5) |> bytesOf()
+		[0xCA, 0x3F, 0xC0, 0, 0]
+	)
+
+	'parse null round-trip' |> t.eq(
+		msgpack.parse(msgpack.serialize(?))
+		?
+	)
+
+	'parse bool round-trip' |> t.eq(
+		[msgpack.parse(msgpack.serialize(true)), msgpack.parse(msgpack.serialize(false))]
+		[true, false]
+	)
+
+	'parse int round-trip' |> t.eq(
+		[msgpack.parse(msgpack.serialize(0)), msgpack.parse(msgpack.serialize(42)), msgpack.parse(msgpack.serialize(-100))]
+		[0, 42, -100]
+	)
+
+	'parse string round-trip' |> t.eq(
+		msgpack.parse(msgpack.serialize('hello'))
+		'hello'
+	)
+
+	'parse list round-trip' |> t.eq(
+		msgpack.parse(msgpack.serialize([1, true, 'x']))
+		[1, true, 'x']
+	)
+
+	'parse map round-trip' |> t.eq(
+		msgpack.parse(msgpack.serialize({ a: 1, b: 'ok' }))
+		{ a: 1, b: 'ok' }
+	)
+
+	'parse float64 1.5 round-trip' |> t.eq(
+		msgpack.parse(msgpack.encodeFloat64(1.5))
+		1.5
+	)
+
+	'parse float32 1.5 round-trip' |> t.eq(
+		msgpack.parse(msgpack.encodeFloat32(1.5))
+		1.5
+	)
+
+	'parsePacket is inverse of serializePacket' |> t.eq(
+		msgpack.parsePacket(msgpack.serializePacket('world'))
+		'world'
 	)
 }

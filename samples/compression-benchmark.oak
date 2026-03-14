@@ -1,0 +1,77 @@
+// Compare compression ratio and timing across RLE, Huffman, and LZW codecs.
+
+std := import('std')
+compression := import('compression')
+
+fn repeat(s, n) {
+    fn sub(i, acc) if i {
+        n -> acc
+        _ -> sub(i + 1, acc + s)
+    }
+    sub(0, '')
+}
+
+fn timeNs(fnRun) {
+    start := nanotime()
+    value := fnRun()
+    [value, nanotime() - start]
+}
+
+fn ratio(outLen, inLen) if inLen {
+    0 -> 0
+    _ -> outLen / inLen
+}
+
+samples := [
+    {
+        name: 'run-heavy'
+        input: repeat('AAAAABBBBBCCCCCDDDDDEEEEE', 120)
+    }
+    {
+        name: 'phrase-heavy'
+        input: repeat('TOBEORNOTTOBEORTOBEORNOT|', 120)
+    }
+    {
+        name: 'mixed text'
+        input: repeat('Magnolia compression benchmark 2026; ', 150)
+    }
+]
+
+algorithms := [
+    { name: 'rle', encode: compression.rleCompress, decode: compression.rleDecompress }
+    { name: 'huffman', encode: compression.huffmanCompress, decode: compression.huffmanDecompress }
+    { name: 'lzw', encode: compression.lzwCompress, decode: compression.lzwDecompress }
+]
+
+std.println('Compression benchmark')
+std.println('---------------------')
+
+samples |> with std.each() fn(sample) {
+    input := sample.input
+    inLen := len(input)
+
+    std.println('')
+    std.println('sample: ' + sample.name)
+    std.println('input bytes: ' + string(inLen))
+
+    algorithms |> with std.each() fn(algo) {
+        [encoded, encNs] := timeNs(fn() algo.encode(input))
+        if encoded = :error -> {
+            std.println('  ' + algo.name + ': encode error')
+        }
+
+        [decoded, decNs] := timeNs(fn() algo.decode(encoded))
+        if decoded = :error | decoded != input -> {
+            std.println('  ' + algo.name + ': decode mismatch/error')
+        }
+
+        outLen := len(encoded)
+        std.println(
+            '  ' + algo.name +
+            ' out=' + string(outLen) +
+            ' ratio=' + string(ratio(outLen, inLen)) +
+            ' enc_ns=' + string(encNs) +
+            ' dec_ns=' + string(decNs)
+        )
+    }
+}
