@@ -1,0 +1,79 @@
+// Relay-style P2P sample using the p2p stdlib.
+//
+// This demo starts a host plus two peers in one process so it is easy to run:
+//   magnolia samples/p2p.oak
+
+{
+	println: println
+	string: string
+	wait: wait
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+p2p := import('p2p')
+
+fn log(label, evt) if evt.type {
+	:ready -> printf('[{{ 0 }}] ready with peers: {{ 1 }}', label, string(evt.peers))
+	:peer-joined -> printf('[{{ 0 }}] peer joined: {{ 1 }} {{ 2 }}', label, evt.peerId, string(evt.meta))
+	:peer-left -> printf('[{{ 0 }}] peer left: {{ 1 }} ({{ 2 }})', label, evt.peerId, evt.reason)
+	:message -> printf('[{{ 0 }}] message from {{ 1 }} on {{ 2 }}: {{ 3 }}', label, evt.from, evt.channel, string(evt.payload))
+	:error -> printf('[{{ 0 }}] error: {{ 1 }}', label, evt.error)
+	:closed -> printf('[{{ 0 }}] closed: {{ 1 }}', label, evt.reason)
+	_ -> printf('[{{ 0 }}] event: {{ 1 }}', label, string(evt))
+}
+
+println('== Magnolia P2P Sample ==')
+
+host := p2p.Host('127.0.0.1:9411', '/mesh', fn(evt) log('host', evt))
+
+wait(0.1)
+
+alice := p2p.join('ws://127.0.0.1:9411/mesh', 'alice', fn(evt) log('alice', evt), {
+	role: 'initiator'
+})
+if alice.type = :error {
+	printf('Could not connect alice: {{ 0 }}', alice.error)
+	host.close()
+	exit(1)
+}
+
+bob := p2p.join('ws://127.0.0.1:9411/mesh', 'bob', fn(evt) log('bob', evt), {
+	role: 'responder'
+})
+if bob.type = :error {
+	printf('Could not connect bob: {{ 0 }}', bob.error)
+	alice.close('bob connect failed')
+	host.close()
+	exit(1)
+}
+
+wait(0.2)
+
+println('Alice broadcasts a room message.')
+alice.broadcast({
+	text: 'hello from alice'
+	seq: 1
+}, 'chat')
+
+wait(0.1)
+
+println('Bob sends a direct reply to Alice.')
+bob.send('alice', {
+	text: 'private hello from bob'
+	seq: 2
+}, 'dm')
+
+wait(0.2)
+
+printf('Host peer snapshot: {{ 0 }}', string(host.peers()))
+
+alice.close('demo complete')
+bob.close('demo complete')
+
+wait(0.2)
+
+host.close()
+
+println('P2P sample complete.')

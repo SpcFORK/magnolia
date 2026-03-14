@@ -187,6 +187,9 @@ var liblinux string
 //go:embed lib/websocket.oak
 var libwebsocket string
 
+//go:embed lib/p2p.oak
+var libp2p string
+
 //go:embed lib/GUI.oak
 var libgui string
 
@@ -291,6 +294,7 @@ var stdlibs = map[string]string{
 	"linux":            liblinux,
 	"Linux":            liblinux,
 	"websocket":        libwebsocket,
+	"p2p":              libp2p,
 	"gui-mesh":         libguimesh,
 	"gui-render":       libguirender,
 	"gui-3dmath":       libgui3dmath,

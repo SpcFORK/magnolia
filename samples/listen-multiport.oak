@@ -1,0 +1,92 @@
+// low-level HTTP listener sample that can bind one or many local ports.
+//
+// Usage:
+//   magnolia samples/listen-multiport.oak
+//   magnolia samples/listen-multiport.oak 8080 8081
+//   magnolia samples/listen-multiport.oak serve 8080 8081
+//   magnolia samples/listen-multiport.oak --port 8080
+//   magnolia samples/listen-multiport.oak --ports 8080,8081,9090
+
+{
+	default: default
+	append: append
+	map: map
+	filter: filter
+} := import('std')
+{
+	split: split
+	trim: trim
+	join: strJoin
+} := import('str')
+{
+	printf: printf
+} := import('fmt')
+{
+	parse: parse
+} := import('cli')
+
+fn rawPortArgs(cli) if cli.verb {
+	'serve', 'listen', ? -> cli.args
+	_ -> [cli.verb] |> append(cli.args)
+}
+
+fn parsePorts(cli) {
+	raw := if {
+		cli.opts.ports != ? -> split(string(cli.opts.ports), ',')
+		cli.opts.port != ? -> [string(cli.opts.port)]
+		len(rawPortArgs(cli)) > 0 -> rawPortArgs(cli)
+		_ -> ['8080']
+	}
+
+	raw |>
+		map(fn(part) part |> string() |> trim(' ')) |>
+		filter(fn(part) part != '') |>
+		map(int) |>
+		filter(fn(port) port != ?)
+}
+
+fn respond(port, ports, evt) {
+	req := evt.req
+	otherListeners := ports |> filter(fn(p) p != port) |> map(fn(p) '  http://127.0.0.1:' + string(p))
+	otherLines := if len(otherListeners) {
+		0 -> ['  only one listener is active']
+		_ -> otherListeners
+	}
+
+	evt.end({
+		status: 200
+		headers: {
+			'content-type': 'text/plain; charset=utf-8'
+			'x-listener-port': string(port)
+		}
+		body: [
+			'listener port: ' + string(port)
+			'active ports: ' + (ports |> map(string) |> strJoin(', '))
+			'method: ' + req.method
+			'url: ' + req.url
+			'body bytes: ' + string(len(req.body))
+			''
+			'Try another listener:'
+		] |> append(otherLines) |> strJoin('\n')
+	})
+}
+
+ports := parsePorts(parse())
+
+if len(ports) {
+	0 -> printf('No valid ports were provided. Try --port 8080 or --ports 8080,8081')
+	_ -> {
+		closers := ports |> map(fn(port) {
+			host := '0.0.0.0:' + string(port)
+			close := listen(host, fn(evt) if evt.type {
+				:error -> printf('[listen {{ 0 }}] {{ 1 }}', port, evt.error)
+				_ -> respond(port, ports, evt)
+			})
+
+			printf('Listening on http://127.0.0.1:{{ 0 }}', port)
+			close
+		})
+
+		printf('Started {{ 0 }} listener(s). Press Ctrl+C to stop.', len(closers))
+	}
+}

@@ -309,6 +309,12 @@ func TestOakClassMatch(t *testing.T) {
 	if v, err := ctx.oakClassMatch([]Value{IntValue(1), AtomValue("Alpha")}); err != nil || v != BoolValue(false) {
 		t.Fatalf("expected csof(non-class/atom pair) == false, got v=%v err=%v", v, err)
 	}
+	if v, err := ctx.oakClassMatch([]Value{alpha}); err != nil || v != BoolValue(true) {
+		t.Fatalf("expected csof(class) == true, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakClassMatch([]Value{IntValue(1)}); err != nil || v != BoolValue(false) {
+		t.Fatalf("expected csof(non-class) == false, got v=%v err=%v", v, err)
+	}
 }
 
 func TestMemwriteAtomReferenceHelpers(t *testing.T) {

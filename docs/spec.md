@@ -89,7 +89,7 @@ block
 - `char(n)`: Converts the Unicode code point `n` to a character.
 - `type(x)`: Returns the type of the argument `x`.
 - `name(x)`: Returns an atom name for `x` (for example class and function names).
-- `csof(a, b)`: Returns `true` when `a` and `b` refer to the same class, or when one is a class and the other is an atom matching that class name.
+- `csof(x)` or `csof(a, b)`: With one argument, returns `true` if `x` is a class and `false` otherwise. With two arguments, returns `true` when `a` and `b` refer to the same class, or when one is a class and the other is an atom matching that class name.
 - `len(x)`: Returns the length of the argument `x`.
 - `keys(x)`: Returns an array of keys of the argument `x`.
 

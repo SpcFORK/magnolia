@@ -9,6 +9,8 @@
 ```oak
 runtimeCodegen := import('runtime-codegen')
 { OakNativeRuntime: OakNativeRuntime, OakJSRuntime: OakJSRuntime } := import('runtime-codegen')
+{ OakNativeRuntime: OakNativeRuntime, OakJSRuntime: OakJSRuntime
+  encodeWATString: encodeWATString, renderWasmBundle: renderWasmBundle } := import('runtime-codegen')
 ```
 
 ## Constants
@@ -243,6 +245,38 @@ fn generateBundle(modules, target) {
 }
 ```
 
+### WebAssembly WASM Bundle
+
+```oak
+{ renderWasmBundle: renderWasmBundle } := import('runtime-codegen')
+buildRender := import('build-render')
+
+// renderWasmBundle produces WAT (WebAssembly Text) source embedding the Oak
+// bundle in linear memory. Requires `wat2wasm` to produce binary .wasm.
+fn generateWasmBundle(bundleNode, vfsFiles, encodeJSON, oakNativeRuntime, formatIdent, abort) {
+    renderOak := fn(node) buildRender.renderOakBundle(
+        node, vfsFiles, encodeJSON, oakNativeRuntime, formatIdent, abort
+    )
+    watSource := renderWasmBundle(bundleNode, renderOak)
+    writeFile('program.wat', watSource)
+    // Then convert: wat2wasm program.wat -o program.wasm
+}
+```
+
+### Custom WAT Data Segment
+
+```oak
+{ encodeWATString: encodeWATString } := import('runtime-codegen')
+
+text := 'Hello, 世界!'
+encoded := encodeWATString(text)
+// encoded.byteLen => UTF-8 byte count (useful for sizing WASM memory)
+// encoded.escaped => hex-escaped string for WAT data element
+
+watData := '(data (i32.const 1024) "' << encoded.escaped << '")'
+memoryPages := int((1024 + encoded.byteLen) / 65536) + 1
+```
+
 ### Circular Import Handling
 
 ```javascript
@@ -279,6 +313,58 @@ utils := __oak_module_import('utils')
 utils2 := __oak_module_import('utils')
 
 // utils === utils2 (same object)
+```
+
+## Functions
+
+### `renderWasmBundle(bundleNode, renderOakBundle)`
+
+Renders Oak AST nodes to WebAssembly Text (WAT) format. The resulting WAT module embeds the bundled Oak source code in linear memory and exports functions for a host Oak interpreter to execute.
+
+**Parameters:**
+- `bundleNode` — Root AST node of the bundled program
+- `renderOakBundle` — Callback `fn(node)` that renders an AST node to Oak source text
+
+**Returns:** A WAT source string ready for conversion to binary WASM via `wat2wasm`.
+
+**Exports from the generated WAT module:**
+- `memory` — Linear memory (sized to fit the bundle source)
+- `__oak_bundle_ptr` (global) — Memory offset of the embedded Oak source
+- `__oak_bundle_len` (global) — Byte length of the embedded Oak source
+- `run()` — Calls `oak.run` with the bundle pointer and length
+- `bundle_ptr()` — Returns `__oak_bundle_ptr`
+- `bundle_len()` — Returns `__oak_bundle_len`
+- `main()` — Entry point; delegates to `run()`
+
+**Imports required from host:**
+- `oak.run(ptr: i32, len: i32) → i32` — Executes the Oak source at the given memory location
+
+```oak
+{ renderWasmBundle: renderWasmBundle } := import('runtime-codegen')
+{ renderOakBundle: renderOakBundle } := import('build-render')
+
+watSource := renderWasmBundle(bundleNode, renderOakBundle)
+writeFile('program.wat', watSource)
+```
+
+### `encodeWATString(s)`
+
+Encodes an Oak string as a WAT data segment value. Returns the UTF-8 byte sequence as a hex-escaped string safe for use inside a WAT `(data ...)` element, along with the byte length.
+
+**Parameters:**
+- `s` — Oak string to encode
+
+**Returns:** An object `{ escaped: string, byteLen: int }` where:
+- `escaped` — The string with non-printable and non-ASCII characters hex-escaped (`\xx`)
+- `byteLen` — The total number of UTF-8 encoded bytes (used to size WASM memory)
+
+```oak
+{ encodeWATString: encodeWATString } := import('runtime-codegen')
+
+encoded := encodeWATString('Hello, 世界')
+// => { escaped: 'Hello, \e4\b8\96\e7\95\8c', byteLen: 13 }
+
+wat := '(data (i32.const 1024) "' << encoded.escaped << '")'
 ```
 
 ## Runtime Functions

@@ -2,32 +2,61 @@
 
 { OakNativeRuntime: OakNativeRuntime } := import('runtime-native')
 { OakJSRuntime: OakJSRuntime } := import('runtime-js')
+
 std := import('std')
 map := std.map
+toHex := std.toHex
 str := import('str')
 join := str.join
+padStart := str.padStart
 
-fn escapeWATString(s) s |> map(fn(c) if c {
-	'\\' -> '\\\\'
-	'"' -> '\\"'
-	'\n' -> '\\n'
-	'\r' -> '\\r'
-	'\f' -> '\\0c'
-	'\t' -> '\\t'
-	_ -> if {
-		codepoint(c) < 32
-		codepoint(c) > 126 -> '\\' << toHex(codepoint(c)) |> padStart(2, '0')
-		_ -> c
-	}
-}) |> join('')
+fn _hexByte(n) toHex(n) |> padStart(2, '0')
+
+// _escapeWATCodepoint converts a Unicode codepoint to one or more WAT \xx
+// hex escapes that represent the UTF-8 byte sequence for that codepoint.
+fn _escapeWATCodepoint(cp) if {
+	cp < 128 -> '\\' << _hexByte(cp)
+	cp < 2048 -> '\\' << _hexByte((cp >> 6) | 192) << '\\' << _hexByte((cp & 63) | 128)
+	cp < 65536 -> '\\' << _hexByte((cp >> 12) | 224) << '\\' << _hexByte(((cp >> 6) & 63) | 128) << '\\' << _hexByte((cp & 63) | 128)
+	_ -> '\\' << _hexByte((cp >> 18) | 240) << '\\' << _hexByte(((cp >> 12) & 63) | 128) << '\\' << _hexByte(((cp >> 6) & 63) | 128) << '\\' << _hexByte((cp & 63) | 128)
+}
+
+// encodeWATString encodes a string as a WAT (data ...) element value.
+// Returns { escaped, byteLen } where:
+//   escaped  - the string with control/non-ASCII chars as \xx UTF-8 hex sequences
+//   byteLen  - total UTF-8 byte length (used for accurate WASM memory sizing)
+fn encodeWATString(s) {
+	escaped := ''
+	byteLen := 0
+	s |> map(fn(c) {
+		cp := codepoint(c)
+		if cp >= 32 & cp <= 126 & c != '\\' & c != '"' {
+			true -> {
+				escaped <- escaped << c
+				byteLen <- byteLen + 1
+			}
+			_ -> {
+				escaped <- escaped << _escapeWATCodepoint(cp)
+				byteLen <- byteLen + if {
+					cp < 128 -> 1
+					cp < 2048 -> 2
+					cp < 65536 -> 3
+					_ -> 4
+				}
+			}
+		}
+	})
+	{ escaped: escaped, byteLen: byteLen }
+}
 
 // renderWasmBundle renders Oak AST nodes to WebAssembly text format.
 // It embeds the bundled Oak source in linear memory and expects a host
 // runtime import (`oak.run`) to execute the source.
 fn renderWasmBundle(bundleNode, renderOakBundle) {
 	bundleSource := renderOakBundle(bundleNode)
-	bundleSourceWAT := escapeWATString(bundleSource)
-	bundleSourceLen := len(bundleSource)
+	encoded := encodeWATString(bundleSource)
+	bundleSourceWAT := encoded.escaped
+	bundleSourceLen := encoded.byteLen
 	bundlePtr := 1024
 	pageBytes := 65536
 	bytesRequired := bundlePtr + bundleSourceLen + 1
@@ -70,5 +99,6 @@ fn renderWasmBundle(bundleNode, renderOakBundle) {
 {
 	OakNativeRuntime: OakNativeRuntime
 	OakJSRuntime: OakJSRuntime
+	encodeWATString: encodeWATString
 	renderWasmBundle: renderWasmBundle
 }

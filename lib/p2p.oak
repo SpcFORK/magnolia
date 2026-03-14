@@ -1,0 +1,472 @@
+// libp2p provides a small relay-based peer messaging layer on top of Magnolia's
+// websocket primitives.
+
+{
+	default: default
+	each: each
+	filter: filter
+	map: map
+} := import('std')
+
+thread := import('thread')
+json := import('json')
+ws := import('websocket')
+
+fn _noop(_) ?
+
+fn _packet(kind, body) json.serialize({
+	type: kind
+	body: default(body, {})
+})
+
+fn _sendPacket(socket, kind, body) ws.send(socket, _packet(kind, body))
+
+fn _decodePacket(evt) if evt.type {
+	:message -> {
+		parsed := json.parse(evt.data)
+		if type(parsed) {
+			:object -> if parsed.type {
+				? -> {
+					type: :error
+					error: 'missing p2p packet type'
+					raw: evt.data
+				}
+				_ -> {
+					type: :packet
+					packetType: parsed.type
+					body: default(parsed.body, {})
+					raw: evt.data
+				}
+			}
+			_ -> {
+				type: :error
+				error: 'invalid p2p packet payload'
+				raw: evt.data
+			}
+		}
+	}
+	:closed -> evt
+	:error -> evt
+	_ -> {
+		type: :error
+		error: 'unexpected websocket event'
+		raw: evt
+	}
+}
+
+fn _findPeer(peers, peerId) {
+	fn sub(i) if i >= len(peers) {
+		true -> ?
+		_ -> if peers.(i).id = peerId {
+			true -> peers.(i)
+			_ -> sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+fn _peerSummaries(peers, excludeId) peers |>
+	filter(fn(peer) peer.id != excludeId) |>
+	map(fn(peer) {
+		id: peer.id
+		meta: default(peer.meta, {})
+	})
+
+fn _peerSockets(peers, excludeId) peers |>
+	filter(fn(peer) peer.id != excludeId) |>
+	map(fn(peer) peer.socket)
+
+fn _fanout(state, mutex, excludeId, kind, body) {
+	mutex.lock()
+	targets := _peerSockets(state.peers, excludeId)
+	mutex.unlock()
+
+	targets |> each(fn(socket) _sendPacket(socket, kind, body))
+}
+
+fn _removePeer(state, mutex, peerId) {
+	mutex.lock()
+	peer := _findPeer(state.peers, peerId)
+	if peer != ? -> state.peers <- state.peers |> filter(fn(entry) entry.id != peerId)
+	mutex.unlock()
+	peer
+}
+
+fn _sendDirect(state, mutex, toPeerId, fromPeerId, channel, payload) {
+	mutex.lock()
+	target := _findPeer(state.peers, toPeerId)
+	mutex.unlock()
+
+	if target != ? -> _sendPacket(target.socket, 'peer-message', {
+		from: fromPeerId
+		channel: channel
+		payload: payload
+	})
+}
+
+fn _peerEvent(packetType, body) if packetType {
+	'welcome' -> {
+		type: :ready
+		peerId: body.peerId
+		peers: default(body.peers, [])
+		host: body.host
+		path: body.path
+	}
+	'peer-joined' -> {
+		type: :peer-joined
+		peerId: body.peerId
+		meta: default(body.meta, {})
+	}
+	'peer-left' -> {
+		type: :peer-left
+		peerId: body.peerId
+		reason: default(body.reason, '')
+	}
+	'peer-message' -> {
+		type: :message
+		from: body.from
+		channel: default(body.channel, 'default')
+		payload: body.payload
+	}
+	'error' -> {
+		type: :error
+		scope: :remote
+		error: default(body.error, 'remote peer error')
+	}
+	_ -> {
+		type: :packet
+		packetType: packetType
+		body: body
+	}
+}
+
+fn _hostError(onEvent, peerId, error) onEvent({
+	type: :error
+	scope: :host
+	peerId: peerId
+	error: error
+})
+
+fn _hostLoop(state, mutex, peerId, socket, onEvent) {
+	fn loop {
+		evt := _decodePacket(ws.recv(socket))
+		if evt.type {
+			:packet -> if evt.packetType {
+				'broadcast' -> {
+					channel := default(evt.body.channel, 'default')
+					_fanout(state, mutex, peerId, 'peer-message', {
+						from: peerId
+						channel: channel
+						payload: evt.body.payload
+					})
+					onEvent({
+						type: :message
+						mode: :broadcast
+						from: peerId
+						channel: channel
+						payload: evt.body.payload
+					})
+					loop()
+				}
+				'direct' -> {
+					channel := default(evt.body.channel, 'direct')
+					toPeerId := evt.body.to
+					if type(toPeerId) = :string {
+						true -> {
+							_sendDirect(state, mutex, toPeerId, peerId, channel, evt.body.payload)
+							onEvent({
+								type: :message
+								mode: :direct
+								from: peerId
+								to: toPeerId
+								channel: channel
+								payload: evt.body.payload
+							})
+							loop()
+						}
+						_ -> {
+							_sendPacket(socket, 'error', {
+								error: 'direct packet requires a string "to" peer id'
+							})
+							_hostError(onEvent, peerId, 'direct packet missing destination')
+							loop()
+						}
+					}
+				}
+				_ -> {
+					_sendPacket(socket, 'error', {
+						error: 'unknown packet type: ' + string(evt.packetType)
+					})
+					_hostError(onEvent, peerId, 'unknown packet type: ' + string(evt.packetType))
+					loop()
+				}
+			}
+			:closed -> {
+				if removed := _removePeer(state, mutex, peerId) {
+					? -> ?
+					_ -> {
+						_fanout(state, mutex, ?, 'peer-left', {
+							peerId: peerId
+							reason: evt.reason
+						})
+						onEvent({
+							type: :peer-left
+							peerId: peerId
+							reason: evt.reason
+						})
+					}
+				}
+			}
+			:error -> {
+				if removed := _removePeer(state, mutex, peerId) {
+					? -> ?
+					_ -> {
+						_fanout(state, mutex, ?, 'peer-left', {
+							peerId: peerId
+							reason: evt.error
+						})
+						onEvent({
+							type: :peer-left
+							peerId: peerId
+							reason: evt.error
+						})
+					}
+				}
+				_hostError(onEvent, peerId, evt.error)
+			}
+		}
+	}
+	loop()
+}
+
+fn _acceptPeer(state, mutex, host, path, socket, req, onEvent) {
+	handshake := _decodePacket(ws.recv(socket))
+	if handshake.type {
+		:packet -> if handshake.packetType {
+			'hello' -> {
+				peerId := handshake.body.peerId
+				meta := default(handshake.body.meta, {})
+				if type(peerId) = :string {
+					true -> {
+						mutex.lock()
+						existing := _findPeer(state.peers, peerId)
+						others := []
+						if existing {
+							? -> {
+								state.peers <- state.peers << {
+									id: peerId
+									socket: socket
+									meta: meta
+								}
+								others <- _peerSummaries(state.peers, peerId)
+							}
+							_ -> ?
+						}
+						mutex.unlock()
+
+						if existing {
+							? -> {
+								_sendPacket(socket, 'welcome', {
+									peerId: peerId
+									peers: others
+									host: host
+									path: path
+								})
+								_fanout(state, mutex, peerId, 'peer-joined', {
+									peerId: peerId
+									meta: meta
+								})
+								onEvent({
+									type: :peer-joined
+									peerId: peerId
+									meta: meta
+									req: req
+								})
+								_hostLoop(state, mutex, peerId, socket, onEvent)
+							}
+							_ -> {
+								_sendPacket(socket, 'error', {
+									error: 'duplicate peer id: ' + peerId
+								})
+								ws.close(socket, ws.CloseCode.policyViolation, 'duplicate peer id')
+								_hostError(onEvent, peerId, 'duplicate peer id')
+							}
+						}
+					}
+					_ -> {
+						_sendPacket(socket, 'error', {
+							error: 'hello packet requires a string peerId'
+						})
+						ws.close(socket, ws.CloseCode.protocolError, 'missing peer id')
+						_hostError(onEvent, '?', 'hello packet missing peer id')
+					}
+				}
+			}
+			_ -> {
+				_sendPacket(socket, 'error', {
+					error: 'first packet must be hello'
+				})
+				ws.close(socket, ws.CloseCode.protocolError, 'expected hello')
+				_hostError(onEvent, '?', 'first packet was not hello')
+			}
+		}
+		:error -> {
+			ws.close(socket, ws.CloseCode.protocolError, 'invalid handshake')
+			_hostError(onEvent, '?', handshake.error)
+		}
+		:closed -> ?
+	}
+}
+
+fn Host(host, path, onEvent) {
+	onEvent := default(onEvent, _noop)
+	state := {
+		peers: []
+	}
+	mutex := thread.Mutex()
+	closeServer := ws.listen(host, path, fn(evt) if evt.type {
+		:error -> onEvent({
+			type: :error
+			scope: :host
+			error: evt.error
+		})
+		:connect -> thread.spawn(_acceptPeer, state, mutex, host, path, evt.socket, evt.req, onEvent)
+	})
+
+	{
+		type: :host
+		host: host
+		path: path
+		peers: fn() {
+			mutex.lock()
+			snapshot := _peerSummaries(state.peers, ?)
+			mutex.unlock()
+			snapshot
+		}
+		send: fn(peerId, payload, channel) _sendDirect(
+			state,
+			mutex,
+			peerId,
+			'host',
+			default(channel, 'host'),
+			payload
+		)
+		broadcast: fn(payload, channel) _fanout(state, mutex, ?, 'peer-message', {
+			from: 'host'
+			channel: default(channel, 'host')
+			payload: payload
+		})
+		close: fn() {
+			mutex.lock()
+			sockets := _peerSockets(state.peers, ?)
+			state.peers <- []
+			mutex.unlock()
+
+			sockets |> each(fn(socket) ws.close(socket, ws.CloseCode.goingAway, 'host closed'))
+			closeServer()
+		}
+	}
+}
+
+fn join(url, peerId, onEvent, meta) {
+	onEvent := default(onEvent, _noop)
+	meta := default(meta, {})
+	connected := ws.connect(url)
+
+	if connected.type {
+		:error -> connected
+		_ -> {
+			socket := connected.socket
+			hello := _sendPacket(socket, 'hello', {
+				peerId: peerId
+				meta: meta
+			})
+			if hello.type = :error {
+				true -> {
+					ws.close(socket, ws.CloseCode.protocolError, 'could not send hello')
+					hello
+				}
+				_ -> {
+					state := {
+						connected?: true
+						welcome: ?
+					}
+
+					thread.spawn(fn(socket, peerId, onEvent, state) {
+						fn loop {
+							evt := _decodePacket(ws.recv(socket))
+							if evt.type {
+								:packet -> {
+									if evt.packetType = 'welcome' -> state.welcome <- evt.body
+									onEvent(_peerEvent(evt.packetType, evt.body))
+									loop()
+								}
+								:closed -> {
+									state.connected? <- false
+									onEvent({
+										type: :closed
+										peerId: peerId
+										code: evt.code
+										reason: evt.reason
+									})
+								}
+								:error -> {
+									state.connected? <- false
+									onEvent({
+										type: :error
+										scope: :peer
+										peerId: peerId
+										error: evt.error
+									})
+								}
+							}
+						}
+						loop()
+					}, socket, peerId, onEvent, state)
+
+					{
+						type: :peer
+						peerId: peerId
+						url: url
+						connected?: fn() state.connected?
+						ready?: fn() state.welcome != ?
+						knownPeers: fn() if welcome := state.welcome {
+							? -> []
+							_ -> default(welcome.peers, [])
+						}
+						send: fn(toPeerId, payload, channel) if state.connected? {
+							true -> _sendPacket(socket, 'direct', {
+								to: toPeerId
+								channel: default(channel, 'direct')
+								payload: payload
+							})
+							_ -> {
+								type: :error
+								error: 'peer is closed'
+							}
+						}
+						broadcast: fn(payload, channel) if state.connected? {
+							true -> _sendPacket(socket, 'broadcast', {
+								channel: default(channel, 'default')
+								payload: payload
+							})
+							_ -> {
+								type: :error
+								error: 'peer is closed'
+							}
+						}
+						close: fn(reason) {
+							state.connected? <- false
+							ws.close(socket, ws.CloseCode.normal, default(reason, 'peer closed'))
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+{
+	Host: Host
+	join: join
+}

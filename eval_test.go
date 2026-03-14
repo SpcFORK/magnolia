@@ -1643,6 +1643,8 @@ func TestClassMatchBuiltin(t *testing.T) {
 			csof(:Alpha, Alpha)
 			csof(:Alpha, Beta)
 			csof(1, :Alpha)
+			csof(Alpha)
+			csof(1)
 		]
 	`, MakeList(
 		BoolValue(true),
@@ -1650,6 +1652,8 @@ func TestClassMatchBuiltin(t *testing.T) {
 		BoolValue(true),
 		BoolValue(true),
 		BoolValue(false),
+		BoolValue(false),
+		BoolValue(true),
 		BoolValue(false),
 	))
 }

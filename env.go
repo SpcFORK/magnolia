@@ -674,8 +674,13 @@ func (c *Context) oakName(args []Value) (Value, *runtimeError) {
 }
 
 func (c *Context) oakClassMatch(args []Value) (Value, *runtimeError) {
-	if err := c.requireArgLen("csof", args, 2); err != nil {
+	if err := c.requireArgLen("csof", args, 1); err != nil {
 		return nil, err
+	}
+
+	if len(args) == 1 {
+		_, ok := args[0].(ClassValue)
+		return BoolValue(ok), nil
 	}
 
 	leftClass, leftIsClass := args[0].(ClassValue)

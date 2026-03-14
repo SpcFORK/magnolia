@@ -288,6 +288,37 @@ function keys(x) {
 	}
 	throw new Error(\'keys() takes a composite value, but got \' + string(x).valueOf());
 }
+function name(x) {
+	if (x == null) return Symbol.for(\'null\');
+	if (typeof x === \'symbol\') return x;
+	if (__is_oak_string(x)) return Symbol.for(x.valueOf());
+	if (typeof x === \'function\') {
+		const n = x.name;
+		return Symbol.for(n ?? \'\');
+	}
+	if (typeof x === \'object\' && x !== null && typeof x.constructor === \'function\') {
+		return Symbol.for(x.constructor.name || \'\');
+	}
+	return Symbol.for(string(x).valueOf());
+}
+function csof(x, cls) {
+	if (cls === undefined) {
+		// 1-arg: in JS there are no Oak class values, always false
+		return false;
+	}
+	if (x == null || cls == null) return false;
+	if (typeof cls === \'function\') return x instanceof cls;
+	if (typeof cls === \'symbol\') {
+		const clsName = Symbol.keyFor(cls);
+		if (typeof x === \'object\' && x !== null && typeof x.constructor === \'function\') {
+			return x.constructor.name === clsName;
+		}
+		if (typeof x === \'symbol\') {
+			return Symbol.keyFor(x) === clsName;
+		}
+	}
+	return false;
+}
 
 // OS interfaces
 function args() {
@@ -480,6 +511,15 @@ function chan_recv(ch, cb) {
 		return null;
 	}
 	return __oak_io_error("chan_recv() would block on empty channel");
+}
+function lock_thread() {
+	return null;
+}
+function unlock_thread() {
+	return null;
+}
+function win_msg_loop(fn) {
+	return __oak_io_error(\'win_msg_loop() unavailable in this runtime\');
 }
 
 let __Oak_FS;
@@ -788,11 +828,436 @@ function write() {
 	}
 	return __oak_io_error("write() unavailable in this runtime");
 }
-function listen() {
-	return __oak_io_error("listen() unavailable in this runtime");
+function listen(host, handler, cb) {
+	if (__Is_Oak_Node) {
+		const http = require(\'http\');
+		const hostStr = __oak_to_string_value(host);
+		const [hostname, portStr] = hostStr.split(\':\');
+		const port = int(portStr) ?? 9090;
+		const server = http.createServer((nodeReq, nodeRes) => {
+			let bodyChunks = [];
+			nodeReq.on(\'data\', chunk => bodyChunks.push(chunk));
+			nodeReq.on(\'end\', () => {
+				const bodyBuf = Buffer.concat(bodyChunks);
+				const bodyStr = __as_oak_string(bodyBuf.toString(\'latin1\'));
+				const hdrs = {};
+				for (const key of Object.keys(nodeReq.headers)) {
+					hdrs[key] = __as_oak_string(nodeReq.headers[key]);
+				}
+				const endFn = (args) => {
+					const resp = args[0] ?? {};
+					const status = int(resp.status) ?? 200;
+					const respHdrs = resp.headers ?? {};
+					const respBody = __oak_to_string_value(resp.body ?? \'\');
+					for (const k of Object.getOwnPropertyNames(respHdrs)) {
+						nodeRes.setHeader(k, __oak_to_string_value(respHdrs[k]));
+					}
+					nodeRes.writeHead(status);
+					nodeRes.end(Buffer.from(respBody, \'latin1\'));
+					return null;
+				};
+				if (typeof handler === \'function\') {
+					handler({
+						type: Symbol.for(\'req\'),
+						req: {
+							method: __as_oak_string(nodeReq.method || \'GET\'),
+							url: __as_oak_string(nodeReq.url || \'/\'),
+							headers: hdrs,
+							body: bodyStr,
+						},
+						end: endFn,
+					});
+				}
+			});
+		});
+		server.listen(port, hostname || \'0.0.0.0\');
+		return (...args) => { server.close(); return null; };
+	}
+	return __oak_io_error(\'listen() unavailable in this runtime\');
 }
-function req() {
-	return __oak_io_error("req() unavailable in this runtime");
+function req(data, cb) {
+	const method = __oak_to_string_value((data && data.method) || \'GET\');
+	const url = __oak_to_string_value((data && data.url) || \'\');
+	const headers = (data && data.headers) ? data.headers : {};
+	const body = (data && data.body != null && data.body !== null) ? __oak_to_string_value(data.body) : null;
+
+	function __oak_make_resp(status, respHeaders, respBody) {
+		const hdrs = {};
+		for (const k of Object.getOwnPropertyNames(respHeaders)) {
+			hdrs[k] = __as_oak_string(__oak_to_string_value(respHeaders[k]));
+		}
+		return {
+			type: Symbol.for(\'resp\'),
+			resp: {
+				status: int(status) ?? 0,
+				headers: hdrs,
+				body: __as_oak_string(respBody ?? \'\'),
+			},
+		};
+	}
+
+	const fetchHeaders = {};
+	for (const k of Object.getOwnPropertyNames(headers)) {
+		fetchHeaders[k] = __oak_to_string_value(headers[k]);
+	}
+
+	if (__Is_Oak_Node) {
+		// Use Node.js built-in fetch (v18+) or fall back to http/https modules
+		if (typeof fetch === \'function\') {
+			const opts = {
+				method,
+				headers: fetchHeaders,
+				redirect: \'manual\',
+			};
+			if (body != null) opts.body = body;
+			const p = fetch(url, opts)
+				.then(r => r.arrayBuffer().then(buf => {
+					const bodyText = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join(\'\');
+					const hdrsOut = {};
+					r.headers.forEach((v, k) => { hdrsOut[k] = v; });
+					return __oak_make_resp(r.status, hdrsOut, bodyText);
+				}))
+				.catch(e => __oak_io_error(\'req() failed: \' + e));
+			if (typeof cb === \'function\') {
+				p.then(cb);
+				return null;
+			}
+			return __oak_io_error(\'req() requires a callback in async Node.js context\');
+		}
+		// Node.js http/https fallback for older runtimes
+		try {
+			const parsedUrl = require(\'url\').parse(url);
+			const mod = parsedUrl.protocol === \'https:\' ? require(\'https\') : require(\'http\');
+			const bodyBuf = body != null ? Buffer.from(body, \'latin1\') : null;
+			const reqOpts = {
+				hostname: parsedUrl.hostname,
+				port: parsedUrl.port,
+				path: parsedUrl.path || \'/\',
+				method,
+				headers: { ...fetchHeaders },
+			};
+			if (bodyBuf != null) reqOpts.headers[\'Content-Length\'] = bodyBuf.length;
+			if (typeof cb === \'function\') {
+				const nodeReq = mod.request(reqOpts, nodeRes => {
+					const chunks = [];
+					nodeRes.on(\'data\', c => chunks.push(c));
+					nodeRes.on(\'end\', () => {
+						const respBody = Buffer.concat(chunks).toString(\'latin1\');
+						const hdrsOut = {};
+						for (const k of Object.keys(nodeRes.headers)) {
+							hdrsOut[k] = nodeRes.headers[k];
+						}
+						cb(__oak_make_resp(nodeRes.statusCode, hdrsOut, respBody));
+					});
+				});
+				nodeReq.on(\'error\', e => cb(__oak_io_error(\'req() failed: \' + e)));
+				if (bodyBuf != null) nodeReq.write(bodyBuf);
+				nodeReq.end();
+				return null;
+			}
+			// sync path using spawnSync for Node without native sync http
+			const result = require(\'child_process\').spawnSync(process.execPath, [
+				\'-e\',
+				`const http=require(\'${parsedUrl.protocol === \'https:\' ? \'https\' : \'http\'}\');`
+				+ `const o=${JSON.stringify(reqOpts)};`
+				+ `const r=[];`
+				+ `const q=http.request(o,res=>{res.on(\'data\',c=>r.push(c));res.on(\'end\',()=>{`
+				+ `const b=Buffer.concat(r).toString(\'latin1\');`
+				+ `const h={};for(const k of Object.keys(res.headers))h[k]=res.headers[k];`
+				+ `process.stdout.write(JSON.stringify({s:res.statusCode,h,b}));})});`
+				+ `q.on(\'error\',e=>{process.stdout.write(JSON.stringify({err:e.message}))});`
+				+ (bodyBuf != null ? `q.write(Buffer.from(${JSON.stringify(Array.from(bodyBuf))}));` : \'\')
+				+ `q.end();`,
+			], { encoding: \'latin1\', timeout: 30000 });
+			if (result.error || result.status !== 0) {
+				return __oak_io_error(\'req() sync fallback failed\');
+			}
+			const parsed = JSON.parse(result.stdout);
+			if (parsed.err) return __oak_io_error(\'req() failed: \' + parsed.err);
+			return __oak_make_resp(parsed.s, parsed.h, parsed.b);
+		} catch (e) {
+			return __oak_io_error(\'req() failed: \' + e);
+		}
+	}
+	// browser path — use fetch
+	if (typeof fetch === \'function\') {
+		const opts = { method, headers: fetchHeaders, redirect: \'manual\' };
+		if (body != null) opts.body = body;
+		const p = fetch(url, opts)
+			.then(r => r.arrayBuffer().then(buf => {
+				const bodyText = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join(\'\');
+				const hdrsOut = {};
+				r.headers.forEach((v, k) => { hdrsOut[k] = v; });
+				return __oak_make_resp(r.status, hdrsOut, bodyText);
+			}))
+			.catch(e => __oak_io_error(\'req() failed: \' + e));
+		if (typeof cb === \'function\') {
+			p.then(cb);
+			return null;
+		}
+		// return a promise-like synthetic result; Oak callers should use callback form
+		return __oak_io_error(\'req() in browser requires a callback\');
+	}
+	return __oak_io_error(\'req() unavailable in this runtime\');
+}
+
+// WebSocket
+let __Oak_WS_NextID = 1;
+const __Oak_WS_Map = new Map();
+function __oak_ws_socket_object(id) {
+	return { type: Symbol.for(\'websocket\'), id: int(id) };
+}
+function __oak_ws_get(ws, fnName) {
+	if (ws == null || typeof ws !== \'object\') {
+		return [null, __oak_io_error(fnName + \'() expects a websocket\')];
+	}
+	if (ws.type !== Symbol.for(\'websocket\')) {
+		return [null, __oak_io_error(fnName + \'() expects a websocket\')];
+	}
+	const id = int(ws.id);
+	const entry = __Oak_WS_Map.get(id);
+	if (!entry) return [null, __oak_io_error(\'Websocket is not available\')];
+	return [entry, null];
+}
+// Register post-connection message/close/error handlers on a socket.
+// Handles both Node.js ws EventEmitter API (server and client) and the
+// browser W3C WebSocket API.  Called after the connection is established so
+// that connection-phase errors can be handled separately by the caller.
+function __oak_ws_register(id, entry, conn) {
+	if (typeof conn.on === \'function\') {
+		// Node.js ws EventEmitter API
+		conn.on(\'message\', (rawData, isBinary) => {
+			let str;
+			if (typeof Buffer !== \'undefined\' && Buffer.isBuffer(rawData)) {
+				str = rawData.toString(\'latin1\');
+			} else if (Array.isArray(rawData)) {
+				// ws may give multiple buffers
+				str = Buffer.concat(rawData).toString(\'latin1\');
+			} else if (typeof ArrayBuffer !== \'undefined\' && rawData instanceof ArrayBuffer) {
+				str = Array.from(new Uint8Array(rawData)).map(b => String.fromCharCode(b)).join(\'\');
+			} else {
+				str = String(rawData);
+			}
+			const msg = { type: Symbol.for(\'message\'), opcode: isBinary ? 2 : 1, data: __as_oak_string(str) };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		});
+		conn.on(\'close\', (code, reasonBuf) => {
+			entry.closed = true;
+			__Oak_WS_Map.delete(id);
+			const reason = reasonBuf ? reasonBuf.toString() : \'\';
+			const msg = { type: Symbol.for(\'closed\'), code: int(code) ?? 0, reason: __as_oak_string(reason) };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		});
+		conn.on(\'error\', () => {
+			const err = __oak_io_error(\'WebSocket error\');
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(err);
+			else entry.msgQueue.push(err);
+		});
+	} else {
+		// W3C API (browser WebSocket)
+		if (typeof conn.binaryType !== \'undefined\') conn.binaryType = \'arraybuffer\';
+		conn.onmessage = evt => {
+			let data;
+			if (typeof ArrayBuffer !== \'undefined\' && evt.data instanceof ArrayBuffer) {
+				data = __as_oak_string(Array.from(new Uint8Array(evt.data)).map(b => String.fromCharCode(b)).join(\'\'));
+			} else {
+				data = __as_oak_string(String(evt.data));
+			}
+			const msg = { type: Symbol.for(\'message\'), opcode: 1, data };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		};
+		conn.onclose = evt => {
+			entry.closed = true;
+			__Oak_WS_Map.delete(id);
+			const msg = { type: Symbol.for(\'closed\'), code: int(evt.code) ?? 0, reason: __as_oak_string(evt.reason || \'\') };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		};
+		conn.onerror = () => {
+			const err = __oak_io_error(\'WebSocket error\');
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(err);
+			else entry.msgQueue.push(err);
+		};
+	}
+}
+function ws_dial(url, headers, cb) {
+	if (typeof headers === \'function\') { cb = headers; headers = {}; }
+	const urlStr = __oak_to_string_value(url);
+	let socket;
+	try {
+		if (__Is_Oak_Node) {
+			let WS;
+			try { WS = require(\'ws\'); } catch (_) {
+				const err = __oak_io_error(\'ws_dial() requires the "ws" npm module in Node.js\');
+				if (typeof cb === \'function\') { cb(err); return null; }
+				return err;
+			}
+			const hdrs = {};
+			if (headers && typeof headers === \'object\' && !Array.isArray(headers)) {
+				for (const key of Object.getOwnPropertyNames(headers)) {
+					hdrs[key] = __oak_to_string_value(headers[key]);
+				}
+			}
+			socket = new WS(urlStr, { headers: hdrs });
+		} else if (typeof WebSocket !== \'undefined\') {
+			socket = new WebSocket(urlStr);
+		} else {
+			const err = __oak_io_error(\'ws_dial() unavailable in this runtime\');
+			if (typeof cb === \'function\') { cb(err); return null; }
+			return err;
+		}
+	} catch (e) {
+		const err = __oak_io_error(\'ws_dial() failed: \' + e);
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	const id = __Oak_WS_NextID++;
+	const entry = { socket, msgQueue: [], recvQueue: [], closed: false };
+	__Oak_WS_Map.set(id, entry);
+	if (typeof cb === \'function\') {
+		// For Node.js ws EventEmitter API
+		if (typeof socket.once === \'function\') {
+			socket.once(\'open\', () => {
+				__oak_ws_register(id, entry, socket);
+				cb({ type: Symbol.for(\'ok\'), socket: __oak_ws_socket_object(id), status: 101, headers: {} });
+			});
+			socket.once(\'error\', e => {
+				__Oak_WS_Map.delete(id);
+				cb(__oak_io_error(\'ws_dial() could not connect: \' + e));
+			});
+		} else {
+			// W3C API: onopen / onerror for connection phase, then hand off to __oak_ws_register
+			socket.onerror = () => {
+				__Oak_WS_Map.delete(id);
+				cb(__oak_io_error(\'ws_dial() could not connect\'));
+			};
+			socket.onopen = () => {
+				__oak_ws_register(id, entry, socket);
+				cb({ type: Symbol.for(\'ok\'), socket: __oak_ws_socket_object(id), status: 101, headers: {} });
+			};
+		}
+		return null;
+	}
+	// Non-callback path: register handlers immediately (connection may still be opening)
+	__oak_ws_register(id, entry, socket);
+	return { type: Symbol.for(\'ok\'), socket: __oak_ws_socket_object(id), status: 0, headers: {} };
+}
+function ws_send(ws, data, opcode, cb) {
+	if (typeof opcode === \'function\') { cb = opcode; opcode = 1; }
+	if (opcode == null) opcode = 1;
+	const [entry, err] = __oak_ws_get(ws, \'ws_send\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	try {
+		const isBinary = int(opcode) === 2;
+		const payload = isBinary
+			? Buffer.from(__oak_to_string_value(data), \'latin1\')
+			: __oak_to_string_value(data);
+		entry.socket.send(payload);
+		const result = { type: Symbol.for(\'sent\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		const ferr = __oak_io_error(\'ws_send() failed: \' + e);
+		if (typeof cb === \'function\') { cb(ferr); return null; }
+		return ferr;
+	}
+}
+function ws_recv(ws, cb) {
+	const [entry, err] = __oak_ws_get(ws, \'ws_recv\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	if (entry.msgQueue.length > 0) {
+		const msg = entry.msgQueue.shift();
+		if (typeof cb === \'function\') { cb(msg); return null; }
+		return msg;
+	}
+	if (typeof cb === \'function\') {
+		entry.recvQueue.push(cb);
+		return null;
+	}
+	return __oak_io_error(\'ws_recv() would block: no message available\');
+}
+function ws_close(ws, code, reason, cb) {
+	if (typeof code === \'function\') { cb = code; code = 1000; reason = \'\'; }
+	else if (typeof reason === \'function\') { cb = reason; reason = \'\'; }
+	const [entry, err] = __oak_ws_get(ws, \'ws_close\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	const closeCode = int(code) ?? 1000;
+	const closeReason = __oak_to_string_value(reason || \'\');
+	try {
+		entry.socket.close(closeCode, closeReason);
+		const result = { type: Symbol.for(\'closed\'), code: closeCode, reason: __as_oak_string(closeReason) };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		const ferr = __oak_io_error(\'ws_close() failed: \' + e);
+		if (typeof cb === \'function\') { cb(ferr); return null; }
+		return ferr;
+	}
+}
+function ws_listen(host, path, handler) {
+	if (__Is_Oak_Node) {
+		let WSServer;
+		try {
+			const wsLib = require(\'ws\');
+			WSServer = wsLib.WebSocketServer || wsLib.Server;
+		} catch (_) {
+			return __oak_io_error(\'ws_listen() requires the "ws" npm module in Node.js\');
+		}
+		const hostStr = __oak_to_string_value(host);
+		const pathStr = __oak_to_string_value(path);
+		const colonIdx = hostStr.lastIndexOf(\':\');
+		const hostname = colonIdx > 0 ? hostStr.slice(0, colonIdx) : \'0.0.0.0\';
+		const port = int(colonIdx > 0 ? hostStr.slice(colonIdx + 1) : \'9090\') ?? 9090;
+		const wss = new WSServer({ host: hostname, port });
+		wss.on(\'connection\', (conn, req) => {
+			const reqUrl = (req && req.url) ? req.url : pathStr;
+			// Filter by path (ignore query string when matching)
+			if (pathStr && pathStr !== \'/\' && reqUrl.split(\'?\')[0] !== pathStr) {
+				conn.close(1008, \'Path not found\');
+				return;
+			}
+			const hdrs = {};
+			if (req && req.headers) {
+				for (const k of Object.keys(req.headers)) {
+					hdrs[k] = __as_oak_string(req.headers[k]);
+				}
+			}
+			const id = __Oak_WS_NextID++;
+			const entry = { socket: conn, msgQueue: [], recvQueue: [], closed: false };
+			__Oak_WS_Map.set(id, entry);
+			__oak_ws_register(id, entry, conn);
+			if (typeof handler === \'function\') {
+				handler({
+					type: Symbol.for(\'connect\'),
+					socket: __oak_ws_socket_object(id),
+					req: {
+						method: __as_oak_string((req && req.method) || \'GET\'),
+						url: __as_oak_string(reqUrl),
+						headers: hdrs,
+					},
+				});
+			}
+		});
+		wss.on(\'error\', e => {
+			if (typeof handler === \'function\') {
+				handler(__oak_io_error(\'ws_listen() server error: \' + e));
+			}
+		});
+		return (...args) => { wss.close(); return null; };
+	}
+	return __oak_io_error(\'ws_listen() unavailable in this runtime\');
 }
 
 // math
