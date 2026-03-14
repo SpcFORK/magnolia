@@ -1,0 +1,298 @@
+// libvideo provides frame-based pixel processing utilities for Oak.
+//
+// Frames are plain objects:
+//   { width: <int>, height: <int>, channels: <int>, pixels: [byte...] }
+// where pixels are row-major, interleaved by channel.
+
+{
+	range: range
+	map: map
+	each: each
+	default: default
+	clone: clone
+	reduce: reduce
+} := import('std')
+{
+	abs: abs
+} := import('math')
+
+// ---- low-level helpers ----------------------------------------------
+
+fn clampByte(n) if {
+	n < 0 -> 0
+	n > 255 -> 255
+	_ -> int(n)
+}
+
+fn clampUnit(n) if {
+	n < 0 -> 0
+	n > 1 -> 1
+	_ -> n
+}
+
+fn _min(a, b) if a < b { true -> a, _ -> b }
+
+fn _max(a, b) if a > b { true -> a, _ -> b }
+
+fn _pixelIndexRaw(width, channels, x, y, ch) ((y * width + x) * channels + ch)
+
+// pixelIndex returns the flat list index for a channel of one pixel.
+fn pixelIndex(frame, x, y, ch) {
+	ch := default(ch, 0)
+	_pixelIndexRaw(frame.width, frame.channels, x, y, ch)
+}
+
+// ---- frame construction ---------------------------------------------
+
+// frame creates a frame object. If pixels is omitted, it is initialized to 0.
+fn frame(width, height, pixels, channels) {
+	width := int(width)
+	height := int(height)
+	channels := default(channels, 3)
+	total := width * height * channels
+	pixels := default(pixels, range(total) |> map(fn(_) 0))
+	{
+		width: width
+		height: height
+		channels: channels
+		pixels: pixels
+	}
+}
+
+// blank creates a new solid frame filled with one byte value.
+fn blank(width, height, channels, value) {
+	channels := default(channels, 3)
+	value := clampByte(default(value, 0))
+	total := int(width) * int(height) * channels
+	frame(width, height, range(total) |> map(fn(_) value), channels)
+}
+
+// cloneFrame returns a shallow-cloned frame object with cloned pixel data.
+fn cloneFrame(f) {
+	{
+		width: f.width
+		height: f.height
+		channels: f.channels
+		pixels: clone(f.pixels)
+	}
+}
+
+// ---- pixel access ---------------------------------------------------
+
+// getPixel returns a list of channel values at (x, y).
+fn getPixel(f, x, y) range(f.channels) |> map(fn(ch) {
+	f.pixels.(pixelIndex(f, x, y, ch))
+})
+
+// setPixel returns a new frame with one pixel overwritten.
+fn setPixel(f, x, y, pixel) {
+	out := clone(f.pixels)
+	range(f.channels) |> each(fn(ch) {
+		idx := pixelIndex(f, x, y, ch)
+		out.(idx) := clampByte(default(pixel.(ch), 0))
+	})
+	{
+		width: f.width
+		height: f.height
+		channels: f.channels
+		pixels: out
+	}
+}
+
+// mapPixels applies mapper(pixel, x, y) for each pixel and returns a new frame.
+fn mapPixels(f, mapper) {
+	nPix := f.width * f.height
+	out := clone(f.pixels)
+
+	range(nPix) |> each(fn(i) {
+		x := i % f.width
+		y := int(i / f.width)
+		src := getPixel(f, x, y)
+		dst := default(mapper(src, x, y), src)
+		range(f.channels) |> each(fn(ch) {
+			idx := pixelIndex(f, x, y, ch)
+			out.(idx) := clampByte(default(dst.(ch), 0))
+		})
+	})
+
+	{
+		width: f.width
+		height: f.height
+		channels: f.channels
+		pixels: out
+	}
+}
+
+// ---- color and channel transforms ----------------------------------
+
+fn _luma(pixel) {
+	r := default(pixel.(0), 0)
+	g := default(pixel.(1), r)
+	b := default(pixel.(2), g)
+	clampByte(0.299 * r + 0.587 * g + 0.114 * b)
+}
+
+// toGrayscale converts RGB/RGBA frames to grayscale while preserving shape.
+fn toGrayscale(f) mapPixels(f, fn(pixel, _x, _y) {
+	g := _luma(pixel)
+	if f.channels {
+		1 -> [g]
+		2 -> [g, default(pixel.(1), 255)]
+		3 -> [g, g, g]
+		_ -> [g, g, g, default(pixel.(3), 255)]
+	}
+})
+
+// invert inverts color channels against maxValue (default 255).
+fn invert(f, maxValue) {
+	maxValue := clampByte(default(maxValue, 255))
+	mapPixels(f, fn(pixel, _x, _y) {
+		if f.channels {
+			1 -> [maxValue - default(pixel.(0), 0)]
+			2 -> [maxValue - default(pixel.(0), 0), default(pixel.(1), 255)]
+			3 -> [
+				maxValue - default(pixel.(0), 0)
+				maxValue - default(pixel.(1), 0)
+				maxValue - default(pixel.(2), 0)
+			]
+			_ -> [
+				maxValue - default(pixel.(0), 0)
+				maxValue - default(pixel.(1), 0)
+				maxValue - default(pixel.(2), 0)
+				default(pixel.(3), 255)
+			]
+		}
+	})
+}
+
+// threshold converts to a binary black/white frame based on luma.
+fn threshold(f, t) {
+	t := clampByte(default(t, 127))
+	mapPixels(f, fn(pixel, _x, _y) {
+		bw := if _luma(pixel) >= t { true -> 255, _ -> 0 }
+		if f.channels {
+			1 -> [bw]
+			2 -> [bw, default(pixel.(1), 255)]
+			3 -> [bw, bw, bw]
+			_ -> [bw, bw, bw, default(pixel.(3), 255)]
+		}
+	})
+}
+
+// rgbToYuv converts one RGB pixel [r,g,b] to [y,u,v].
+fn rgbToYuv(pixel) {
+	r := default(pixel.(0), 0)
+	g := default(pixel.(1), 0)
+	b := default(pixel.(2), 0)
+	y := 0.299 * r + 0.587 * g + 0.114 * b
+	u := -0.14713 * r - 0.28886 * g + 0.436 * b + 128
+	v := 0.615 * r - 0.51499 * g - 0.10001 * b + 128
+	[clampByte(y), clampByte(u), clampByte(v)]
+}
+
+// yuvToRgb converts one YUV pixel [y,u,v] to [r,g,b].
+fn yuvToRgb(pixel) {
+	y := default(pixel.(0), 0)
+	u := default(pixel.(1), 128) - 128
+	v := default(pixel.(2), 128) - 128
+	r := y + 1.13983 * v
+	g := y - 0.39465 * u - 0.58060 * v
+	b := y + 2.03211 * u
+	[clampByte(r), clampByte(g), clampByte(b)]
+}
+
+// ---- geometric transforms ------------------------------------------
+
+// crop extracts a rectangular region, clamped to frame bounds.
+fn crop(f, x, y, width, height) {
+	x0 := _max(0, int(x))
+	y0 := _max(0, int(y))
+	x1 := _min(f.width, x0 + _max(0, int(width)))
+	y1 := _min(f.height, y0 + _max(0, int(height)))
+	outW := _max(0, x1 - x0)
+	outH := _max(0, y1 - y0)
+
+	pixels := range(outW * outH * f.channels) |> map(fn(i) {
+		p := int(i / f.channels)
+		ch := i % f.channels
+		ox := p % outW
+		oy := int(p / outW)
+		sx := x0 + ox
+		sy := y0 + oy
+		f.pixels.(_pixelIndexRaw(f.width, f.channels, sx, sy, ch))
+	})
+
+	frame(outW, outH, pixels, f.channels)
+}
+
+// resizeNearest rescales a frame using nearest-neighbor sampling.
+fn resizeNearest(f, newWidth, newHeight) {
+	newWidth := _max(1, int(newWidth))
+	newHeight := _max(1, int(newHeight))
+	total := newWidth * newHeight * f.channels
+
+	pixels := range(total) |> map(fn(i) {
+		p := int(i / f.channels)
+		ch := i % f.channels
+		x := p % newWidth
+		y := int(p / newWidth)
+		sx := _min(f.width - 1, int(x * f.width / newWidth))
+		sy := _min(f.height - 1, int(y * f.height / newHeight))
+		f.pixels.(_pixelIndexRaw(f.width, f.channels, sx, sy, ch))
+	})
+
+	frame(newWidth, newHeight, pixels, f.channels)
+}
+
+// ---- frame blending and sequence utilities --------------------------
+
+// blend mixes two frames of equal channel count with alpha in [0, 1].
+// If dimensions differ, it blends the overlapping top-left region.
+fn blend(a, b, alpha) {
+	w := _min(a.width, b.width)
+	h := _min(a.height, b.height)
+	channels := _min(a.channels, b.channels)
+	a2 := crop(a, 0, 0, w, h)
+	b2 := crop(b, 0, 0, w, h)
+	k := clampUnit(default(alpha, 0.5))
+	inv := 1 - k
+
+	pixels := range(w * h * channels) |> map(fn(i) {
+		av := default(a2.pixels.(i), 0)
+		bv := default(b2.pixels.(i), 0)
+		clampByte(av * inv + bv * k)
+	})
+
+	frame(w, h, pixels, channels)
+}
+
+// frameDiff computes absolute per-channel difference between two frames.
+fn frameDiff(a, b) {
+	w := _min(a.width, b.width)
+	h := _min(a.height, b.height)
+	channels := _min(a.channels, b.channels)
+	a2 := crop(a, 0, 0, w, h)
+	b2 := crop(b, 0, 0, w, h)
+
+	pixels := range(w * h * channels) |> map(fn(i) {
+		clampByte(abs(default(a2.pixels.(i), 0) - default(b2.pixels.(i), 0)))
+	})
+
+	frame(w, h, pixels, channels)
+}
+
+// mapFrames applies fn(frame, index) over a sequence of frames.
+fn mapFrames(frames, f) frames |> map(fn(frm, i) f(frm, i))
+
+// sampleFrame picks the nearest frame for a given time and fps.
+fn sampleFrame(frames, timeSeconds, fps) {
+	if len(frames) = 0 {
+		true -> ?
+		_ -> {
+			fps := default(fps, 30)
+			i := int(timeSeconds * fps + 0.5)
+			idx := _max(0, _min(len(frames) - 1, i))
+			frames.(idx)
+		}
+	}
+}

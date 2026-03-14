@@ -1,0 +1,93 @@
+video := import('video')
+
+fn run(t) {
+	f := video.blank(2, 2, 3, 10)
+
+	'blank creates expected dimensions' |> t.eq(
+		[f.width, f.height, f.channels, len(f.pixels)]
+		[2, 2, 3, 12]
+	)
+
+	'getPixel reads seeded pixel values' |> t.eq(
+		video.getPixel(f, 1, 1)
+		[10, 10, 10]
+	)
+
+	f2 := video.setPixel(f, 0, 1, [255, 4, 8])
+
+	'setPixel writes one pixel' |> t.eq(
+		video.getPixel(f2, 0, 1)
+		[255, 4, 8]
+	)
+
+	'frameDiff computes per-channel absolute delta' |> t.eq(
+		video.frameDiff(f, f2).pixels
+		[0, 0, 0, 0, 0, 0, 245, 6, 2, 0, 0, 0]
+	)
+
+	gray := video.toGrayscale(video.frame(1, 1, [100, 50, 0], 3))
+	'toGrayscale outputs equal RGB channels' |> t.eq(
+		video.getPixel(gray, 0, 0)
+		[59, 59, 59]
+	)
+
+	bw := video.threshold(video.frame(1, 1, [220, 220, 220], 3), 200)
+	'threshold sets bright pixel to white' |> t.eq(
+		video.getPixel(bw, 0, 0)
+		[255, 255, 255]
+	)
+
+	inv := video.invert(video.frame(1, 1, [0, 10, 255], 3))
+	'invert flips RGB channels' |> t.eq(
+		video.getPixel(inv, 0, 0)
+		[255, 245, 0]
+	)
+
+	src := video.frame(2, 2, [
+		10, 20, 30,
+		40, 50, 60,
+		70, 80, 90,
+		100, 110, 120
+	], 3)
+	cropped := video.crop(src, 1, 0, 1, 2)
+
+	'crop extracts expected region' |> t.eq(
+		[cropped.width, cropped.height, cropped.pixels]
+		[1, 2, [40, 50, 60, 100, 110, 120]]
+	)
+
+	resized := video.resizeNearest(video.frame(2, 1, [
+		255, 0, 0,
+		0, 255, 0
+	], 3), 4, 1)
+	'resizeNearest duplicates nearest source pixels' |> t.eq(
+		resized.pixels
+		[255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0]
+	)
+
+	blended := video.blend(
+		video.frame(1, 1, [0, 0, 0], 3),
+		video.frame(1, 1, [200, 100, 50], 3),
+		0.25
+	)
+	'blend interpolates with alpha weight' |> t.eq(
+		video.getPixel(blended, 0, 0)
+		[50, 25, 12]
+	)
+
+	yuv := video.rgbToYuv([255, 0, 0])
+	rgb := video.yuvToRgb(yuv)
+	'RGB->YUV->RGB approximately round-trips red channel dominance' |> t.eq(
+		rgb.(0) > rgb.(1) & rgb.(0) > rgb.(2)
+		true
+	)
+
+	frames := [
+		video.frame(1, 1, [1, 2, 3], 3)
+		video.frame(1, 1, [4, 5, 6], 3)
+	]
+	'frame sequence sampling picks nearest frame index' |> t.eq(
+		video.sampleFrame(frames, 0.04, 30).pixels
+		[4, 5, 6]
+	)
+}

@@ -461,6 +461,7 @@ For Magnolia-specific features, see:
 - [Classes (`cs`) documentation](docs/cs.md)
 - [Syntax and Macros documentation](docs/syntax.md)
 - [Multi-backend GPU helpers (`gpus`) documentation](docs/gpus.md)
+- [Video processing library](docs/video.md)
 - [Advanced Build Features](docs/build.md)
 - [String manipulation library](docs/str.md)
 - Example programs in [samples/](samples/) including GUI, threading, transpilation, VFS, and pointer/bitwise examples
