@@ -197,7 +197,7 @@ nums := bits(raw) // [65, 66, 67]
 ### `addr(byteString)` and `pointer(x)`
 
 - `addr` returns an address for byte-backed data.
-- `pointer` converts integers/pointers/byte strings into pointer values.
+- `pointer` converts integers, atom references, pointers, and byte strings into pointer values.
 
 ```oak
 buf := bits([65, 66, 67])
@@ -210,7 +210,7 @@ Reads `length` bytes from memory and returns a byte string.
 
 ### `memwrite(addressOrPointer, data)`
 
-Writes byte data to memory.
+Writes byte data to memory. Data can be a byte string, atom, or byte list.
 
 ```oak
 buf := bits([65, 66, 67])
@@ -218,6 +218,10 @@ ptr := addr(buf)
 
 memwrite(ptr + 1, bits([90]))
 println(bits(memread(ptr, 3))) // [65, 90, 67]
+
+// Named references are also writable
+memwrite(:slot, :hello)
+println(name(pointer(:slot))) // :hello
 ```
 
 ## Safety Notes

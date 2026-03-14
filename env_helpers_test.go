@@ -310,3 +310,44 @@ func TestOakClassMatch(t *testing.T) {
 		t.Fatalf("expected csof(non-class/atom pair) == false, got v=%v err=%v", v, err)
 	}
 }
+
+func TestMemwriteAtomReferenceHelpers(t *testing.T) {
+	ctx := NewContext(".")
+
+	if v, err := ctx.oakMemWrite([]Value{AtomValue("slot"), AtomValue("hello")}); err != nil || v != IntValue(5) {
+		t.Fatalf("expected memwrite(:slot, :hello) to write 5 bytes, got v=%v err=%v", v, err)
+	}
+
+	ptrVal, err := ctx.oakPointer([]Value{AtomValue("slot")})
+	if err != nil {
+		t.Fatalf("unexpected pointer(:slot) error: %v", err)
+	}
+	ptr, ok := ptrVal.(PointerValue)
+	if !ok || ptr == 0 {
+		t.Fatalf("expected non-zero pointer for :slot, got %v", ptrVal)
+	}
+
+	if v, err := ctx.oakName([]Value{ptr}); err != nil || v != AtomValue("hello") {
+		t.Fatalf("expected name(pointer(:slot)) == :hello, got v=%v err=%v", v, err)
+	}
+
+	if v, err := ctx.oakMemWrite([]Value{AtomValue("slot"), MakeList(IntValue(65), IntValue(66), IntValue(67))}); err != nil || v != IntValue(3) {
+		t.Fatalf("expected memwrite(:slot, [65,66,67]) to write 3 bytes, got v=%v err=%v", v, err)
+	}
+	if v, err := ctx.oakName([]Value{mustPointer(t, &ctx, AtomValue("slot"))}); err != nil || v != AtomValue("ABC") {
+		t.Fatalf("expected name(pointer(:slot)) == :ABC after list write, got v=%v err=%v", v, err)
+	}
+}
+
+func mustPointer(t *testing.T, ctx *Context, atom AtomValue) PointerValue {
+	t.Helper()
+	v, err := ctx.oakPointer([]Value{atom})
+	if err != nil {
+		t.Fatalf("unexpected pointer(%s) error: %v", atom, err)
+	}
+	ptr, ok := v.(PointerValue)
+	if !ok {
+		t.Fatalf("expected pointer result, got %T", v)
+	}
+	return ptr
+}

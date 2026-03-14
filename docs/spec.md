@@ -115,7 +115,7 @@ block
 - `addr(bits)`: Gets the address from bits.
 - `pointer(x)`: Converts an integer, atom name, or byte string to a pointer type.
 - `memread(address, length)`: Reads memory at the specified address.
-- `memwrite(address, bits)`: Writes bits to memory at the specified address.
+- `memwrite(addressOrRef, data)`: Writes to memory or a named atom reference. `data` may be a byte string, atom, or byte list.
 
 ### System Interop Result Shapes
 

@@ -1710,17 +1710,25 @@ func TestNameBuiltinAndAtomPointerRefs(t *testing.T) {
 	expectProgramToReturn(t, `
 		cs Alpha {}
 		p := pointer(:Alpha)
+		memwrite(:slot, :hello)
+		q := pointer(:slot)
 		[
 			name(Alpha)
 			name(:Beta)
 			type(p)
 			name(p)
+			name(q)
+			memwrite(:slot, [65, 66, 67])
+			name(pointer(:slot))
 		]
 	`, MakeList(
 		AtomValue("Alpha"),
 		AtomValue("Beta"),
 		AtomValue("pointer"),
 		AtomValue("Alpha"),
+		AtomValue("hello"),
+		IntValue(3),
+		AtomValue("ABC"),
 	))
 }
 

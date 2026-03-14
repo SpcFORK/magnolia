@@ -412,6 +412,7 @@ type engine struct {
 	fdLock  sync.Mutex
 	// stable storage for pointers created from atom names
 	nameRefs    map[uintptr]*StringValue
+	namePtrs    map[string]uintptr
 	nameRefLock sync.Mutex
 	// Go interop channels
 	chanMap    map[int64]chan Value
@@ -440,6 +441,7 @@ func NewContext(rootPath string) Context {
 		importMap: map[string]scope{},
 		fileMap:   map[uintptr]*os.File{},
 		nameRefs:  map[uintptr]*StringValue{},
+		namePtrs:  map[string]uintptr{},
 		chanMap:   map[int64]chan Value{},
 		reportErr: func(err error) {
 			fmt.Println(err)

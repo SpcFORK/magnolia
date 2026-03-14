@@ -1010,17 +1010,27 @@ func (c *Context) oakPointer(args []Value) (Value, *runtimeError) {
 		}
 		return PointerValue(uintptr(unsafe.Pointer(&(*arg)[0]))), nil
 	case AtomValue:
-		buf := StringValue([]byte(string(arg)))
-		if len(buf) == 0 {
+		if arg == "" {
 			return PointerValue(0), nil
 		}
 
-		ptr := uintptr(unsafe.Pointer(&buf[0]))
+		atomName := string(arg)
 		c.eng.nameRefLock.Lock()
+		if ptr, ok := c.eng.namePtrs[atomName]; ok {
+			c.eng.nameRefLock.Unlock()
+			return PointerValue(ptr), nil
+		}
+
+		buf := StringValue([]byte(atomName))
+		ptr := uintptr(unsafe.Pointer(&buf[0]))
 		if c.eng.nameRefs == nil {
 			c.eng.nameRefs = map[uintptr]*StringValue{}
 		}
+		if c.eng.namePtrs == nil {
+			c.eng.namePtrs = map[string]uintptr{}
+		}
 		c.eng.nameRefs[ptr] = &buf
+		c.eng.namePtrs[atomName] = ptr
 		c.eng.nameRefLock.Unlock()
 
 		return PointerValue(ptr), nil
@@ -1031,6 +1041,64 @@ func (c *Context) oakPointer(args []Value) (Value, *runtimeError) {
 			reason: fmt.Sprintf("pointer() expects int, atom, or byte string, got %s", args[0]),
 		}
 	}
+}
+
+func (c *Context) memWriteBytes(val Value) (*StringValue, *runtimeError) {
+	switch data := val.(type) {
+	case *StringValue:
+		return data, nil
+	case AtomValue:
+		s := StringValue([]byte(string(data)))
+		return &s, nil
+	case *ListValue:
+		buf := make([]byte, len(*data))
+		for i, el := range *data {
+			byteVal, ok := el.(IntValue)
+			if !ok || byteVal < 0 || byteVal > 255 {
+				return nil, &runtimeError{reason: fmt.Sprintf("memwrite list payload expects byte values 0-255, got %s", el)}
+			}
+			buf[i] = byte(byteVal)
+		}
+		s := StringValue(buf)
+		return &s, nil
+	default:
+		return nil, &runtimeError{reason: fmt.Sprintf("memwrite payload must be byte string, atom, or byte list, got %s", val)}
+	}
+}
+
+func (c *Context) setNameRef(name AtomValue, data *StringValue) PointerValue {
+	nameKey := string(name)
+	if nameKey == "" {
+		return PointerValue(0)
+	}
+	if len(*data) == 0 {
+		c.eng.nameRefLock.Lock()
+		if oldPtr, ok := c.eng.namePtrs[nameKey]; ok {
+			delete(c.eng.nameRefs, oldPtr)
+			delete(c.eng.namePtrs, nameKey)
+		}
+		c.eng.nameRefLock.Unlock()
+		return PointerValue(0)
+	}
+
+	buf := StringValue(append([]byte(nil), (*data)...))
+	ptr := uintptr(unsafe.Pointer(&buf[0]))
+
+	c.eng.nameRefLock.Lock()
+	if c.eng.nameRefs == nil {
+		c.eng.nameRefs = map[uintptr]*StringValue{}
+	}
+	if c.eng.namePtrs == nil {
+		c.eng.namePtrs = map[string]uintptr{}
+	}
+	if oldPtr, ok := c.eng.namePtrs[nameKey]; ok {
+		delete(c.eng.nameRefs, oldPtr)
+	}
+	c.eng.nameRefs[ptr] = &buf
+	c.eng.namePtrs[nameKey] = ptr
+	c.eng.nameRefLock.Unlock()
+
+	return PointerValue(ptr)
 }
 
 func (c *Context) oakAddr(args []Value) (Value, *runtimeError) {
@@ -1106,11 +1174,9 @@ func (c *Context) oakMemWrite(args []Value) (Value, *runtimeError) {
 	}
 
 	addrVal := args[0]
-	data, ok2 := args[1].(*StringValue)
-	if !ok2 {
-		return nil, &runtimeError{
-			reason: fmt.Sprintf("Mismatched types in call memwrite(%s, %s)", args[0], args[1]),
-		}
+	data, dataErr := c.memWriteBytes(args[1])
+	if dataErr != nil {
+		return nil, dataErr
 	}
 	var addr uintptr
 	switch v := addrVal.(type) {
@@ -1123,9 +1189,15 @@ func (c *Context) oakMemWrite(args []Value) (Value, *runtimeError) {
 		addr = uintptr(v)
 	case PointerValue:
 		addr = uintptr(v)
+	case AtomValue:
+		ptr := c.setNameRef(v, data)
+		if ptr == 0 {
+			return IntValue(0), nil
+		}
+		return IntValue(len(*data)), nil
 	default:
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("memwrite address must be int or pointer, got %s", addrVal),
+			reason: fmt.Sprintf("memwrite address must be int, pointer, or atom reference, got %s", addrVal),
 		}
 	}
 	if len(*data) == 0 {
