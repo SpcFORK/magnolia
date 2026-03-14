@@ -1,0 +1,217 @@
+compression := import('compression')
+std := import('std')
+
+fn run(t) {
+	// default/generic RLE API
+	{
+		'compress empty' |> t.eq(
+			compression.compress('')
+			''
+		)
+		'decompress empty' |> t.eq(
+			compression.decompress('')
+			''
+		)
+	}
+
+	// explicit RLE codec
+	{
+		source := 'oak language'
+		encoded := compression.compress(source)
+		'plain text may remain unchanged' |> t.eq(
+			encoded
+			source
+		)
+		'round-trip plain text' |> t.eq(
+			compression.decompress(encoded)
+			source
+		)
+	}
+
+	{
+		source := 'aaaaabbbbccccczzzzzzzzzzzzzzzzzz'
+		encoded := compression.rleCompress(source)
+		'explicit rle compresses smaller' |> t.assert(
+			len(encoded) < len(source)
+		)
+		'explicit rle round-trip' |> t.eq(
+			compression.rleDecompress(encoded)
+			source
+		)
+	}
+
+	{
+		source := 'aaaaabbbbccccczzzzzzzzzzzzzzzzzz'
+		encoded := compression.compress(source)
+		'run-heavy text compresses smaller' |> t.assert(
+			len(encoded) < len(source)
+		)
+		'round-trip run-heavy text' |> t.eq(
+			compression.decompress(encoded)
+			source
+		)
+	}
+
+	{
+		m := compression.Marker
+		source := m + 'abc' + m + m + 'zzz' + m
+		encoded := compression.compress(source)
+		'marker payload is preserved' |> t.eq(
+			compression.decompress(encoded)
+			source
+		)
+		'compressed? detects marker streams' |> t.eq(
+			compression.compressed?(encoded)
+			true
+		)
+		'rleCompressed? detects marker streams' |> t.eq(
+			compression.rleCompressed?(encoded)
+			true
+		)
+	}
+
+	{
+		cases := [
+			compression.Marker
+			compression.Marker + 'x'
+			compression.Marker + compression.RunPrefix
+			compression.Marker + compression.RunPrefix + '3'
+			compression.Marker + compression.RunPrefix + '0:a'
+			compression.Marker + compression.RunPrefix + '-2:a'
+			compression.Marker + compression.RunPrefix + '2:'
+		]
+
+		cases |> std.each(fn(s, i) {
+			('invalid stream #' + string(i)) |> t.eq(
+				compression.decompress(s)
+				:error
+			)
+		})
+	}
+
+	// Huffman codec
+	{
+		source := 'BANANA BANDANA BANANA BANDANA BANANA BANDANA'
+		encoded := compression.huffmanCompress(source)
+		'Huffman format is recognized' |> t.eq(
+			compression.huffmanCompressed?(encoded)
+			true
+		)
+		'generic compressed? recognizes Huffman' |> t.eq(
+			compression.compressed?(encoded, :huffman)
+			true
+		)
+		'Huffman round-trip' |> t.eq(
+			compression.huffmanDecompress(encoded)
+			source
+		)
+		'Huffman generic dispatch round-trip' |> t.eq(
+			compression.decompress(compression.compress(source, :huffman), :huffman)
+			source
+		)
+	}
+
+	{
+		cases := [
+			''
+			compression.HuffmanMagic
+			compression.HuffmanMagic + '000000000001'
+			compression.HuffmanMagic + '000000000000000000000001x'
+		]
+
+		('Huffman invalid stream #0') |> t.eq(
+			compression.huffmanDecompress(cases.0)
+			:error
+		)
+		('Huffman invalid stream #1') |> t.eq(
+			compression.huffmanDecompress(cases.1)
+			:error
+		)
+		('Huffman invalid stream #2') |> t.eq(
+			compression.huffmanDecompress(cases.2)
+			:error
+		)
+		('Huffman invalid stream #3') |> t.eq(
+			compression.huffmanDecompress(cases.3)
+			:error
+		)
+	}
+
+	// LZW codec
+	{
+		source := 'TOBEORNOTTOBEORTOBEORNOTTOBEORTOBEORNOT'
+		encoded := compression.lzwCompress(source)
+		'LZW format is recognized' |> t.eq(
+			compression.lzwCompressed?(encoded)
+			true
+		)
+		'generic compressed? recognizes LZW' |> t.eq(
+			compression.compressed?(encoded, :lzw)
+			true
+		)
+		'LZW round-trip' |> t.eq(
+			compression.lzwDecompress(encoded)
+			source
+		)
+		'LZW generic dispatch round-trip' |> t.eq(
+			compression.decompress(compression.compress(source, :lzw), :lzw)
+			source
+		)
+	}
+
+	{
+		('LZW invalid stream #0') |> t.eq(
+			compression.lzwDecompress('')
+			:error
+		)
+		('LZW invalid stream #1') |> t.eq(
+			compression.lzwDecompress(compression.LZWMagic)
+			:error
+		)
+		('LZW invalid stream #2') |> t.eq(
+			compression.lzwDecompress(compression.LZWMagic + '000000000000000000000001')
+			:error
+		)
+	}
+
+	{
+		targets := [
+			''
+			'a'
+			'ab'
+			'abbcccddddeeeee'
+			':::\x1d:::'
+			'1111111122222333333334444'
+			'hello hello hello'
+			'BANANA BANDANA'
+			'TOBEORNOTTOBEORTOBEORNOT'
+		]
+
+		targets |> std.each(fn(s) {
+			('round-trip target: ' + s) |> t.eq(
+				s |> compression.compress() |> compression.decompress()
+				s
+			)
+		})
+	}
+
+	{
+		targets := [
+			''
+			'AAAAAAAAAABBBBBBBBBBCCCCCCCCCC'
+			'BANANA BANDANA BANANA BANDANA'
+			'TOBEORNOTTOBEORTOBEORNOT'
+		]
+
+		targets |> std.each(fn(s) {
+			('Huffman target: ' + s) |> t.eq(
+				s |> compression.huffmanCompress() |> compression.huffmanDecompress()
+				s
+			)
+			('LZW target: ' + s) |> t.eq(
+				s |> compression.lzwCompress() |> compression.lzwDecompress()
+				s
+			)
+		})
+	}
+}

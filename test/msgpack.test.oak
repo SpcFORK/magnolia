@@ -1,0 +1,89 @@
+msgpack := import('msgpack')
+
+fn bytesOf(s) msgpack.packet(s)
+
+fn run(t) {
+	'null encodes as c0' |> t.eq(
+		msgpack.serialize(?) |> bytesOf()
+		[0xC0]
+	)
+
+	'bool true/false encoding' |> t.eq(
+		[
+			msgpack.serialize(true) |> bytesOf()
+			msgpack.serialize(false) |> bytesOf()
+		]
+		[
+			[0xC3]
+			[0xC2]
+		]
+	)
+
+	'positive and negative fixint encoding' |> t.eq(
+		[
+			msgpack.serialize(42) |> bytesOf()
+			msgpack.serialize(-1) |> bytesOf()
+			msgpack.serialize(-32) |> bytesOf()
+		]
+		[
+			[42]
+			[255]
+			[224]
+		]
+	)
+
+	'uint16 and int16 encoding' |> t.eq(
+		[
+			msgpack.serialize(500) |> bytesOf()
+			msgpack.serialize(-200) |> bytesOf()
+		]
+		[
+			[0xCD, 0x01, 0xF4]
+			[0xD1, 0xFF, 0x38]
+		]
+	)
+
+	'fixstr and str8 encoding' |> t.eq(
+		[
+			msgpack.serialize('oak') |> bytesOf()
+			{
+				encoded := msgpack.serialize('abcdefghijklmnopqrstuvwxyzabcdef') |> bytesOf()
+				encoded.0
+			}
+		]
+		[
+			[0xA3, 111, 97, 107]
+			0xD9
+		]
+	)
+
+	'array encoding' |> t.eq(
+		msgpack.serialize([1, 2, 3]) |> bytesOf()
+		[0x93, 0x01, 0x02, 0x03]
+	)
+
+	'single-key map encoding' |> t.eq(
+		msgpack.serialize({ a: 1 }) |> bytesOf()
+		[0x81, 0xA1, 97, 0x01]
+	)
+
+	'binary payload wrapper encodes as bin' |> t.eq(
+		msgpack.serialize(msgpack.Binary('\x00\xFF')) |> bytesOf()
+		[0xC4, 0x02, 0x00, 0xFF]
+	)
+
+	'serializePacket equals packet(serialize)' |> t.eq(
+		msgpack.serializePacket([:ok, 'v'])
+		msgpack.packet(msgpack.serialize([:ok, 'v']))
+	)
+
+	'serializeSafe rejects unsupported value' |> t.eq(
+		type(msgpack.serializeSafe(3.14))
+		:atom
+	)
+
+	'serialize fallback for unsupported value is nil' |> t.eq(
+		msgpack.serialize(3.14) |> bytesOf()
+		[0xC0]
+	)
+}

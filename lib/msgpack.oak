@@ -1,0 +1,207 @@
+// libmsgpack provides MessagePack-style binary serialization for Oak values.
+//
+// This module focuses on producing wire-format bytes (packet payloads).
+// Supported in serializeSafe: null, bool, int (up to signed 32-bit / unsigned
+// 32-bit), string, list (array), object (map with string keys), and Binary(...).
+// Floats and functions currently return :error in serializeSafe.
+
+{
+	append: append
+	keys: keys
+	map: map
+	range: range
+} := import('std')
+{
+	join: join
+} := import('str')
+
+fn bytes(parts) parts |> map(fn(n) char(n % 256)) |> join('')
+
+fn packet(data) range(len(data)) |> map(fn(i) codepoint(data.(i)))
+
+fn fromPacket(parts) bytes(parts)
+
+fn Binary(data) {
+	{
+		__msgpack_bin__: true
+		data: data
+	}
+}
+
+fn binary?(value) type(value) = :object & value.__msgpack_bin__ = true
+
+fn _u8(n) [n & 255]
+
+fn _u16be(n) [
+	(n >> 8) & 255
+	n & 255
+]
+
+fn _u32be(n) [
+	(n >> 24) & 255
+	(n >> 16) & 255
+	(n >> 8) & 255
+	n & 255
+]
+
+fn _encodeString(s) {
+	n := len(s)
+	header := if n <= 31 {
+		true -> [0xA0 + n]
+		_ -> if n <= 255 {
+			true -> [0xD9] |> append(_u8(n))
+			_ -> if n <= 65535 {
+				true -> [0xDA] |> append(_u16be(n))
+				_ -> if n <= 4294967295 {
+					true -> [0xDB] |> append(_u32be(n))
+					_ -> :error
+				}
+			}
+		}
+	}
+	if header {
+		:error -> :error
+		_ -> header |> append(packet(s))
+	}
+}
+
+fn _encodeBinary(data) {
+	n := len(data)
+	header := if n <= 255 {
+		true -> [0xC4] |> append(_u8(n))
+		_ -> if n <= 65535 {
+			true -> [0xC5] |> append(_u16be(n))
+			_ -> if n <= 4294967295 {
+				true -> [0xC6] |> append(_u32be(n))
+				_ -> :error
+			}
+		}
+	}
+	if header {
+		:error -> :error
+		_ -> header |> append(packet(data))
+	}
+}
+
+fn _encodeInt(n) if n >= 0 {
+	true -> if n <= 127 {
+		true -> [n]
+		_ -> if n <= 255 {
+			true -> [0xCC] |> append(_u8(n))
+			_ -> if n <= 65535 {
+				true -> [0xCD] |> append(_u16be(n))
+				_ -> if n <= 4294967295 {
+					true -> [0xCE] |> append(_u32be(n))
+					_ -> :error
+				}
+			}
+		}
+	}
+	_ -> if n >= -32 {
+		true -> [256 + n]
+		_ -> if n >= -128 {
+			true -> [0xD0, 256 + n]
+			_ -> if n >= -32768 {
+				true -> [0xD1] |> append(_u16be(65536 + n))
+				_ -> if n >= -2147483648 {
+					true -> [0xD2] |> append(_u32be(4294967296 + n))
+					_ -> :error
+				}
+			}
+		}
+	}
+}
+
+fn _encodeList(xs) {
+	n := len(xs)
+	header := if n <= 15 {
+		true -> [0x90 + n]
+		_ -> if n <= 65535 {
+			true -> [0xDC] |> append(_u16be(n))
+			_ -> if n <= 4294967295 {
+				true -> [0xDD] |> append(_u32be(n))
+				_ -> :error
+			}
+		}
+	}
+	if header {
+		:error -> :error
+		_ -> {
+			fn sub(i, acc) if i {
+				n -> acc
+				_ -> if encoded := _encodeToPacket(xs.(i)) {
+					:error -> :error
+					_ -> sub(i + 1, acc |> append(encoded))
+				}
+			}
+			sub(0, header)
+		}
+	}
+}
+
+fn _encodeObject(obj) {
+	ks := keys(obj)
+	n := len(ks)
+	header := if n <= 15 {
+		true -> [0x80 + n]
+		_ -> if n <= 65535 {
+			true -> [0xDE] |> append(_u16be(n))
+			_ -> if n <= 4294967295 {
+				true -> [0xDF] |> append(_u32be(n))
+				_ -> :error
+			}
+		}
+	}
+	if header {
+		:error -> :error
+		_ -> {
+			fn sub(i, acc) if i {
+				n -> acc
+				_ -> {
+					k := ks.(i)
+					keyBytes := _encodeString(k)
+					valBytes := _encodeToPacket(obj.(k))
+					if keyBytes = :error | valBytes = :error {
+						true -> :error
+						_ -> sub(i + 1, acc |> append(keyBytes) |> append(valBytes))
+					}
+				}
+			}
+			sub(0, header)
+		}
+	}
+}
+
+fn _encodeToPacket(value) if binary?(value) {
+	true -> _encodeBinary(value.data)
+	_ -> if type(value) {
+		:null -> [0xC0]
+		:bool -> if value { true -> [0xC3], _ -> [0xC2] }
+		:int -> _encodeInt(value)
+		:string -> _encodeString(value)
+		:atom -> _encodeString(string(value))
+		:list -> _encodeList(value)
+		:object -> _encodeObject(value)
+		_ -> :error
+	}
+}
+
+// serializeSafe returns a MessagePack byte string for supported values,
+// or :error when the value cannot be represented by this implementation.
+fn serializeSafe(value) if encoded := _encodeToPacket(value) {
+	:error -> :error
+	_ -> fromPacket(encoded)
+}
+
+// serialize returns a MessagePack byte string and falls back to nil (0xC0)
+// when a value is unsupported.
+fn serialize(value) if out := serializeSafe(value) {
+	:error -> fromPacket([0xC0])
+	_ -> out
+}
+
+// serializePacket is the list-of-byte variant of serializeSafe.
+fn serializePacket(value) if encoded := _encodeToPacket(value) {
+	:error -> :error
+	_ -> encoded
+}

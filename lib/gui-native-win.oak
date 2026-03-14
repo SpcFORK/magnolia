@@ -180,16 +180,14 @@ fn _select2DLayer(opts, opengl, ddraw, vulkan) {
 			true -> :ddraw
 			_ -> :gdi
 		}
+		// In 'auto' mode prefer DDraw/GDI: Vulkan swapchain present is not yet
+		// wired and the OpenGL path falls back to GDI BitBlt anyway, so eagerly
+		// selecting them only causes slow probing / driver-init hangs for no
+		// rendering gain.  Users can request 'vulkan'/'opengl' explicitly.
 		'gdi' -> :gdi
-		_ -> if vulkan.available {
-			true -> :vulkan
-			_ -> if opengl.available {
-				true -> :opengl
-				_ -> if ddraw.available {
-					true -> :ddraw
-					_ -> :gdi
-				}
-			}
+		_ -> if ddraw.available {
+			true -> :ddraw
+			_ -> :gdi
 		}
 	}
 }
@@ -929,6 +927,123 @@ fn _applyWindowIcons(hwnd, iconState) {
 	}
 	0
 }
+// _runLayerInit runs the GPU 2D/3D layer initialization for a window state.
+// It is called lazily from beginFrame on the first rendered frame, after the
+// Win32 message pump has started.  Deferring avoids Vulkan ICD / OpenGL driver
+// calls that can block or deadlock when no message loop is running yet.
+fn _runLayerInit(state) {
+	state.layers.twoD.init <- _init2DLayer(state)
+	if state.presenterBackend = :vulkan {
+		true -> {
+			state.layers.twoD.vulkanInit <- state.layers.twoD.init
+			if state.layers.twoD.init.type = :ok {
+				true -> {
+					state.vulkanInstance <- _default(state.layers.twoD.init.instance, 0)
+					state.vulkanSurface <- _default(state.layers.twoD.init.surface, 0)
+					state.vulkanPhysicalDevice <- _default(state.layers.twoD.init.selectedPhysicalDevice, 0)
+					state.vulkanQueueFamily <- _default(state.layers.twoD.init.selectedQueueFamily, -1)
+					state.layers.twoD.staged <- {
+						requested: :vulkan
+						active: true
+					}
+				}
+				_ -> {
+					fallbackTo := if state.layers.twoD.opengl.available {
+						true -> :opengl
+						_ -> if state.layers.twoD.ddraw.available {
+							true -> :ddraw
+							_ -> :gdi
+						}
+					}
+					state.layers.twoD.fallback <- {
+						from: :vulkan
+						to: fallbackTo
+						reason: 'Vulkan initialization failed; using fallback presenter'
+						detail: state.layers.twoD.init
+					}
+					state.presenterBackend <- fallbackTo
+					state.layers.twoD.selected <- fallbackTo
+					state.layers.twoD.staged <- {
+						requested: :vulkan
+						active: false
+					}
+					state.layers.twoD.init <- _init2DLayer(state)
+				}
+			}
+		}
+	}
+	if state.presenterBackend = :opengl {
+		true -> {
+			state.layers.twoD.openglInit <- state.layers.twoD.init
+			if state.layers.twoD.init.type = :ok {
+				true -> {
+					state.openglContext <- _default(state.layers.twoD.init.context, 0)
+					state.openglPixelFormat <- _default(state.layers.twoD.init.pixelFormat, 0)
+					state.layers.twoD.staged <- {
+						requested: :opengl
+						active: true
+					}
+				}
+				_ -> {
+					state.layers.twoD.fallback <- if state.layers.twoD.ddraw.available {
+						true -> {
+							from: :opengl
+							to: :ddraw
+							reason: 'OpenGL initialization failed; using DirectDraw presenter fallback'
+							detail: state.layers.twoD.init
+						}
+						_ -> {
+							from: :opengl
+							to: :gdi
+							reason: 'OpenGL initialization failed; using GDI presenter fallback'
+							detail: state.layers.twoD.init
+						}
+					}
+					state.presenterBackend <- state.layers.twoD.fallback.to
+					state.layers.twoD.selected <- state.layers.twoD.fallback.to
+					state.layers.twoD.staged <- {
+						requested: :opengl
+						active: false
+					}
+					state.layers.twoD.init <- _init2DLayer(state)
+				}
+			}
+		}
+	}
+	if state.layers.twoD.init.type = :error | (state.layers.twoD.init.type = :warn & !_default(state.layers.twoD.init.primarySurfaceCreated, false)) {
+		true -> {
+			state.presenterBackend <- :gdi
+			state.layers.twoD.selected <- :gdi
+			state.layers.twoD.fallback <- {
+				from: :ddraw
+				to: :gdi
+				reason: if state.layers.twoD.init.type = :warn {
+					true -> 'DirectDraw initialization degraded; switching to GDI'
+					_ -> 'DirectDraw initialization failed'
+				}
+			}
+		}
+	}
+	if state.presenterBackend = :ddraw & _default(state.layers.twoD.init.primarySurfaceCreated, false) {
+		true -> state.ddrawPrimarySurface <- _default(state.layers.twoD.init.surfaceCreateResult.surface, 0)
+	}
+	state.layers.threeD.init <- _init3DLayer(state)
+	if state.layers.threeD.init.type = :error | state.layers.threeD.init.type = :warn {
+		true -> {
+			state.layers.threeD.selected <- :cpu
+			state.layers.threeD.fallback <- {
+				from: :d3d9
+				to: :cpu
+				reason: if state.layers.threeD.init.type = :warn {
+					true -> 'Direct3D9 initialization degraded; switching to CPU'
+					_ -> 'Direct3D9 initialization failed'
+				}
+			}
+		}
+	}
+	state._layerReady <- true
+	state
+}
 
 fn createWindowState(title, width, height, options, className, frameMs, updateOnDispatch) {
 	opts := _default(options, {})
@@ -1016,115 +1131,10 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							msgBuf: msgBuf
 							closed: false
 						}
-						state.layers.twoD.init <- _init2DLayer(state)
-						if state.presenterBackend = :vulkan {
-							true -> {
-								state.layers.twoD.vulkanInit <- state.layers.twoD.init
-								if state.layers.twoD.init.type = :ok {
-									true -> {
-										state.vulkanInstance <- _default(state.layers.twoD.init.instance, 0)
-										state.vulkanSurface <- _default(state.layers.twoD.init.surface, 0)
-										state.vulkanPhysicalDevice <- _default(state.layers.twoD.init.selectedPhysicalDevice, 0)
-										state.vulkanQueueFamily <- _default(state.layers.twoD.init.selectedQueueFamily, -1)
-										state.layers.twoD.staged <- {
-											requested: :vulkan
-											active: true
-										}
-									}
-									_ -> {
-										fallbackTo := if opengl.available {
-											true -> :opengl
-											_ -> if ddraw.available {
-												true -> :ddraw
-												_ -> :gdi
-											}
-										}
-										state.layers.twoD.fallback <- {
-											from: :vulkan
-											to: fallbackTo
-											reason: 'Vulkan initialization failed; using fallback presenter'
-											detail: state.layers.twoD.init
-										}
-										state.presenterBackend <- fallbackTo
-										state.layers.twoD.selected <- fallbackTo
-										state.layers.twoD.staged <- {
-											requested: :vulkan
-											active: false
-										}
-										state.layers.twoD.init <- _init2DLayer(state)
-									}
-								}
-							}
-						}
-						if state.presenterBackend = :opengl {
-							true -> {
-								state.layers.twoD.openglInit <- state.layers.twoD.init
-								if state.layers.twoD.init.type = :ok {
-									true -> {
-										state.openglContext <- _default(state.layers.twoD.init.context, 0)
-										state.openglPixelFormat <- _default(state.layers.twoD.init.pixelFormat, 0)
-										state.layers.twoD.staged <- {
-											requested: :opengl
-											active: true
-										}
-									}
-									_ -> {
-										state.layers.twoD.fallback <- if state.ddraw.available {
-											true -> {
-												from: :opengl
-												to: :ddraw
-												reason: 'OpenGL initialization failed; using DirectDraw presenter fallback'
-												detail: state.layers.twoD.init
-											}
-											_ -> {
-												from: :opengl
-												to: :gdi
-												reason: 'OpenGL initialization failed; using GDI presenter fallback'
-												detail: state.layers.twoD.init
-											}
-										}
-										state.presenterBackend <- state.layers.twoD.fallback.to
-										state.layers.twoD.selected <- state.layers.twoD.fallback.to
-										state.layers.twoD.staged <- {
-											requested: :opengl
-											active: false
-										}
-										state.layers.twoD.init <- _init2DLayer(state)
-									}
-								}
-							}
-						}
-						if state.layers.twoD.init.type = :error | (state.layers.twoD.init.type = :warn & !_default(state.layers.twoD.init.primarySurfaceCreated, false)) {
-							true -> {
-								state.presenterBackend <- :gdi
-								state.layers.twoD.selected <- :gdi
-								state.layers.twoD.fallback <- {
-									from: :ddraw
-									to: :gdi
-									reason: if state.layers.twoD.init.type = :warn {
-										true -> 'DirectDraw initialization degraded; switching to GDI'
-										_ -> 'DirectDraw initialization failed'
-									}
-								}
-							}
-						}
-						if state.presenterBackend = :ddraw & _default(state.layers.twoD.init.primarySurfaceCreated, false) {
-							true -> state.ddrawPrimarySurface <- _default(state.layers.twoD.init.surfaceCreateResult.surface, 0)
-						}
-						state.layers.threeD.init <- _init3DLayer(state)
-						if state.layers.threeD.init.type = :error | state.layers.threeD.init.type = :warn {
-							true -> {
-								state.layers.threeD.selected <- :cpu
-								state.layers.threeD.fallback <- {
-									from: :d3d9
-									to: :cpu
-									reason: if state.layers.threeD.init.type = :warn {
-										true -> 'Direct3D9 initialization degraded; switching to CPU'
-										_ -> 'Direct3D9 initialization failed'
-									}
-								}
-							}
-						}
+						// GPU layer init is deferred to the first beginFrame call so that
+						// Vulkan/OpenGL ICD calls happen after the Win32 message pump has
+						// started.  _runLayerInit is a no-op on subsequent calls.
+						state._layerReady <- false
 						state
 					}
 					_ -> {
@@ -1314,6 +1324,12 @@ fn _retryEnsureBackbuffer(window, targetHdc) {
 }
 
 fn beginFrame(window) {
+	// Initialize GPU layers on first frame, after the Win32 message pump has
+	// started.  This prevents Vulkan/OpenGL ICD calls from blocking or
+	// deadlocking during window creation.
+	if !_default(window._layerReady, false) {
+		true -> _runLayerInit(window)
+	}
 	target := windows.getDC(window.hwnd)
 	if windows.callOk?(target) & target.r1 > 0 {
 		true -> {
@@ -1365,44 +1381,31 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 		// window.vulkanInstance is kept alive for future draw calls and swapchain setup.
 		if window.presenterBackend = :opengl & window.openglContext > 0 {
 			true -> {
-				mk := windows.opengl32('wglMakeCurrent', window.frameTargetHdc, window.openglContext)
-				if windows.callOk?(mk) & mk.r1 > 0 {
-					true -> {
-						blt := windows.gdi32(
-							'BitBlt'
-							window.frameTargetHdc
-							0
-							0
-							window.width
-							window.height
-							window.frameHdc
-							0
-							0
-							SRCCOPY
-						)
-						windows.opengl32('wglMakeCurrent', 0, 0)
-						if windows.callOk?(blt) & blt.r1 > 0 {
-							true -> presentedViaOpenGL <- true
-							_ -> {
-								window.presenterBackend <- :gdi
-								window.layers.twoD.selected <- :gdi
-								window.layers.twoD.fallback <- {
-									from: :opengl
-									to: :gdi
-									reason: 'OpenGL present failed at runtime'
-									detail: blt
-								}
-							}
-						}
-					}
+				// Rendering is GDI-based (drawn into frameHdc backbuffer).
+				// Use a plain BitBlt to present; wglMakeCurrent + GDI BitBlt mixing
+				// causes GPU stalls and is undefined by the OpenGL spec.
+				blt := windows.gdi32(
+					'BitBlt'
+					window.frameTargetHdc
+					0
+					0
+					window.width
+					window.height
+					window.frameHdc
+					0
+					0
+					SRCCOPY
+				)
+				if windows.callOk?(blt) & blt.r1 > 0 {
+					true -> presentedViaOpenGL <- true
 					_ -> {
 						window.presenterBackend <- :gdi
 						window.layers.twoD.selected <- :gdi
 						window.layers.twoD.fallback <- {
 							from: :opengl
 							to: :gdi
-							reason: 'OpenGL make-current failed at runtime'
-							detail: mk
+							reason: 'OpenGL present failed at runtime'
+							detail: blt
 						}
 					}
 				}

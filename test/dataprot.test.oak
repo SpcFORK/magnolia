@@ -1,0 +1,148 @@
+dataprot := import('dataprot')
+
+fn run(t) {
+	{
+		'parity() over odd payload' |> t.eq(
+			dataprot.parity('ABC')
+			1
+		)
+		'parityBit() defaults to even parity' |> t.eq(
+			dataprot.parityBit('ABC')
+			1
+		)
+		'parityBit() supports odd parity' |> t.eq(
+			dataprot.parityBit('ABC', true)
+			0
+		)
+		'parityValid?() validates even parity' |> t.eq(
+			dataprot.parityValid?('ABC', 1)
+			true
+		)
+		'parityValid?() validates odd parity' |> t.eq(
+			dataprot.parityValid?('ABC', 0, true)
+			true
+		)
+	}
+
+	{
+		'xorChecksum()' |> t.eq(
+			dataprot.xorChecksum('ABC')
+			64
+		)
+		'sumChecksum8() wraps at 8 bits' |> t.eq(
+			dataprot.sumChecksum8([255, 1])
+			0
+		)
+		'sumChecksum16() wraps at 16 bits' |> t.eq(
+			dataprot.sumChecksum16([255, 255, 1])
+			511
+		)
+		'sumChecksum32() accumulates 32-bit totals' |> t.eq(
+			dataprot.sumChecksum32([255, 255, 255, 255])
+			1020
+		)
+	}
+
+	{
+		'crc16Ccitt() matches standard vector' |> t.eq(
+			dataprot.crc16Ccitt('123456789')
+			0x29B1
+		)
+		'crc32() matches standard vector' |> t.eq(
+			dataprot.crc32('123456789')
+			0xCBF43926
+		)
+	}
+
+	{
+		'hammingDistance() counts differing bits' |> t.eq(
+			dataprot.hammingDistance('A', 'C')
+			1
+		)
+		'hammingDistance() rejects mismatched lengths' |> t.eq(
+			dataprot.hammingDistance('A', 'BC')
+			:error
+		)
+	}
+
+	{
+		H := [
+			'1010101'
+			'0110011'
+			'0001111'
+		]
+
+		'ldpcSyndrome() returns zero syndrome for valid word' |> t.eq(
+			dataprot.ldpcSyndrome('1010101', H)
+			[0, 0, 0]
+		)
+		'ldpcValid?() accepts valid codeword' |> t.eq(
+			dataprot.ldpcValid?('1010101', H)
+			true
+		)
+		'ldpcSyndrome() flags broken codeword' |> t.eq(
+			dataprot.ldpcSyndrome('1010100', H)
+			[1, 1, 1]
+		)
+		'ldpcValid?() rejects broken codeword' |> t.eq(
+			dataprot.ldpcValid?('1010100', H)
+			false
+		)
+
+		check := dataprot.ldpcCheck('1010100', H)
+		'ldpcCheck() reports validity' |> t.eq(
+			check.valid
+			false
+		)
+		'ldpcCheck() reports failing rows' |> t.eq(
+			check.failed
+			[0, 1, 2]
+		)
+		'ldpcCheck() reports syndrome weight' |> t.eq(
+			check.weight
+			3
+		)
+
+		'ldpcCandidates() locates a single-bit error' |> t.eq(
+			dataprot.ldpcCandidates('1010100', H)
+			[6]
+		)
+
+		correction := dataprot.ldpcCorrect('1010100', H)
+		'ldpcCorrect() repairs single-bit error' |> t.eq(
+			correction.word
+			'1010101'
+		)
+		'ldpcCorrect() reports corrected index' |> t.eq(
+			correction.index
+			6
+		)
+		'ldpcCorrect() reports valid repaired word' |> t.eq(
+			correction.valid
+			true
+		)
+		'ldpcCorrect() marks successful correction' |> t.eq(
+			correction.corrected
+			true
+		)
+	}
+
+	{
+		'byte helpers reject invalid list entries' |> t.eq(
+			dataprot.sumChecksum8([256])
+			:error
+		)
+		'ldpc helpers reject invalid row widths' |> t.eq(
+			dataprot.ldpcSyndrome('101', ['10'])
+			:error
+		)
+		'ldpc helpers accept boolean bits' |> t.eq(
+			dataprot.ldpcSyndrome([true, false, true], [[true, false, true]])
+			[0]
+		)
+		'ldpcCorrect() leaves ambiguous syndrome uncorrected' |> t.eq(
+			dataprot.ldpcCorrect('11', ['11']).corrected
+			false
+		)
+	}
+}

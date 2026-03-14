@@ -1,0 +1,358 @@
+// libdataprot provides byte-oriented integrity helpers and parity-check tools.
+//
+// It includes lightweight parity and checksum helpers for transport payloads,
+// plus LDPC parity-matrix checks for validating codewords.
+
+{
+	default: default
+	range: range
+	map: map
+	reduce: reduce
+	filter: filter
+} := import('std')
+
+fn _byte?(n) type(n) = :int & n >= 0 & n <= 255
+
+fn _byteList(data) if type(data) {
+	:string -> range(len(data)) |> map(fn(i) codepoint(data.(i)) & 0xFF)
+	:list -> {
+		fn sub(acc, i) if i {
+			len(data) -> acc
+			_ -> if _byte?(b := data.(i)) {
+				true -> sub(acc << b, i + 1)
+				_ -> :error
+			}
+		}
+		sub([], 0)
+	}
+	_ -> :error
+}
+
+fn _bitValue(v) if type(v) {
+	:bool -> if v {
+		true -> 1
+		_ -> 0
+	}
+	:int -> if v {
+		0, 1 -> v
+		_ -> :error
+	}
+	:string -> if len(v) = 1 {
+		true -> if v {
+			'0' -> 0
+			'1' -> 1
+			_ -> :error
+		}
+		_ -> :error
+	}
+	_ -> :error
+}
+
+fn _bitVector(data) if type(data) {
+	:string -> {
+		fn sub(acc, i) if i {
+			len(data) -> acc
+			_ -> if :error != bit := _bitValue(data.(i)) {
+				true -> sub(acc << bit, i + 1)
+				_ -> :error
+			}
+		}
+		sub([], 0)
+	}
+	:list -> {
+		fn sub(acc, i) if i {
+			len(data) -> acc
+			_ -> if :error != bit := _bitValue(data.(i)) {
+				true -> sub(acc << bit, i + 1)
+				_ -> :error
+			}
+		}
+		sub([], 0)
+	}
+	_ -> :error
+}
+
+fn _bitMatrix(matrix) if type(matrix) {
+	:list -> {
+		fn sub(acc, i) if i {
+			len(matrix) -> acc
+			_ -> if :error != row := _bitVector(matrix.(i)) {
+				true -> sub(acc << row, i + 1)
+				_ -> :error
+			}
+		}
+		sub([], 0)
+	}
+	_ -> :error
+}
+
+fn _popcount8(n) {
+	n := n & 0xFF
+	fn sub(v, acc) if v {
+		0 -> acc
+		_ -> sub(v & (v - 1), acc + 1)
+	}
+	sub(n, 0)
+}
+
+fn _targetParity(odd) if default(odd, false) {
+	true -> 1
+	_ -> 0
+}
+
+fn _crc16Byte(crc, b, poly) {
+	fn sub(value, i) if i {
+		8 -> value & 0xFFFF
+		_ -> if (value & 0x8000) != 0 {
+			true -> sub(((value << 1) ^ poly) & 0xFFFF, i + 1)
+			_ -> sub((value << 1) & 0xFFFF, i + 1)
+		}
+	}
+	sub((crc ^ ((b & 0xFF) << 8)) & 0xFFFF, 0)
+}
+
+fn _crc32Byte(crc, b, poly) {
+	fn sub(value, i) if i {
+		8 -> value & 0xFFFFFFFF
+		_ -> if (value & 1) != 0 {
+			true -> sub(((value >> 1) ^ poly) & 0xFFFFFFFF, i + 1)
+			_ -> sub((value >> 1) & 0xFFFFFFFF, i + 1)
+		}
+	}
+	sub((crc ^ (b & 0xFF)) & 0xFFFFFFFF, 0)
+}
+
+fn _rowParity(row, bits) {
+	fn sub(i, acc) if i {
+		len(row) -> acc
+		_ -> sub(i + 1, acc ^ (row.(i) & bits.(i)))
+	}
+	sub(0, 0)
+}
+
+fn _bitColumn(rows, idx) {
+	fn sub(i, acc) if i {
+		len(rows) -> acc
+		_ -> sub(i + 1, acc << rows.(i).(idx))
+	}
+	sub(0, [])
+}
+
+fn _sameBits(a, b) if len(a) != len(b) {
+	true -> false
+	_ -> range(len(a)) |> reduce(true, fn(acc, i) acc & (a.(i) = b.(i)))
+}
+
+fn _flipBit(bits, idx) {
+	fn sub(i, acc) if i {
+		len(bits) -> acc
+		_ -> sub(i + 1, acc << if i = idx {
+			true -> bits.(i) ^ 1
+			_ -> bits.(i)
+		})
+	}
+	sub(0, [])
+}
+
+fn _formatBits(bits, template) if type(template) {
+	:string -> bits |> reduce('', fn(acc, bit) acc << string(bit))
+	_ -> bits
+}
+
+// parity returns the parity of the input payload bits: 0 for even, 1 for odd.
+// Accepts either a byte string or a list of byte integers.
+fn parity(data) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> bytes |> reduce(0, fn(acc, b) acc ^ (_popcount8(b) & 1))
+}
+
+// parityBit returns the parity bit needed to make the total parity even by
+// default, or odd when odd=true.
+fn parityBit(data, odd) if p := parity(data) {
+	:error -> :error
+	_ -> p ^ _targetParity(odd)
+}
+
+// parityValid? reports whether the payload plus checkBit satisfies the desired
+// parity convention. By default it checks for even parity.
+fn parityValid?(data, checkBit, odd) if bit := _bitValue(checkBit) {
+	:error -> :error
+	_ -> if p := parity(data) {
+		:error -> :error
+		_ -> (p ^ bit) = _targetParity(odd)
+	}
+}
+
+// xorChecksum computes the XOR of all payload bytes.
+fn xorChecksum(data) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> bytes |> reduce(0, fn(acc, b) (acc ^ b) & 0xFF)
+}
+
+// sumChecksum8 computes the additive checksum modulo 2^8.
+fn sumChecksum8(data) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> bytes |> reduce(0, fn(acc, b) (acc + b) & 0xFF)
+}
+
+// sumChecksum16 computes the additive checksum modulo 2^16.
+fn sumChecksum16(data) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> bytes |> reduce(0, fn(acc, b) (acc + b) & 0xFFFF)
+}
+
+// sumChecksum32 computes the additive checksum modulo 2^32.
+fn sumChecksum32(data) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> bytes |> reduce(0, fn(acc, b) (acc + b) & 0xFFFFFFFF)
+}
+
+// crc16Ccitt computes CRC-16/CCITT-FALSE with seed 0xFFFF and polynomial
+// 0x1021 by default.
+fn crc16Ccitt(data, seed, poly) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> {
+		seed := int(default(seed, 0xFFFF)) & 0xFFFF
+		poly := int(default(poly, 0x1021)) & 0xFFFF
+		bytes |> reduce(seed, fn(crc, b) _crc16Byte(crc, b, poly))
+	}
+}
+
+// crc32 computes the reflected IEEE CRC-32 with standard defaults.
+fn crc32(data, seed, poly, finalXor) if bytes := _byteList(data) {
+	:error -> :error
+	_ -> {
+		seed := int(default(seed, 0xFFFFFFFF)) & 0xFFFFFFFF
+		poly := int(default(poly, 0xEDB88320)) & 0xFFFFFFFF
+		finalXor := int(default(finalXor, 0xFFFFFFFF)) & 0xFFFFFFFF
+		(bytes |> reduce(seed, fn(crc, b) _crc32Byte(crc, b, poly)) ^ finalXor) & 0xFFFFFFFF
+	}
+}
+
+// hammingDistance counts differing bits between two equally-sized byte
+// sequences. Inputs may be byte strings or byte lists.
+fn hammingDistance(a, b) if {
+	:error = aBytes := _byteList(a) -> :error
+	:error = bBytes := _byteList(b) -> :error
+	len(aBytes) != len(bBytes) -> :error
+	_ -> range(len(aBytes)) |> reduce(0, fn(acc, i) acc + _popcount8(aBytes.(i) ^ bBytes.(i)))
+}
+
+// ldpcSyndrome multiplies a bit codeword by a parity-check matrix and returns
+// the syndrome vector. Inputs may be lists of 0/1 or strings like '101101'.
+fn ldpcSyndrome(word, parityMatrix) if {
+	:error = bits := _bitVector(word) -> :error
+	:error = rows := _bitMatrix(parityMatrix) -> :error
+	_ -> {
+		fn sub(acc, i) if i {
+			len(rows) -> acc
+			_ -> if len(rows.(i)) = len(bits) {
+				true -> sub(acc << _rowParity(rows.(i), bits), i + 1)
+				_ -> :error
+			}
+		}
+		sub([], 0)
+	}
+}
+
+// ldpcValid? reports whether all LDPC parity checks pass.
+fn ldpcValid?(word, parityMatrix) if syndrome := ldpcSyndrome(word, parityMatrix) {
+	:error -> :error
+	_ -> syndrome |> reduce(true, fn(acc, bit) acc & (bit = 0))
+}
+
+// ldpcCheck returns a structured parity-check result, including failing row
+// indices and syndrome weight.
+fn ldpcCheck(word, parityMatrix) if syndrome := ldpcSyndrome(word, parityMatrix) {
+	:error -> :error
+	_ -> {
+		failed := range(len(syndrome)) |> filter(fn(i) syndrome.(i) = 1)
+		weight := syndrome |> reduce(0, fn(acc, bit) acc + bit)
+		{
+			valid: weight = 0
+			syndrome: syndrome
+			failed: failed
+			weight: weight
+		}
+	}
+}
+
+// ldpcCandidates returns column indices whose parity-check column matches the
+// current syndrome. These are candidate single-bit error positions.
+fn ldpcCandidates(word, parityMatrix) if {
+	:error = bits := _bitVector(word) -> :error
+	:error = rows := _bitMatrix(parityMatrix) -> :error
+	:error = syndrome := ldpcSyndrome(bits, rows) -> :error
+	_ -> {
+		fn sub(acc, i) if i {
+			len(bits) -> acc
+			_ -> if len(rows.(0)) = len(bits) {
+				true -> sub(acc << if _sameBits(_bitColumn(rows, i), syndrome) {
+					true -> i
+					_ -> ?
+				}, i + 1)
+				_ -> :error
+			}
+		}
+		range(len(bits)) |> filter(fn(i) _sameBits(_bitColumn(rows, i), syndrome))
+	}
+}
+
+// ldpcCorrect performs a syndrome-based single-bit correction when the
+// syndrome matches exactly one parity-check column.
+fn ldpcCorrect(word, parityMatrix) if {
+	:error = bits := _bitVector(word) -> :error
+	:error = rows := _bitMatrix(parityMatrix) -> :error
+	:error = check := ldpcCheck(bits, rows) -> :error
+	:error = candidates := ldpcCandidates(bits, rows) -> :error
+	_ -> if check.valid {
+		true -> {
+			valid: true
+			corrected: false
+			word: _formatBits(bits, word)
+			index: ?
+			syndrome: check.syndrome
+			failed: check.failed
+		}
+		_ -> if len(candidates) = 1 {
+			true -> {
+				correctedBits := _flipBit(bits, candidates.0)
+				correctedCheck := ldpcCheck(correctedBits, rows)
+				{
+					valid: correctedCheck.valid
+					corrected: correctedCheck.valid
+					word: _formatBits(correctedBits, word)
+					index: candidates.0
+					syndrome: correctedCheck.syndrome
+					failed: correctedCheck.failed
+				}
+			}
+			_ -> {
+				valid: false
+				corrected: false
+				word: _formatBits(bits, word)
+				index: ?
+				syndrome: check.syndrome
+				failed: check.failed
+			}
+		}
+	}
+}
+
+{
+	parity: parity
+	parityBit: parityBit
+	parityValid?: parityValid?
+	xorChecksum: xorChecksum
+	sumChecksum8: sumChecksum8
+	sumChecksum16: sumChecksum16
+	sumChecksum32: sumChecksum32
+	crc16Ccitt: crc16Ccitt
+	crc32: crc32
+	hammingDistance: hammingDistance
+	ldpcSyndrome: ldpcSyndrome
+	ldpcValid?: ldpcValid?
+	ldpcCheck: ldpcCheck
+	ldpcCandidates: ldpcCandidates
+	ldpcCorrect: ldpcCorrect
+}

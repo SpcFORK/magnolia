@@ -31,11 +31,20 @@ var libfmt string
 //go:embed lib/json.oak
 var libjson string
 
+//go:embed lib/msgpack.oak
+var libmsgpack string
+
 //go:embed lib/datetime.oak
 var libdatetime string
 
 //go:embed lib/path.oak
 var libpath string
+
+//go:embed lib/compression.oak
+var libcompression string
+
+//go:embed lib/dataprot.oak
+var libdataprot string
 
 //go:embed lib/http.oak
 var libhttp string
@@ -220,8 +229,11 @@ var stdlibs = map[string]string{
 	"fs":               libfs,
 	"fmt":              libfmt,
 	"json":             libjson,
+	"msgpack":          libmsgpack,
 	"datetime":         libdatetime,
 	"path":             libpath,
+	"compression":      libcompression,
+	"dataprot":         libdataprot,
 	"http":             libhttp,
 	"test":             libtest,
 	"debug":            libdebug,
@@ -295,6 +307,7 @@ var stdlibAutoLoadOrder = []string{
 	"json",
 	"datetime",
 	"path",
+	"compression",
 	"http",
 	"test",
 	"debug",

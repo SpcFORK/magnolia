@@ -458,6 +458,7 @@ For Magnolia-specific features, see:
 - [Go Runtime and System Interop documentation](docs/go.md)
 - [System interop wrappers (`sys`) documentation](docs/sys.md)
 - [Bitwise and pointer helper documentation](docs/bitwise.md)
+- [Data protection helper documentation](docs/dataprot.md)
 - [Classes (`cs`) documentation](docs/cs.md)
 - [Syntax and Macros documentation](docs/syntax.md)
 - [Multi-backend GPU helpers (`gpus`) documentation](docs/gpus.md)
