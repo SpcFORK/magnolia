@@ -1,0 +1,45 @@
+motionComp := import('comps/motion')
+collisionComp := import('comps/collision')
+
+cs State(worldW, worldH, timerMs, winFlashMs, wins, player, goal, input, colliders) {
+	self := {
+		worldW: worldW
+		worldH: worldH
+		timerMs: timerMs
+		winFlashMs: winFlashMs
+		wins: wins
+		player: player
+		goal: goal
+		input: input
+		colliders: colliders
+	}
+
+	self.resize <- fn(nextW, nextH) {
+		self.worldW <- nextW
+		self.worldH <- nextH
+	}
+
+	self.update <- fn(dt) {
+		move := motionComp.desiredMove(self.player, self.input, self.worldW, self.worldH, dt)
+		resolved := collisionComp.resolveMove(self.player, move.nextX, move.nextY, self.colliders)
+		self.player.x <- resolved.x
+		self.player.y <- resolved.y
+
+		self.timerMs <- self.timerMs + (move.useDt * 1000)
+		if self.winFlashMs > 0 -> self.winFlashMs <- self.winFlashMs - (move.useDt * 1000)
+
+		hitX := (self.player.x + self.player.size) >= self.goal.x & self.player.x <= (self.goal.x + self.goal.size)
+		hitY := (self.player.y + self.player.size) >= self.goal.y & self.player.y <= (self.goal.y + self.goal.size)
+
+		if hitX & hitY -> {
+			self.wins <- self.wins + 1
+			self.winFlashMs <- 700
+			self.player.x <- 90
+			self.player.y <- 90
+			self.goal.x <- self.worldW - 130
+			self.goal.y <- self.worldH - 130
+		}
+	}
+
+	self
+}

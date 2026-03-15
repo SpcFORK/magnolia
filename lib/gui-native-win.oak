@@ -833,6 +833,7 @@ SWP_NOMOVE := 2
 SWP_NOZORDER := 4
 SWP_NOACTIVATE := 16
 SWP_FRAMECHANGED := 32
+SWP_NOOWNERZORDER := 512
 
 fn _loadWindowsIconSized(iconSpec, width, height) {
 	if iconSpec {
@@ -1093,6 +1094,8 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							visible: false
 							fullscreen: false
 							restoreBounds: ?
+							preFullscreenStyle: ?
+							locked: false
 							frameHdc: 0
 							frameTargetHdc: 0
 							frameBitmap: 0
@@ -1201,30 +1204,95 @@ fn setFullscreen(window, enabled) {
 	if enabled {
 		true -> {
 			if !window.fullscreen {
-				true -> window.restoreBounds <- {
-					x: window.x
-					y: window.y
-					width: window.width
-					height: window.height
+				true -> {
+					window.restoreBounds <- {
+						x: window.x
+						y: window.y
+						width: window.width
+						height: window.height
+					}
+					style := windows.getWindowLongPtr(window.hwnd, windows.GWL_STYLE)
+					if style.type = :ok {
+						true -> window.preFullscreenStyle <- style.r1
+					}
 				}
 			}
-			windows.showWindow(window.hwnd, windows.SW_MAXIMIZE)
-			windows.updateWindow(window.hwnd)
+			currentStyle := _default(window.preFullscreenStyle, 0)
+			borderlessStyle := (currentStyle & ~(windows.WS_OVERLAPPEDWINDOW)) | windows.WS_POPUP | windows.WS_VISIBLE
+			windows.setWindowLongPtr(window.hwnd, windows.GWL_STYLE, borderlessStyle)
+			screenW := windows.getSystemMetrics(windows.SM_CXSCREEN)
+			screenH := windows.getSystemMetrics(windows.SM_CYSCREEN)
+			sw := if screenW.type = :ok { true -> screenW.r1; _ -> window.width }
+			sh := if screenH.type = :ok { true -> screenH.r1; _ -> window.height }
+			windows.user32(
+				'SetWindowPos'
+				window.hwnd
+				windows.HWND_TOP
+				0
+				0
+				sw
+				sh
+				SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED
+			)
+			window.width <- sw
+			window.height <- sh
+			window.x <- 0
+			window.y <- 0
 			window.fullscreen <- true
 			window.visible <- true
 			window
 		}
 		_ -> {
-			windows.showWindow(window.hwnd, windows.SW_RESTORE)
+			if window.preFullscreenStyle != ? {
+				true -> windows.setWindowLongPtr(window.hwnd, windows.GWL_STYLE, window.preFullscreenStyle)
+			}
 			if window.restoreBounds != ? {
 				true -> {
 					resizeWindow(window, window.restoreBounds.width, window.restoreBounds.height)
 					moveWindow(window, window.restoreBounds.x, window.restoreBounds.y)
 				}
 			}
+			windows.user32(
+				'SetWindowPos'
+				window.hwnd
+				0
+				0
+				0
+				0
+				0
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+			)
+			window.preFullscreenStyle <- ?
 			window.fullscreen <- false
 			window
 		}
+	}
+}
+
+fn lockResize(window, locked) {
+	style := windows.getWindowLongPtr(window.hwnd, windows.GWL_STYLE)
+	if style.type = :ok {
+		true -> {
+			currentStyle := style.r1
+			newStyle := if locked {
+				true -> currentStyle & ~(windows.WS_THICKFRAME | windows.WS_MAXIMIZEBOX)
+				_ -> currentStyle | windows.WS_THICKFRAME | windows.WS_MAXIMIZEBOX
+			}
+			windows.setWindowLongPtr(window.hwnd, windows.GWL_STYLE, newStyle)
+			windows.user32(
+				'SetWindowPos'
+				window.hwnd
+				0
+				0
+				0
+				0
+				0
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+			)
+			window.locked <- if locked { true -> true; _ -> false }
+			window
+		}
+		_ -> _err('GetWindowLongPtrW failed', style)
 	}
 }
 

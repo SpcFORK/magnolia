@@ -1,0 +1,110 @@
+{
+	string: string
+	int: int
+	float: float
+} := import('std')
+
+gui := import('GUI')
+
+playerComp := import('comps/player')
+stateComp := import('comps/state')
+goalComp := import('comps/goal')
+inputComp := import('comps/input')
+
+fn draw(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> {
+		gui.fillRect(window, 0, 0, state.worldW, state.worldH, gui.rgb(12, 16, 26))
+		gui.drawGrid2D(window, 40, gui.rgb(28, 42, 68), 0, 0)
+
+		gui.fillRect(window, int(state.player.x), int(state.player.y), state.player.size, state.player.size, gui.rgb(68, 190, 255))
+		gui.drawRect2D(window, state.goal.x, state.goal.y, state.goal.size, state.goal.size, gui.rgb(250, 205, 90), false)
+
+		gui.drawText(window, 16, 28, 'MG')
+		gui.drawText(window, 16, 50, 'Use WASD or Arrow keys to move. Reach the goal square.')
+		gui.drawText(window, 16, 72, 'time: ' + string(int(state.timerMs)) + ' ms')
+		gui.drawText(window, 16, 94, 'wins: ' + string(state.wins))
+
+		if state.winFlashMs > 0 -> gui.drawText(window, 16, 126, 'Goal reached!')
+
+		gui.endFrame(window)
+	}
+}
+
+fn runGame(window) {
+	colliders := [
+		{
+			x: 280
+			y: 120
+			w: 60
+			h: 280
+		}
+		{
+			x: 520
+			y: 0
+			w: 48
+			h: 260
+		}
+		{
+			x: 520
+			y: 340
+			w: 48
+			h: 220
+		}
+		{
+			x: 700
+			y: 180
+			w: 140
+			h: 48
+		}
+	]
+
+	state := stateComp.State(
+		window.width,
+		window.height,
+		0.0,
+		0.0,
+		0,
+		playerComp.Player(90.0, 90.0, 34, 280.0),
+		goalComp.Goal(window.width - 130, window.height - 130, 40),
+		inputComp.Input(false, false, false, false),
+		colliders
+	)
+
+	gui.show(window)
+	gui.setTitle(window, 'MG')
+
+	fn windowsLoop {
+		gui.onKeyDown(window, fn(vk) {
+			state.input.applyVk(vk, true)
+			if vk = 27 -> gui.close(window)
+		})
+		gui.onKeyUp(window, fn(vk) {
+			state.input.applyVk(vk, false)
+		})
+	}
+
+	fn defaultLoop {
+		gui.onKeyDownEvent(window, fn(key, _evt) {
+			state.input.applyKey(key, true)
+			if key = 'escape' -> gui.close(window)
+		})
+		gui.onKeyUpEvent(window, fn(key, _evt) {
+			state.input.applyKey(key, false)
+		})
+	}
+
+	if window.backend = :windows {
+		true -> windowsLoop()
+		_ -> defaultLoop()
+	}
+
+	draw(window, state)
+	gui.run(window, ?, fn(win, dt) {
+		state.resize(win.width, win.height)
+		state.update(float(dt))
+		draw(win, state)
+	})
+
+	gui.close(window)
+}

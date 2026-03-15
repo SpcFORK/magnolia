@@ -9,17 +9,12 @@ toHex := std.toHex
 str := import('str')
 join := str.join
 padStart := str.padStart
+lower := str.lower
 
-fn _hexByte(n) toHex(n) |> padStart(2, '0')
+fn _hexByte(n) toHex(n) |> padStart(2, '0') |> lower()
 
-// _escapeWATCodepoint converts a Unicode codepoint to one or more WAT \xx
-// hex escapes that represent the UTF-8 byte sequence for that codepoint.
-fn _escapeWATCodepoint(cp) if {
-	cp < 128 -> '\\' << _hexByte(cp)
-	cp < 2048 -> '\\' << _hexByte((cp >> 6) | 192) << '\\' << _hexByte((cp & 63) | 128)
-	cp < 65536 -> '\\' << _hexByte((cp >> 12) | 224) << '\\' << _hexByte(((cp >> 6) & 63) | 128) << '\\' << _hexByte((cp & 63) | 128)
-	_ -> '\\' << _hexByte((cp >> 18) | 240) << '\\' << _hexByte(((cp >> 12) & 63) | 128) << '\\' << _hexByte(((cp >> 6) & 63) | 128) << '\\' << _hexByte((cp & 63) | 128)
-}
+// _escapeWATCodepoint converts one Oak string byte to a WAT \xx escape.
+fn _escapeWATCodepoint(cp) '\\' << _hexByte(cp & 0xFF)
 
 // encodeWATString encodes a string as a WAT (data ...) element value.
 // Returns { escaped, byteLen } where:
@@ -27,25 +22,27 @@ fn _escapeWATCodepoint(cp) if {
 //   byteLen  - total UTF-8 byte length (used for accurate WASM memory sizing)
 fn encodeWATString(s) {
 	escaped := ''
-	byteLen := 0
-	s |> map(fn(c) {
-		cp := codepoint(c)
-		if cp >= 32 & cp <= 126 & c != '\\' & c != '"' {
-			true -> {
-				escaped <- escaped << c
-				byteLen <- byteLen + 1
+	byteLen := len(s)
+
+	fn sub(i) if i < len(s) {
+		true -> {
+			c := s.(i)
+			cp := codepoint(c)
+			if {
+				cp = 92 -> escaped <- escaped << '\\\\'
+				cp = 34 -> escaped <- escaped << '\\"'
+				cp = 10 -> escaped <- escaped << '\\n'
+				cp = 9 -> escaped <- escaped << '\\t'
+				cp = 13 -> escaped <- escaped << '\\r'
+				cp = 12 -> escaped <- escaped << '\\f'
+				cp >= 32 & cp <= 126 -> escaped <- escaped << c
+				_ -> escaped <- escaped << _escapeWATCodepoint(cp)
 			}
-			_ -> {
-				escaped <- escaped << _escapeWATCodepoint(cp)
-				byteLen <- byteLen + if {
-					cp < 128 -> 1
-					cp < 2048 -> 2
-					cp < 65536 -> 3
-					_ -> 4
-				}
-			}
+			sub(i + 1)
 		}
-	})
+	}
+
+	sub(0)
 	{ escaped: escaped, byteLen: byteLen }
 }
 

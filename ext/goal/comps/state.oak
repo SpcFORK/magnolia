@@ -1,0 +1,268 @@
+{
+	each: each
+	string: string
+} := import('std')
+
+// must be comps/
+motionComp := import('comps/motion')
+collisionComp := import('comps/collision')
+
+fn nearEntity(a, b, pad) {
+	collisionComp.overlapsRect(
+		a.x - pad,
+		a.y - pad,
+		a.size + pad * 2,
+		a.size + pad * 2,
+		b.x,
+		b.y,
+		b.size,
+		b.size
+	)
+}
+
+fn roomEnemyCount(room) {
+	count := 0
+	each(room.enemies, fn(enemy) {
+		if enemy.alive -> count <- count + 1
+	})
+	count
+}
+
+cs State(worldW, worldH, player, input, rooms, currentRoomId) {
+	self := {
+		worldW: worldW
+		worldH: worldH
+		player: player
+		input: input
+		rooms: rooms
+		roomOrder: ['village', 'cabin', 'shrine', 'crypt']
+		currentRoomId: currentRoomId
+		message: 'Elder Rowan is waiting outside the cabin.'
+		prompt: 'Move with WASD or arrows. Press E to interact.'
+		questStage: 0
+		shardsGoal: 3
+		contactCooldownMs: 0.0
+	}
+
+	self.currentRoom <- fn() self.rooms.(self.currentRoomId)
+
+	self.roomName <- fn() self.currentRoom().name
+
+	self.livingEnemyCount <- fn() {
+		count := 0
+		each(self.roomOrder, fn(roomId) {
+			count <- count + roomEnemyCount(self.rooms.(roomId))
+		})
+		count
+	}
+
+	self.questText <- fn() if self.questStage {
+		0 -> 'Quest: find Elder Rowan in Ashgrove.'
+		1 -> 'Quest: search the rooms, recover 3 sun shards, and clear the shrine.'
+		2 -> 'Quest: return to Rowan in Ashgrove.'
+		_ -> 'Quest: Ashgrove stands again. The rooms are yours to expand.'
+	}
+
+	self.setMessage <- fn(nextMessage) {
+		self.message <- nextMessage
+	}
+
+	self.findNearbyNpc <- fn(room, pad) {
+		found := ?
+		each(room.npcs, fn(npc) {
+			if found = ? & nearEntity(self.player, npc, pad) -> found <- npc
+		})
+		found
+	}
+
+	self.findNearbyEnemy <- fn(room, pad) {
+		found := ?
+		each(room.enemies, fn(enemy) {
+			if found = ? & enemy.alive & nearEntity(self.player, enemy, pad) -> found <- enemy
+		})
+		found
+	}
+
+	self.findNearbyTransition <- fn(room, pad) {
+		found := ?
+		each(room.transitions, fn(transition) {
+			if found = ? & collisionComp.overlapsRect(
+				self.player.x - pad,
+				self.player.y - pad,
+				self.player.size + pad * 2,
+				self.player.size + pad * 2,
+				transition.x,
+				transition.y,
+				transition.w,
+				transition.h
+			) -> found <- transition
+		})
+		found
+	}
+
+	self.refreshPrompt <- fn() {
+		room := self.currentRoom()
+		prompt := 'Move with WASD or arrows. Press E to interact.'
+
+		npc := self.findNearbyNpc(room, 28)
+		enemy := self.findNearbyEnemy(room, 24)
+		transition := self.findNearbyTransition(room, 14)
+
+		if npc != ? -> prompt <- 'Press E to talk with ' + npc.name + '.'
+		if npc = ? & enemy != ? -> prompt <- 'Press E to strike the ' + enemy.name + '.'
+		if npc = ? & enemy = ? & room.shrine != ? & nearEntity(self.player, room.shrine, 28) -> prompt <- 'Press E to inspect the ' + room.shrine.label + '.'
+		if npc = ? & enemy = ? & transition != ? -> prompt <- 'Press E to ' + transition.label + '.'
+
+		self.prompt <- prompt
+	}
+
+	self.syncQuestProgress <- fn() {
+		if self.questStage = 1 & self.player.shards >= self.shardsGoal & self.livingEnemyCount() = 0 -> {
+			self.questStage <- 2
+			self.setMessage('The shrine is safe again. Return to Elder Rowan in Ashgrove.')
+		}
+	}
+
+	self.touchPickups <- fn(room) {
+		each(room.pickups, fn(pickup) {
+			if !pickup.collected & collisionComp.overlapsRect(self.player.x, self.player.y, self.player.size, self.player.size,
+				pickup.x, pickup.y, pickup.size, pickup.size) -> {
+				pickup.collected <- true
+				self.player.shards <- self.player.shards + 1
+				self.setMessage('Recovered ' + pickup.label + ' in ' + room.name + ' (' + string(self.player.shards) + '/' + string(self.shardsGoal) + ').')
+			}
+		})
+	}
+
+	self.attackNearby <- fn(room) if self.findNearbyEnemy(room, 26) {
+		? -> false
+		enemy -> {
+			enemy.hp <- enemy.hp - self.player.attack
+			if enemy.hp <= 0 -> {
+				enemy.hp <- 0
+				enemy.alive <- false
+				self.player.xp <- self.player.xp + enemy.xpReward
+				self.setMessage('The ' + enemy.name + ' falls inside ' + room.name + '.')
+			}
+			if enemy.hp > 0 -> self.setMessage('You strike the ' + enemy.name + '. ' + string(enemy.hp) + ' HP remain.')
+			true
+		}
+	}
+
+	self.enterTransition <- fn(transition) {
+		self.currentRoomId <- transition.target
+		self.player.x <- transition.spawnX
+		self.player.y <- transition.spawnY
+		self.player.facing <- transition.facing
+		self.contactCooldownMs <- 0
+		self.setMessage(transition.message)
+		self.refreshPrompt()
+	}
+
+	self.interact <- fn() {
+		room := self.currentRoom()
+		if self.attackNearby(room) -> ?
+
+		npc := self.findNearbyNpc(room, 28)
+		if npc != ? -> if self.questStage {
+			0 -> {
+				self.questStage <- 1
+				self.setMessage('Rowan: search my cabin and the shrine trail. Bring back 3 sun shards and clear the slime.')
+			}
+			1 -> self.setMessage('Rowan: one shard is in the cabin, the others lie beyond the shrine trail.')
+			2 -> {
+				self.questStage <- 3
+				self.player.level <- self.player.level + 1
+				self.player.attack <- self.player.attack + 1
+				self.player.maxHp <- self.player.maxHp + 2
+				self.player.hp <- self.player.maxHp
+				self.setMessage('Rowan: good work. These rooms are now your foothold in Ashgrove.')
+			}
+			_ -> self.setMessage('Rowan: expand from room to room and keep the grove alive.')
+		}
+
+		if room.shrine != ? & nearEntity(self.player, room.shrine, 28) -> if self.questStage {
+			0 -> self.setMessage('The shrine lies dormant. Rowan should see it restored first.')
+			1 -> if self.player.shards < self.shardsGoal {
+				true -> self.setMessage('The shrine is missing ' + string(self.shardsGoal - self.player.shards) + ' sun shards.')
+				_ -> if self.livingEnemyCount() > 0 {
+					true -> self.setMessage('Hostile slime still blocks the shrine chamber.')
+					_ -> self.setMessage('The shrine glows across the whole chamber. Rowan should know.')
+				}
+			}
+			2 -> self.setMessage('The shrine is restored. Return through Ashgrove to Rowan.')
+			_ -> {
+				self.player.hp <- self.player.maxHp
+				self.setMessage('Sunlight from the shrine restores your strength.')
+			}
+		}
+
+		transition := self.findNearbyTransition(room, 14)
+		if transition != ? -> self.enterTransition(transition)
+	}
+
+	self.updateEnemies <- fn(useDt, room) {
+		if self.contactCooldownMs > 0 -> {
+			self.contactCooldownMs <- self.contactCooldownMs - (useDt * 1000)
+			if self.contactCooldownMs < 0 -> self.contactCooldownMs <- 0
+		}
+
+		each(room.enemies, fn(enemy) {
+			if enemy.alive -> {
+				enemy.x <- enemy.x + enemy.dir * enemy.speed * useDt
+				if enemy.x < enemy.minX -> {
+					enemy.x <- enemy.minX
+					enemy.dir <- 1
+				}
+				if enemy.x > enemy.maxX -> {
+					enemy.x <- enemy.maxX
+					enemy.dir <- -1
+				}
+
+				if self.contactCooldownMs = 0 & collisionComp.overlapsRect(self.player.x, self.player.y, self.player.size, self.player.size,
+					enemy.x, enemy.y, enemy.size, enemy.size) -> {
+					self.player.hp <- self.player.hp - enemy.contactDamage
+					self.contactCooldownMs <- 850
+					if self.player.hp <= 0 -> {
+						self.player.hp <- self.player.maxHp
+						self.currentRoomId <- 'village'
+						self.player.x <- self.player.spawnX
+						self.player.y <- self.player.spawnY
+						self.setMessage('You collapse and wake again in Ashgrove.')
+					}
+					if self.player.hp > 0 -> self.setMessage('The ' + enemy.name + ' hits you. HP ' + string(self.player.hp) + '/' + string(self.player.maxHp))
+				}
+			}
+		})
+	}
+
+	self.resize <- fn(nextW, nextH) {
+		self.worldW <- nextW
+		self.worldH <- nextH
+	}
+
+	self.update <- fn(dt) {
+		room := self.currentRoom()
+		move := motionComp.desiredMove(self.player, self.input, self.worldW, self.worldH, dt)
+
+		if self.input.left -> self.player.facing <- 'left'
+		if self.input.right -> self.player.facing <- 'right'
+		if self.input.up -> self.player.facing <- 'up'
+		if self.input.down -> self.player.facing <- 'down'
+
+		resolved := collisionComp.resolveMove(self.player, move.nextX, move.nextY, room.colliders)
+		self.player.x <- resolved.x
+		self.player.y <- resolved.y
+
+		self.touchPickups(room)
+		self.updateEnemies(move.useDt, room)
+
+		if self.input.consumeInteract() -> self.interact()
+
+		self.syncQuestProgress()
+		self.refreshPrompt()
+	}
+
+	self.refreshPrompt()
+	self
+}

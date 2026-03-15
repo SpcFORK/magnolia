@@ -1,0 +1,200 @@
+{
+	string: string
+	int: int
+	float: float
+	each: each
+} := import('std')
+
+gui := import('GUI')
+
+playerComp := import('comps/player')
+stateComp := import('comps/state')
+inputComp := import('comps/input')
+roomsComp := import('rooms/index')
+
+fn drawTransition(window, transition) {
+	gui.drawRect2D(window, transition.x, transition.y, transition.w, transition.h, gui.rgb(230, 224, 180), false)
+	gui.fillRect(window, transition.x + 4, transition.y + 4, transition.w - 8, transition.h - 8, gui.rgb(58, 66, 72))
+}
+
+fn drawRoomBackdrop(window, room, worldW, worldH) if room.kind {
+	'cabin' -> {
+		gui.fillRect(window, 0, 0, worldW, worldH, gui.rgb(44, 30, 24))
+		gui.fillRect(window, 54, 54, worldW - 108, worldH - 108, gui.rgb(108, 82, 54))
+		gui.drawGrid2D(window, 48, gui.rgb(84, 64, 42), 0, 0)
+	}
+	'crypt' -> {
+		gui.fillRect(window, 0, 0, worldW, worldH, gui.rgb(18, 20, 24))
+		gui.fillRect(window, 50, 50, worldW - 100, worldH - 100, gui.rgb(46, 52, 58))
+		gui.fillRect(window, 90, 90, worldW - 180, worldH - 180, gui.rgb(28, 32, 36))
+		gui.drawGrid2D(window, 48, gui.rgb(60, 66, 74), 0, 0)
+	}
+	'shrine' -> {
+		gui.fillRect(window, 0, 0, worldW, worldH, gui.rgb(20, 24, 34))
+		gui.fillRect(window, 0, 238, worldW, 70, gui.rgb(62, 58, 82))
+		gui.drawGrid2D(window, 48, gui.rgb(44, 48, 76), 0, 0)
+	}
+	_ -> {
+		gui.fillRect(window, 0, 0, worldW, worldH, gui.rgb(22, 34, 30))
+		gui.fillRect(window, 0, 224, worldW, 92, gui.rgb(96, 88, 54))
+		gui.fillRect(window, 764, 112, 76, 178, gui.rgb(110, 100, 58))
+		gui.drawGrid2D(window, 48, gui.rgb(30, 52, 40), 0, 0)
+	}
+}
+
+fn drawCollider(window, col) if col.kind {
+	'cabin' -> {
+		gui.fillRect(window, col.x, col.y, col.w, col.h, gui.rgb(88, 58, 38))
+		gui.drawRect2D(window, col.x, col.y, col.w, col.h, gui.rgb(168, 120, 74), false)
+	}
+	'pond' -> {
+		gui.fillRect(window, col.x, col.y, col.w, col.h, gui.rgb(28, 82, 126))
+		gui.drawRect2D(window, col.x, col.y, col.w, col.h, gui.rgb(98, 174, 220), false)
+	}
+	'hedge' -> {
+		gui.fillRect(window, col.x, col.y, col.w, col.h, gui.rgb(34, 82, 50))
+		gui.drawRect2D(window, col.x, col.y, col.w, col.h, gui.rgb(80, 140, 96), false)
+	}
+	_ -> {
+		gui.fillRect(window, col.x, col.y, col.w, col.h, gui.rgb(82, 84, 96))
+		gui.drawRect2D(window, col.x, col.y, col.w, col.h, gui.rgb(144, 148, 164), false)
+	}
+}
+
+fn drawPlayer(window, player, contactCooldownMs) {
+	bodyColor := if contactCooldownMs > 0 {
+		true -> gui.rgb(230, 112, 92)
+		_ -> gui.rgb(94, 214, 176)
+	}
+	markerX := int(player.x + player.size / 2 - 4)
+	markerY := int(player.y + player.size / 2 - 4)
+
+	if player.facing = 'left' -> markerX <- int(player.x + 4)
+	if player.facing = 'right' -> markerX <- int(player.x + player.size - 10)
+	if player.facing = 'up' -> markerY <- int(player.y + 4)
+	if player.facing = 'down' -> markerY <- int(player.y + player.size - 10)
+
+	gui.fillRect(window, int(player.x), int(player.y), player.size, player.size, bodyColor)
+	gui.fillRect(window, markerX, markerY, 8, 8, gui.rgb(12, 18, 28))
+	gui.drawRect2D(window, int(player.x), int(player.y), player.size, player.size, gui.rgb(16, 26, 36), false)
+}
+
+fn draw(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> {
+		room := state.currentRoom()
+		drawRoomBackdrop(window, room, state.worldW, state.worldH)
+
+		each(room.colliders, fn(col) {
+			drawCollider(window, col)
+		})
+
+		each(room.transitions, fn(transition) {
+			drawTransition(window, transition)
+		})
+
+		if room.shrine != ? -> {
+			gui.fillRect(window, room.shrine.x - 10, room.shrine.y - 10, room.shrine.size + 20, room.shrine.size + 20,
+				if state.questStage = 3 {
+					true -> gui.rgb(214, 182, 84)
+					_ -> gui.rgb(96, 88, 104)
+				})
+			gui.drawRect2D(window, room.shrine.x - 10, room.shrine.y - 10, room.shrine.size + 20, room.shrine.size + 20,
+				gui.rgb(224, 220, 212), false)
+			gui.fillRect(window, room.shrine.x, room.shrine.y, room.shrine.size, room.shrine.size,
+				if state.questStage = 3 {
+					true -> gui.rgb(248, 228, 120)
+					_ -> gui.rgb(122, 120, 136)
+				})
+			gui.drawText(window, room.shrine.x - 8, room.shrine.y - 22, room.shrine.label)
+		}
+
+		each(room.npcs, fn(npc) {
+			gui.fillRect(window, int(npc.x), int(npc.y), npc.size, npc.size, gui.rgb(236, 194, 94))
+			gui.drawRect2D(window, int(npc.x), int(npc.y), npc.size, npc.size, gui.rgb(92, 58, 24), false)
+			gui.drawText(window, int(npc.x) - 16, int(npc.y) - 20, npc.name)
+		})
+
+		each(room.pickups, fn(pickup) {
+			if !pickup.collected -> {
+				gui.fillRect(window, pickup.x, pickup.y, pickup.size, pickup.size, gui.rgb(254, 214, 96))
+				gui.drawRect2D(window, pickup.x, pickup.y, pickup.size, pickup.size, gui.rgb(120, 88, 18), false)
+			}
+		})
+
+		each(room.enemies, fn(enemy) {
+			if enemy.alive -> {
+				gui.fillRect(window, int(enemy.x), int(enemy.y), enemy.size, enemy.size, gui.rgb(172, 84, 92))
+				gui.drawRect2D(window, int(enemy.x), int(enemy.y), enemy.size, enemy.size, gui.rgb(76, 26, 30), false)
+				gui.fillRect(window, int(enemy.x), int(enemy.y) - 10, enemy.size, 5, gui.rgb(62, 26, 30))
+				gui.fillRect(window, int(enemy.x), int(enemy.y) - 10, int(enemy.size * enemy.hp / enemy.maxHp), 5, gui.rgb(230, 112, 92))
+			}
+		})
+
+		drawPlayer(window, state.player, state.contactCooldownMs)
+
+		gui.fillRect(window, 12, 12, 440, 124, gui.rgb(12, 18, 20))
+		gui.drawRect2D(window, 12, 12, 440, 124, gui.rgb(62, 96, 88), false)
+		gui.drawText(window, 28, 34, 'Ashgrove RPG Base')
+		gui.drawText(window, 28, 56, 'Room ' + room.name + '  HP ' + string(state.player.hp) + '/' + string(state.player.maxHp) + '  LV ' + string(state.player.level))
+		gui.drawText(window, 28, 78, 'Shards ' + string(state.player.shards) + '/' + string(state.shardsGoal) + '  Hostiles ' + string(state.livingEnemyCount()))
+		gui.drawText(window, 28, 100, state.questText())
+
+		gui.fillRect(window, 12, state.worldH - 80, state.worldW - 24, 64, gui.rgb(14, 18, 22))
+		gui.drawRect2D(window, 12, state.worldH - 80, state.worldW - 24, 64, gui.rgb(70, 82, 90), false)
+		gui.drawText(window, 24, state.worldH - 56, state.message)
+		gui.drawText(window, 24, state.worldH - 34, state.prompt)
+
+		gui.endFrame(window)
+	}
+}
+
+fn runGame(window) {
+	rooms := roomsComp.buildRooms()
+
+	state := stateComp.State(
+		window.width,
+		window.height,
+		playerComp.Player(100.0, 360.0, 30, 252.0),
+		inputComp.Input(false, false, false, false, false, false),
+		rooms,
+		'village'
+	)
+
+	gui.show(window)
+	gui.setTitle(window, 'Ashgrove RPG Base')
+
+	fn windowsLoop {
+		gui.onKeyDown(window, fn(vk) {
+			state.input.applyVk(vk, true)
+			if vk = 27 -> gui.close(window)
+		})
+		gui.onKeyUp(window, fn(vk) {
+			state.input.applyVk(vk, false)
+		})
+	}
+
+	fn defaultLoop {
+		gui.onKeyDownEvent(window, fn(key, _evt) {
+			state.input.applyKey(key, true)
+			if key = 'escape' -> gui.close(window)
+		})
+		gui.onKeyUpEvent(window, fn(key, _evt) {
+			state.input.applyKey(key, false)
+		})
+	}
+
+	if window.backend = :windows {
+		true -> windowsLoop()
+		_ -> defaultLoop()
+	}
+
+	draw(window, state)
+	gui.run(window, ?, fn(win, dt) {
+		state.resize(win.width, win.height)
+		state.update(float(dt))
+		draw(win, state)
+	})
+
+	gui.close(window)
+}
