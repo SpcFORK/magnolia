@@ -523,10 +523,6 @@ To try Magnolia by building from source, clone the repository and run `make inst
 
 Magnolia is under active development. Some features are experimental or have known limitations:
 
-- **Bitwise right shift operator (`>>`)**: The right shift operator has a known syntax conflict with template syntax and is not fully functional. Users experiencing issues should use alternative approaches or workarounds.
-
-    Recommended workaround: use `bitwise.shr(value, by)` from `import('bitwise')`.
-
 - **Virtual (self-hosting) interpreter**: The Virtual library provides a self-hosted Oak interpreter written in Magnolia itself, enabling dynamic code evaluation at runtime. This feature is still being stabilized and may not support all language features yet.
 
 - **Channel operations and async communication**: Low-level channel primitives for asynchronous communication are under development. Some edge cases in async patterns may not be fully supported.
