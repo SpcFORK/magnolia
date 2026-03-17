@@ -298,9 +298,42 @@ handlers with `off(window, :dispatch, token)`.
 
 Draws text in the target window.
 
+Use `setFont(window, fontSpec)` to control font family/size/weight used by
+subsequent text draws.
+
 - Windows: `TextOutW`
 - Linux: `XDrawString`
-- Web: records a logical `:text` draw op in `window.messages`
+- Web: records a logical `:text` draw op in `window.messages` (includes `font`
+    CSS value when set)
+
+### `setFont(window, fontSpec)`
+
+Sets the active text font for a window.
+
+`fontSpec` fields:
+
+- `family` - font family name (default: `Segoe UI` on Windows)
+- `size` - font size in px (default: `16`)
+- `weight` - numeric weight (default: `400`, bold is usually `700`)
+- `italic` - boolean
+- `underline` - boolean
+- `strikeOut` - boolean
+- `css` - optional web CSS font shorthand override (web backend only)
+
+Example:
+
+```oak
+gui.setFont(window, {
+    family: 'Consolas'
+    size: 18
+    weight: 700
+})
+gui.drawText(window, 24, 32, 'Font-aware text')
+```
+
+### `clearFont(window)`
+
+Clears the custom font and returns to backend defaults.
 
 ### `fillRect(window, x, y, width, height, color?)`
 

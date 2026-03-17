@@ -1,0 +1,81 @@
+{
+	println: println
+	string: string
+} := import('std')
+
+gui := import('GUI')
+
+// ----
+// @ Comps
+
+sm := import('comps/scene-manager')
+introScene := import('scenes/intro')
+menuScene := import('scenes/menu')
+
+// ---
+// @ Window
+
+window := gui.createWindow('Blank Space', 960, 540, {
+	frameMs: 16
+	layer2D: 'auto'
+	resizable: false
+})
+
+fn clampDt(dt) if dt < 0 {
+	true -> 0
+	_ -> if dt > 0.05 {
+		true -> 0.05
+		_ -> dt
+	}
+}
+
+if window.type {
+	:ok -> {
+		sm := sm.SceneManager()
+		currentSceneModule := introScene
+		sm.setClockMs('frameDtMs', 0)
+
+		gui.show(window)
+		introScene.setupScene(window, sm)
+
+		gui.run(window, ?, fn(win, _dt) {
+			dt := float(_dt) |> clampDt()
+			sm.setClockMs('frameDtMs', int(dt * 1000))
+
+			if sm.isSceneChange(sm) -> {
+				sm.updateScene(sm)
+
+				gui.clearListeners(win, :keyDown)
+				gui.clearListeners(win, :keyUp)
+				gui.clearListeners(win, :mouseDown)
+				gui.clearListeners(win, :mouseUp)
+				gui.clearListeners(win, :mouseMove)
+				gui.clearListeners(win, :mouseWheel)
+				gui.clearListeners(win, :textInput)
+				gui.clearListeners(win, :resize)
+				gui.clearListeners(win, :close)
+				gui.clearListeners(win, :focus)
+				gui.clearListeners(win, :blur)
+				
+				if sm.currentScene {
+					:intro -> {
+						currentSceneModule <- introScene
+						introScene.setupScene(win, sm)
+					}
+					:menu -> {
+						currentSceneModule <- menuScene
+						menuScene.setupScene(win, sm)
+					}
+					_ -> ?
+				}
+			}
+			currentSceneModule.draw(win, sm, dt)
+		})
+
+		gui.close(window)
+	}
+	_ -> {
+		println('Failed to create GUI window.')
+		println(string(window))
+	}
+}

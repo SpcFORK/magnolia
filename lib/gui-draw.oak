@@ -16,6 +16,112 @@ fn _err(message, detail) {
 	}
 }
 
+fn _asBool(value) if value {
+	true -> true
+	_ -> false
+}
+
+fn _fontKey(fontSpec) {
+	if fontSpec {
+		? -> ?
+		_ -> {
+			family := _default(fontSpec.family, 'Segoe UI')
+			size := int(_default(fontSpec.size, 16))
+			weight := int(_default(fontSpec.weight, 400))
+			italic := _asBool(_default(fontSpec.italic, false))
+			underline := _asBool(_default(fontSpec.underline, false))
+			strikeOut := _asBool(_default(fontSpec.strikeOut, false))
+			family + '|' + string(size) + '|' + string(weight) + '|' + string(italic) + '|' + string(underline) + '|' + string(strikeOut)
+		}
+	}
+}
+
+fn _windowsDeleteCachedFont(window) {
+	fontHandle := _default(window._fontHandle, 0)
+	if fontHandle > 0 {
+		true -> {
+			windows.deleteObject(fontHandle)
+			window._fontHandle <- 0
+			window._fontKey <- ?
+		}
+	}
+}
+
+fn _ensureWindowsFont(window) {
+	fontSpec := _default(window.textFont, ?)
+	if fontSpec {
+		? -> {
+			_windowsDeleteCachedFont(window)
+			0
+		}
+		_ -> {
+			key := _fontKey(fontSpec)
+			cachedHandle := _default(window._fontHandle, 0)
+			cachedKey := _default(window._fontKey, ?)
+			if cachedHandle > 0 & cachedKey = key {
+				true -> cachedHandle
+				_ -> {
+					_windowsDeleteCachedFont(window)
+					family := _default(fontSpec.family, 'Segoe UI')
+					size := int(_default(fontSpec.size, 16))
+					weight := int(_default(fontSpec.weight, 400))
+					font := windows.createFont(
+						0 - size
+						0
+						0
+						0
+						weight
+						if _asBool(_default(fontSpec.italic, false)) { true -> 1, _ -> 0 }
+						if _asBool(_default(fontSpec.underline, false)) { true -> 1, _ -> 0 }
+						if _asBool(_default(fontSpec.strikeOut, false)) { true -> 1, _ -> 0 }
+						1
+						0
+						0
+						0
+						0
+						family
+					)
+					if windows.callOk?(font) & font.r1 > 0 {
+						true -> {
+							window._fontHandle <- font.r1
+							window._fontKey <- key
+							font.r1
+						}
+						_ -> 0
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _webFontString(fontSpec) {
+	if fontSpec {
+		? -> ?
+		_ -> {
+			if fontSpec.css {
+				? -> {
+					style := if _asBool(_default(fontSpec.italic, false)) { true -> 'italic ', _ -> '' }
+					weight := string(int(_default(fontSpec.weight, 400))) + ' '
+					size := string(int(_default(fontSpec.size, 16))) + 'px '
+					family := _default(fontSpec.family, 'sans-serif')
+					style + weight + size + family
+				}
+				_ -> fontSpec.css
+			}
+		}
+	}
+}
+
+fn releaseResources(window) {
+	if window.type = :ok {
+		true -> if window.backend {
+			:windows -> _windowsDeleteCachedFont(window)
+		}
+	}
+	0
+}
+
 fn drawText(window, x, y, text) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
@@ -31,11 +137,19 @@ fn drawText(window, x, y, text) if window.type {
 			}
 			if hdcValue > 0 {
 				true -> {
+					fontHandle := _ensureWindowsFont(window)
+					prevFont := if fontHandle > 0 {
+						true -> windows.selectObject(hdcValue, fontHandle)
+						_ -> ?
+					}
 					// Set transparent text rendering with a light default color so
 					// text remains readable on dark-themed demo UIs.
 					windows.setBkMode(hdcValue, 1)
 					windows.setTextColor(hdcValue, 15919352)
 					windows.textOut(hdcValue, x, y, text)
+					if prevFont & windows.callOk?(prevFont) & prevFont.r1 > 0 {
+						true -> windows.selectObject(hdcValue, prevFont.r1)
+					}
 					if window.frameHdc = 0 {
 						true -> windows.releaseDC(window.hwnd, hdcValue)
 					}
@@ -68,11 +182,13 @@ fn drawText(window, x, y, text) if window.type {
 			}
 		}
 		:web -> {
+			fontCss := _webFontString(_default(window.textFont, ?))
 			window.messages <- window.messages << {
 				type: :text
 				x: x
 				y: y
 				text: text
+				font: fontCss
 			}
 			{type: :ok}
 		}
