@@ -310,6 +310,9 @@ var libai string
 //go:embed lib/audio.oak
 var libaudio string
 
+//go:embed lib/audio-complex.oak
+var libaudiocomplex string
+
 //go:embed lib/video.oak
 var libvideo string
 
@@ -420,6 +423,7 @@ var stdlibs = map[string]string{
 	"gui":                    libgui,
 	"ai":                     libai,
 	"audio":                  libaudio,
+	"audio-complex":          libaudiocomplex,
 	"video":                  libvideo,
 	"async/event-bus":        libasynceventbus,
 }

@@ -1,30 +1,22 @@
-// GUI + audio sample.
+// GUI + audio buffer playback sample.
 //
-// - Opens a GUI window and draws a tiny synthesized waveform preview.
-// - Press Space or Enter to play the next note in a short melody.
-// - On Windows this uses Kernel32!Beep for audible playback.
-// - On non-Windows backends, the sample still runs and displays status text.
+// - Uses audio.oak to synthesize tone buffers and encode WAV data in memory.
+// - Plays those WAV buffers with WinMM PlaySoundA(SND_MEMORY).
+// - Press Space/Enter to play next buffer, Esc/Q to close.
 
 {
 	println: println
 	string: string
 	int: int
 	float: float
-	range: range
-	map: map
 } := import('std')
-{
-	sin: sin
-	Pi: Pi
-} := import('math')
 
 gui := import('GUI')
+audio := import('../lib/audio.oak')
 windows := import('windows')
 
-fn makeSineWave(freq, sampleRate, length) {
-	step := 2.0 * Pi * float(freq) / float(sampleRate)
-	range(length) |> map(fn(i) sin(float(i) * step))
-}
+SND_ASYNC := 1
+SND_MEMORY := 4
 
 fn sampleAt(samples, i) if i < 0 {
 	true -> 0.0
@@ -48,80 +40,114 @@ fn drawWave(window, samples, i, maxI, x, y, w, h, color) if i < maxI {
 	_ -> ?
 }
 
-fn playBeep(freq, durMs) {
-	res := windows.kernel32('Beep', freq, durMs)
+fn makeToneBuffer(name, freq, seconds, sampleRate) {
+	n := audio.durationSamples(seconds, sampleRate)
+	raw := audio.sine(freq, sampleRate, n)
+	shaped := audio.adsr(audio.gain(raw, 0.32), sampleRate, 0.005, 0.04, 0.76, 0.08)
+	wav := audio.wav(shaped, sampleRate, audio.Mono, audio.BitDepth16)
+	{
+		name: name
+		freq: freq
+		samples: shaped
+		wav: wav
+	}
+}
+
+fn stopPlayback() windows.winmm('PlaySoundA', 0, 0, 0)
+
+fn playToneBuffer(tone) {
+	res := windows.winmm('PlaySoundA', addr(tone.wav), 0, SND_ASYNC | SND_MEMORY)
 	windows.callOk?(res) & res.r1 > 0
 }
 
 fn playNextTone(state) {
-	note := state.melody.(state.noteIndex)
-	ok := if windows.isWindows?() {
-		true -> playBeep(note.freq, note.dur)
+	tone := state.tones.(state.toneIndex)
+	ok := if state.winmmReady {
+		true -> playToneBuffer(tone)
 		_ -> false
 	}
 
-	state.noteIndex <- state.noteIndex + 1
-	if state.noteIndex >= len(state.melody) -> state.noteIndex <- 0
-
+	state.current <- tone
 	state.playCount <- state.playCount + 1
-	state.lastNote <- note.name
+	state.toneIndex <- state.toneIndex + 1
+	if state.toneIndex >= len(state.tones) -> state.toneIndex <- 0
+
 	state.status <- if ok {
-		true -> 'played ' + note.name + ' (' + string(note.freq) + ' Hz)'
-		_ -> 'audio playback unavailable on this backend'
+		true -> 'played buffer: ' + tone.name + ' (' + string(tone.freq) + ' Hz)'
+		_ -> if windows.isWindows?() {
+			true -> 'winmm playback unavailable'
+			_ -> 'buffer playback sample currently requires Windows WinMM'
+		}
 	}
 }
 
 fn draw(window, state) {
 	frame := gui.beginFrame(window)
 	if frame.type = :ok -> {
-		bg := gui.rgb(14, 16, 24)
-		panel := gui.rgb(24, 30, 44)
-		accent := gui.rgb(74, 210, 255)
-		wave := gui.rgb(255, 210, 120)
+		bg := gui.rgb(16, 18, 26)
+		panel := gui.rgb(26, 31, 47)
+		accent := gui.rgb(86, 224, 255)
+		waveColor := gui.rgb(255, 214, 120)
 
 		gui.fillRect(window, 0, 0, window.width, window.height, bg)
 		gui.fillRect(window, 24, 24, window.width - 48, window.height - 48, panel)
 
-		gui.drawText(window, 40, 52, 'Magnolia GUI + Audio Sample')
-		gui.drawText(window, 40, 78, 'Press Space/Enter: play note   Esc/Q: close')
-		gui.drawText(window, 40, 104, 'Backend: ' + string(window.backend))
-		gui.drawText(window, 40, 130, 'Status: ' + state.status)
-		gui.drawText(window, 40, 156, 'Notes played: ' + string(state.playCount))
-		gui.drawText(window, 40, 182, 'Last note: ' + state.lastNote)
+		gui.drawText(window, 42, 52, 'Magnolia GUI + audio.oak Buffer Sample')
+		gui.drawText(window, 42, 78, 'Space/Enter: play next WAV buffer   Esc/Q: close')
+		gui.drawText(window, 42, 104, 'Backend: ' + string(window.backend))
+		gui.drawText(window, 42, 130, 'Status: ' + state.status)
+		gui.drawText(window, 42, 156, 'Buffers played: ' + string(state.playCount))
+		gui.drawText(window, 42, 182, 'Current tone: ' + state.current.name + ' (' + string(state.current.freq) + ' Hz)')
 
-		plotX := 40
-		plotY := 228
-		plotW := window.width - 80
-		plotH := 180
+		plotX := 42
+		plotY := 226
+		plotW := window.width - 84
+		plotH := 188
 		gui.drawRect2D(window, plotX, plotY, plotW, plotH, accent, false)
-		drawWave(window, state.wave, 0, len(state.wave) - 1, plotX + 8, plotY + 8, plotW - 16, plotH - 16, wave)
+		drawWave(window, state.current.samples, 0, len(state.current.samples) - 1, plotX + 8, plotY + 8, plotW - 16, plotH - 16, waveColor)
 
-		gui.drawText(window, 40, window.height - 36, 'Auto-close after ~10 seconds for unattended runs.')
 		gui.endFrame(window)
 	}
 }
 
 fn run(window) {
+	sampleRate := 22050
+	t1 := makeToneBuffer('A4', 440, 0.20, sampleRate)
+	t2 := makeToneBuffer('C5', 523, 0.20, sampleRate)
+	t3 := makeToneBuffer('E5', 659, 0.24, sampleRate)
+	t4 := makeToneBuffer('G5', 784, 0.24, sampleRate)
+	tones := [
+		t1
+		t2
+		t3
+		t4
+	]
+
+	winmmReady := false
+	if windows.isWindows?() {
+		true -> {
+			load := windows.loadDll(windows.Winmm)
+			if load.type = :ok -> winmmReady <- true
+		}
+	}
+
 	state := {
-		status: if windows.isWindows?() {
-			true -> 'ready (Windows Beep enabled)'
-			_ -> 'ready (GUI-only mode)'
+		winmmReady: winmmReady
+		status: if winmmReady {
+			true -> 'ready (audio buffers encoded by audio.oak)'
+			_ -> if windows.isWindows?() {
+				true -> 'winmm.dll unavailable'
+				_ -> 'ready (GUI mode only)'
+			}
 		}
 		playCount: 0
-		lastNote: '-'
-		noteIndex: 0
-		lifeSec: 0.0
-		wave: makeSineWave(220, 4800, 240)
-		melody: [
-			{name: 'C5', freq: 523, dur: 120}
-			{name: 'E5', freq: 659, dur: 120}
-			{name: 'G5', freq: 784, dur: 160}
-			{name: 'E5', freq: 659, dur: 120}
-		]
+		toneIndex: 0
+		tones: tones
+		current: tones.(0)
 	}
 
 	gui.show(window)
-	gui.setTitle(window, 'Magnolia GUI + Audio')
+	gui.setTitle(window, 'Magnolia GUI + audio.oak Buffers')
 
 	gui.onKeyDown(window, fn(vk) {
 		if vk = 32 | vk = 13 -> playNextTone(state)
@@ -129,25 +155,22 @@ fn run(window) {
 	})
 
 	gui.onKeyDownEvent(window, fn(key, _evt) {
-		if key = ' ' | key = 'space' | key = 'enter' | key = 'return' {
-			true -> playNextTone(state)
-		}
+		if key = ' ' | key = 'space' | key = 'enter' | key = 'return' -> playNextTone(state)
 		if key = 'escape' | key = 'q' | key = 'Q' -> gui.close(window)
 	})
 
 	draw(window, state)
-	gui.run(window, ?, fn(win, dt) {
-		state.lifeSec <- state.lifeSec + float(dt)
+	gui.run(window, ?, fn(win, _dt) {
 		draw(win, state)
-		if state.lifeSec >= 10.0 -> gui.close(win)
 	})
 
+	stopPlayback()
 	gui.close(window)
 }
 
-println('== GUI + Audio Sample ==')
+println('== GUI + Audio Buffer Sample ==')
 
-window := gui.createWindow('Magnolia GUI + Audio', 900, 520, {
+window := gui.createWindow('Magnolia GUI + Audio Buffers', 920, 540, {
 	frameMs: 16
 	layer2D: 'auto'
 	icon: './build/magnolia.ico'

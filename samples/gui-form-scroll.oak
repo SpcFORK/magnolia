@@ -1,0 +1,369 @@
+// gui-form-scroll.oak
+// GUI form-style sample with a scrollable list and custom scrollbar.
+//
+// Controls:
+//  - Drag scrollbar thumb with mouse
+//  - Click scrollbar track to page-scroll
+//  - Mouse wheel over the viewport
+//  - Arrow Up/Down, PageUp/PageDown, Home/End keys
+//
+// Run: magnolia run samples/gui-form-scroll.oak
+
+{
+	println: println
+	string: string
+	int: int
+	len: len
+} := import('std')
+
+gui := import('GUI')
+
+C_BG          := gui.rgb(18, 24, 36)
+C_HEADER      := gui.rgb(34, 58, 132)
+C_PANEL       := gui.rgb(28, 36, 54)
+C_VIEWPORT    := gui.rgb(16, 21, 32)
+C_ROW_A       := gui.rgb(24, 30, 44)
+C_ROW_B       := gui.rgb(30, 38, 56)
+C_ROW_ACTIVE  := gui.rgb(42, 74, 158)
+C_BORDER      := gui.rgb(60, 76, 104)
+C_TEXT        := gui.rgb(220, 230, 248)
+C_LABEL       := gui.rgb(150, 170, 204)
+C_TRACK       := gui.rgb(20, 26, 40)
+C_THUMB       := gui.rgb(86, 134, 246)
+C_THUMB_HOVER := gui.rgb(114, 158, 255)
+
+ROW_HEIGHT := 30
+
+fn makeItems() {
+	[
+		'01  Profile details'
+		'02  Account and identity'
+		'03  Email and recovery'
+		'04  Connected devices'
+		'05  Session management'
+		'06  Security checklist'
+		'07  2FA app + backup codes'
+		'08  Passkey enrollment'
+		'09  API keys'
+		'10  OAuth applications'
+		'11  Notification routing'
+		'12  In-app notification level'
+		'13  Digest cadence'
+		'14  Quiet hours'
+		'15  Data export options'
+		'16  Privacy controls'
+		'17  Visibility defaults'
+		'18  Team permissions'
+		'19  Project roles'
+		'20  Billing profile'
+		'21  Invoice delivery'
+		'22  Tax settings'
+		'23  Payment methods'
+		'24  Spending alerts'
+		'25  Feature flags'
+		'26  Beta channels'
+		'27  Accessibility'
+		'28  Font scale'
+		'29  Contrast tuning'
+		'30  Reduced motion'
+		'31  Language and locale'
+		'32  Date/time formatting'
+		'33  Number formatting'
+		'34  Region-specific defaults'
+		'35  Keyboard shortcuts'
+		'36  Command palette scope'
+		'37  Integrations'
+		'38  Webhooks'
+		'39  Retry/backoff policy'
+		'40  Queue behavior'
+		'41  Cache controls'
+		'42  Persistence mode'
+		'43  File storage defaults'
+		'44  Compression profile'
+		'45  CDN toggles'
+		'46  Logging level'
+		'47  Audit trails'
+		'48  Retention period'
+		'49  Alert rules'
+		'50  Incident contacts'
+		'51  Sandbox mode'
+		'52  Preview environments'
+		'53  Build acceleration'
+		'54  Artifact cleanup'
+		'55  Deployment windows'
+		'56  Approval gates'
+		'57  Canary rollout'
+		'58  Health checks'
+		'59  Rollback strategy'
+		'60  Maintenance mode'
+	]
+}
+
+fn layout(W, H) {
+	panelX := 16
+	panelY := 56
+	panelW := W - 32
+	panelH := H - 72
+
+	viewX := panelX + 14
+	viewY := panelY + 58
+	trackW := 14
+	viewW := panelW - 28 - trackW - 10
+	viewH := panelH - 88
+
+	trackX := viewX + viewW + 10
+	trackY := viewY
+	trackH := viewH
+
+	{
+		panelX: panelX
+		panelY: panelY
+		panelW: panelW
+		panelH: panelH
+		viewX: viewX
+		viewY: viewY
+		viewW: viewW
+		viewH: viewH
+		trackX: trackX
+		trackY: trackY
+		trackW: trackW
+		trackH: trackH
+	}
+}
+
+fn maxScrollFor(lo, itemCount) {
+	contentH := itemCount * ROW_HEIGHT
+	gui.formClamp(contentH - lo.viewH, 0, contentH)
+}
+
+fn thumbRect(lo, itemCount, scrollOffset) {
+	contentH := itemCount * ROW_HEIGHT
+	maxScroll := maxScrollFor(lo, itemCount)
+	trackH := lo.trackH
+	minThumbH := 28
+
+	thumbH := if contentH <= lo.viewH {
+		true -> trackH
+		_ -> gui.formClamp(int(trackH * lo.viewH / contentH), minThumbH, trackH)
+	}
+
+	travel := gui.formClamp(trackH - thumbH, 0, trackH)
+	thumbY := if maxScroll = 0 {
+		true -> lo.trackY
+		_ -> lo.trackY + int(scrollOffset * travel / maxScroll)
+	}
+
+	{
+		x: lo.trackX
+		y: thumbY
+		w: lo.trackW
+		h: thumbH
+		travel: travel
+		maxScroll: maxScroll
+	}
+}
+
+fn setScrollFromThumb(state, lo, thumb, my) {
+	if thumb.travel = 0 | thumb.maxScroll = 0 -> {
+		state.scroll <- 0
+		0
+	}
+
+	newThumbY := gui.formClamp(my - state.dragOffsetY, lo.trackY, lo.trackY + thumb.travel)
+	state.scroll <- int((newThumbY - lo.trackY) * thumb.maxScroll / thumb.travel)
+}
+
+fn signedHiWord(v) {
+	w := gui.formHiWord(v)
+	if w >= 32768 {
+		true -> w - 65536
+		_ -> w
+	}
+}
+
+fn drawForm(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type != :ok -> 0
+
+	W := window.width
+	H := window.height
+	lo := layout(W, H)
+	count := len(state.items)
+	maxScroll := maxScrollFor(lo, count)
+	state.scroll <- gui.formClamp(state.scroll, 0, maxScroll)
+	thumb := thumbRect(lo, count, state.scroll)
+
+	gui.fillRect(window, 0, 0, W, H, C_BG)
+	gui.fillRect(window, 0, 0, W, 44, C_HEADER)
+	gui.drawText(window, 14, 14, 'M  MAGNOLIA APP  |  Scroll Form Sample')
+
+	gui.fillRect(window, lo.panelX, lo.panelY, lo.panelW, lo.panelH, C_PANEL)
+	gui.formDrawBorder(window, lo.panelX, lo.panelY, lo.panelW, lo.panelH, C_BORDER)
+
+	gui.drawText(window, lo.viewX, lo.panelY + 14, 'Scrollable Settings Sections')
+	gui.drawText(window, lo.viewX, lo.panelY + 34, 'Drag the scrollbar, click track, or use Up/Down, PgUp/PgDn, Home/End')
+
+	gui.fillRect(window, lo.viewX, lo.viewY, lo.viewW, lo.viewH, C_VIEWPORT)
+	gui.formDrawBorder(window, lo.viewX, lo.viewY, lo.viewW, lo.viewH, C_BORDER)
+
+	i := 0
+	fn drawRows() if i < count {
+		true -> {
+			rowY := lo.viewY + i * ROW_HEIGHT - state.scroll
+			if rowY + ROW_HEIGHT > lo.viewY & rowY < lo.viewY + lo.viewH {
+				true -> {
+					isActive := i = state.selected
+					bg := if isActive {
+						true -> C_ROW_ACTIVE
+						_ -> if i % 2 = 0 { true -> C_ROW_A, _ -> C_ROW_B }
+					}
+					gui.fillRect(window, lo.viewX + 1, rowY, lo.viewW - 2, ROW_HEIGHT - 1, bg)
+					gui.drawText(window, lo.viewX + 12, rowY + 8, state.items.(i))
+				}
+			}
+			i <- i + 1
+			drawRows()
+		}
+	}
+	drawRows()
+
+	gui.fillRect(window, lo.trackX, lo.trackY, lo.trackW, lo.trackH, C_TRACK)
+	gui.formDrawBorder(window, lo.trackX, lo.trackY, lo.trackW, lo.trackH, C_BORDER)
+
+	thumbColor := if state.dragging | state.hoverThumb {
+		true -> C_THUMB_HOVER
+		_ -> C_THUMB
+	}
+	gui.fillRect(window, thumb.x + 1, thumb.y + 1, thumb.w - 2, thumb.h - 2, thumbColor)
+	gui.formDrawBorder(window, thumb.x, thumb.y, thumb.w, thumb.h, C_BORDER)
+
+	infoY := lo.viewY + lo.viewH + 10
+	gui.drawText(window, lo.viewX, infoY, 'Rows: ' + string(count) + '  Scroll: ' + string(state.scroll) + ' / ' + string(maxScroll))
+	gui.drawText(window, lo.viewX, infoY + 20, 'Selected: ' + state.items.(state.selected))
+	gui.drawText(window, lo.viewX, infoY + 40, 'Esc or Q closes window. Auto-close after ~20 seconds.')
+
+	gui.endFrame(window)
+}
+
+println('== Magnolia Scroll Form Sample ==')
+println('  Drag scrollbar thumb, click track, mouse wheel, or keyboard to scroll')
+
+window := gui.createWindow('Magnolia - Scroll Form', 760, 620, {
+	updateOnDispatch: false
+})
+
+if window.type {
+	:ok -> {
+		state := {
+			items: makeItems()
+			scroll: 0
+			selected: 0
+			dragging: false
+			hoverThumb: false
+			dragOffsetY: 0
+			mouseX: 0
+			mouseY: 0
+			lifeSec: 0.0
+		}
+
+		gui.show(window)
+
+		gui.onMouseMove(window, fn(mx, my) {
+			state.mouseX <- mx
+			state.mouseY <- my
+			lo := layout(window.width, window.height)
+			thumb := thumbRect(lo, len(state.items), state.scroll)
+			state.hoverThumb <- gui.formInRect?(mx, my, thumb.x, thumb.y, thumb.w, thumb.h)
+
+			if state.dragging -> setScrollFromThumb(state, lo, thumb, my)
+
+			if gui.formInRect?(mx, my, lo.viewX, lo.viewY, lo.viewW, lo.viewH) {
+				true -> {
+					hovered := int((my - lo.viewY + state.scroll) / ROW_HEIGHT)
+					if hovered >= 0 & hovered < len(state.items) -> state.selected <- hovered
+				}
+			}
+		})
+
+		gui.onLButtonDown(window, fn(mx, my) {
+			state.mouseX <- mx
+			state.mouseY <- my
+			lo := layout(window.width, window.height)
+			thumb := thumbRect(lo, len(state.items), state.scroll)
+
+			if gui.formInRect?(mx, my, thumb.x, thumb.y, thumb.w, thumb.h) {
+				true -> {
+					state.dragging <- true
+					state.dragOffsetY <- my - thumb.y
+				}
+				_ -> if gui.formInRect?(mx, my, lo.trackX, lo.trackY, lo.trackW, lo.trackH) {
+					true -> {
+						page := int(lo.viewH * 0.85)
+						if my < thumb.y -> state.scroll <- state.scroll - page
+						if my > thumb.y + thumb.h -> state.scroll <- state.scroll + page
+					}
+				}
+			}
+
+			if gui.formInRect?(mx, my, lo.viewX, lo.viewY, lo.viewW, lo.viewH) {
+				true -> {
+					hit := int((my - lo.viewY + state.scroll) / ROW_HEIGHT)
+					if hit >= 0 & hit < len(state.items) -> state.selected <- hit
+				}
+			}
+
+			maxScroll := maxScrollFor(lo, len(state.items))
+			state.scroll <- gui.formClamp(state.scroll, 0, maxScroll)
+		})
+
+		gui.onLButtonUp(window, fn(mx, my) {
+			state.mouseX <- mx
+			state.mouseY <- my
+			state.dragging <- false
+		})
+
+		gui.onDispatch(window, fn(_) {
+			if gui.formMsgType(window) = 522 {
+				true -> {
+					lo := layout(window.width, window.height)
+					if gui.formInRect?(state.mouseX, state.mouseY, lo.viewX, lo.viewY, lo.viewW, lo.viewH) {
+						true -> {
+							delta := signedHiWord(gui.formMsgWParam(window))
+							step := int(delta * 0.35)
+							state.scroll <- state.scroll - step
+							maxScroll := maxScrollFor(lo, len(state.items))
+							state.scroll <- gui.formClamp(state.scroll, 0, maxScroll)
+						}
+					}
+				}
+			}
+		})
+
+		gui.onKeyDown(window, fn(vk) {
+			lo := layout(window.width, window.height)
+			lineStep := 24
+			pageStep := int(lo.viewH * 0.85)
+
+			if vk = 38 -> state.scroll <- state.scroll - lineStep
+			if vk = 40 -> state.scroll <- state.scroll + lineStep
+			if vk = 33 -> state.scroll <- state.scroll - pageStep
+			if vk = 34 -> state.scroll <- state.scroll + pageStep
+			if vk = 36 -> state.scroll <- 0
+			if vk = 35 -> state.scroll <- 999999
+
+			if vk = 27 | vk = 81 -> gui.close(window)
+
+			maxScroll := maxScrollFor(lo, len(state.items))
+			state.scroll <- gui.formClamp(state.scroll, 0, maxScroll)
+		})
+
+		drawForm(window, state)
+		gui.run(window, ?, fn(win, dt) {
+			state.lifeSec <- state.lifeSec + dt
+			if state.lifeSec >= 20.0 -> gui.close(win)
+			drawForm(win, state)
+		})
+		gui.close(window)
+	}
+	_ -> println('Could not create window: ' + string(window))
+}

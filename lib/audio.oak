@@ -23,13 +23,18 @@
 } := import('str')
 {
 	abs: abs
-	sqrt: sqrt
 	pow: pow
 	sin: sin
 	cos: cos
 	floor: floor
 	Pi: Pi
 } := import('math')
+{
+	complexMag: _complexMagFromModule
+	phaseAt: _phaseAtFromModule
+	freqToMidi: _freqToMidiFromModule
+	linearToDb: _linearToDbFromModule
+} := import('audio-complex')
 
 // ---- constants -------------------------------------------------------
 
@@ -714,7 +719,7 @@ fn _fftCore(re, im, sign) {
 	range(n) |> each(fn(i) {
 		j := _bitrev(i, bits)
 		if j > i {
-			_fftSwap(re, im, i, j)
+			true -> _fftSwap(re, im, i, j)
 		}
 	})
 
@@ -763,32 +768,20 @@ fn ifft(re, im) {
 //
 // Example:
 //   mags := magnitude(result.re, result.im)
-fn _complexMag(x, y) sqrt(x * x + y * y)
-
 fn magnitude(re, im) range(len(re)) |> map(fn(i) {
 	r := re.(i)
 	g := im.(i)
-	_complexMag(r, g)
+	_complexMagFromModule(r, g)
 })
 
 // phase computes the phase angle (radians) of each complex FFT bin.
 //
 // Example:
 //   phases := phase(result.re, result.im)
-fn _phaseAt(x, y) {
-	m := _complexMag(x, y)
-	if {
-		x > 0 -> 2 * atan(y / (m + x))
-		x <= 0 & y != 0 -> 2 * atan((m - x) / y)
-		x < 0 & y = 0 -> Pi
-		_ -> 0
-	}
-}
-
 fn phase(re, im) range(len(re)) |> map(fn(i) {
 	x := re.(i)
 	y := im.(i)
-	_phaseAt(x, y)
+	_phaseAtFromModule(x, y)
 })
 
 // powerSpectrum computes magnitude-spectrum bins from a real signal.
@@ -843,7 +836,7 @@ fn midiToFreq(note) 440 * pow(2, (note - 69) / 12)
 // Example:
 //   freqToMidi(440)     // => 69
 //   freqToMidi(261.63)  // => 60
-fn freqToMidi(freq) int(69 + 12 * log(2, freq / 440) + 0.5)
+fn freqToMidi(freq) _freqToMidiFromModule(freq)
 
 // dbToLinear converts a dB value to a linear amplitude gain factor.
 //
@@ -858,4 +851,4 @@ fn dbToLinear(db) pow(10, db / 20)
 // Example:
 //   linearToDb(0.5)  // => ~-6.02
 //   linearToDb(1.0)  // => 0.0
-fn linearToDb(g) if g > 0 { true -> 20 * log(10, g), _ -> ? }
+fn linearToDb(g) _linearToDbFromModule(g)
