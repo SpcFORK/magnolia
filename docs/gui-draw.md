@@ -4,7 +4,7 @@ Cross-platform drawing primitives used by the GUI facade: text, lines, rectangle
 
 Key exports
 
-- `drawText(window, x, y, text)`
+- `drawText(window, x, y, text, color?)`
 - `fillRect(window, x, y, width, height, color?)`
 - `drawLine(window, x1, y1, x2, y2, color?)`
 - `releaseResources(window)`
@@ -21,5 +21,5 @@ Example
 ```oak
 gd := import('gui-draw')
 gd.fillRect(window, 10, 10, 200, 120, gui.rgb(200,80,40))
-gd.drawText(window, 16, 28, 'Sample')
+gd.drawText(window, 16, 28, 'Sample', gui.rgb(248, 232, 242))
 ```

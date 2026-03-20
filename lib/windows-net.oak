@@ -1,0 +1,284 @@
+// windows-net provides Winsock and WinINet wrappers used by lib/windows.
+
+sys := import('sys')
+{
+	readU32: readU32
+} := import('writes')
+{
+	Ws2_32: Ws2_32
+	Wininet: Wininet
+} := import('windows-constants')
+{
+	AF_INET: AF_INET
+	INTERNET_OPEN_TYPE_PRECONFIG: INTERNET_OPEN_TYPE_PRECONFIG
+} := import('windows-flags')
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn wstr(s) utf16(s)
+
+fn cstr(s) s + char(0)
+
+fn _zeros(n, acc) if n {
+	0 -> acc
+	_ -> _zeros(n - 1, acc << 0)
+}
+
+fn callOk?(res) sys.ok?(res) | (res.type = :error & res.r1 > 0)
+
+fn callValueOrZero(res) if sys.ok?(res) {
+	true -> res.r1
+	_ -> 0
+}
+
+fn ws2_32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Ws2_32, symbol, args...)
+	_ -> _platformError('ws2_32')
+}
+
+fn wininet(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Wininet, symbol, args...)
+	_ -> _platformError('wininet')
+}
+
+fn wsLastError() if isWindows?() {
+	true -> ws2_32('WSAGetLastError')
+	_ -> _platformError('wsLastError')
+}
+
+// wsaDataPtr should point to a writable WSAData-compatible buffer (typically 400 bytes).
+fn wsaStartup(version, wsaDataPtr) if isWindows?() {
+	true -> ws2_32('WSAStartup', version, wsaDataPtr)
+	_ -> _platformError('wsaStartup')
+}
+
+fn wsaCleanup() if isWindows?() {
+	true -> ws2_32('WSACleanup')
+	_ -> _platformError('wsaCleanup')
+}
+
+fn socket(af, socketType, protocol) if isWindows?() {
+	true -> ws2_32('socket', af, socketType, protocol)
+	_ -> _platformError('socket')
+}
+
+fn bindSocket(sock, sockaddrPtr, sockaddrLen) if isWindows?() {
+	true -> ws2_32('bind', sock, sockaddrPtr, sockaddrLen)
+	_ -> _platformError('bindSocket')
+}
+
+fn connectSocket(sock, sockaddrPtr, sockaddrLen) if isWindows?() {
+	true -> ws2_32('connect', sock, sockaddrPtr, sockaddrLen)
+	_ -> _platformError('connectSocket')
+}
+
+fn listenSocket(sock, backlog) if isWindows?() {
+	true -> ws2_32('listen', sock, backlog)
+	_ -> _platformError('listenSocket')
+}
+
+fn acceptSocket(sock, addrOutPtr, addrLenInOutPtr) if isWindows?() {
+	true -> ws2_32('accept', sock, addrOutPtr, addrLenInOutPtr)
+	_ -> _platformError('acceptSocket')
+}
+
+fn sendSocket(sock, bufferPtr, size, flags) if isWindows?() {
+	true -> ws2_32('send', sock, bufferPtr, size, flags)
+	_ -> _platformError('sendSocket')
+}
+
+fn recvSocket(sock, bufferPtr, size, flags) if isWindows?() {
+	true -> ws2_32('recv', sock, bufferPtr, size, flags)
+	_ -> _platformError('recvSocket')
+}
+
+fn shutdownSocket(sock, how) if isWindows?() {
+	true -> ws2_32('shutdown', sock, how)
+	_ -> _platformError('shutdownSocket')
+}
+
+fn closeSocket(sock) if isWindows?() {
+	true -> ws2_32('closesocket', sock)
+	_ -> _platformError('closeSocket')
+}
+
+fn htons(value) if isWindows?() {
+	true -> ws2_32('htons', value)
+	_ -> _platformError('htons')
+}
+
+fn htonl(value) if isWindows?() {
+	true -> ws2_32('htonl', value)
+	_ -> _platformError('htonl')
+}
+
+fn inetAddr(ipv4) if isWindows?() {
+	true -> ws2_32('inet_addr', cstr(ipv4))
+	_ -> _platformError('inetAddr')
+}
+
+fn internetOpen(agent, accessType, proxy, proxyBypass, flags) if isWindows?() {
+	true -> wininet(
+		'InternetOpenW'
+		wstr(agent)
+		accessType
+		if proxy {
+			? -> ?
+			_ -> wstr(proxy)
+		}
+		if proxyBypass {
+			? -> ?
+			_ -> wstr(proxyBypass)
+		}
+		flags
+	)
+	_ -> _platformError('internetOpen')
+}
+
+fn internetConnect(hInternet, serverName, serverPort, username, password, service, flags, context) if isWindows?() {
+	true -> wininet(
+		'InternetConnectW'
+		hInternet
+		wstr(serverName)
+		serverPort
+		if username {
+			? -> ?
+			_ -> wstr(username)
+		}
+		if password {
+			? -> ?
+			_ -> wstr(password)
+		}
+		service
+		flags
+		context
+	)
+	_ -> _platformError('internetConnect')
+}
+
+fn internetOpenUrl(hInternet, url, headers, headersLen, flags, context) if isWindows?() {
+	true -> wininet(
+		'InternetOpenUrlW'
+		hInternet
+		wstr(url)
+		if headers {
+			? -> ?
+			_ -> wstr(headers)
+		}
+		headersLen
+		flags
+		context
+	)
+	_ -> _platformError('internetOpenUrl')
+}
+
+fn internetReadFile(hFile, outBufferPtr, bytesToRead, bytesReadOutPtr) if isWindows?() {
+	true -> wininet('InternetReadFile', hFile, outBufferPtr, bytesToRead, bytesReadOutPtr)
+	_ -> _platformError('internetReadFile')
+}
+
+fn internetCloseHandle(hInternet) if isWindows?() {
+	true -> wininet('InternetCloseHandle', hInternet)
+	_ -> _platformError('internetCloseHandle')
+}
+
+fn _bytesToString(raw) {
+	bytes := bits(raw)
+	fn sub(i, out) if i < len(bytes) {
+		true -> sub(i + 1, out + char(bytes.(i)))
+		_ -> out
+	}
+	sub(0, '')
+}
+
+// Builds a sockaddr_in-compatible structure and returns {buffer, ptr, len}.
+fn sockaddrIn(ipv4, port) if isWindows?() {
+	true -> {
+		portNet := callValueOrZero(htons(port))
+		ipNet := callValueOrZero(inetAddr(ipv4))
+		buf := bits([
+			AF_INET % 256
+			int(AF_INET / 256)
+			portNet % 256
+			int(portNet / 256)
+			ipNet % 256
+			int(ipNet / 256) % 256
+			int(ipNet / 65536) % 256
+			int(ipNet / 16777216) % 256
+			0
+			0
+			0
+			0
+			0
+			0
+			0
+			0
+		])
+		{type: :ok, buffer: buf, ptr: addr(buf), len: 16}
+	}
+	_ -> _platformError('sockaddrIn')
+}
+
+fn _internetReadAll(hInternetFile, chunkBuf, bytesReadBuf, chunkSize, out) {
+	res := internetReadFile(hInternetFile, addr(chunkBuf), chunkSize, addr(bytesReadBuf))
+	if callOk?(res) {
+		true -> {
+			readCount := readU32(addr(bytesReadBuf))
+			if readCount {
+				0 -> {type: :ok, body: out}
+				_ -> _internetReadAll(
+					hInternetFile
+					chunkBuf
+					bytesReadBuf
+					chunkSize
+					out + _bytesToString(memread(addr(chunkBuf), readCount))
+				)
+			}
+		}
+		_ -> {type: :error, error: 'InternetReadFile failed', detail: res}
+	}
+}
+
+// Downloads URL content via WinINet and returns {type: :ok, body: <string>}.
+fn internetSimpleGet(url, agent, chunkSize) if isWindows?() {
+	true -> {
+		chunkSize := if chunkSize {
+			? -> 4096
+			_ -> chunkSize
+		}
+		agent := if agent {
+			? -> 'Magnolia/Windows'
+			_ -> agent
+		}
+
+		hInternet := internetOpen(agent, INTERNET_OPEN_TYPE_PRECONFIG, ?, ?, 0)
+		if callOk?(hInternet) {
+			true -> {
+				hFile := internetOpenUrl(hInternet.r1, url, ?, 0, 0, 0)
+				if callOk?(hFile) {
+					true -> {
+						chunkBuf := bits(_zeros(chunkSize, []))
+						bytesReadBuf := bits([0, 0, 0, 0])
+						result := _internetReadAll(hFile.r1, chunkBuf, bytesReadBuf, chunkSize, '')
+						internetCloseHandle(hFile.r1)
+						internetCloseHandle(hInternet.r1)
+						result
+					}
+					_ -> {
+						internetCloseHandle(hInternet.r1)
+						{type: :error, error: 'InternetOpenUrlW failed', detail: hFile}
+					}
+				}
+			}
+			_ -> {type: :error, error: 'InternetOpenW failed', detail: hInternet}
+		}
+	}
+	_ -> _platformError('internetSimpleGet')
+}

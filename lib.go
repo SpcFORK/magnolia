@@ -181,6 +181,33 @@ var libwrites string
 //go:embed lib/windows.oak
 var libwindows string
 
+//go:embed lib/windows-constants.oak
+var libwindowsconstants string
+
+//go:embed lib/windows-flags.oak
+var libwindowsflags string
+
+//go:embed lib/windows-registry.oak
+var libwindowsregistry string
+
+//go:embed lib/windows-net.oak
+var libwindowsnet string
+
+//go:embed lib/windows-windowing.oak
+var libwindowswindowing string
+
+//go:embed lib/windows-gdi.oak
+var libwindowsgdi string
+
+//go:embed lib/windows-kernel.oak
+var libwindowskernel string
+
+//go:embed lib/windows-loader.oak
+var libwindowsloader string
+
+//go:embed lib/windows-core.oak
+var libwindowscore string
+
 //go:embed lib/Linux.oak
 var liblinux string
 
@@ -219,6 +246,21 @@ var libguidraw string
 
 //go:embed lib/gui-2d.oak
 var libgui2d string
+
+//go:embed lib/gui-color.oak
+var libguicolor string
+
+//go:embed lib/gui-events.oak
+var libguievents string
+
+//go:embed lib/gui-graph.oak
+var libguigraph string
+
+//go:embed lib/gui-form.oak
+var libguiform string
+
+//go:embed lib/gui-loop.oak
+var libguiloop string
 
 //go:embed lib/ai.oak
 var libai string
@@ -290,6 +332,15 @@ var stdlibs = map[string]string{
 	"codegen-common":      libcodegencommon,
 	"sys":                 libsys,
 	"writes":              libwrites,
+	"windows-constants":   libwindowsconstants,
+	"windows-flags":       libwindowsflags,
+	"windows-registry":    libwindowsregistry,
+	"windows-net":         libwindowsnet,
+	"windows-windowing":   libwindowswindowing,
+	"windows-gdi":         libwindowsgdi,
+	"windows-kernel":      libwindowskernel,
+	"windows-loader":      libwindowsloader,
+	"windows-core":        libwindowscore,
 	"windows":             libwindows,
 	"linux":               liblinux,
 	"Linux":               liblinux,
@@ -304,6 +355,11 @@ var stdlibs = map[string]string{
 	"gui-native-linux":    libguinativelinux,
 	"gui-draw":            libguidraw,
 	"gui-2d":              libgui2d,
+	"gui-color":           libguicolor,
+	"gui-events":          libguievents,
+	"gui-graph":           libguigraph,
+	"gui-form":            libguiform,
+	"gui-loop":            libguiloop,
 	"GUI":                 libgui,
 	"gui":                 libgui,
 	"ai":                  libai,

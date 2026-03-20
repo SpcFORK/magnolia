@@ -1,0 +1,768 @@
+// windows-loader provides DLL loading, symbol dispatch, and family helpers used by lib/windows.
+
+sys := import('sys')
+
+{
+	Kernel32: Kernel32
+	User32: User32
+	Gdi32: Gdi32
+	Advapi32: Advapi32
+	Shell32: Shell32
+	Ole32: Ole32
+	Ws2_32: Ws2_32
+	Comctl32: Comctl32
+	Wininet: Wininet
+	OpenGL32: OpenGL32
+	Vulkan1: Vulkan1
+	D3d9: D3d9
+	Ddraw: Ddraw
+	Msvcrt: Msvcrt
+	Ucrtbase: Ucrtbase
+	Vcruntime140: Vcruntime140
+	ActionCenter: ActionCenter
+	Aclui: Aclui
+	Acledit: Acledit
+	Acppage: Acppage
+	Acproxy: Acproxy
+	Adprovider: Adprovider
+	Aeinv: Aeinv
+	Aepic: Aepic
+	Amstream: Amstream
+	Adsldp: Adsldp
+	Adsnt: Adsnt
+	Adtschema: Adtschema
+	Adsldpc: Adsldpc
+	Adsmsext: Adsmsext
+	Adhsvc: Adhsvc
+	Advapi32res: Advapi32res
+	Advpack: Advpack
+	Aeevts: Aeevts
+	Apds: Apds
+	Winhttp: Winhttp
+	Urlmon: Urlmon
+	Crypt32: Crypt32
+	Bcrypt: Bcrypt
+	Secur32: Secur32
+	Comdlg32: Comdlg32
+	Oleaut32: Oleaut32
+	Imm32: Imm32
+	Shlwapi: Shlwapi
+	Shcore: Shcore
+	UxTheme: UxTheme
+	Dwmapi: Dwmapi
+	Version: Version
+	Setupapi: Setupapi
+	Netapi32: Netapi32
+	Winmm: Winmm
+	Avrt: Avrt
+	Mmdevapi: Mmdevapi
+	Dsound: Dsound
+	Mfplat: Mfplat
+	Mfreadwrite: Mfreadwrite
+	Mfuuid: Mfuuid
+	Taskschd: Taskschd
+	Wevtapi: Wevtapi
+	Wlanapi: Wlanapi
+	Mpr: Mpr
+	Spoolss: Spoolss
+	Wtsapi32: Wtsapi32
+	Rasapi32: Rasapi32
+	Msi: Msi
+	Wimgapi: Wimgapi
+	Cabinet: Cabinet
+	Apphelp: Apphelp
+	Wer: Wer
+	Faultrep: Faultrep
+	Dbghelp: Dbghelp
+	Dbgeng: Dbgeng
+	Pdh: Pdh
+	Iphlpapi: Iphlpapi
+	Wscapi: Wscapi
+	Sensapi: Sensapi
+	Ncrypt: Ncrypt
+	Cryptui: Cryptui
+	Wintrust: Wintrust
+	Samlib: Samlib
+	Netshell: Netshell
+	Fwpuclnt: Fwpuclnt
+	Dnsapi: Dnsapi
+	Nlaapi: Nlaapi
+	Httpapi: Httpapi
+	Rpcrt4: Rpcrt4
+	Srpapi: Srpapi
+	Sxs: Sxs
+	Msvcirt: Msvcirt
+	ApiSetPrefix: ApiSetPrefix
+	D3dx9Prefix: D3dx9Prefix
+	MsvcpPrefix: MsvcpPrefix
+	VcruntimePrefix: VcruntimePrefix
+	AtlPrefix: AtlPrefix
+	MfcPrefix: MfcPrefix
+	VcompPrefix: VcompPrefix
+} := import('windows-constants')
+
+{
+	moduleHandle: moduleHandle
+	loadLibrary: loadLibrary
+	procAddress: procAddress
+} := import('windows-kernel')
+
+_loadedLibraries := {}
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn _normalizeHandleResult(result, apiName, library) if sys.ok?(result) & result.r1 > 0 {
+	true -> {
+		{
+			type: :ok
+			handle: result.r1
+			library: library
+		}
+	}
+	_ -> {
+		{
+			type: :error
+			error: apiName + ' failed'
+			library: library
+			detail: result
+		}
+	}
+}
+
+fn loadDll(library) if isWindows?() {
+	true -> if cached := _loadedLibraries.(library) {
+		? -> {
+			alreadyLoaded := moduleHandle(library)
+			if sys.ok?(alreadyLoaded) & alreadyLoaded.r1 > 0 {
+				true -> {
+					_loadedLibraries.(library) := alreadyLoaded.r1
+					{
+						type: :ok
+						handle: alreadyLoaded.r1
+						library: library
+					}
+				}
+				_ -> {
+					loaded := loadLibrary(library)
+					result := _normalizeHandleResult(loaded, 'LoadLibraryW', library)
+					if result.type {
+						:ok -> {
+							_loadedLibraries.(library) := result.handle
+							result
+						}
+						_ -> {
+							systemPath := 'C:\\Windows\\System32\\' + library
+							loadedSystem := loadLibrary(systemPath)
+							systemResult := _normalizeHandleResult(loadedSystem, 'LoadLibraryW', systemPath)
+							if systemResult.type {
+								:ok -> {
+									_loadedLibraries.(library) := systemResult.handle
+									{
+										type: :ok
+										handle: systemResult.handle
+										library: library
+										path: systemPath
+									}
+								}
+								_ -> {
+									{
+										type: :error
+										error: 'LoadLibraryW failed'
+										library: library
+										detail: result.detail
+										fallback: systemResult.detail
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :ok
+				handle: cached
+				library: library
+			}
+		}
+	}
+	_ -> _platformError('loadDll')
+}
+
+fn resolveInLoaded(library, symbol) if isWindows?() {
+	true -> {
+		loaded := loadDll(library)
+		if loaded.type {
+			:ok -> {
+				proc := procAddress(loaded.handle, symbol)
+				if sys.ok?(proc) & proc.r1 > 0 {
+					true -> {
+						{
+							type: :ok
+							proc: proc.r1
+							handle: loaded.handle
+							library: library
+							symbol: symbol
+						}
+					}
+					_ -> {
+						{
+							type: :error
+							error: 'Could not resolve procedure'
+							library: library
+							symbol: symbol
+							detail: proc
+						}
+					}
+				}
+			}
+			_ -> loaded
+		}
+	}
+	_ -> _platformError('resolveInLoaded')
+}
+
+fn callIn(library, symbol, args...) if isWindows?() {
+	true -> {
+		resolved := resolveInLoaded(library, symbol)
+		if resolved.type {
+			:ok -> sys.call(resolved.proc, args...)
+			_ -> resolved
+		}
+	}
+	_ -> _platformError('callIn')
+}
+
+fn user32(symbol, args...) if isWindows?() {
+	true -> callIn(User32, symbol, args...)
+	_ -> _platformError('user32')
+}
+
+fn gdi32(symbol, args...) if isWindows?() {
+	true -> callIn(Gdi32, symbol, args...)
+	_ -> _platformError('gdi32')
+}
+
+fn advapi32(symbol, args...) if isWindows?() {
+	true -> callIn(Advapi32, symbol, args...)
+	_ -> _platformError('advapi32')
+}
+
+fn shell32(symbol, args...) if isWindows?() {
+	true -> callIn(Shell32, symbol, args...)
+	_ -> _platformError('shell32')
+}
+
+fn ole32(symbol, args...) if isWindows?() {
+	true -> callIn(Ole32, symbol, args...)
+	_ -> _platformError('ole32')
+}
+
+fn ws2_32(symbol, args...) if isWindows?() {
+	true -> callIn(Ws2_32, symbol, args...)
+	_ -> _platformError('ws2_32')
+}
+
+fn comctl32(symbol, args...) if isWindows?() {
+	true -> callIn(Comctl32, symbol, args...)
+	_ -> _platformError('comctl32')
+}
+
+fn wininet(symbol, args...) if isWindows?() {
+	true -> callIn(Wininet, symbol, args...)
+	_ -> _platformError('wininet')
+}
+
+fn opengl32(symbol, args...) if isWindows?() {
+	true -> callIn(OpenGL32, symbol, args...)
+	_ -> _platformError('opengl32')
+}
+
+fn vulkan1(symbol, args...) if isWindows?() {
+	true -> callIn(Vulkan1, symbol, args...)
+	_ -> _platformError('vulkan1')
+}
+
+fn d3d9(symbol, args...) if isWindows?() {
+	true -> callIn(D3d9, symbol, args...)
+	_ -> _platformError('d3d9')
+}
+
+fn ddraw(symbol, args...) if isWindows?() {
+	true -> callIn(Ddraw, symbol, args...)
+	_ -> _platformError('ddraw')
+}
+
+fn directDrawCreateEx(guidPtr, outPtr, iidPtr, outerUnknown) if isWindows?() {
+	true -> ddraw('DirectDrawCreateEx', guidPtr, outPtr, iidPtr, outerUnknown)
+	_ -> _platformError('directDrawCreateEx')
+}
+
+fn directDrawCreate(guidPtr, outPtr, outerUnknown) if isWindows?() {
+	true -> ddraw('DirectDrawCreate', guidPtr, outPtr, outerUnknown)
+	_ -> _platformError('directDrawCreate')
+}
+
+fn direct3DCreate9(sdkVersion) if isWindows?() {
+	true -> d3d9('Direct3DCreate9', sdkVersion)
+	_ -> _platformError('direct3DCreate9')
+}
+
+fn d3dx9Dll(suffix) D3dx9Prefix + suffix + '.dll'
+
+fn d3dx9(suffix, symbol, args...) if isWindows?() {
+	true -> callIn(d3dx9Dll(suffix), symbol, args...)
+	_ -> _platformError('d3dx9')
+}
+
+fn apiSetDll(contract) {
+	if contract {
+		? -> ApiSetPrefix
+		_ -> if len(contract) >= 4 {
+			true -> if contract.(len(contract) - 4) = '.dll' {
+				true -> contract
+				_ -> ApiSetPrefix + contract + '.dll'
+			}
+			_ -> ApiSetPrefix + contract + '.dll'
+		}
+	}
+}
+
+fn apiSet(contract, symbol, args...) if isWindows?() {
+	true -> callIn(apiSetDll(contract), symbol, args...)
+	_ -> _platformError('apiSet')
+}
+
+fn msvcrt(symbol, args...) if isWindows?() {
+	true -> callIn(Msvcrt, symbol, args...)
+	_ -> _platformError('msvcrt')
+}
+
+fn ucrtbase(symbol, args...) if isWindows?() {
+	true -> callIn(Ucrtbase, symbol, args...)
+	_ -> _platformError('ucrtbase')
+}
+
+fn vcruntime140(symbol, args...) if isWindows?() {
+	true -> callIn(Vcruntime140, symbol, args...)
+	_ -> _platformError('vcruntime140')
+}
+
+fn actionCenter(symbol, args...) if isWindows?() {
+	true -> callIn(ActionCenter, symbol, args...)
+	_ -> _platformError('actionCenter')
+}
+
+fn aclui(symbol, args...) if isWindows?() {
+	true -> callIn(Aclui, symbol, args...)
+	_ -> _platformError('aclui')
+}
+
+fn acledit(symbol, args...) if isWindows?() {
+	true -> callIn(Acledit, symbol, args...)
+	_ -> _platformError('acledit')
+}
+
+fn acppage(symbol, args...) if isWindows?() {
+	true -> callIn(Acppage, symbol, args...)
+	_ -> _platformError('acppage')
+}
+
+fn acproxy(symbol, args...) if isWindows?() {
+	true -> callIn(Acproxy, symbol, args...)
+	_ -> _platformError('acproxy')
+}
+
+fn adprovider(symbol, args...) if isWindows?() {
+	true -> callIn(Adprovider, symbol, args...)
+	_ -> _platformError('adprovider')
+}
+
+fn aeinv(symbol, args...) if isWindows?() {
+	true -> callIn(Aeinv, symbol, args...)
+	_ -> _platformError('aeinv')
+}
+
+fn aepic(symbol, args...) if isWindows?() {
+	true -> callIn(Aepic, symbol, args...)
+	_ -> _platformError('aepic')
+}
+
+fn amstream(symbol, args...) if isWindows?() {
+	true -> callIn(Amstream, symbol, args...)
+	_ -> _platformError('amstream')
+}
+
+fn adsldp(symbol, args...) if isWindows?() {
+	true -> callIn(Adsldp, symbol, args...)
+	_ -> _platformError('adsldp')
+}
+
+fn adsnt(symbol, args...) if isWindows?() {
+	true -> callIn(Adsnt, symbol, args...)
+	_ -> _platformError('adsnt')
+}
+
+fn adtschema(symbol, args...) if isWindows?() {
+	true -> callIn(Adtschema, symbol, args...)
+	_ -> _platformError('adtschema')
+}
+
+fn adsldpc(symbol, args...) if isWindows?() {
+	true -> callIn(Adsldpc, symbol, args...)
+	_ -> _platformError('adsldpc')
+}
+
+fn adsmsext(symbol, args...) if isWindows?() {
+	true -> callIn(Adsmsext, symbol, args...)
+	_ -> _platformError('adsmsext')
+}
+
+fn adhsvc(symbol, args...) if isWindows?() {
+	true -> callIn(Adhsvc, symbol, args...)
+	_ -> _platformError('adhsvc')
+}
+
+fn advapi32res(symbol, args...) if isWindows?() {
+	true -> callIn(Advapi32res, symbol, args...)
+	_ -> _platformError('advapi32res')
+}
+
+fn advpack(symbol, args...) if isWindows?() {
+	true -> callIn(Advpack, symbol, args...)
+	_ -> _platformError('advpack')
+}
+
+fn aeevts(symbol, args...) if isWindows?() {
+	true -> callIn(Aeevts, symbol, args...)
+	_ -> _platformError('aeevts')
+}
+
+fn apds(symbol, args...) if isWindows?() {
+	true -> callIn(Apds, symbol, args...)
+	_ -> _platformError('apds')
+}
+
+fn winhttp(symbol, args...) if isWindows?() {
+	true -> callIn(Winhttp, symbol, args...)
+	_ -> _platformError('winhttp')
+}
+
+fn urlmon(symbol, args...) if isWindows?() {
+	true -> callIn(Urlmon, symbol, args...)
+	_ -> _platformError('urlmon')
+}
+
+fn crypt32(symbol, args...) if isWindows?() {
+	true -> callIn(Crypt32, symbol, args...)
+	_ -> _platformError('crypt32')
+}
+
+fn bcrypt(symbol, args...) if isWindows?() {
+	true -> callIn(Bcrypt, symbol, args...)
+	_ -> _platformError('bcrypt')
+}
+
+fn secur32(symbol, args...) if isWindows?() {
+	true -> callIn(Secur32, symbol, args...)
+	_ -> _platformError('secur32')
+}
+
+fn comdlg32(symbol, args...) if isWindows?() {
+	true -> callIn(Comdlg32, symbol, args...)
+	_ -> _platformError('comdlg32')
+}
+
+fn oleaut32(symbol, args...) if isWindows?() {
+	true -> callIn(Oleaut32, symbol, args...)
+	_ -> _platformError('oleaut32')
+}
+
+fn imm32(symbol, args...) if isWindows?() {
+	true -> callIn(Imm32, symbol, args...)
+	_ -> _platformError('imm32')
+}
+
+fn shlwapi(symbol, args...) if isWindows?() {
+	true -> callIn(Shlwapi, symbol, args...)
+	_ -> _platformError('shlwapi')
+}
+
+fn shcore(symbol, args...) if isWindows?() {
+	true -> callIn(Shcore, symbol, args...)
+	_ -> _platformError('shcore')
+}
+
+fn uxTheme(symbol, args...) if isWindows?() {
+	true -> callIn(UxTheme, symbol, args...)
+	_ -> _platformError('uxTheme')
+}
+
+fn dwmapi(symbol, args...) if isWindows?() {
+	true -> callIn(Dwmapi, symbol, args...)
+	_ -> _platformError('dwmapi')
+}
+
+fn versionDll(symbol, args...) if isWindows?() {
+	true -> callIn(Version, symbol, args...)
+	_ -> _platformError('versionDll')
+}
+
+fn setupapi(symbol, args...) if isWindows?() {
+	true -> callIn(Setupapi, symbol, args...)
+	_ -> _platformError('setupapi')
+}
+
+fn netapi32(symbol, args...) if isWindows?() {
+	true -> callIn(Netapi32, symbol, args...)
+	_ -> _platformError('netapi32')
+}
+
+fn winmm(symbol, args...) if isWindows?() {
+	true -> callIn(Winmm, symbol, args...)
+	_ -> _platformError('winmm')
+}
+
+fn avrt(symbol, args...) if isWindows?() {
+	true -> callIn(Avrt, symbol, args...)
+	_ -> _platformError('avrt')
+}
+
+fn mmdevapi(symbol, args...) if isWindows?() {
+	true -> callIn(Mmdevapi, symbol, args...)
+	_ -> _platformError('mmdevapi')
+}
+
+fn dsound(symbol, args...) if isWindows?() {
+	true -> callIn(Dsound, symbol, args...)
+	_ -> _platformError('dsound')
+}
+
+fn mfplat(symbol, args...) if isWindows?() {
+	true -> callIn(Mfplat, symbol, args...)
+	_ -> _platformError('mfplat')
+}
+
+fn mfreadwrite(symbol, args...) if isWindows?() {
+	true -> callIn(Mfreadwrite, symbol, args...)
+	_ -> _platformError('mfreadwrite')
+}
+
+fn mfuuid(symbol, args...) if isWindows?() {
+	true -> callIn(Mfuuid, symbol, args...)
+	_ -> _platformError('mfuuid')
+}
+
+fn taskschd(symbol, args...) if isWindows?() {
+	true -> callIn(Taskschd, symbol, args...)
+	_ -> _platformError('taskschd')
+}
+
+fn wevtapi(symbol, args...) if isWindows?() {
+	true -> callIn(Wevtapi, symbol, args...)
+	_ -> _platformError('wevtapi')
+}
+
+fn wlanapi(symbol, args...) if isWindows?() {
+	true -> callIn(Wlanapi, symbol, args...)
+	_ -> _platformError('wlanapi')
+}
+
+fn mpr(symbol, args...) if isWindows?() {
+	true -> callIn(Mpr, symbol, args...)
+	_ -> _platformError('mpr')
+}
+
+fn spoolss(symbol, args...) if isWindows?() {
+	true -> callIn(Spoolss, symbol, args...)
+	_ -> _platformError('spoolss')
+}
+
+fn wtsapi32(symbol, args...) if isWindows?() {
+	true -> callIn(Wtsapi32, symbol, args...)
+	_ -> _platformError('wtsapi32')
+}
+
+fn rasapi32(symbol, args...) if isWindows?() {
+	true -> callIn(Rasapi32, symbol, args...)
+	_ -> _platformError('rasapi32')
+}
+
+fn msi(symbol, args...) if isWindows?() {
+	true -> callIn(Msi, symbol, args...)
+	_ -> _platformError('msi')
+}
+
+fn wimgapi(symbol, args...) if isWindows?() {
+	true -> callIn(Wimgapi, symbol, args...)
+	_ -> _platformError('wimgapi')
+}
+
+fn cabinet(symbol, args...) if isWindows?() {
+	true -> callIn(Cabinet, symbol, args...)
+	_ -> _platformError('cabinet')
+}
+
+fn apphelp(symbol, args...) if isWindows?() {
+	true -> callIn(Apphelp, symbol, args...)
+	_ -> _platformError('apphelp')
+}
+
+fn wer(symbol, args...) if isWindows?() {
+	true -> callIn(Wer, symbol, args...)
+	_ -> _platformError('wer')
+}
+
+fn faultrep(symbol, args...) if isWindows?() {
+	true -> callIn(Faultrep, symbol, args...)
+	_ -> _platformError('faultrep')
+}
+
+fn dbghelp(symbol, args...) if isWindows?() {
+	true -> callIn(Dbghelp, symbol, args...)
+	_ -> _platformError('dbghelp')
+}
+
+fn dbgeng(symbol, args...) if isWindows?() {
+	true -> callIn(Dbgeng, symbol, args...)
+	_ -> _platformError('dbgeng')
+}
+
+fn pdh(symbol, args...) if isWindows?() {
+	true -> callIn(Pdh, symbol, args...)
+	_ -> _platformError('pdh')
+}
+
+fn iphlpapi(symbol, args...) if isWindows?() {
+	true -> callIn(Iphlpapi, symbol, args...)
+	_ -> _platformError('iphlpapi')
+}
+
+fn wscapi(symbol, args...) if isWindows?() {
+	true -> callIn(Wscapi, symbol, args...)
+	_ -> _platformError('wscapi')
+}
+
+fn sensapi(symbol, args...) if isWindows?() {
+	true -> callIn(Sensapi, symbol, args...)
+	_ -> _platformError('sensapi')
+}
+
+fn ncrypt(symbol, args...) if isWindows?() {
+	true -> callIn(Ncrypt, symbol, args...)
+	_ -> _platformError('ncrypt')
+}
+
+fn cryptui(symbol, args...) if isWindows?() {
+	true -> callIn(Cryptui, symbol, args...)
+	_ -> _platformError('cryptui')
+}
+
+fn wintrust(symbol, args...) if isWindows?() {
+	true -> callIn(Wintrust, symbol, args...)
+	_ -> _platformError('wintrust')
+}
+
+fn samlib(symbol, args...) if isWindows?() {
+	true -> callIn(Samlib, symbol, args...)
+	_ -> _platformError('samlib')
+}
+
+fn netshell(symbol, args...) if isWindows?() {
+	true -> callIn(Netshell, symbol, args...)
+	_ -> _platformError('netshell')
+}
+
+fn fwpuclnt(symbol, args...) if isWindows?() {
+	true -> callIn(Fwpuclnt, symbol, args...)
+	_ -> _platformError('fwpuclnt')
+}
+
+fn dnsapi(symbol, args...) if isWindows?() {
+	true -> callIn(Dnsapi, symbol, args...)
+	_ -> _platformError('dnsapi')
+}
+
+fn nlaapi(symbol, args...) if isWindows?() {
+	true -> callIn(Nlaapi, symbol, args...)
+	_ -> _platformError('nlaapi')
+}
+
+fn httpapi(symbol, args...) if isWindows?() {
+	true -> callIn(Httpapi, symbol, args...)
+	_ -> _platformError('httpapi')
+}
+
+fn rpcrt4(symbol, args...) if isWindows?() {
+	true -> callIn(Rpcrt4, symbol, args...)
+	_ -> _platformError('rpcrt4')
+}
+
+fn srpapi(symbol, args...) if isWindows?() {
+	true -> callIn(Srpapi, symbol, args...)
+	_ -> _platformError('srpapi')
+}
+
+fn sxs(symbol, args...) if isWindows?() {
+	true -> callIn(Sxs, symbol, args...)
+	_ -> _platformError('sxs')
+}
+
+fn msvcirt(symbol, args...) if isWindows?() {
+	true -> callIn(Msvcirt, symbol, args...)
+	_ -> _platformError('msvcirt')
+}
+
+fn _familyDll(prefix, suffix) if suffix {
+	? -> prefix + '.dll'
+	_ -> if len(suffix) >= 4 {
+		true -> if suffix.(len(suffix) - 4) = '.dll' {
+			true -> suffix
+			_ -> prefix + suffix + '.dll'
+		}
+		_ -> prefix + suffix + '.dll'
+	}
+}
+
+fn msvcpDll(suffix) _familyDll(MsvcpPrefix, suffix)
+
+fn msvcpFamily(suffix, symbol, args...) if isWindows?() {
+	true -> callIn(msvcpDll(suffix), symbol, args...)
+	_ -> _platformError('msvcpFamily')
+}
+
+fn vcruntimeDll(suffix) _familyDll(VcruntimePrefix, suffix)
+
+fn vcruntimeFamily(suffix, symbol, args...) if isWindows?() {
+	true -> callIn(vcruntimeDll(suffix), symbol, args...)
+	_ -> _platformError('vcruntimeFamily')
+}
+
+fn atlDll(suffix) _familyDll(AtlPrefix, suffix)
+
+fn atlFamily(suffix, symbol, args...) if isWindows?() {
+	true -> callIn(atlDll(suffix), symbol, args...)
+	_ -> _platformError('atlFamily')
+}
+
+fn mfcDll(suffix) _familyDll(MfcPrefix, suffix)
+
+fn mfcFamily(suffix, symbol, args...) if isWindows?() {
+	true -> callIn(mfcDll(suffix), symbol, args...)
+	_ -> _platformError('mfcFamily')
+}
+
+fn vcompDll(suffix) _familyDll(VcompPrefix, suffix)
+
+fn vcompFamily(suffix, symbol, args...) if isWindows?() {
+	true -> callIn(vcompDll(suffix), symbol, args...)
+	_ -> _platformError('vcompFamily')
+}

@@ -1,0 +1,93 @@
+// gui-loop contains GUI runtime loop timing and resize urgency helpers.
+
+windows := import('windows')
+guiEvents := import('gui-events')
+guiNativeLinux := import('gui-native-linux')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn frameIntervalNt(window) _default(window.frameMs, 16) * 1000000
+
+fn frameMaxDtNt(window) _default(window.maxFrameDtMs, 250) * 1000000
+
+fn markUrgentFrameIfResizeDispatch(window, step) {
+	if window.backend = :windows & step.type = :dispatch {
+		true -> if guiEvents.isResizeDispatch?(window, step) {
+			true -> window._forceNextFrame <- true
+		}
+	}
+}
+
+fn maybeRunFrame(window, onFrame, force, publish) {
+	if onFrame {
+		? -> ?
+		_ -> {
+			now := nanotime()
+			next := _default(window._nextFrameNt, now)
+			if window._nextFrameNt {
+				? -> window._nextFrameNt <- next
+			}
+			forceNow := force | _default(window._forceNextFrame, false)
+			if forceNow {
+				true -> window._forceNextFrame <- false
+			}
+			due := forceNow | now >= next
+			if due {
+				true -> {
+					last := _default(window._lastFrameNt, now)
+					rawDt := now - last
+					dtNs := if rawDt < 0 {
+						true -> 0
+						_ -> if rawDt > frameMaxDtNt(window) {
+							true -> frameMaxDtNt(window)
+							_ -> rawDt
+						}
+					}
+					dt := float(dtNs) / 1000000000.0
+					window._lastFrameNt <- now
+					onFrame(window, dt)
+					publish(window, :frame, {
+						type: :frame
+						dt: dt
+						timeNs: now
+					})
+					interval := frameIntervalNt(window)
+					now2 := nanotime()
+					scheduledBase := if forceNow {
+						true -> now2
+						_ -> next
+					}
+					scheduled := scheduledBase + interval
+					if scheduled < now2 - interval {
+						true -> window._nextFrameNt <- now2 + interval
+						_ -> window._nextFrameNt <- scheduled
+					}
+				}
+			}
+		}
+	}
+}
+
+fn sleepUntilNextFrame(window) {
+	if _default(window._forceNextFrame, false) {
+		true -> 0
+		_ -> {
+			now := nanotime()
+			next := _default(window._nextFrameNt, now + frameIntervalNt(window))
+			remaining := next - now
+			if remaining > 0 {
+				true -> {
+					sleepMs := int((remaining + 999999) / 1000000)
+					if sleepMs < 1 -> sleepMs <- 1
+					if window.backend {
+						:windows -> windows.kernel32('Sleep', sleepMs)
+						:linux -> guiNativeLinux.sleepFrame(sleepMs)
+					}
+				}
+			}
+		}
+	}
+}

@@ -1,0 +1,218 @@
+// windows-registry provides Win32 Registry wrappers used by lib/windows.
+
+sys := import('sys')
+{
+	readU32: readU32
+	writeU32: writeU32
+	readU64: readU64
+} := import('writes')
+{
+	Advapi32: Advapi32
+} := import('windows-constants')
+{
+	ERROR_SUCCESS: ERROR_SUCCESS
+	KEY_READ: KEY_READ
+	KEY_WRITE: KEY_WRITE
+	REG_DWORD: REG_DWORD
+	REG_SZ: REG_SZ
+} := import('windows-flags')
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn ptrSize() if ___runtime_sys_info().arch {
+	'amd64' -> 8
+	'arm64' -> 8
+	_ -> 4
+}
+
+fn _zeros(n, acc) if n {
+	0 -> acc
+	_ -> _zeros(n - 1, acc << 0)
+}
+
+fn _statusOk?(res) sys.ok?(res) & res.r1 = ERROR_SUCCESS
+
+fn _ptrRead(address) if ptrSize() {
+	8 -> readU64(address)
+	_ -> readU32(address)
+}
+
+fn _utf16leToString(buf) {
+	bytes := bits(buf)
+	fn sub(i, out) if i + 1 < len(bytes) {
+		true -> {
+			cp := bytes.(i) + bytes.(i + 1) * 256
+			if cp = 0 {
+				true -> out
+				_ -> sub(i + 2, out + char(cp))
+			}
+		}
+		_ -> out
+	}
+	sub(0, '')
+}
+
+fn wstr(s) utf16(s)
+
+fn advapi32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Advapi32, symbol, args...)
+	_ -> _platformError('advapi32')
+}
+
+fn regCloseKey(hKey) if isWindows?() {
+	true -> advapi32('RegCloseKey', hKey)
+	_ -> _platformError('regCloseKey')
+}
+
+fn regOpenKeyEx(rootKey, subKey, options, samDesired, outKeyPtr) if isWindows?() {
+	true -> advapi32('RegOpenKeyExW', rootKey, wstr(subKey), options, samDesired, outKeyPtr)
+	_ -> _platformError('regOpenKeyEx')
+}
+
+fn regCreateKeyEx(rootKey, subKey, reserved, className, options, samDesired, securityAttributesPtr, outKeyPtr, dispositionOutPtr) if isWindows?() {
+	true -> advapi32(
+		'RegCreateKeyExW'
+		rootKey
+		wstr(subKey)
+		reserved
+		if className {
+			? -> ?
+			_ -> wstr(className)
+		}
+		options
+		samDesired
+		securityAttributesPtr
+		outKeyPtr
+		dispositionOutPtr
+	)
+	_ -> _platformError('regCreateKeyEx')
+}
+
+fn regQueryValueEx(hKey, valueName, reserved, typeOutPtr, dataOutPtr, dataLenInOutPtr) if isWindows?() {
+	true -> advapi32('RegQueryValueExW', hKey, wstr(valueName), reserved, typeOutPtr, dataOutPtr, dataLenInOutPtr)
+	_ -> _platformError('regQueryValueEx')
+}
+
+fn regSetValueEx(hKey, valueName, reserved, valueType, dataPtr, dataLen) if isWindows?() {
+	true -> advapi32('RegSetValueExW', hKey, wstr(valueName), reserved, valueType, dataPtr, dataLen)
+	_ -> _platformError('regSetValueEx')
+}
+
+fn regDeleteValue(hKey, valueName) if isWindows?() {
+	true -> advapi32('RegDeleteValueW', hKey, wstr(valueName))
+	_ -> _platformError('regDeleteValue')
+}
+
+fn regReadDword(rootKey, subKey, valueName) if isWindows?() {
+	true -> {
+		keyBuf := bits(_zeros(ptrSize(), []))
+		openResult := regOpenKeyEx(rootKey, subKey, 0, KEY_READ, addr(keyBuf))
+		if _statusOk?(openResult) {
+			true -> {
+				hKey := _ptrRead(addr(keyBuf))
+				typeBuf := bits([0, 0, 0, 0])
+				valueBuf := bits([0, 0, 0, 0])
+				sizeBuf := bits([4, 0, 0, 0])
+				queryResult := regQueryValueEx(hKey, valueName, 0, addr(typeBuf), addr(valueBuf), addr(sizeBuf))
+				regCloseKey(hKey)
+				if _statusOk?(queryResult) {
+					true -> {type: :ok, value: readU32(addr(valueBuf)), regType: readU32(addr(typeBuf))}
+					_ -> {type: :error, error: 'RegQueryValueExW failed', detail: queryResult}
+				}
+			}
+			_ -> {type: :error, error: 'RegOpenKeyExW failed', detail: openResult}
+		}
+	}
+	_ -> _platformError('regReadDword')
+}
+
+fn regWriteDword(rootKey, subKey, valueName, value) if isWindows?() {
+	true -> {
+		keyBuf := bits(_zeros(ptrSize(), []))
+		dispositionBuf := bits([0, 0, 0, 0])
+		createResult := regCreateKeyEx(rootKey, subKey, 0, ?, 0, KEY_READ | KEY_WRITE, 0, addr(keyBuf), addr(dispositionBuf))
+		if _statusOk?(createResult) {
+			true -> {
+				hKey := _ptrRead(addr(keyBuf))
+				valueBuf := bits([0, 0, 0, 0])
+				writeU32(addr(valueBuf), value)
+				setResult := regSetValueEx(hKey, valueName, 0, REG_DWORD, addr(valueBuf), 4)
+				regCloseKey(hKey)
+				if _statusOk?(setResult) {
+					true -> {type: :ok, value: value}
+					_ -> {type: :error, error: 'RegSetValueExW failed', detail: setResult}
+				}
+			}
+			_ -> {type: :error, error: 'RegCreateKeyExW failed', detail: createResult}
+		}
+	}
+	_ -> _platformError('regWriteDword')
+}
+
+fn regReadString(rootKey, subKey, valueName) if isWindows?() {
+	true -> {
+		keyBuf := bits(_zeros(ptrSize(), []))
+		openResult := regOpenKeyEx(rootKey, subKey, 0, KEY_READ, addr(keyBuf))
+		if _statusOk?(openResult) {
+			true -> {
+				hKey := _ptrRead(addr(keyBuf))
+				typeBuf := bits([0, 0, 0, 0])
+				sizeBuf := bits([0, 0, 0, 0])
+				sizeResult := regQueryValueEx(hKey, valueName, 0, addr(typeBuf), ?, addr(sizeBuf))
+				if _statusOk?(sizeResult) {
+					true -> {
+						size := readU32(addr(sizeBuf))
+						valueBuf := bits(_zeros(size, []))
+						queryResult := regQueryValueEx(hKey, valueName, 0, addr(typeBuf), addr(valueBuf), addr(sizeBuf))
+						regCloseKey(hKey)
+						if _statusOk?(queryResult) {
+							true -> {
+								{
+									type: :ok
+									value: _utf16leToString(memread(addr(valueBuf), readU32(addr(sizeBuf))))
+									regType: readU32(addr(typeBuf))
+								}
+							}
+							_ -> {type: :error, error: 'RegQueryValueExW failed', detail: queryResult}
+						}
+					}
+					_ -> {
+						regCloseKey(hKey)
+						{type: :error, error: 'RegQueryValueExW size query failed', detail: sizeResult}
+					}
+				}
+			}
+			_ -> {type: :error, error: 'RegOpenKeyExW failed', detail: openResult}
+		}
+	}
+	_ -> _platformError('regReadString')
+}
+
+fn regWriteString(rootKey, subKey, valueName, value) if isWindows?() {
+	true -> {
+		keyBuf := bits(_zeros(ptrSize(), []))
+		dispositionBuf := bits([0, 0, 0, 0])
+		createResult := regCreateKeyEx(rootKey, subKey, 0, ?, 0, KEY_READ | KEY_WRITE, 0, addr(keyBuf), addr(dispositionBuf))
+		if _statusOk?(createResult) {
+			true -> {
+				hKey := _ptrRead(addr(keyBuf))
+				valueWide := wstr(value)
+				setResult := regSetValueEx(hKey, valueName, 0, REG_SZ, addr(valueWide), len(valueWide))
+				regCloseKey(hKey)
+				if _statusOk?(setResult) {
+					true -> {type: :ok, value: value}
+					_ -> {type: :error, error: 'RegSetValueExW failed', detail: setResult}
+				}
+			}
+			_ -> {type: :error, error: 'RegCreateKeyExW failed', detail: createResult}
+		}
+	}
+	_ -> _platformError('regWriteString')
+}

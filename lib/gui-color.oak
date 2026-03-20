@@ -1,0 +1,41 @@
+// gui-color provides color construction, decomposition, and blending
+// utilities for the Magnolia GUI facade. No imports required — purely
+// arithmetic operations on packed RGB integers.
+
+fn _clampByte(value) {
+	v := int(if value { ? -> 0, _ -> value })
+	if v < 0 -> v <- 0
+	if v > 255 -> v <- 255
+	v
+}
+
+fn _clampOpacity(value) {
+	v := if value { ? -> 1, _ -> value }
+	if v < 0 -> v <- 0
+	if v > 1 -> v <- 1
+	v
+}
+
+// rgb packs three 0-255 channel values into a single integer (BGR layout).
+fn rgb(r, g, b) r | (g << 8) | (b << 16)
+
+// colorR / colorG / colorB decompose a packed color back to channels.
+fn colorR(color) _clampByte(color & 255)
+fn colorG(color) _clampByte((color >> 8) & 255)
+fn colorB(color) _clampByte((color >> 16) & 255)
+
+// opacity blends fg over bg at the given alpha (0.0–1.0).
+fn opacity(color, amount, background) {
+	fg := if color { ? -> rgb(255, 255, 255), _ -> color }
+	bg := if background { ? -> rgb(0, 0, 0), _ -> background }
+	a := _clampOpacity(amount)
+	inv := 1 - a
+	rgb(
+		_clampByte(int(float(colorR(bg)) * inv + float(colorR(fg)) * a))
+		_clampByte(int(float(colorG(bg)) * inv + float(colorG(fg)) * a))
+		_clampByte(int(float(colorB(bg)) * inv + float(colorB(fg)) * a))
+	)
+}
+
+// rgba is a convenience wrapper: rgb + alpha blend over an optional background.
+fn rgba(r, g, b, a, background) opacity(rgb(r, g, b), a, background)

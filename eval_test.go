@@ -2356,6 +2356,65 @@ func TestGUIStdlibSafeSurface(t *testing.T) {
 	))
 }
 
+func TestGUIOpacityHelpers(t *testing.T) {
+	expectProgramToReturn(t, `
+		gui := import('GUI')
+		bg := gui.rgb(18, 20, 26)
+		overlay := gui.opacity(gui.rgb(248, 232, 242), 0.2, bg)
+		overlayRgba := gui.rgba(248, 232, 242, 0.2, bg)
+
+		[
+			overlay
+			overlay = overlayRgba
+			gui.colorR(overlay)
+			gui.colorG(overlay)
+			gui.colorB(overlay)
+		]
+	`, MakeList(
+		IntValue(4537920),
+		oakTrue,
+		IntValue(64),
+		IntValue(62),
+		IntValue(69),
+	))
+}
+
+func TestGUIDrawOpsPreserveColorOnWeb(t *testing.T) {
+	expectProgramToReturn(t, `
+		gui := import('GUI')
+		bg := gui.rgb(18, 20, 26)
+		textColor := gui.opacity(gui.rgb(248, 232, 242), 0.2, bg)
+		rectColor := gui.opacity(gui.rgb(80, 120, 160), 0.5, bg)
+		win := {
+			type: :ok
+			backend: :web
+			messages: []
+		}
+
+		gui.drawText(win, 10, 20, 'alpha', textColor)
+		gui.fillRect(win, 1, 2, 30, 40, rectColor)
+		gui.drawLine(win, 0, 0, 5, 5, textColor)
+
+		[
+			len(win.messages)
+			win.messages.(0).type = :text
+			win.messages.(0).color = textColor
+			win.messages.(1).type = :rect
+			win.messages.(1).color = rectColor
+			win.messages.(2).type = :line
+			win.messages.(2).color = textColor
+		]
+	`, MakeList(
+		IntValue(3),
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+		oakTrue,
+	))
+}
+
 func TestGUIEventBusHelpers(t *testing.T) {
 	expectProgramToReturn(t, `
 		gui := import('GUI')

@@ -58,6 +58,21 @@ Boolean helpers derived from `backend()`.
 
 Builds a packed RGB integer color value.
 
+### `rgba(r, g, b, a, background?)`
+
+Builds a packed RGB color by composing an RGBA-style input over
+`background` using alpha `a` in `[0, 1]`.
+
+This is equivalent to `opacity(rgb(r, g, b), a, background)`.
+
+### `opacity(color, amount, background?)`
+
+Pre-composes `color` over `background` using an opacity in `[0, 1]` and
+returns a packed RGB integer that can be passed to the native drawing helpers.
+
+This is useful on native backends that currently draw with opaque packed colors
+instead of full RGBA surfaces.
+
 ## Window lifecycle
 
 ### `createWindow(title?, width?, height?, options?)`
@@ -294,12 +309,16 @@ handlers with `off(window, :dispatch, token)`.
 
 ## Drawing helpers
 
-### `drawText(window, x, y, text)`
+### `drawText(window, x, y, text, color?)`
 
 Draws text in the target window.
 
 Use `setFont(window, fontSpec)` to control font family/size/weight used by
 subsequent text draws.
+
+When `color` is omitted, GUI uses its default light text color. You can pass a
+packed RGB color from `rgb(...)` or a pre-composed color from
+`opacity(...)`.
 
 - Windows: `TextOutW`
 - Linux: `XDrawString`
@@ -328,7 +347,7 @@ gui.setFont(window, {
     size: 18
     weight: 700
 })
-gui.drawText(window, 24, 32, 'Font-aware text')
+gui.drawText(window, 24, 32, 'Font-aware text', gui.rgb(248, 232, 242))
 ```
 
 ### `clearFont(window)`
@@ -571,8 +590,11 @@ gui := import('GUI')
 window := gui.createWindow('Magnolia GUI', 840, 520)
 if window.type = :ok {
     gui.show(window)
-    gui.fillRect(window, 24, 48, 320, 180, gui.rgb(46, 120, 226))
+    bg := gui.rgb(12, 18, 30)
+    gui.fillRect(window, 0, 0, window.width, window.height, bg)
+    gui.fillRect(window, 24, 48, 320, 180, gui.rgba(46, 120, 226, 0.9, bg))
     gui.drawText(window, 24, 26, 'Hello from Magnolia GUI')
+    gui.drawText(window, 24, 250, 'Close the window to exit.', gui.rgba(248, 232, 242, 0.75, bg))
 
     gui.run(window, fn(win, evt) {
         // inspect events if needed

@@ -11,40 +11,52 @@
 gui := import('GUI')
 
 {
-	typewrite: typewrite
+	// typewrite: typewrite
 	guiTypewrite: guiTypewrite
 } := import('comps/type')
 
 // ---
 // @ Scene
 
+introElapsedMs := :introElapsedMs
+introAutoAdvanceMs := :introAutoAdvanceMs
+
+fn makeIntroElapsedMs(sm) sm.setClockMs(introElapsedMs, 0)
+fn getIntroElapsedMs(sm) sm.clockMs(introElapsedMs)
+
+fn makeIntroAutoAdvanceMs(sm) sm.setClockMs(introAutoAdvanceMs, 120000)
+fn getIntroAutoAdvanceMs(sm) sm.clockMs(introAutoAdvanceMs)
+
+// ---
+
 fn setupScene(window, sm) {
-	sm.setClockMs(:introElapsedMs, 0)
-	sm.setClockMs(:introAutoAdvanceMs, 10000)
+	makeIntroElapsedMs(sm)
+	makeIntroAutoAdvanceMs(sm)
 
 	gui.onKeyDown(window, fn(_vk) {
 		sm.changeScene(:menu)
 	})
 }
 
-fn introTypewrite(window, sm, str, ps) guiTypewrite(gui, window, 120, 260, str, sm.clockMs(:introElapsedMs), ps)
+fn introTypewrite(window, sm, str, ps) guiTypewrite(gui, window, 120, 260, str, getIntroElapsedMs(sm), ps)
 
 fn introP1(window, sm, dt) {
 	gui.fillRect(window, 0, 0, window.width, window.height, gui.rgb(18, 20, 26))
 
-	// MS
+	// MS 20% opacity debug text
 	gui.drawText(window, 120, 140
-		string(int(sm.clockMs(:introElapsedMs))) + 'ms / ' + string(int(sm.clockMs(:introAutoAdvanceMs))) + 'ms'
+		string(int(getIntroElapsedMs(sm))) + 'ms / ' + string(int(getIntroAutoAdvanceMs(sm))) + 'ms'
+		gui.opacity(gui.rgb(248, 232, 242), 0.2, gui.rgb(18, 20, 26))
 	)
 
-	if sm.clockMs(:introElapsedMs) < 6000 -> {
-		guiTypewrite(gui, window, 120, 260, 'In the beginning, there was only darkness...', sm.clockMs(:introElapsedMs), 30)
+	if getIntroElapsedMs(sm) < 6000 -> {
+		introTypewrite(window, sm, 'In the beginning, there was only darkness...', 30)
 	}
 }
 
 fn draw(window, sm, dt) {
-	introElapsedMs := sm.tickClockSec(:introElapsedMs, dt)
-	if introElapsedMs >= sm.clockMs(:introAutoAdvanceMs) -> sm.changeScene(:menu)
+	introElapsedMs := sm.tickClockSec(introElapsedMs, dt)
+	if introElapsedMs >= getIntroAutoAdvanceMs(sm) -> sm.changeScene(:menu)
 
 	frame := gui.beginFrame(window)
 	if frame.type = :ok -> introP1(window, sm, dt)

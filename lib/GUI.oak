@@ -5,19 +5,23 @@
 // - Linux: X11 via lib/linux
 // - Web/JS runtimes: logical no-op window state for portability
 
-std := import('std')
-windows := import('windows')
-linux := import('linux')
-guiMesh := import('gui-mesh')
-guiRender := import('gui-render')
-gui3dmath := import('gui-3dmath')
-gui2d := import('gui-2d')
-guiRaster := import('gui-raster')
-guiWeb := import('gui-web')
-guiNativeWin := import('gui-native-win')
+std            := import('std')
+windows        := import('windows')
+linux          := import('linux')
+guiMesh        := import('gui-mesh')
+guiRender      := import('gui-render')
+gui3dmath      := import('gui-3dmath')
+gui2d          := import('gui-2d')
+guiRaster      := import('gui-raster')
+guiWeb         := import('gui-web')
+guiNativeWin   := import('gui-native-win')
 guiNativeLinux := import('gui-native-linux')
-guiDraw := import('gui-draw')
-eventBusLib := import('async/event-bus')
+guiDraw        := import('gui-draw')
+guiColor       := import('gui-color')
+guiEvents      := import('gui-events')
+guiGraph       := import('gui-graph')
+guiForm        := import('gui-form')
+guiLoop        := import('gui-loop')
 
 fn backend() if ___runtime_sys_info().os {
 	'windows' -> :windows
@@ -46,155 +50,40 @@ fn _default(value, fallback) if value {
 	_ -> value
 }
 
-fn _ensureEventBus(window) if window.type {
-	:ok -> {
-		bus := window.eventBus
-		if bus {
-			? -> {
-				created := eventBusLib.create()
-				window.eventBus <- created
-				created
-			}
-			_ -> bus
-		}
-	}
-	_ -> ?
-}
+fn _ensureEventBus(window) guiEvents._ensureEventBus(window)
+fn eventBus(window) guiEvents.eventBus(window)
+fn on(window, event, handler) guiEvents.on(window, event, handler)
+fn once(window, event, handler) guiEvents.once(window, event, handler)
+fn off(window, event, tokenOrHandler) guiEvents.off(window, event, tokenOrHandler)
+fn emit(window, event, payload, onDone) guiEvents.emit(window, event, payload, onDone)
+fn listenerCount(window, event) guiEvents.listenerCount(window, event)
+fn clearListeners(window, event) guiEvents.clearListeners(window, event)
+fn onDispatch(window, handler) guiEvents.onDispatch(window, handler)
+fn onceDispatch(window, handler) guiEvents.onceDispatch(window, handler)
+fn onRunStart(window, handler) guiEvents.onRunStart(window, handler)
+fn onceRunStart(window, handler) guiEvents.onceRunStart(window, handler)
+fn onIdle(window, handler) guiEvents.onIdle(window, handler)
+fn onceIdle(window, handler) guiEvents.onceIdle(window, handler)
+fn onFrame(window, handler) guiEvents.onFrame(window, handler)
+fn onceFrame(window, handler) guiEvents.onceFrame(window, handler)
+fn onClosing(window, handler) guiEvents.onClosing(window, handler)
+fn onceClosing(window, handler) guiEvents.onceClosing(window, handler)
+fn onClosed(window, handler) guiEvents.onClosed(window, handler)
+fn onceClosed(window, handler) guiEvents.onceClosed(window, handler)
+fn onKeyDownEvent(window, handler) guiEvents.onKeyDownEvent(window, handler)
+fn onceKeyDownEvent(window, handler) guiEvents.onceKeyDownEvent(window, handler)
+fn onKeyUpEvent(window, handler) guiEvents.onKeyUpEvent(window, handler)
+fn onceKeyUpEvent(window, handler) guiEvents.onceKeyUpEvent(window, handler)
+fn _publish(window, event, payload) guiEvents.publish(window, event, payload)
 
-fn eventBus(window) _ensureEventBus(window)
-
-fn on(window, event, handler) if bus := _ensureEventBus(window) {
-	? -> ?
-	_ -> bus.on(event, handler)
-}
-
-fn once(window, event, handler) if bus := _ensureEventBus(window) {
-	? -> ?
-	_ -> bus.once(event, handler)
-}
-
-fn off(window, event, tokenOrHandler) if bus := _ensureEventBus(window) {
-	? -> 0
-	_ -> bus.off(event, tokenOrHandler)
-}
-
-fn emit(window, event, payload, onDone) if bus := _ensureEventBus(window) {
-	? -> 0
-	_ -> bus.emit(event, payload, onDone)
-}
-
-fn listenerCount(window, event) if bus := _ensureEventBus(window) {
-	? -> 0
-	_ -> bus.listenerCount(event)
-}
-
-fn clearListeners(window, event) if bus := _ensureEventBus(window) {
-	? -> false
-	_ -> bus.clear(event)
-}
-
-fn onDispatch(window, handler) on(window, :dispatch, handler)
-
-fn onceDispatch(window, handler) once(window, :dispatch, handler)
-
-fn onRunStart(window, handler) on(window, :runStart, handler)
-
-fn onceRunStart(window, handler) once(window, :runStart, handler)
-
-fn onIdle(window, handler) on(window, :idle, handler)
-
-fn onceIdle(window, handler) once(window, :idle, handler)
-
-fn onFrame(window, handler) on(window, :frame, handler)
-
-fn onceFrame(window, handler) once(window, :frame, handler)
-
-fn onClosing(window, handler) on(window, :closing, handler)
-
-fn onceClosing(window, handler) once(window, :closing, handler)
-
-fn onClosed(window, handler) on(window, :closed, handler)
-
-fn onceClosed(window, handler) once(window, :closed, handler)
-
-fn _vkKeyName(vk) {
-	if vk >= 65 & vk <= 90 -> char(vk)
-	if vk >= 48 & vk <= 57 -> char(vk)
-	if vk = 37 -> 'left'
-	if vk = 38 -> 'up'
-	if vk = 39 -> 'right'
-	if vk = 40 -> 'down'
-	if vk = 32 -> ' '
-	if vk = FORM_VK_TAB -> 'tab'
-	if vk = FORM_VK_RETURN -> 'enter'
-	if vk = FORM_VK_ESCAPE -> 'escape'
-	if vk = FORM_VK_BACK -> 'backspace'
-	'vk-' + string(vk)
-}
-
-fn _extractKeyEvent(window, evt, expectedMsgType, expectedEvtType) {
-	if evt.type = expectedEvtType {
-		true -> {
-			{matched: true, key: _default(evt.key, ?), evt: evt}
-		}
-		_ -> if formMsgType(window) = expectedMsgType {
-			true -> {
-				vk := formMsgWParam(window)
-				key := _vkKeyName(vk)
-				{matched: true, key: key, evt: {type: expectedEvtType, key: key, vk: vk, raw: evt}}
-			}
-			_ -> {matched: false, key: ?, evt: evt}
-		}
-	}
-}
-
-fn onKeyDownEvent(window, handler) {
-	on(window, :dispatch, fn(evt) {
-		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYDOWN, :keyDown)
-		if extracted.matched -> handler(extracted.key, extracted.evt)
-	})
-}
-
-fn onceKeyDownEvent(window, handler) {
-	token := ?
-	token <- on(window, :dispatch, fn(evt) {
-		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYDOWN, :keyDown)
-		if extracted.matched -> {
-			off(window, :dispatch, token)
-			handler(extracted.key, extracted.evt)
-		}
-	})
-	token
-}
-
-fn onKeyUpEvent(window, handler) {
-	on(window, :dispatch, fn(evt) {
-		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYUP, :keyUp)
-		if extracted.matched -> handler(extracted.key, extracted.evt)
-	})
-}
-
-fn onceKeyUpEvent(window, handler) {
-	token := ?
-	token <- on(window, :dispatch, fn(evt) {
-		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYUP, :keyUp)
-		if extracted.matched -> {
-			off(window, :dispatch, token)
-			handler(extracted.key, extracted.evt)
-		}
-	})
-	token
-}
-
-fn _publish(window, event, payload) {
-	bus := _ensureEventBus(window)
-	if bus {
-		? -> 0
-		_ -> bus.emit(event, payload)
-	}
-}
-
-fn rgb(r, g, b) r | (g << 8) | (b << 16)
+fn _clampByte(value) guiColor._clampByte(value)
+fn _clampOpacity(value) guiColor._clampOpacity(value)
+fn rgb(r, g, b) guiColor.rgb(r, g, b)
+fn rgba(r, g, b, a, background) guiColor.rgba(r, g, b, a, background)
+fn colorR(color) guiColor.colorR(color)
+fn colorG(color) guiColor.colorG(color)
+fn colorB(color) guiColor.colorB(color)
+fn opacity(color, amount, background) guiColor.opacity(color, amount, background)
 
 GL_COLOR_BUFFER_BIT := 16384
 GL_DEPTH_BUFFER_BIT := 256
@@ -210,13 +99,9 @@ fn createWindow(title, width, height, options) {
 	updateOnDispatch := _default(opts.updateOnDispatch, false)
 
 	created := if backend() {
-		:windows -> {
-			guiNativeWin.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, opts, className, frameMs, updateOnDispatch)
-		}
+		:windows -> guiNativeWin.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, opts, className, frameMs, updateOnDispatch)
 		:linux -> guiNativeLinux.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch)
-		:web -> {
-			guiWeb.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch, opts)
-		}
+		:web -> guiWeb.createWindowState(resolvedTitle, resolvedWidth, resolvedHeight, frameMs, updateOnDispatch, opts)
 		_ -> _err('Unsupported runtime for GUI window middleware', ___runtime_sys_info())
 	}
 
@@ -300,23 +185,14 @@ fn lockResize(window, locked) if window.type {
 }
 
 fn createCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
-
 fn initWebGL(window, contextName, attrs) guiWeb.initWebGL(window, contextName, attrs)
-
 fn webglCreateShader(window, shaderType, source) guiWeb.webglCreateShader(window, shaderType, source)
-
 fn webglCreateProgram(window, vertexShader, fragmentShader) guiWeb.webglCreateProgram(window, vertexShader, fragmentShader)
-
 fn webglUseProgram(window, program) guiWeb.webglUseProgram(window, program)
-
 fn webglClearColor(window, r, g, b, a) guiWeb.webglClearColor(window, r, g, b, a)
-
 fn webglViewport(window, x, y, width, height) guiWeb.webglViewport(window, x, y, width, height)
-
 fn webglClear(window, mask) guiWeb.webglClear(window, mask, GL_COLOR_BUFFER_BIT)
-
 fn webglDrawArrays(window, mode, first, count) guiWeb.webglDrawArrays(window, mode, first, count, GL_TRIANGLES)
-
 fn webglFlush(window) guiWeb.webglFlush(window)
 
 fn setTitle(window, title) if window.type {
@@ -344,22 +220,17 @@ fn endFrame(window) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
 			res := guiNativeWin.endFrame(window)
-			// record frame timing and update FPS once per second
 			if window._frameStart {
 				? -> 0
 				_ -> {
 					delta := nanotime() - window._frameStart
 					window._fpsCount <- _default(window._fpsCount, 0) + 1
 					window._fpsAccum <- _default(window._fpsAccum, 0) + delta
-					last := _default(window._fpsLastReport, 0)
-					if last = 0 -> window._fpsLastReport <- nanotime()
 					if nanotime() - _default(window._fpsLastReport, 0) >= 1000000000 -> {
 						fps := int(window._fpsCount * 1000000000 / window._fpsAccum)
-						// preserve base title
 						titleBase := _default(window._titleBase, window.title)
 						window._titleBase <- titleBase
 						setTitle(window, titleBase + ' - FPS: ' + string(fps))
-						// also print to console for automated capture
 						std.println('FPS: ' + string(fps))
 						window._fpsCount <- 0
 						window._fpsAccum <- 0
@@ -374,7 +245,7 @@ fn endFrame(window) if window.type {
 	_ -> 0
 }
 
-fn drawText(window, x, y, text) guiDraw.drawText(window, x, y, text)
+fn drawText(window, x, y, text, color) guiDraw.drawText(window, x, y, text, color, rgb(248, 232, 242))
 
 fn setFont(window, fontSpec) if window.type {
 	:ok -> {
@@ -393,778 +264,111 @@ fn clearFont(window) if window.type {
 }
 
 fn fillRect(window, x, y, width, height, color) guiDraw.fillRect(window, x, y, width, height, color, rgb(66, 138, 245))
-
 fn degToRad(deg) gui3dmath.degToRad(deg)
-
 fn Vec3(x, y, z) gui3dmath.Vec3(x, y, z)
-
 fn _transformPoint(v, transform) gui3dmath.transformPoint(v, transform)
-
 fn _projectPoint(window, p, camera) gui3dmath.projectPoint(window, p, camera)
-
 fn _transformVertices(vertices, transform, i, out) gui3dmath.transformVertices(vertices, transform, i, out)
-
 fn drawLine(window, x1, y1, x2, y2, color) guiDraw.drawLine(window, x1, y1, x2, y2, color, rgb(215, 235, 255))
 
-fn graphRange(values, options) {
-	opts := _default(options, {})
-	fixedMin := _default(opts.min, ?)
-	fixedMax := _default(opts.max, ?)
-	padding := _default(opts.padding, 0)
-
-	if len(values) = 0 {
-		true -> {
-			baseMin := if fixedMin { ? -> 0, _ -> fixedMin }
-			baseMax := if fixedMax { ? -> 1, _ -> fixedMax }
-			if baseMax <= baseMin -> baseMax <- baseMin + 1
-			{
-				min: baseMin
-				max: baseMax
-				span: baseMax - baseMin
-			}
-		}
-		_ -> {
-			autoMin := values.(0)
-			autoMax := values.(0)
-			fn loop(i, minV, maxV) if i < len(values) {
-				true -> {
-					v := values.(i)
-					nextMin := if v < minV { true -> v, _ -> minV }
-					nextMax := if v > maxV { true -> v, _ -> maxV }
-					loop(i + 1, nextMin, nextMax)
-				}
-				_ -> {
-					rawMin := if fixedMin { ? -> minV, _ -> fixedMin }
-					rawMax := if fixedMax { ? -> maxV, _ -> fixedMax }
-					resolvedMin := rawMin - padding
-					resolvedMax := rawMax + padding
-					if resolvedMax <= resolvedMin -> resolvedMax <- resolvedMin + 1
-					{
-						min: resolvedMin
-						max: resolvedMax
-						span: resolvedMax - resolvedMin
-					}
-				}
-			}
-			loop(1, autoMin, autoMax)
-		}
-	}
-}
-
-fn graphMapX(index, count, x, width) if count <= 1 {
-	true -> x
-	_ -> x + int((float(index) * float(width)) / float(count - 1))
-}
-
-fn graphMapY(value, y, height, range) {
-	rawT := float(value - range.min) / float(range.span)
-	t := if rawT < 0 {
-		true -> 0.0
-		_ -> if rawT > 1 { true -> 1.0, _ -> rawT }
-	}
-	y + height - int(t * float(height))
-}
-
-fn _graphDrawBorder(window, x, y, width, height, color) {
-	drawLine(window, x, y, x + width, y, color)
-	drawLine(window, x, y + height, x + width, y + height, color)
-	drawLine(window, x, y, x, y + height, color)
-	drawLine(window, x + width, y, x + width, y + height, color)
-}
-
-fn drawGraphAxes(window, x, y, width, height, options) {
-	opts := _default(options, {})
-	gridColor := _default(opts.gridColor, rgb(78, 94, 112))
-	axisColor := _default(opts.axisColor, rgb(158, 186, 220))
-	backgroundColor := _default(opts.backgroundColor, ?)
-	xTicks := _default(opts.xTicks, 5)
-	yTicks := _default(opts.yTicks, 4)
-	showGrid := _default(opts.showGrid, true)
-
-	if backgroundColor != ? -> fillRect(window, x, y, width, height, backgroundColor)
-
-	if showGrid {
-		true -> {
-			if xTicks < 1 -> xTicks <- 1
-			if yTicks < 1 -> yTicks <- 1
-
-			fn drawXGrid(i) if i <= xTicks {
-				true -> {
-					gx := x + int((float(i) * float(width)) / float(xTicks))
-					drawLine(window, gx, y, gx, y + height, gridColor)
-					drawXGrid(i + 1)
-				}
-			}
-			drawXGrid(0)
-
-			fn drawYGrid(i) if i <= yTicks {
-				true -> {
-					gy := y + int((float(i) * float(height)) / float(yTicks))
-					drawLine(window, x, gy, x + width, gy, gridColor)
-					drawYGrid(i + 1)
-				}
-			}
-			drawYGrid(0)
-		}
-	}
-
-	_graphDrawBorder(window, x, y, width, height, axisColor)
-}
-
-fn drawLineGraph(window, x, y, width, height, values, options) {
-	opts := _default(options, {})
-	lineColor := _default(opts.lineColor, rgb(92, 200, 255))
-	pointColor := _default(opts.pointColor, lineColor)
-	showPoints := _default(opts.showPoints, true)
-	showLabels := _default(opts.showLabels, true)
-	axisOptions := _default(opts.axis, opts)
-
-	drawGraphAxes(window, x, y, width, height, axisOptions)
-
-	if len(values) > 0 {
-		true -> {
-			range := graphRange(values, {
-				min: _default(opts.min, ?)
-				max: _default(opts.max, ?)
-				padding: _default(opts.rangePadding, 0)
-			})
-
-			fn drawSegments(i, px, py) if i < len(values) {
-				true -> {
-					vx := graphMapX(i, len(values), x, width)
-					vy := graphMapY(values.(i), y, height, range)
-					drawLine(window, px, py, vx, vy, lineColor)
-					if showPoints -> fillRect(window, vx - 1, vy - 1, 3, 3, pointColor)
-					drawSegments(i + 1, vx, vy)
-				}
-			}
-
-			x0 := graphMapX(0, len(values), x, width)
-			y0 := graphMapY(values.(0), y, height, range)
-			if showPoints -> fillRect(window, x0 - 1, y0 - 1, 3, 3, pointColor)
-			drawSegments(1, x0, y0)
-
-			if showLabels {
-				true -> {
-					drawText(window, x + 4, y + 4, 'max ' + string(range.max))
-					drawText(window, x + 4, y + height - 14, 'min ' + string(range.min))
-				}
-			}
-		}
-	}
-}
-
-fn drawBarGraph(window, x, y, width, height, values, options) {
-	opts := _default(options, {})
-	barColor := _default(opts.barColor, rgb(84, 176, 255))
-	barBorderColor := _default(opts.barBorderColor, ?)
-	barGap := _default(opts.barGap, 2)
-	showLabels := _default(opts.showLabels, true)
-	axisOptions := _default(opts.axis, opts)
-
-	drawGraphAxes(window, x, y, width, height, axisOptions)
-
-	if len(values) > 0 {
-		true -> {
-			range := graphRange(values, {
-				min: _default(opts.min, ?)
-				max: _default(opts.max, ?)
-				padding: _default(opts.rangePadding, 0)
-			})
-			if barGap < 0 -> barGap <- 0
-
-			slotW := int(float(width) / float(len(values)))
-			if slotW < 1 -> slotW <- 1
-			barW := slotW - barGap
-			if barW < 1 -> barW <- 1
-
-			fn drawBars(i) if i < len(values) {
-				true -> {
-					v := values.(i)
-					bx := x + i * slotW + int(barGap / 2)
-					by := graphMapY(v, y, height, range)
-					bh := y + height - by
-					if bh < 1 -> bh <- 1
-					fillRect(window, bx, by, barW, bh, barColor)
-					if barBorderColor != ? -> _graphDrawBorder(window, bx, by, barW, bh, barBorderColor)
-					drawBars(i + 1)
-				}
-			}
-			drawBars(0)
-
-			if showLabels {
-				true -> {
-					drawText(window, x + 4, y + 4, 'max ' + string(range.max))
-					drawText(window, x + 4, y + height - 14, 'min ' + string(range.min))
-				}
-			}
-		}
-	}
-}
-
-fn drawSparkline(window, x, y, width, height, values, options) {
-	opts := _default(options, {})
-	lineColor := _default(opts.lineColor, rgb(108, 214, 172))
-	backgroundColor := _default(opts.backgroundColor, ?)
-	range := graphRange(values, {
-		min: _default(opts.min, ?)
-		max: _default(opts.max, ?)
-		padding: _default(opts.rangePadding, 0)
-	})
-
-	if backgroundColor != ? -> fillRect(window, x, y, width, height, backgroundColor)
-
-	if len(values) > 1 {
-		true -> {
-			fn drawSegments(i, px, py) if i < len(values) {
-				true -> {
-					vx := graphMapX(i, len(values), x, width)
-					vy := graphMapY(values.(i), y, height, range)
-					drawLine(window, px, py, vx, vy, lineColor)
-					drawSegments(i + 1, vx, vy)
-				}
-			}
-
-			x0 := graphMapX(0, len(values), x, width)
-			y0 := graphMapY(values.(0), y, height, range)
-			drawSegments(1, x0, y0)
-		}
-	}
-}
-
-fn formDrawBorder(window, x, y, w, h, color) {
-	drawLine(window, x, y, x + w, y, color)
-	drawLine(window, x, y + h, x + w, y + h, color)
-	drawLine(window, x, y, x, y + h, color)
-	drawLine(window, x + w, y, x + w, y + h, color)
-}
-
-MSG_OFF_TYPE := 8
-MSG_OFF_WPARAM := 16
-MSG_OFF_LPARAM := 24
-
-FORM_WM_MOUSEMOVE := 512
-FORM_WM_LBUTTONDOWN := 513
-FORM_WM_LBUTTONUP := 514
-FORM_WM_KEYDOWN := 256
-FORM_WM_CHAR := 258
-GUI_WM_SIZE := 5
-GUI_WM_PAINT := 15
-GUI_WM_ERASEBKGND := 20
-GUI_WM_SIZING := 532
-GUI_WM_WINDOWPOSCHANGED := 71
-GUI_WM_ENTERSIZEMOVE := 561
-GUI_WM_EXITSIZEMOVE := 562
-
-FORM_VK_BACK := 8
-FORM_VK_TAB := 9
-FORM_VK_RETURN := 13
-FORM_VK_ESCAPE := 27
-FORM_WM_KEYUP       := 257
-FORM_WM_RBUTTONDOWN := 516
-FORM_WM_RBUTTONUP   := 517
-
-fn formInRect?(mx, my, rx, ry, rw, rh) {
-	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
-}
-
-fn formMsgType(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
-fn formMsgWParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
-fn formMsgLParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
-fn formLoWord(v) v & 65535
-fn formHiWord(v) (v >> 16) & 65535
-
-fn formEventContext(window) {
-	lp := formMsgLParam(window)
+fn _graphCtx() {
 	{
-		mt: formMsgType(window)
-		wp: formMsgWParam(window)
-		lp: lp
-		mx: formLoWord(lp)
-		my: formHiWord(lp)
+		drawLine: drawLine
+		fillRect: fillRect
+		drawText: drawText
+		rgb: rgb
 	}
 }
+fn graphRange(values, options) guiGraph.graphRange(values, options)
+fn graphMapX(index, count, x, width) guiGraph.graphMapX(index, count, x, width)
+fn graphMapY(value, y, height, range) guiGraph.graphMapY(value, y, height, range)
+fn drawGraphAxes(window, x, y, width, height, options) guiGraph.drawGraphAxes(_graphCtx(), window, x, y, width, height, options)
+fn drawLineGraph(window, x, y, width, height, values, options) guiGraph.drawLineGraph(_graphCtx(), window, x, y, width, height, values, options)
+fn drawBarGraph(window, x, y, width, height, values, options) guiGraph.drawBarGraph(_graphCtx(), window, x, y, width, height, values, options)
+fn drawSparkline(window, x, y, width, height, values, options) guiGraph.drawSparkline(_graphCtx(), window, x, y, width, height, values, options)
 
-// ─── On<Event> typed dispatch subscribers ─────────────────────────────────
-// Each helper subscribes to :dispatch and fires handler only when the
-// Windows message type matches.  Returns the subscription token so the
-// caller can unsubscribe with gui.off().
+MSG_OFF_TYPE := guiEvents.MSG_OFF_TYPE
+MSG_OFF_WPARAM := guiEvents.MSG_OFF_WPARAM
+MSG_OFF_LPARAM := guiEvents.MSG_OFF_LPARAM
+FORM_WM_MOUSEMOVE := guiEvents.FORM_WM_MOUSEMOVE
+FORM_WM_LBUTTONDOWN := guiEvents.FORM_WM_LBUTTONDOWN
+FORM_WM_LBUTTONUP := guiEvents.FORM_WM_LBUTTONUP
+FORM_WM_RBUTTONDOWN := guiEvents.FORM_WM_RBUTTONDOWN
+FORM_WM_RBUTTONUP := guiEvents.FORM_WM_RBUTTONUP
+FORM_WM_KEYDOWN := guiEvents.FORM_WM_KEYDOWN
+FORM_WM_KEYUP := guiEvents.FORM_WM_KEYUP
+FORM_WM_CHAR := guiEvents.FORM_WM_CHAR
+GUI_WM_SIZE := guiEvents.GUI_WM_SIZE
+GUI_WM_PAINT := guiEvents.GUI_WM_PAINT
+GUI_WM_ERASEBKGND := guiEvents.GUI_WM_ERASEBKGND
+GUI_WM_SIZING := guiEvents.GUI_WM_SIZING
+GUI_WM_WINDOWPOSCHANGED := guiEvents.GUI_WM_WINDOWPOSCHANGED
+GUI_WM_ENTERSIZEMOVE := guiEvents.GUI_WM_ENTERSIZEMOVE
+GUI_WM_EXITSIZEMOVE := guiEvents.GUI_WM_EXITSIZEMOVE
+FORM_VK_BACK := guiEvents.FORM_VK_BACK
+FORM_VK_TAB := guiEvents.FORM_VK_TAB
+FORM_VK_RETURN := guiEvents.FORM_VK_RETURN
+FORM_VK_ESCAPE := guiEvents.FORM_VK_ESCAPE
 
-fn onMouseMove(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MOUSEMOVE -> {
-		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
-	})
-}
+fn formInRect?(mx, my, rx, ry, rw, rh) guiEvents.formInRect?(mx, my, rx, ry, rw, rh)
+fn formMsgType(window) guiEvents.formMsgType(window)
+fn formMsgWParam(window) guiEvents.formMsgWParam(window)
+fn formMsgLParam(window) guiEvents.formMsgLParam(window)
+fn formLoWord(v) guiEvents.formLoWord(v)
+fn formHiWord(v) guiEvents.formHiWord(v)
+fn formEventContext(window) guiEvents.formEventContext(window)
+fn onMouseMove(window, handler) guiEvents.onMouseMove(window, handler)
+fn onLButtonDown(window, handler) guiEvents.onLButtonDown(window, handler)
+fn onLButtonUp(window, handler) guiEvents.onLButtonUp(window, handler)
+fn onRButtonDown(window, handler) guiEvents.onRButtonDown(window, handler)
+fn onRButtonUp(window, handler) guiEvents.onRButtonUp(window, handler)
+fn onKeyDown(window, handler) guiEvents.onKeyDown(window, handler)
+fn onKeyUp(window, handler) guiEvents.onKeyUp(window, handler)
+fn onChar(window, handler) guiEvents.onChar(window, handler)
+fn onResize(window, handler) guiEvents.onResize(window, handler)
 
-fn onLButtonDown(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONDOWN -> {
-		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
-	})
-}
+fn formSetStatus(state, message, ok) guiForm.formSetStatus(state, message, ok)
+fn formPopChar(s) guiForm.formPopChar(s)
+fn formClamp(v, minVal, maxVal) guiForm.formClamp(v, minVal, maxVal)
+fn formHitListIndex(mx, my, x, y, itemW, itemH, count) guiForm.formHitListIndex(mx, my, x, y, itemW, itemH, count)
+fn formHitRectKey(mx, my, rects) guiForm.formHitRectKey(mx, my, rects)
+fn formToggleIfHit(value, mx, my, x, y, w, h) guiForm.formToggleIfHit(value, mx, my, x, y, w, h)
+fn formSelectByHit(current, mx, my, rects) guiForm.formSelectByHit(current, mx, my, rects)
+fn formSetByAssignments(state, assignments) guiForm.formSetByAssignments(state, assignments)
+fn formResetFlags(state, keys, value) guiForm.formResetFlags(state, keys, value)
+fn formSetHoverFromRects(state, mx, my, rects) guiForm.formSetHoverFromRects(state, mx, my, rects)
+fn formToggleKeysByHit(state, mx, my, rects) guiForm.formToggleKeysByHit(state, mx, my, rects)
+fn formSetKeyByHit(state, targetKey, mx, my, rects) guiForm.formSetKeyByHit(state, targetKey, mx, my, rects)
+fn formTruncateText(s, maxChars) guiForm.formTruncateText(s, maxChars)
+fn formIsPrintableChar?(code) guiForm.formIsPrintableChar?(code)
+fn formAppendByFocus(state, focus, c, fieldSpecs, notesSpec) guiForm.formAppendByFocus(state, focus, c, fieldSpecs, notesSpec)
+fn formBackspaceByFocus(state, focus, fieldKeys, notesSpec) guiForm.formBackspaceByFocus(state, focus, fieldKeys, notesSpec)
+fn formNotesAppendChar(lines, c) guiForm.formNotesAppendChar(lines, c)
+fn formNotesBackspace(lines) guiForm.formNotesBackspace(lines)
+fn formNotesNewLine(lines, maxLines) guiForm.formNotesNewLine(lines, maxLines)
+fn formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal) guiForm.formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal)
+fn formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings) guiForm.formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings)
+fn formNextField(current, order) guiForm.formNextField(current, order)
+fn formMaskText(s) guiForm.formMaskText(s)
 
-fn onLButtonUp(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONUP -> {
-		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
-	})
-}
-
-fn onRButtonDown(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONDOWN -> {
-		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
-	})
-}
-
-fn onRButtonUp(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONUP -> {
-		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
-	})
-}
-
-fn onKeyDown(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYDOWN -> {
-		handler(formMsgWParam(window))
-	})
-}
-
-fn onKeyUp(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYUP -> {
-		handler(formMsgWParam(window))
-	})
-}
-
-fn onChar(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_CHAR -> {
-		handler(formMsgWParam(window))
-	})
-}
-
-fn onResize(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_SIZE -> {
-		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
-	})
-}
-
-fn formSetStatus(state, message, ok) {
-	state.status <- message
-	state.statusOk <- _default(ok, true)
-}
-
-fn formPopChar(s) if len(s) > 0 {
-	true -> std.slice(s, 0, len(s) - 1)
-	_ -> ''
-}
-
-fn formClamp(v, minVal, maxVal) if v < minVal {
-	true -> minVal
-	_ -> if v > maxVal { true -> maxVal, _ -> v }
-}
-
-fn formHitListIndex(mx, my, x, y, itemW, itemH, count) {
-	fn loop(i) if i < count {
-		true -> {
-			iy := y + i * itemH
-			if formInRect?(mx, my, x, iy, itemW, itemH) {
-				true -> i
-				_ -> loop(i + 1)
-			}
-		}
-		_ -> -1
-	}
-	loop(0)
-}
-
-fn formHitRectKey(mx, my, rects) {
-	fn loop(i) if i < len(rects) {
-		true -> {
-			r := rects.(i)
-			if formInRect?(mx, my, r.x, r.y, r.w, r.h) {
-				true -> r.key
-				_ -> loop(i + 1)
-			}
-		}
-		_ -> ?
-	}
-	loop(0)
-}
-
-fn formToggleIfHit(value, mx, my, x, y, w, h) if formInRect?(mx, my, x, y, w, h) {
-	true -> !value
-	_ -> value
-}
-
-fn formSelectByHit(current, mx, my, rects) {
-	hit := formHitRectKey(mx, my, rects)
-	if hit != ? {
-		true -> hit
-		_ -> current
+fn _formCtx() {
+	{
+		drawLine: drawLine
+		fillRect: fillRect
+		drawText: drawText
 	}
 }
-
-fn formSetByAssignments(state, assignments) {
-	fn loop(i) if i < len(assignments) {
-		true -> {
-			a := assignments.(i)
-			state.(a.key) <- a.value
-			loop(i + 1)
-		}
-	}
-	loop(0)
-}
-
-fn formResetFlags(state, keys, value) {
-	v := _default(value, false)
-	fn loop(i) if i < len(keys) {
-		true -> {
-			state.(keys.(i)) <- v
-			loop(i + 1)
-		}
-	}
-	loop(0)
-}
-
-fn formSetHoverFromRects(state, mx, my, rects) {
-	fn loop(i) if i < len(rects) {
-		true -> {
-			r := rects.(i)
-			state.(r.key) <- formInRect?(mx, my, r.x, r.y, r.w, r.h)
-			loop(i + 1)
-		}
-	}
-	loop(0)
-}
-
-fn formToggleKeysByHit(state, mx, my, rects) {
-	fn loop(i) if i < len(rects) {
-		true -> {
-			r := rects.(i)
-			state.(r.key) <- formToggleIfHit(state.(r.key), mx, my, r.x, r.y, r.w, r.h)
-			loop(i + 1)
-		}
-	}
-	loop(0)
-}
-
-fn formSetKeyByHit(state, targetKey, mx, my, rects) {
-	hit := formHitRectKey(mx, my, rects)
-	if hit != ? -> state.(targetKey) <- hit
-}
-
-fn formTruncateText(s, maxChars) if len(s) > maxChars {
-	true -> std.slice(s, 0, maxChars) + '..'
-	_ -> s
-}
-
-fn formIsPrintableChar?(code) code != ? & code >= 32 & code < 127
-
-fn formAppendByFocus(state, focus, c, fieldSpecs, notesSpec) {
-	fn loop(i) if i < len(fieldSpecs) {
-		true -> {
-			spec := fieldSpecs.(i)
-			if focus = spec.key {
-				true -> {
-					v := state.(spec.key)
-					if len(v) < spec.max -> state.(spec.key) <- v + c
-				}
-				_ -> loop(i + 1)
-			}
-		}
-	}
-	loop(0)
-	if notesSpec != ? & focus = notesSpec.focusKey -> {
-		state.(notesSpec.valueKey) <- formNotesAppendChar(state.(notesSpec.valueKey), c)
-	}
-}
-
-fn formBackspaceByFocus(state, focus, fieldKeys, notesSpec) {
-	fn loop(i) if i < len(fieldKeys) {
-		true -> {
-			k := fieldKeys.(i)
-			if focus = k {
-				true -> state.(k) <- formPopChar(state.(k))
-				_ -> loop(i + 1)
-			}
-		}
-	}
-	loop(0)
-	if notesSpec != ? & focus = notesSpec.focusKey -> {
-		state.(notesSpec.valueKey) <- formNotesBackspace(state.(notesSpec.valueKey))
-	}
-}
-
-fn formNotesAppendChar(lines, c) {
-	last := len(lines) - 1
-	fn build(i, acc) if i < len(lines) {
-		true -> {
-			line := lines.(i)
-			if i = last {
-				true -> build(i + 1, acc << (line + c))
-				_ -> build(i + 1, acc << line)
-			}
-		}
-		_ -> acc
-	}
-	build(0, [])
-}
-
-fn formNotesBackspace(lines) {
-	last := len(lines) - 1
-	if last < 0 -> ['']
-	lastLine := lines.(last)
-	if len(lastLine) > 0 {
-		true -> {
-			fn build(i, acc) if i < len(lines) {
-				true -> {
-					line := lines.(i)
-					if i = last {
-						true -> build(i + 1, acc << formPopChar(line))
-						_ -> build(i + 1, acc << line)
-					}
-				}
-				_ -> acc
-			}
-			build(0, [])
-		}
-		_ -> if last > 0 {
-			true -> {
-				fn drop(i, acc) if i < last {
-					true -> drop(i + 1, acc << lines.(i))
-					_ -> acc
-				}
-				drop(0, [])
-			}
-			_ -> lines
-		}
-	}
-}
-
-fn formNotesNewLine(lines, maxLines) if len(lines) < _default(maxLines, 3) {
-	true -> lines << ''
-	_ -> lines
-}
-
-fn formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal) {
-	hw := _default(handleW, 12)
-	if hw < 1 -> hw <- 1
-	span := _default(maxVal, 100) - _default(minVal, 0)
-	if span < 1 -> span <- 1
-	den := sliderW - hw
-	if den < 1 -> den <- 1
-	raw := _default(minVal, 0) + ((mx - sliderX) * span) / den
-	formClamp(raw, _default(minVal, 0), _default(maxVal, 100))
-}
-
-fn formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings) {
-	fn loop(i) if i < len(bindings) {
-		true -> {
-			b := bindings.(i)
-			if state.(dragKey) = b.drag {
-				true -> state.(b.valueKey) <- formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal)
-				_ -> loop(i + 1)
-			}
-		}
-	}
-	loop(0)
-}
-
-fn formNextField(current, order) {
-	fn loop(i) if i < len(order) {
-		true -> if order.(i) = current {
-			true -> if i + 1 < len(order) {
-				true -> order.(i + 1)
-				_ -> order.(0)
-			}
-			_ -> loop(i + 1)
-		}
-		_ -> order.(0)
-	}
-	loop(0)
-}
-
-fn formMaskText(s) {
-	fn loop(i, acc) if i < len(s) {
-		true -> loop(i + 1, acc + '*')
-		_ -> acc
-	}
-	loop(0, '')
-}
-
-fn formDrawField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
-	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
-	bd := if focused { true -> borderFocusColor, _ -> borderColor }
-	fillRect(window, x, y, w, h, bg)
-	formDrawBorder(window, x, y, w, h, bd)
-	display := if text = '' { true -> placeholder, _ -> text }
-	drawText(window, x + 10, int(y + (h / 2) - 6), display)
-	if focused & text != '' {
-		true -> {
-			cx := x + 10 + len(text) * 7 + 2
-			if cx < x + w - 6 {
-				true -> drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
-			}
-		}
-	}
-}
-
-fn formDrawPasswordField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
-	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
-	bd := if focused { true -> borderFocusColor, _ -> borderColor }
-	fillRect(window, x, y, w, h, bg)
-	formDrawBorder(window, x, y, w, h, bd)
-	display := if text = '' { true -> placeholder, _ -> formMaskText(text) }
-	drawText(window, x + 10, int(y + (h / 2) - 6), display)
-	if focused & text != '' {
-		true -> {
-			cx := x + 10 + len(text) * 7 + 2
-			if cx < x + w - 6 {
-				true -> drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
-			}
-		}
-	}
-}
-
-fn formDrawCheckbox(window, x, y, checked, label, fieldColor, borderColor, checkColor) {
-	fillRect(window, x, y, 16, 16, fieldColor)
-	formDrawBorder(window, x, y, 16, 16, borderColor)
-	if checked {
-		true -> fillRect(window, x + 3, y + 3, 10, 10, checkColor)
-	}
-	drawText(window, x + 24, y + 1, label)
-}
-
-fn formDrawRadio(window, x, y, selected, label, fieldColor, borderColor, accentColor) {
-	fillRect(window, x + 2, y, 12, 16, fieldColor)
-	fillRect(window, x, y + 2, 16, 12, fieldColor)
-	drawLine(window, x + 2, y, x + 14, y, borderColor)
-	drawLine(window, x + 2, y + 16, x + 14, y + 16, borderColor)
-	drawLine(window, x, y + 2, x, y + 14, borderColor)
-	drawLine(window, x + 16, y + 2, x + 16, y + 14, borderColor)
-	if selected {
-		true -> fillRect(window, x + 5, y + 5, 7, 7, accentColor)
-	}
-	drawText(window, x + 24, y + 1, label)
-}
-
-fn formDrawPrimaryButton(window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, bottomLineColor) {
-	c := if press {
-		true -> pressColor
-		_ -> if hover { true -> hoverColor, _ -> baseColor }
-	}
-	fillRect(window, x, y, w, h, c)
-	drawLine(window, x, y + h, x + w, y + h, bottomLineColor)
-	lx := int(x + (w - len(label) * 7) / 2)
-	drawText(window, lx, int(y + (h / 2) - 6), label)
-}
-
-fn formDrawSecondaryButton(window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, borderColor) {
-	c := if press {
-		true -> pressColor
-		_ -> if hover { true -> hoverColor, _ -> baseColor }
-	}
-	fillRect(window, x, y, w, h, c)
-	formDrawBorder(window, x, y, w, h, borderColor)
-	lx := int(x + (w - len(label) * 7) / 2)
-	drawText(window, lx, int(y + (h / 2) - 6), label)
-}
-
-fn formDrawSlider(window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, options) {
-	opts := _default(options, {})
-	showHandle := _default(opts.showHandle, true)
-	showPercentRect := _default(opts.showPercentRect, false)
-	showTrackFill := _default(opts.showTrackFill, true)
-	handleW := _default(opts.handleWidth, 12)
-	percentRectW := _default(opts.percentRectWidth, 44)
-	percentRectColor := _default(opts.percentRectColor, fillColor)
-
-	safeMax := if maxVal > 0 { true -> maxVal, _ -> 1 }
-	clamped := if value < 0 {
-		true -> 0
-		_ -> if value > safeMax { true -> safeMax, _ -> value }
-	}
-
-	if handleW < 4 -> handleW <- 4
-	pct := int((clamped * 100) / safeMax)
-	fillW := int((pct * w) / 100)
-	if clamped > 0 & fillW < 1 -> fillW <- 1
-	if fillW > w -> fillW <- w
-
-	trackY := y + 6
-	trackH := 4
-	fillRect(window, x, trackY, w, trackH, trackColor)
-	if showTrackFill {
-		true -> if fillW > 0 -> fillRect(window, x, trackY, fillW, trackH, fillColor)
-	}
-
-	if showHandle {
-		true -> {
-			tx := x + fillW - int(handleW / 2)
-			if tx < x -> tx <- x
-			if tx > x + w - handleW -> tx <- x + w - handleW
-			fillRect(window, tx, y, handleW, 16, thumbColor)
-			formDrawBorder(window, tx, y, handleW, 16, thumbBorderColor)
-		}
-	}
-
-	if showPercentRect {
-		true -> {
-			rx := x + w + 8
-			fillRect(window, rx, y, percentRectW, 16, percentRectColor)
-			formDrawBorder(window, rx, y, percentRectW, 16, thumbBorderColor)
-			drawText(window, rx + 6, y + 2, string(pct) + '%')
-		}
-		_ -> drawText(window, x + w + 8, y, string(clamped))
-	}
-}
-
-fn formDrawLabeledPercentSlider(window, x, labelY, sliderY, w, label, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, percentRectColor) {
-	drawText(window, x, labelY, label)
-	formDrawSlider(window, x, sliderY, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, {
-		showHandle: true
-		showTrackFill: true
-		showPercentRect: true
-		percentRectWidth: 48
-		percentRectColor: _default(percentRectColor, fillColor)
-	})
-}
-
-fn formDrawNotes(window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
-	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
-	bd := if focused { true -> borderFocusColor, _ -> borderColor }
-	fillRect(window, x, y, w, h, bg)
-	formDrawBorder(window, x, y, w, h, bd)
-	if !focused & len(lines) > 0 & lines.(0) = '' {
-		true -> drawText(window, x + 8, y + 8, placeholder)
-	}
-	fn drawLines(i) if i < len(lines) & i < 3 {
-		true -> {
-			drawText(window, x + 8, y + 8 + i * 18, lines.(i))
-			drawLines(i + 1)
-		}
-	}
-	drawLines(0)
-	if focused {
-		true -> {
-			lastIdx := if len(lines) > 0 { true -> len(lines) - 1, _ -> 0 }
-			lastLine := if len(lines) > 0 { true -> lines.(lastIdx), _ -> '' }
-			vis := if lastIdx < 3 { true -> lastIdx, _ -> 2 }
-			cx := x + 8 + len(lastLine) * 7 + 2
-			drawLine(window, cx, y + 8 + vis * 18, cx, y + 8 + vis * 18 + 13, cursorColor)
-		}
-	}
-}
-
-fn formDrawStatusBanner(window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor) {
-	accent := if ok { true -> successColor, _ -> errorColor }
-	fillRect(window, x, y, w, h, fieldColor)
-	fillRect(window, x, y, 4, h, accent)
-	formDrawBorder(window, x, y, w, h, borderColor)
-	drawText(window, x + 12, y + 8, message)
-}
+fn formDrawBorder(window, x, y, w, h, color) guiForm.formDrawBorder(_formCtx(), window, x, y, w, h, color)
+fn formDrawField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) guiForm.formDrawField(_formCtx(), window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor)
+fn formDrawPasswordField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) guiForm.formDrawPasswordField(_formCtx(), window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor)
+fn formDrawCheckbox(window, x, y, checked, label, fieldColor, borderColor, checkColor) guiForm.formDrawCheckbox(_formCtx(), window, x, y, checked, label, fieldColor, borderColor, checkColor)
+fn formDrawRadio(window, x, y, selected, label, fieldColor, borderColor, accentColor) guiForm.formDrawRadio(_formCtx(), window, x, y, selected, label, fieldColor, borderColor, accentColor)
+fn formDrawPrimaryButton(window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, bottomLineColor) guiForm.formDrawPrimaryButton(_formCtx(), window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, bottomLineColor)
+fn formDrawSecondaryButton(window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, borderColor) guiForm.formDrawSecondaryButton(_formCtx(), window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, borderColor)
+fn formDrawSlider(window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, options) guiForm.formDrawSlider(_formCtx(), window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, options)
+fn formDrawLabeledPercentSlider(window, x, labelY, sliderY, w, label, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, percentRectColor) guiForm.formDrawLabeledPercentSlider(_formCtx(), window, x, labelY, sliderY, w, label, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, percentRectColor)
+fn formDrawNotes(window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) guiForm.formDrawNotes(_formCtx(), window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor)
+fn formDrawStatusBanner(window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor) guiForm.formDrawStatusBanner(_formCtx(), window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor)
 
 fn Vec2(x, y) gui2d.Vec2(x, y)
 fn Rect2(x, y, width, height) gui2d.Rect2(x, y, width, height)
@@ -1293,99 +497,15 @@ fn poll(window) if window.type {
 	_ -> window
 }
 
-fn _frameIntervalNt(window) _default(window.frameMs, 16) * 1000000
+fn _frameIntervalNt(window) guiLoop.frameIntervalNt(window)
 
-fn _frameMaxDtNt(window) _default(window.maxFrameDtMs, 250) * 1000000
+fn _frameMaxDtNt(window) guiLoop.frameMaxDtNt(window)
 
-fn _markUrgentFrameIfResizeDispatch(window, step) {
-	if window.backend = :windows & step.type = :dispatch {
-		true -> {
-			msgType := windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
-			isResizeRelated :=
-				(msgType = GUI_WM_SIZE) |
-				(msgType = GUI_WM_PAINT) |
-				(msgType = GUI_WM_ERASEBKGND) |
-				(msgType = GUI_WM_SIZING) |
-				(msgType = GUI_WM_WINDOWPOSCHANGED) |
-				(msgType = GUI_WM_ENTERSIZEMOVE) |
-				(msgType = GUI_WM_EXITSIZEMOVE)
-			if isResizeRelated {
-				true -> window._forceNextFrame <- true
-			}
-		}
-	}
-}
+fn _markUrgentFrameIfResizeDispatch(window, step) guiLoop.markUrgentFrameIfResizeDispatch(window, step)
 
-fn _maybeRunFrame(window, onFrame, force) {
-	if onFrame {
-		? -> ?
-		_ -> {
-			now := nanotime()
-			next := _default(window._nextFrameNt, now)
-			if window._nextFrameNt {
-				? -> window._nextFrameNt <- next
-			}
-			forceNow := force | _default(window._forceNextFrame, false)
-			if forceNow {
-				true -> window._forceNextFrame <- false
-			}
-			due := forceNow | now >= next
-			if due {
-				true -> {
-					last := _default(window._lastFrameNt, now)
-					rawDt := now - last
-					dtNs := if rawDt < 0 {
-						true -> 0
-						_ -> if rawDt > _frameMaxDtNt(window) {
-							true -> _frameMaxDtNt(window)
-							_ -> rawDt
-						}
-					}
-					dt := float(dtNs) / 1000000000.0
-					window._lastFrameNt <- now
-					onFrame(window, dt)
-					_publish(window, :frame, {
-						type: :frame
-						dt: dt
-						timeNs: now
-					})
-					interval := _frameIntervalNt(window)
-					now2 := nanotime()
-					scheduledBase := if forceNow {
-						true -> now2
-						_ -> next
-					}
-					scheduled := scheduledBase + interval
-					if scheduled < now2 - interval {
-						true -> window._nextFrameNt <- now2 + interval
-						_ -> window._nextFrameNt <- scheduled
-					}
-				}
-			}
-		}
-	}
-}
+fn _maybeRunFrame(window, onFrame, force) guiLoop.maybeRunFrame(window, onFrame, force, _publish)
 
-fn _sleepUntilNextFrame(window) {
-	if _default(window._forceNextFrame, false) {
-		true -> 0
-		_ -> {
-	now := nanotime()
-	next := _default(window._nextFrameNt, now + _frameIntervalNt(window))
-	remaining := next - now
-	if remaining > 0 {
-		true -> {
-			sleepMs := int((remaining + 999999) / 1000000)
-			if sleepMs < 1 -> sleepMs <- 1
-			if window.backend {
-				:windows -> windows.kernel32('Sleep', sleepMs)
-				:linux -> guiNativeLinux.sleepFrame(sleepMs)
-			}
-		}
-	}
-		}
-}
-}
+fn _sleepUntilNextFrame(window) guiLoop.sleepUntilNextFrame(window)
 
 fn run(window, onEvent, onFrame) if window.type {
 	:ok -> {

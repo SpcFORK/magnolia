@@ -1,0 +1,284 @@
+// gui-events handles event-bus wiring, lifecycle helper subscribers, typed
+// key-event helpers, and Win32 window-message event subscribers for the
+// Magnolia GUI facade.
+
+windows    := import('windows')
+eventBusLib := import('async/event-bus')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+// ─── Event bus lazy init ────────────────────────────────────────────────────
+
+fn _ensureEventBus(window) if window.type {
+	:ok -> {
+		bus := window.eventBus
+		if bus {
+			? -> {
+				created := eventBusLib.create()
+				window.eventBus <- created
+				created
+			}
+			_ -> bus
+		}
+	}
+	_ -> ?
+}
+
+fn eventBus(window) _ensureEventBus(window)
+
+fn on(window, event, handler) if bus := _ensureEventBus(window) {
+	? -> ?
+	_ -> bus.on(event, handler)
+}
+
+fn once(window, event, handler) if bus := _ensureEventBus(window) {
+	? -> ?
+	_ -> bus.once(event, handler)
+}
+
+fn off(window, event, tokenOrHandler) if bus := _ensureEventBus(window) {
+	? -> 0
+	_ -> bus.off(event, tokenOrHandler)
+}
+
+fn emit(window, event, payload, onDone) if bus := _ensureEventBus(window) {
+	? -> 0
+	_ -> bus.emit(event, payload, onDone)
+}
+
+fn listenerCount(window, event) if bus := _ensureEventBus(window) {
+	? -> 0
+	_ -> bus.listenerCount(event)
+}
+
+fn clearListeners(window, event) if bus := _ensureEventBus(window) {
+	? -> false
+	_ -> bus.clear(event)
+}
+
+fn publish(window, event, payload) {
+	bus := _ensureEventBus(window)
+	if bus {
+		? -> 0
+		_ -> bus.emit(event, payload)
+	}
+}
+
+// ─── Named lifecycle event subscribers ─────────────────────────────────────
+
+fn onDispatch(window, handler)     on(window, :dispatch, handler)
+fn onceDispatch(window, handler)   once(window, :dispatch, handler)
+fn onRunStart(window, handler)     on(window, :runStart, handler)
+fn onceRunStart(window, handler)   once(window, :runStart, handler)
+fn onIdle(window, handler)         on(window, :idle, handler)
+fn onceIdle(window, handler)       once(window, :idle, handler)
+fn onFrame(window, handler)        on(window, :frame, handler)
+fn onceFrame(window, handler)      once(window, :frame, handler)
+fn onClosing(window, handler)      on(window, :closing, handler)
+fn onceClosing(window, handler)    once(window, :closing, handler)
+fn onClosed(window, handler)       on(window, :closed, handler)
+fn onceClosed(window, handler)     once(window, :closed, handler)
+
+// ─── Win32 window-message constants ────────────────────────────────────────
+
+MSG_OFF_TYPE   := 8
+MSG_OFF_WPARAM := 16
+MSG_OFF_LPARAM := 24
+
+FORM_WM_MOUSEMOVE   := 512
+FORM_WM_LBUTTONDOWN := 513
+FORM_WM_LBUTTONUP   := 514
+FORM_WM_RBUTTONDOWN := 516
+FORM_WM_RBUTTONUP   := 517
+FORM_WM_KEYDOWN     := 256
+FORM_WM_KEYUP       := 257
+FORM_WM_CHAR        := 258
+GUI_WM_SIZE             := 5
+GUI_WM_PAINT            := 15
+GUI_WM_ERASEBKGND       := 20
+GUI_WM_SIZING           := 532
+GUI_WM_WINDOWPOSCHANGED := 71
+GUI_WM_ENTERSIZEMOVE    := 561
+GUI_WM_EXITSIZEMOVE     := 562
+
+FORM_VK_BACK   := 8
+FORM_VK_TAB    := 9
+FORM_VK_RETURN := 13
+FORM_VK_ESCAPE := 27
+
+// ─── Win32 message buffer readers ───────────────────────────────────────────
+
+fn formMsgType(window)   windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+fn formMsgWParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
+fn formMsgLParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+fn formLoWord(v) v & 65535
+fn formHiWord(v) (v >> 16) & 65535
+
+fn formEventContext(window) {
+	lp := formMsgLParam(window)
+	{
+		mt: formMsgType(window)
+		wp: formMsgWParam(window)
+		lp: lp
+		mx: formLoWord(lp)
+		my: formHiWord(lp)
+	}
+}
+
+fn formInRect?(mx, my, rx, ry, rw, rh) {
+	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
+}
+
+// ─── Typed key events (cross-platform) ─────────────────────────────────────
+
+fn _vkKeyName(vk) {
+	if vk >= 65 & vk <= 90 -> char(vk)
+	if vk >= 48 & vk <= 57 -> char(vk)
+	if vk = 37 -> 'left'
+	if vk = 38 -> 'up'
+	if vk = 39 -> 'right'
+	if vk = 40 -> 'down'
+	if vk = 32 -> ' '
+	if vk = FORM_VK_TAB    -> 'tab'
+	if vk = FORM_VK_RETURN -> 'enter'
+	if vk = FORM_VK_ESCAPE -> 'escape'
+	if vk = FORM_VK_BACK   -> 'backspace'
+	'vk-' + string(vk)
+}
+
+fn _extractKeyEvent(window, evt, expectedMsgType, expectedEvtType) {
+	if evt.type = expectedEvtType {
+		true -> {
+			{matched: true, key: _default(evt.key, ?), evt: evt}
+		}
+		_ -> if formMsgType(window) = expectedMsgType {
+			true -> {
+				vk := formMsgWParam(window)
+				key := _vkKeyName(vk)
+				{matched: true, key: key, evt: {type: expectedEvtType, key: key, vk: vk, raw: evt}}
+			}
+			_ -> {matched: false, key: ?, evt: evt}
+		}
+	}
+}
+
+fn onKeyDownEvent(window, handler) {
+	on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYDOWN, :keyDown)
+		if extracted.matched -> handler(extracted.key, extracted.evt)
+	})
+}
+
+fn onceKeyDownEvent(window, handler) {
+	token := ?
+	token <- on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYDOWN, :keyDown)
+		if extracted.matched -> {
+			off(window, :dispatch, token)
+			handler(extracted.key, extracted.evt)
+		}
+	})
+	token
+}
+
+fn onKeyUpEvent(window, handler) {
+	on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYUP, :keyUp)
+		if extracted.matched -> handler(extracted.key, extracted.evt)
+	})
+}
+
+fn onceKeyUpEvent(window, handler) {
+	token := ?
+	token <- on(window, :dispatch, fn(evt) {
+		extracted := _extractKeyEvent(window, evt, FORM_WM_KEYUP, :keyUp)
+		if extracted.matched -> {
+			off(window, :dispatch, token)
+			handler(extracted.key, extracted.evt)
+		}
+	})
+	token
+}
+
+// ─── Win32 mouse/keyboard dispatch subscribers ──────────────────────────────
+// Each helper subscribes to :dispatch and fires handler only when the
+// Windows message type matches. Returns the token for gui.off().
+
+fn onMouseMove(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MOUSEMOVE -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onLButtonDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONDOWN -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onLButtonUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONUP -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onRButtonDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONDOWN -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onRButtonUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONUP -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn onKeyDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYDOWN -> {
+		handler(formMsgWParam(window))
+	})
+}
+
+fn onKeyUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYUP -> {
+		handler(formMsgWParam(window))
+	})
+}
+
+fn onChar(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_CHAR -> {
+		handler(formMsgWParam(window))
+	})
+}
+
+fn onResize(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_SIZE -> {
+		lp := formMsgLParam(window)
+		handler(formLoWord(lp), formHiWord(lp))
+	})
+}
+
+fn isResizeDispatch?(window, step) {
+	if step.type = :dispatch {
+		true -> {
+			msgType := formMsgType(window)
+			(msgType = GUI_WM_SIZE) |
+			(msgType = GUI_WM_PAINT) |
+			(msgType = GUI_WM_ERASEBKGND) |
+			(msgType = GUI_WM_SIZING) |
+			(msgType = GUI_WM_WINDOWPOSCHANGED) |
+			(msgType = GUI_WM_ENTERSIZEMOVE) |
+			(msgType = GUI_WM_EXITSIZEMOVE)
+		}
+		_ -> false
+	}
+}

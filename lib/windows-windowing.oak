@@ -1,0 +1,353 @@
+// windows-windowing provides Win32 window and message-loop helpers used by lib/windows.
+
+sys := import('sys')
+{
+	writeU32: writeU32
+	writeU64: writeU64
+} := import('writes')
+{
+	Kernel32: Kernel32
+	User32: User32
+} := import('windows-constants')
+{
+	CS_VREDRAW: CS_VREDRAW
+	CS_HREDRAW: CS_HREDRAW
+	WS_OVERLAPPEDWINDOW: WS_OVERLAPPEDWINDOW
+	WS_CLIPSIBLINGS: WS_CLIPSIBLINGS
+	WS_CLIPCHILDREN: WS_CLIPCHILDREN
+	CW_USEDEFAULT: CW_USEDEFAULT
+	IDC_ARROW: IDC_ARROW
+	IDI_APPLICATION: IDI_APPLICATION
+	PM_REMOVE: PM_REMOVE
+} := import('windows-flags')
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn wstr(s) utf16(s)
+
+fn cstr(s) s + char(0)
+
+fn ptrSize() if ___runtime_sys_info().arch {
+	'amd64' -> 8
+	'arm64' -> 8
+	_ -> 4
+}
+
+fn writePtr(address, value) if ptrSize() {
+	8 -> writeU64(address, value)
+	_ -> writeU32(address, value)
+}
+
+fn ptrInt(ptrOrInt) int(ptrOrInt)
+
+fn callValueOrZero(res) if sys.ok?(res) {
+	true -> res.r1
+	_ -> 0
+}
+
+fn _zeros(n, acc) if n {
+	0 -> acc
+	_ -> _zeros(n - 1, acc << 0)
+}
+
+fn callOk?(res) sys.ok?(res) | (res.type = :error & res.r1 > 0)
+
+fn noMessage?(res) {
+	(sys.ok?(res) & res.r1 = 0) |
+	(res.type = :error & res.errno = 1400)
+}
+
+fn kernel32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Kernel32, symbol, args...)
+	_ -> _platformError('kernel32')
+}
+
+fn user32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(User32, symbol, args...)
+	_ -> _platformError('user32')
+}
+
+fn moduleHandle(name) if isWindows?() {
+	true -> if name {
+		? -> kernel32('GetModuleHandleW', ?)
+		_ -> kernel32('GetModuleHandleW', wstr(name))
+	}
+	_ -> _platformError('moduleHandle')
+}
+
+fn imageBase() if isWindows?() {
+	true -> sys.valueOr(moduleHandle(?), 0)
+	_ -> 0
+}
+
+// `wndClassExPtr` should point to a valid WNDCLASSEXW-compatible struct.
+fn registerClassEx(wndClassExPtr) if isWindows?() {
+	true -> user32('RegisterClassExW', wndClassExPtr)
+	_ -> _platformError('registerClassEx')
+}
+
+// `className` and `windowName` are UTF-16 converted and null-terminated.
+fn createWindowEx(exStyle, className, windowName, style, x, y, width, height, parent, menu, instance, param) if isWindows?() {
+	true -> user32(
+		'CreateWindowExW'
+		exStyle
+		wstr(className)
+		wstr(windowName)
+		style
+		x
+		y
+		width
+		height
+		parent
+		menu
+		instance
+		param
+	)
+	_ -> _platformError('createWindowEx')
+}
+
+fn defWindowProc(hwnd, msg, wParam, lParam) if isWindows?() {
+	true -> user32('DefWindowProcW', hwnd, msg, wParam, lParam)
+	_ -> _platformError('defWindowProc')
+}
+
+fn showWindow(hwnd, cmdShow) if isWindows?() {
+	true -> user32('ShowWindow', hwnd, cmdShow)
+	_ -> _platformError('showWindow')
+}
+
+fn updateWindow(hwnd) if isWindows?() {
+	true -> user32('UpdateWindow', hwnd)
+	_ -> _platformError('updateWindow')
+}
+
+fn getWindowLongPtr(hwnd, index) if isWindows?() {
+	true -> user32('GetWindowLongPtrW', hwnd, index)
+	_ -> _platformError('getWindowLongPtr')
+}
+
+fn setWindowLongPtr(hwnd, index, value) if isWindows?() {
+	true -> user32('SetWindowLongPtrW', hwnd, index, value)
+	_ -> _platformError('setWindowLongPtr')
+}
+
+fn getSystemMetrics(idx) if isWindows?() {
+	true -> user32('GetSystemMetrics', idx)
+	_ -> _platformError('getSystemMetrics')
+}
+
+fn destroyWindow(hwnd) if isWindows?() {
+	true -> user32('DestroyWindow', hwnd)
+	_ -> _platformError('destroyWindow')
+}
+
+fn postQuitMessage(exitCode) if isWindows?() {
+	true -> user32('PostQuitMessage', exitCode)
+	_ -> _platformError('postQuitMessage')
+}
+
+// `msgPtr` should point to a MSG-compatible struct.
+fn getMessage(msgPtr, hwnd, msgFilterMin, msgFilterMax) if isWindows?() {
+	true -> user32('GetMessageW', msgPtr, hwnd, msgFilterMin, msgFilterMax)
+	_ -> _platformError('getMessage')
+}
+
+// `msgPtr` should point to a MSG-compatible struct.
+fn peekMessage(msgPtr, hwnd, msgFilterMin, msgFilterMax, removeMsg) if isWindows?() {
+	true -> user32('PeekMessageW', msgPtr, hwnd, msgFilterMin, msgFilterMax, removeMsg)
+	_ -> _platformError('peekMessage')
+}
+
+// `msgPtr` should point to a MSG-compatible struct.
+fn translateMessage(msgPtr) if isWindows?() {
+	true -> user32('TranslateMessage', msgPtr)
+	_ -> _platformError('translateMessage')
+}
+
+// `msgPtr` should point to a MSG-compatible struct.
+fn dispatchMessage(msgPtr) if isWindows?() {
+	true -> user32('DispatchMessageW', msgPtr)
+	_ -> _platformError('dispatchMessage')
+}
+
+fn isWindow(hwnd) if isWindows?() {
+	true -> user32('IsWindow', hwnd)
+	_ -> _platformError('isWindow')
+}
+
+fn waitMessage() if isWindows?() {
+	true -> user32('WaitMessage')
+	_ -> _platformError('waitMessage')
+}
+
+fn windowAlive?(hwnd) {
+	res := isWindow(hwnd)
+	sys.ok?(res) & res.r1 > 0
+}
+
+fn msgStructSize() if ptrSize() {
+	8 -> 48
+	_ -> 28
+}
+
+// Returns a zero-initialized MSG-compatible byte buffer.
+fn createMsgBuffer() bits(_zeros(msgStructSize(), []))
+
+// Pumps one message iteration for `hwnd` using PeekMessageW + WaitMessage.
+// Returns {type: :dispatch|:idle|:closed|:error, ...}.
+fn pumpWindowMessage(hwnd, msgPtr) if isWindows?() {
+	true -> if windowAlive?(hwnd) {
+		true -> {
+			msg := peekMessage(msgPtr, 0, 0, 0, PM_REMOVE)
+			if callOk?(msg) | noMessage?(msg) {
+				true -> if msg.r1 > 0 {
+					true -> {
+						translateMessage(msgPtr)
+						dispatchMessage(msgPtr)
+						{type: :dispatch, detail: msg}
+					}
+					_ -> {
+						waitMessage()
+						{type: :idle, detail: msg}
+					}
+				}
+				_ -> {
+					{type: :error, error: 'PeekMessageW failed', detail: msg}
+				}
+			}
+		}
+		_ -> {type: :closed}
+	}
+	_ -> _platformError('pumpWindowMessage')
+}
+
+fn loadCursor(instance, cursorId) if isWindows?() {
+	true -> user32('LoadCursorW', instance, cursorId)
+	_ -> _platformError('loadCursor')
+}
+
+fn loadIcon(instance, iconId) if isWindows?() {
+	true -> user32('LoadIconW', instance, iconId)
+	_ -> _platformError('loadIcon')
+}
+
+// Registers a top-level window class using DefWindowProcW.
+// classStyle can override default CS_HREDRAW|CS_VREDRAW.
+fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, classStyle) if isWindows?() {
+	true -> {
+		size := if ptrSize() {
+			8 -> 80
+			_ -> 48
+		}
+
+		wcBuf := bits({
+			fn zeros(n, acc) if n {
+				0 -> acc
+				_ -> zeros(n - 1, acc << 0)
+			}
+			zeros(size, [])
+		})
+		wcPtr := addr(wcBuf)
+
+		defProcAddr := sys.valueOr(
+			kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
+			0
+		)
+
+		resolvedCursor := if cursorHandle {
+			? -> callValueOrZero(loadCursor(0, IDC_ARROW))
+			_ -> cursorHandle
+		}
+		resolvedIcon := if iconHandle {
+			? -> callValueOrZero(loadIcon(0, IDI_APPLICATION))
+			_ -> iconHandle
+		}
+		resolvedSmallIcon := if smallIconHandle {
+			? -> resolvedIcon
+			_ -> smallIconHandle
+		}
+		resolvedClassStyle := if classStyle {
+			? -> CS_HREDRAW | CS_VREDRAW
+			_ -> classStyle
+		}
+		classWide := wstr(className)
+		classWidePtr := ptrInt(addr(classWide))
+
+		writeU32(wcPtr + 0, size)
+		writeU32(wcPtr + 4, resolvedClassStyle)
+		writePtr(wcPtr + 8, defProcAddr)
+		writeU32(wcPtr + 16, 0)
+		writeU32(wcPtr + 20, 0)
+		writePtr(wcPtr + 24, imageBase())
+		writePtr(wcPtr + 24 + ptrSize(), resolvedIcon)
+		writePtr(wcPtr + 24 + ptrSize() * 2, resolvedCursor)
+		writePtr(wcPtr + 24 + ptrSize() * 3, 0)
+		writePtr(wcPtr + 24 + ptrSize() * 4, 0)
+		writePtr(wcPtr + 24 + ptrSize() * 5, classWidePtr)
+		writePtr(wcPtr + 24 + ptrSize() * 6, resolvedSmallIcon)
+
+		registerClassEx(wcPtr)
+	}
+	_ -> _platformError('registerWindowClassEx')
+}
+
+// Registers a top-level window class using DefWindowProcW.
+fn registerDefaultWindowClass(className) if isWindows?() {
+	true -> registerWindowClassEx(className, ?, ?, ?, ?)
+	_ -> _platformError('registerDefaultWindowClass')
+}
+
+fn createTopLevelWindow(className, title, width, height) if isWindows?() {
+	true -> createWindowEx(
+		0
+		className
+		title
+		WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+		CW_USEDEFAULT
+		CW_USEDEFAULT
+		width
+		height
+		0
+		0
+		imageBase()
+		0
+	)
+	_ -> _platformError('createTopLevelWindow')
+}
+
+// Runs a native Win32 message loop on the current thread until the window closes.
+fn runWindowLoop(hwnd) if isWindows?() {
+	true -> win_msg_loop(hwnd)
+	_ -> _platformError('runWindowLoop')
+}
+
+// Runs a close-aware PeekMessageW loop for `hwnd` until the window closes.
+fn runWindowLoopPeek(hwnd, msgPtr) if isWindows?() {
+	true -> {
+		step := pumpWindowMessage(hwnd, msgPtr)
+		if step.type {
+			:dispatch -> runWindowLoopPeek(hwnd, msgPtr)
+			:idle -> runWindowLoopPeek(hwnd, msgPtr)
+			:closed -> 0
+			_ -> step
+		}
+	}
+	_ -> _platformError('runWindowLoopPeek')
+}
+
+fn messageBox(hwnd, text, caption, msgType) if isWindows?() {
+	true -> user32('MessageBoxW', hwnd, wstr(text), wstr(caption), msgType)
+	_ -> _platformError('messageBox')
+}
+
+fn setWindowText(hwnd, text) if isWindows?() {
+	true -> user32('SetWindowTextW', hwnd, wstr(text))
+	_ -> _platformError('setWindowText')
+}

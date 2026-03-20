@@ -122,9 +122,10 @@ fn releaseResources(window) {
 	0
 }
 
-fn drawText(window, x, y, text) if window.type {
+fn drawText(window, x, y, text, color, defaultColor) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
+			useColor := _default(color, defaultColor)
 			hdcValue := if window.frameHdc > 0 {
 				true -> window.frameHdc
 				_ -> {
@@ -145,10 +146,13 @@ fn drawText(window, x, y, text) if window.type {
 					// Set transparent text rendering with a light default color so
 					// text remains readable on dark-themed demo UIs.
 					windows.setBkMode(hdcValue, 1)
-					windows.setTextColor(hdcValue, 15919352)
+					windows.setTextColor(hdcValue, useColor)
 					windows.textOut(hdcValue, x, y, text)
-					if prevFont & windows.callOk?(prevFont) & prevFont.r1 > 0 {
-						true -> windows.selectObject(hdcValue, prevFont.r1)
+					if prevFont {
+						? -> 0
+						_ -> if windows.callOk?(prevFont) & prevFont.r1 > 0 {
+							true -> windows.selectObject(hdcValue, prevFont.r1)
+						}
 					}
 					if window.frameHdc = 0 {
 						true -> windows.releaseDC(window.hwnd, hdcValue)
@@ -159,6 +163,7 @@ fn drawText(window, x, y, text) if window.type {
 			}
 		}
 		:linux -> {
+			useColor := _default(color, defaultColor)
 			gcHandle := if window._gcCache > 0 {
 				true -> window._gcCache
 				_ -> {
@@ -174,7 +179,7 @@ fn drawText(window, x, y, text) if window.type {
 			}
 			if gcHandle > 0 {
 				true -> {
-					linux.setForeground(window.display, gcHandle, window.black)
+					linux.setForeground(window.display, gcHandle, useColor)
 					linux.drawString(window.display, window.window, gcHandle, x, y, text)
 					{type: :ok}
 				}
@@ -183,12 +188,14 @@ fn drawText(window, x, y, text) if window.type {
 		}
 		:web -> {
 			fontCss := _webFontString(_default(window.textFont, ?))
+			useColor := _default(color, defaultColor)
 			window.messages <- window.messages << {
 				type: :text
 				x: x
 				y: y
 				text: text
 				font: fontCss
+				color: useColor
 			}
 			{type: :ok}
 		}

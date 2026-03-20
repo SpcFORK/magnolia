@@ -1,0 +1,446 @@
+// gui-form provides form-widget drawing helpers and stateless form-state
+// utilities for the Magnolia GUI facade.
+//
+// Draw functions accept a `ctx` object as their first argument so they remain
+// decoupled from the specific drawing backend:
+//   ctx = { drawLine, fillRect, drawText }
+//
+// GUI.oak re-exports these as single-window convenience wrappers.
+
+std     := import('std')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+// ─── Pure state helpers ───────────────────────────────────────────────────────
+
+fn formSetStatus(state, message, ok) {
+	state.status <- message
+	state.statusOk <- _default(ok, true)
+}
+
+fn formPopChar(s) if len(s) > 0 {
+	true -> std.slice(s, 0, len(s) - 1)
+	_ -> ''
+}
+
+fn formClamp(v, minVal, maxVal) if v < minVal {
+	true -> minVal
+	_ -> if v > maxVal { true -> maxVal, _ -> v }
+}
+
+fn formInRect?(mx, my, rx, ry, rw, rh) {
+	mx >= rx & mx <= rx + rw & my >= ry & my <= ry + rh
+}
+
+fn formHitListIndex(mx, my, x, y, itemW, itemH, count) {
+	fn loop(i) if i < count {
+		true -> {
+			iy := y + i * itemH
+			if formInRect?(mx, my, x, iy, itemW, itemH) {
+				true -> i
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> -1
+	}
+	loop(0)
+}
+
+fn formHitRectKey(mx, my, rects) {
+	fn loop(i) if i < len(rects) {
+		true -> {
+			r := rects.(i)
+			if formInRect?(mx, my, r.x, r.y, r.w, r.h) {
+				true -> r.key
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
+fn formToggleIfHit(value, mx, my, x, y, w, h) if formInRect?(mx, my, x, y, w, h) {
+	true -> !value
+	_ -> value
+}
+
+fn formSelectByHit(current, mx, my, rects) {
+	hit := formHitRectKey(mx, my, rects)
+	if hit != ? {
+		true -> hit
+		_ -> current
+	}
+}
+
+fn formSetByAssignments(state, assignments) {
+	fn loop(i) if i < len(assignments) {
+		true -> {
+			a := assignments.(i)
+			state.(a.key) <- a.value
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formResetFlags(state, keys, value) {
+	v := _default(value, false)
+	fn loop(i) if i < len(keys) {
+		true -> {
+			state.(keys.(i)) <- v
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formSetHoverFromRects(state, mx, my, rects) {
+	fn loop(i) if i < len(rects) {
+		true -> {
+			r := rects.(i)
+			state.(r.key) <- formInRect?(mx, my, r.x, r.y, r.w, r.h)
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formToggleKeysByHit(state, mx, my, rects) {
+	fn loop(i) if i < len(rects) {
+		true -> {
+			r := rects.(i)
+			state.(r.key) <- formToggleIfHit(state.(r.key), mx, my, r.x, r.y, r.w, r.h)
+			loop(i + 1)
+		}
+	}
+	loop(0)
+}
+
+fn formSetKeyByHit(state, targetKey, mx, my, rects) {
+	hit := formHitRectKey(mx, my, rects)
+	if hit != ? -> state.(targetKey) <- hit
+}
+
+fn formTruncateText(s, maxChars) if len(s) > maxChars {
+	true -> std.slice(s, 0, maxChars) + '..'
+	_ -> s
+}
+
+fn formIsPrintableChar?(code) code != ? & code >= 32 & code < 127
+
+fn formAppendByFocus(state, focus, c, fieldSpecs, notesSpec) {
+	fn loop(i) if i < len(fieldSpecs) {
+		true -> {
+			spec := fieldSpecs.(i)
+			if focus = spec.key {
+				true -> {
+					v := state.(spec.key)
+					if len(v) < spec.max -> state.(spec.key) <- v + c
+				}
+				_ -> loop(i + 1)
+			}
+		}
+	}
+	loop(0)
+	if notesSpec != ? & focus = notesSpec.focusKey -> {
+		state.(notesSpec.valueKey) <- formNotesAppendChar(state.(notesSpec.valueKey), c)
+	}
+}
+
+fn formBackspaceByFocus(state, focus, fieldKeys, notesSpec) {
+	fn loop(i) if i < len(fieldKeys) {
+		true -> {
+			k := fieldKeys.(i)
+			if focus = k {
+				true -> state.(k) <- formPopChar(state.(k))
+				_ -> loop(i + 1)
+			}
+		}
+	}
+	loop(0)
+	if notesSpec != ? & focus = notesSpec.focusKey -> {
+		state.(notesSpec.valueKey) <- formNotesBackspace(state.(notesSpec.valueKey))
+	}
+}
+
+fn formNotesAppendChar(lines, c) {
+	last := len(lines) - 1
+	fn build(i, acc) if i < len(lines) {
+		true -> {
+			line := lines.(i)
+			if i = last {
+				true -> build(i + 1, acc << (line + c))
+				_ -> build(i + 1, acc << line)
+			}
+		}
+		_ -> acc
+	}
+	build(0, [])
+}
+
+fn formNotesBackspace(lines) {
+	last := len(lines) - 1
+	if last < 0 -> ['']
+	lastLine := lines.(last)
+	if len(lastLine) > 0 {
+		true -> {
+			fn build(i, acc) if i < len(lines) {
+				true -> {
+					line := lines.(i)
+					if i = last {
+						true -> build(i + 1, acc << formPopChar(line))
+						_ -> build(i + 1, acc << line)
+					}
+				}
+				_ -> acc
+			}
+			build(0, [])
+		}
+		_ -> if last > 0 {
+			true -> {
+				fn drop(i, acc) if i < last {
+					true -> drop(i + 1, acc << lines.(i))
+					_ -> acc
+				}
+				drop(0, [])
+			}
+			_ -> lines
+		}
+	}
+}
+
+fn formNotesNewLine(lines, maxLines) if len(lines) < _default(maxLines, 3) {
+	true -> lines << ''
+	_ -> lines
+}
+
+fn formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal) {
+	hw := _default(handleW, 12)
+	if hw < 1 -> hw <- 1
+	span := _default(maxVal, 100) - _default(minVal, 0)
+	if span < 1 -> span <- 1
+	den := sliderW - hw
+	if den < 1 -> den <- 1
+	raw := _default(minVal, 0) + ((mx - sliderX) * span) / den
+	formClamp(raw, _default(minVal, 0), _default(maxVal, 100))
+}
+
+fn formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings) {
+	fn loop(i) if i < len(bindings) {
+		true -> {
+			b := bindings.(i)
+			if state.(dragKey) = b.drag {
+				true -> state.(b.valueKey) <- formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal)
+				_ -> loop(i + 1)
+			}
+		}
+	}
+	loop(0)
+}
+
+fn formNextField(current, order) {
+	fn loop(i) if i < len(order) {
+		true -> if order.(i) = current {
+			true -> if i + 1 < len(order) {
+				true -> order.(i + 1)
+				_ -> order.(0)
+			}
+			_ -> loop(i + 1)
+		}
+		_ -> order.(0)
+	}
+	loop(0)
+}
+
+fn formMaskText(s) {
+	fn loop(i, acc) if i < len(s) {
+		true -> loop(i + 1, acc + '*')
+		_ -> acc
+	}
+	loop(0, '')
+}
+
+// ─── Widget drawing (ctx-injected) ───────────────────────────────────────────
+
+fn formDrawBorder(ctx, window, x, y, w, h, color) {
+	ctx.drawLine(window, x, y, x + w, y, color)
+	ctx.drawLine(window, x, y + h, x + w, y + h, color)
+	ctx.drawLine(window, x, y, x, y + h, color)
+	ctx.drawLine(window, x + w, y, x + w, y + h, color)
+}
+
+fn formDrawField(ctx, window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	ctx.fillRect(window, x, y, w, h, bg)
+	formDrawBorder(ctx, window, x, y, w, h, bd)
+	display := if text = '' { true -> placeholder, _ -> text }
+	ctx.drawText(window, x + 10, int(y + (h / 2) - 6), display)
+	if focused & text != '' {
+		true -> {
+			cx := x + 10 + len(text) * 7 + 2
+			if cx < x + w - 6 {
+				true -> ctx.drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
+			}
+		}
+	}
+}
+
+fn formDrawPasswordField(ctx, window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	ctx.fillRect(window, x, y, w, h, bg)
+	formDrawBorder(ctx, window, x, y, w, h, bd)
+	display := if text = '' { true -> placeholder, _ -> formMaskText(text) }
+	ctx.drawText(window, x + 10, int(y + (h / 2) - 6), display)
+	if focused & text != '' {
+		true -> {
+			cx := x + 10 + len(text) * 7 + 2
+			if cx < x + w - 6 {
+				true -> ctx.drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
+			}
+		}
+	}
+}
+
+fn formDrawCheckbox(ctx, window, x, y, checked, label, fieldColor, borderColor, checkColor) {
+	ctx.fillRect(window, x, y, 16, 16, fieldColor)
+	formDrawBorder(ctx, window, x, y, 16, 16, borderColor)
+	if checked {
+		true -> ctx.fillRect(window, x + 3, y + 3, 10, 10, checkColor)
+	}
+	ctx.drawText(window, x + 24, y + 1, label)
+}
+
+fn formDrawRadio(ctx, window, x, y, selected, label, fieldColor, borderColor, accentColor) {
+	ctx.fillRect(window, x + 2, y, 12, 16, fieldColor)
+	ctx.fillRect(window, x, y + 2, 16, 12, fieldColor)
+	ctx.drawLine(window, x + 2, y, x + 14, y, borderColor)
+	ctx.drawLine(window, x + 2, y + 16, x + 14, y + 16, borderColor)
+	ctx.drawLine(window, x, y + 2, x, y + 14, borderColor)
+	ctx.drawLine(window, x + 16, y + 2, x + 16, y + 14, borderColor)
+	if selected {
+		true -> ctx.fillRect(window, x + 5, y + 5, 7, 7, accentColor)
+	}
+	ctx.drawText(window, x + 24, y + 1, label)
+}
+
+fn formDrawPrimaryButton(ctx, window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, bottomLineColor) {
+	c := if press {
+		true -> pressColor
+		_ -> if hover { true -> hoverColor, _ -> baseColor }
+	}
+	ctx.fillRect(window, x, y, w, h, c)
+	ctx.drawLine(window, x, y + h, x + w, y + h, bottomLineColor)
+	lx := int(x + (w - len(label) * 7) / 2)
+	ctx.drawText(window, lx, int(y + (h / 2) - 6), label)
+}
+
+fn formDrawSecondaryButton(ctx, window, x, y, w, h, label, hover, press, baseColor, hoverColor, pressColor, borderColor) {
+	c := if press {
+		true -> pressColor
+		_ -> if hover { true -> hoverColor, _ -> baseColor }
+	}
+	ctx.fillRect(window, x, y, w, h, c)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+	lx := int(x + (w - len(label) * 7) / 2)
+	ctx.drawText(window, lx, int(y + (h / 2) - 6), label)
+}
+
+fn formDrawSlider(ctx, window, x, y, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, options) {
+	opts            := _default(options, {})
+	showHandle      := _default(opts.showHandle, true)
+	showPercentRect := _default(opts.showPercentRect, false)
+	showTrackFill   := _default(opts.showTrackFill, true)
+	handleW         := _default(opts.handleWidth, 12)
+	percentRectW    := _default(opts.percentRectWidth, 44)
+	percentRectColor := _default(opts.percentRectColor, fillColor)
+
+	safeMax := if maxVal > 0 { true -> maxVal, _ -> 1 }
+	clamped := if value < 0 {
+		true -> 0
+		_ -> if value > safeMax { true -> safeMax, _ -> value }
+	}
+
+	if handleW < 4 -> handleW <- 4
+	pct   := int((clamped * 100) / safeMax)
+	fillW := int((pct * w) / 100)
+	if clamped > 0 & fillW < 1 -> fillW <- 1
+	if fillW > w -> fillW <- w
+
+	trackY := y + 6
+	trackH := 4
+	ctx.fillRect(window, x, trackY, w, trackH, trackColor)
+	if showTrackFill {
+		true -> if fillW > 0 -> ctx.fillRect(window, x, trackY, fillW, trackH, fillColor)
+	}
+
+	if showHandle {
+		true -> {
+			tx := x + fillW - int(handleW / 2)
+			if tx < x -> tx <- x
+			if tx > x + w - handleW -> tx <- x + w - handleW
+			ctx.fillRect(window, tx, y, handleW, 16, thumbColor)
+			formDrawBorder(ctx, window, tx, y, handleW, 16, thumbBorderColor)
+		}
+	}
+
+	if showPercentRect {
+		true -> {
+			rx := x + w + 8
+			ctx.fillRect(window, rx, y, percentRectW, 16, percentRectColor)
+			formDrawBorder(ctx, window, rx, y, percentRectW, 16, thumbBorderColor)
+			ctx.drawText(window, rx + 6, y + 2, string(pct) + '%')
+		}
+		_ -> ctx.drawText(window, x + w + 8, y, string(clamped))
+	}
+}
+
+fn formDrawLabeledPercentSlider(ctx, window, x, labelY, sliderY, w, label, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, percentRectColor) {
+	ctx.drawText(window, x, labelY, label)
+	formDrawSlider(ctx, window, x, sliderY, w, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, {
+		showHandle: true
+		showTrackFill: true
+		showPercentRect: true
+		percentRectWidth: 48
+		percentRectColor: _default(percentRectColor, fillColor)
+	})
+}
+
+fn formDrawNotes(ctx, window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	ctx.fillRect(window, x, y, w, h, bg)
+	formDrawBorder(ctx, window, x, y, w, h, bd)
+	if !focused & len(lines) > 0 & lines.(0) = '' {
+		true -> ctx.drawText(window, x + 8, y + 8, placeholder)
+	}
+	fn drawLines(i) if i < len(lines) & i < 3 {
+		true -> {
+			ctx.drawText(window, x + 8, y + 8 + i * 18, lines.(i))
+			drawLines(i + 1)
+		}
+	}
+	drawLines(0)
+	if focused {
+		true -> {
+			lastIdx  := if len(lines) > 0 { true -> len(lines) - 1, _ -> 0 }
+			lastLine := if len(lines) > 0 { true -> lines.(lastIdx), _ -> '' }
+			vis := if lastIdx < 3 { true -> lastIdx, _ -> 2 }
+			cx := x + 8 + len(lastLine) * 7 + 2
+			ctx.drawLine(window, cx, y + 8 + vis * 18, cx, y + 8 + vis * 18 + 13, cursorColor)
+		}
+	}
+}
+
+fn formDrawStatusBanner(ctx, window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor) {
+	accent := if ok { true -> successColor, _ -> errorColor }
+	ctx.fillRect(window, x, y, w, h, fieldColor)
+	ctx.fillRect(window, x, y, 4, h, accent)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+	ctx.drawText(window, x + 12, y + 8, message)
+}

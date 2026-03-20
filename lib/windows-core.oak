@@ -1,0 +1,55 @@
+// windows-core provides the root Win32 dispatch helpers exposed by lib/windows.
+
+sys := import('sys')
+
+{
+	Kernel32: Kernel32
+	Ntdll: Ntdll
+	Psapi: Psapi
+} := import('windows-constants')
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn makeWord(low, high) low + high * 256
+
+fn resolve(symbol) if isWindows?() {
+	true -> sys.resolve(Kernel32, symbol)
+	_ -> _platformError('resolve')
+}
+
+fn resolveIn(library, symbol) if isWindows?() {
+	true -> sys.resolve(library, symbol)
+	_ -> _platformError('resolveIn')
+}
+
+fn call(target, args...) if isWindows?() {
+	true -> sys.call(target, args...)
+	_ -> _platformError('call')
+}
+
+fn kernel32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Kernel32, symbol, args...)
+	_ -> _platformError('kernel32')
+}
+
+fn ntdll(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Ntdll, symbol, args...)
+	_ -> _platformError('ntdll')
+}
+
+fn ntNative(symbol, args...) if isWindows?() {
+	true -> ntdll(symbol, args...)
+	_ -> _platformError('ntNative')
+}
+
+fn psapi(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Psapi, symbol, args...)
+	_ -> _platformError('psapi')
+}
