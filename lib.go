@@ -64,6 +64,18 @@ var libdataprot string
 //go:embed lib/http.oak
 var libhttp string
 
+//go:embed lib/socket.oak
+var libsocket string
+
+//go:embed lib/smtp.oak
+var libsmtp string
+
+//go:embed lib/pop.oak
+var libpop string
+
+//go:embed lib/imap.oak
+var libimap string
+
 //go:embed lib/test.oak
 var libtest string
 
@@ -87,6 +99,9 @@ var libbitwise string
 
 //go:embed lib/bmp.oak
 var libbmp string
+
+//go:embed lib/ico.oak
+var libico string
 
 //go:embed lib/gpu.oak
 var libgpu string
@@ -359,6 +374,10 @@ var stdlibs = map[string]string{
 	"compression-lzw":        libcompressionlzw,
 	"dataprot":               libdataprot,
 	"http":                   libhttp,
+	"socket":                 libsocket,
+	"smtp":                   libsmtp,
+	"pop":                    libpop,
+	"imap":                   libimap,
 	"test":                   libtest,
 	"debug":                  libdebug,
 	"cli":                    libcli,
@@ -366,6 +385,7 @@ var stdlibs = map[string]string{
 	"crypto":                 libcrypto,
 	"bitwise":                libbitwise,
 	"bmp":                    libbmp,
+	"ico":                    libico,
 	"gpu":                    libgpu,
 	"gpus":                   libgpus,
 	"syntax":                 libsyntax,

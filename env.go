@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -124,6 +126,14 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("write", c.callbackify(c.oakWrite))
 	c.LoadFunc("listen", c.oakListen)
 	c.LoadFunc("req", c.callbackify(c.oakReq))
+	c.LoadFunc("socket_connect", c.callbackify(c.oakSocketConnect))
+	c.LoadFunc("socket_send", c.callbackify(c.oakSocketSend))
+	c.LoadFunc("socket_recv", c.callbackify(c.oakSocketRecv))
+	c.LoadFunc("socket_recv_exact", c.callbackify(c.oakSocketRecvExact))
+	c.LoadFunc("socket_recv_line", c.callbackify(c.oakSocketRecvLine))
+	c.LoadFunc("socket_starttls", c.callbackify(c.oakSocketStartTLS))
+	c.LoadFunc("socket_close", c.callbackify(c.oakSocketClose))
+	c.LoadFunc("socket_listen", c.oakSocketListen)
 	c.LoadFunc("ws_dial", c.callbackify(c.oakWSDial))
 	c.LoadFunc("ws_send", c.callbackify(c.oakWSSend))
 	c.LoadFunc("ws_recv", c.callbackify(c.oakWSRecv))
@@ -168,10 +178,20 @@ func syscallErrObj(message string) ObjectValue {
 }
 
 var (
-	wsConnMu     sync.Mutex
-	wsConnMap    = map[int64]*websocket.Conn{}
-	wsNextConnID int64
+	wsConnMu      sync.Mutex
+	wsConnMap     = map[int64]*websocket.Conn{}
+	wsNextConnID  int64
+	socketConnMu  sync.Mutex
+	socketConnMap = map[int64]*oakSocketConn{}
+	socketNextID  int64
 )
+
+type oakSocketConn struct {
+	conn      net.Conn
+	reader    *bufio.Reader
+	isTLS     bool
+	serverTLS bool
+}
 
 func chanSentObj() ObjectValue {
 	return ObjectValue{
@@ -193,6 +213,13 @@ func websocketObj(id int64) ObjectValue {
 	}
 }
 
+func socketObj(id int64) ObjectValue {
+	return ObjectValue{
+		"type": AtomValue("socket"),
+		"id":   IntValue(id),
+	}
+}
+
 func websocketEvent(messageType int, data []byte) ObjectValue {
 	return ObjectValue{
 		"type":   AtomValue("message"),
@@ -206,6 +233,19 @@ func websocketClosedEvent(code int, reason string) ObjectValue {
 		"type":   AtomValue("closed"),
 		"code":   IntValue(code),
 		"reason": MakeString(reason),
+	}
+}
+
+func socketClosedEvent() ObjectValue {
+	return ObjectValue{
+		"type": AtomValue("closed"),
+	}
+}
+
+func socketDataEvent(data []byte) ObjectValue {
+	return ObjectValue{
+		"type": AtomValue("data"),
+		"data": MakeString(string(data)),
 	}
 }
 
@@ -259,6 +299,61 @@ func storeWebsocket(conn *websocket.Conn) ObjectValue {
 	wsConnMu.Unlock()
 
 	return websocketObj(id)
+}
+
+func storeSocket(conn net.Conn, isTLS bool, serverTLS bool) ObjectValue {
+	socketConnMu.Lock()
+	id := socketNextID
+	socketNextID++
+	socketConnMap[id] = &oakSocketConn{
+		conn:      conn,
+		reader:    bufio.NewReader(conn),
+		isTLS:     isTLS,
+		serverTLS: serverTLS,
+	}
+	socketConnMu.Unlock()
+
+	return socketObj(id)
+}
+
+func removeSocket(id int64) {
+	socketConnMu.Lock()
+	delete(socketConnMap, id)
+	socketConnMu.Unlock()
+}
+
+func (c *Context) getSocket(arg Value, fnName string) (*oakSocketConn, int64, *runtimeError) {
+	socketValue, ok := arg.(ObjectValue)
+	if !ok {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("First argument to %s must be a socket, got %s", fnName, arg),
+		}
+	}
+
+	typeVal, ok := socketValue["type"].(AtomValue)
+	if !ok || typeVal != AtomValue("socket") {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("First argument to %s must be a socket, got %s", fnName, arg),
+		}
+	}
+
+	id, ok := socketValue["id"].(IntValue)
+	if !ok {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("Socket %s is malformed", arg),
+		}
+	}
+
+	socketConnMu.Lock()
+	conn, ok := socketConnMap[int64(id)]
+	socketConnMu.Unlock()
+	if !ok {
+		return nil, 0, &runtimeError{
+			reason: fmt.Sprintf("Socket %s is not available", arg),
+		}
+	}
+
+	return conn, int64(id), nil
 }
 
 func removeWebsocket(id int64) {
@@ -2128,6 +2223,456 @@ func (c *Context) oakReq(args []Value) (Value, *runtimeError) {
 			"headers": respHeaders,
 			"body":    respBody,
 		},
+	}, nil
+}
+
+type socketOptions struct {
+	useTLS             bool
+	serverTLS          bool
+	serverName         string
+	insecureSkipVerify bool
+	certFile           string
+	keyFile            string
+}
+
+func stringField(value Value, name string) (string, bool, *runtimeError) {
+	if value == nil {
+		return "", false, nil
+	}
+	str, ok := value.(*StringValue)
+	if !ok {
+		return "", false, &runtimeError{reason: fmt.Sprintf("%s must be a string, got %s", name, value)}
+	}
+	return str.stringContent(), true, nil
+}
+
+func boolField(value Value, name string) (bool, bool, *runtimeError) {
+	if value == nil {
+		return false, false, nil
+	}
+	b, ok := value.(BoolValue)
+	if !ok {
+		return false, false, &runtimeError{reason: fmt.Sprintf("%s must be a bool, got %s", name, value)}
+	}
+	return bool(b), true, nil
+}
+
+func parseSocketOptions(arg Value, name string) (socketOptions, *runtimeError) {
+	if arg == nil {
+		return socketOptions{}, nil
+	}
+	if _, ok := arg.(NullValue); ok {
+		return socketOptions{}, nil
+	}
+
+	obj, ok := arg.(ObjectValue)
+	if !ok {
+		return socketOptions{}, &runtimeError{reason: fmt.Sprintf("%s must be an object, got %s", name, arg)}
+	}
+
+	options := socketOptions{}
+	if value, ok := obj["tls"]; ok {
+		parsed, _, err := boolField(value, name+".tls")
+		if err != nil {
+			return socketOptions{}, err
+		}
+		options.useTLS = parsed
+	}
+	if value, ok := obj["server"]; ok {
+		parsed, _, err := boolField(value, name+".server")
+		if err != nil {
+			return socketOptions{}, err
+		}
+		options.serverTLS = parsed
+	}
+	if value, ok := obj["serverName"]; ok {
+		parsed, _, err := stringField(value, name+".serverName")
+		if err != nil {
+			return socketOptions{}, err
+		}
+		options.serverName = parsed
+	}
+	if value, ok := obj["insecureSkipVerify"]; ok {
+		parsed, _, err := boolField(value, name+".insecureSkipVerify")
+		if err != nil {
+			return socketOptions{}, err
+		}
+		options.insecureSkipVerify = parsed
+	}
+	if value, ok := obj["certFile"]; ok {
+		parsed, _, err := stringField(value, name+".certFile")
+		if err != nil {
+			return socketOptions{}, err
+		}
+		options.certFile = parsed
+	}
+	if value, ok := obj["keyFile"]; ok {
+		parsed, _, err := stringField(value, name+".keyFile")
+		if err != nil {
+			return socketOptions{}, err
+		}
+		options.keyFile = parsed
+	}
+
+	return options, nil
+}
+
+func tlsConfigFromOptions(options socketOptions) (*tls.Config, *runtimeError) {
+	config := &tls.Config{
+		InsecureSkipVerify: options.insecureSkipVerify,
+		ServerName:         options.serverName,
+	}
+
+	if options.serverTLS {
+		if options.certFile == "" || options.keyFile == "" {
+			return nil, &runtimeError{reason: "TLS server mode requires certFile and keyFile"}
+		}
+		cert, err := tls.LoadX509KeyPair(options.certFile, options.keyFile)
+		if err != nil {
+			return nil, &runtimeError{reason: fmt.Sprintf("Could not load TLS certificate: %s", err.Error())}
+		}
+		config.Certificates = []tls.Certificate{cert}
+	}
+
+	return config, nil
+}
+
+func socketInfo(socket ObjectValue, conn net.Conn, isTLS bool) ObjectValue {
+	return ObjectValue{
+		"type":   AtomValue("ok"),
+		"socket": socket,
+		"remote": MakeString(conn.RemoteAddr().String()),
+		"local":  MakeString(conn.LocalAddr().String()),
+		"tls":    BoolValue(isTLS),
+	}
+}
+
+func (c *Context) oakSocketConnect(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_connect", args, 1); err != nil {
+		return nil, err
+	}
+
+	address, ok := args[0].(*StringValue)
+	if !ok {
+		return nil, &runtimeError{reason: fmt.Sprintf("Mismatched types in call socket_connect(%s)", args[0])}
+	}
+
+	options := socketOptions{}
+	if len(args) >= 2 {
+		parsed, err := parseSocketOptions(args[1], "socket_connect options")
+		if err != nil {
+			return nil, err
+		}
+		options = parsed
+	}
+
+	var conn net.Conn
+	var dialErr error
+	c.Unlock()
+	if options.useTLS {
+		config, err := tlsConfigFromOptions(options)
+		c.Lock()
+		if err != nil {
+			return nil, err
+		}
+		c.Unlock()
+		conn, dialErr = tls.Dial("tcp", address.stringContent(), config)
+		c.Lock()
+	} else {
+		conn, dialErr = net.Dial("tcp", address.stringContent())
+		c.Lock()
+	}
+	if dialErr != nil {
+		return errObj(fmt.Sprintf("Could not connect socket: %s", dialErr.Error())), nil
+	}
+
+	socket := storeSocket(conn, options.useTLS, false)
+	return socketInfo(socket, conn, options.useTLS), nil
+}
+
+func (c *Context) oakSocketSend(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_send", args, 2); err != nil {
+		return nil, err
+	}
+
+	socketConn, _, err := c.getSocket(args[0], "socket_send")
+	if err != nil {
+		return nil, err
+	}
+
+	data, ok := args[1].(*StringValue)
+	if !ok {
+		return nil, &runtimeError{reason: fmt.Sprintf("Second argument to socket_send must be a string, got %s", args[1])}
+	}
+
+	c.Unlock()
+	written, writeErr := socketConn.conn.Write([]byte(data.stringContent()))
+	c.Lock()
+	if writeErr != nil {
+		return errObj(fmt.Sprintf("Could not write socket data: %s", writeErr.Error())), nil
+	}
+
+	return ObjectValue{
+		"type":  AtomValue("sent"),
+		"bytes": IntValue(written),
+	}, nil
+}
+
+func (c *Context) oakSocketRecv(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_recv", args, 2); err != nil {
+		return nil, err
+	}
+
+	socketConn, id, err := c.getSocket(args[0], "socket_recv")
+	if err != nil {
+		return nil, err
+	}
+
+	size, ok := args[1].(IntValue)
+	if !ok || size < 0 {
+		return nil, &runtimeError{reason: fmt.Sprintf("Second argument to socket_recv must be a non-negative int, got %s", args[1])}
+	}
+	if size == 0 {
+		return socketDataEvent([]byte{}), nil
+	}
+
+	buf := make([]byte, int(size))
+	c.Unlock()
+	count, readErr := socketConn.reader.Read(buf)
+	c.Lock()
+	if readErr != nil {
+		if readErr == io.EOF {
+			if count > 0 {
+				return socketDataEvent(buf[:count]), nil
+			}
+			removeSocket(id)
+			return socketClosedEvent(), nil
+		}
+		return errObj(fmt.Sprintf("Could not read socket data: %s", readErr.Error())), nil
+	}
+
+	return socketDataEvent(buf[:count]), nil
+}
+
+func (c *Context) oakSocketRecvExact(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_recv_exact", args, 2); err != nil {
+		return nil, err
+	}
+
+	socketConn, id, err := c.getSocket(args[0], "socket_recv_exact")
+	if err != nil {
+		return nil, err
+	}
+
+	size, ok := args[1].(IntValue)
+	if !ok || size < 0 {
+		return nil, &runtimeError{reason: fmt.Sprintf("Second argument to socket_recv_exact must be a non-negative int, got %s", args[1])}
+	}
+	if size == 0 {
+		return socketDataEvent([]byte{}), nil
+	}
+
+	buf := make([]byte, int(size))
+	c.Unlock()
+	_, readErr := io.ReadFull(socketConn.reader, buf)
+	c.Lock()
+	if readErr != nil {
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			removeSocket(id)
+		}
+		return errObj(fmt.Sprintf("Could not read exact socket data: %s", readErr.Error())), nil
+	}
+
+	return socketDataEvent(buf), nil
+}
+
+func (c *Context) oakSocketRecvLine(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_recv_line", args, 1); err != nil {
+		return nil, err
+	}
+
+	socketConn, id, err := c.getSocket(args[0], "socket_recv_line")
+	if err != nil {
+		return nil, err
+	}
+
+	c.Unlock()
+	line, readErr := socketConn.reader.ReadString('\n')
+	c.Lock()
+	if readErr != nil {
+		if readErr == io.EOF {
+			if line != "" {
+				return socketDataEvent([]byte(strings.TrimRight(line, "\r\n"))), nil
+			}
+			removeSocket(id)
+			return socketClosedEvent(), nil
+		}
+		return errObj(fmt.Sprintf("Could not read socket line: %s", readErr.Error())), nil
+	}
+
+	return socketDataEvent([]byte(strings.TrimRight(line, "\r\n"))), nil
+}
+
+func (c *Context) oakSocketStartTLS(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_starttls", args, 1); err != nil {
+		return nil, err
+	}
+
+	socketConn, id, err := c.getSocket(args[0], "socket_starttls")
+	if err != nil {
+		return nil, err
+	}
+
+	options := socketOptions{}
+	if len(args) >= 2 {
+		parsed, parseErr := parseSocketOptions(args[1], "socket_starttls options")
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		options = parsed
+	}
+
+	config, configErr := tlsConfigFromOptions(options)
+	if configErr != nil {
+		return nil, configErr
+	}
+
+	var tlsConn *tls.Conn
+	c.Unlock()
+	if options.serverTLS {
+		tlsConn = tls.Server(socketConn.conn, config)
+	} else {
+		tlsConn = tls.Client(socketConn.conn, config)
+	}
+	handshakeErr := tlsConn.Handshake()
+	c.Lock()
+	if handshakeErr != nil {
+		return errObj(fmt.Sprintf("Could not upgrade socket to TLS: %s", handshakeErr.Error())), nil
+	}
+
+	socketConn.conn = tlsConn
+	socketConn.reader = bufio.NewReader(tlsConn)
+	socketConn.isTLS = true
+	socketConn.serverTLS = options.serverTLS
+
+	return socketInfo(socketObj(id), tlsConn, true), nil
+}
+
+func (c *Context) oakSocketClose(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("socket_close", args, 1); err != nil {
+		return nil, err
+	}
+
+	socketConn, id, err := c.getSocket(args[0], "socket_close")
+	if err != nil {
+		return nil, err
+	}
+
+	c.Unlock()
+	closeErr := socketConn.conn.Close()
+	c.Lock()
+	removeSocket(id)
+	if closeErr != nil {
+		return errObj(fmt.Sprintf("Could not close socket: %s", closeErr.Error())), nil
+	}
+
+	return socketClosedEvent(), nil
+}
+
+func (ctx *Context) oakSocketListen(args []Value) (Value, *runtimeError) {
+	if err := ctx.requireArgLen("socket_listen", args, 2); err != nil {
+		return nil, err
+	}
+
+	address, okAddress := args[0].(*StringValue)
+	cb, okCb := args[1].(FnValue)
+	if !okAddress || !okCb {
+		return nil, &runtimeError{reason: fmt.Sprintf("Mismatched types in call socket_listen(%s, %s)", args[0], args[1])}
+	}
+
+	options := socketOptions{}
+	if len(args) >= 3 {
+		parsed, err := parseSocketOptions(args[2], "socket_listen options")
+		if err != nil {
+			return nil, err
+		}
+		options = parsed
+	}
+
+	sendErr := func(msg string) {
+		ctx.Lock()
+		defer ctx.Unlock()
+
+		_, err2 := ctx.EvalFnValue(cb, false, errObj(msg))
+		if err2 != nil {
+			ctx.eng.reportErr(err2)
+		}
+	}
+
+	var listener net.Listener
+	var listenErr error
+	if options.useTLS {
+		options.serverTLS = true
+		config, err := tlsConfigFromOptions(options)
+		if err != nil {
+			return nil, err
+		}
+		listener, listenErr = tls.Listen("tcp", address.stringContent(), config)
+	} else {
+		listener, listenErr = net.Listen("tcp", address.stringContent())
+	}
+	if listenErr != nil {
+		return errObj(fmt.Sprintf("Could not listen on socket: %s", listenErr.Error())), nil
+	}
+
+	ctx.eng.Add(1)
+	go func() {
+		defer ctx.eng.Done()
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				if ne, ok := acceptErr.(net.Error); ok && ne.Temporary() {
+					sendErr(fmt.Sprintf("Temporary socket accept error: %s", acceptErr.Error()))
+					continue
+				}
+				if strings.Contains(strings.ToLower(acceptErr.Error()), "closed") {
+					return
+				}
+				sendErr(fmt.Sprintf("Error accepting socket connection: %s", acceptErr.Error()))
+				return
+			}
+
+			socket := storeSocket(conn, options.useTLS, options.useTLS)
+
+			ctx.Lock()
+			_, cbErr := ctx.EvalFnValue(cb, false, ObjectValue{
+				"type":   AtomValue("connect"),
+				"socket": socket,
+				"remote": MakeString(conn.RemoteAddr().String()),
+				"local":  MakeString(conn.LocalAddr().String()),
+				"tls":    BoolValue(options.useTLS),
+			})
+			ctx.Unlock()
+			if cbErr != nil {
+				ctx.eng.reportErr(cbErr)
+			}
+		}
+	}()
+
+	closer := func(_ []Value) (Value, *runtimeError) {
+		ctx.eng.Add(1)
+		go func() {
+			defer ctx.eng.Done()
+			if err := listener.Close(); err != nil {
+				sendErr(fmt.Sprintf("Could not close socket listener: %s", err.Error()))
+			}
+		}()
+		return null, nil
+	}
+
+	return BuiltinFnValue{
+		name: "close",
+		fn:   closer,
 	}, nil
 }
 

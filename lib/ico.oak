@@ -1,0 +1,136 @@
+// libico provides helpers to encode a 32-bit ICO image from raw pixel data.
+
+{
+	map: map
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// bytes converts a list of byte integers into a binary string.
+fn bytes(parts) parts |> map(fn(n) char(n % 256)) |> join('')
+
+// intToBytes converts an integer to little-endian bytes with fixed width.
+fn intToBytes(n, width) {
+	fn sub(i, p, acc) if i {
+		width -> acc
+		_ -> sub(i + 1, int(p / 256), acc << (p % 256))
+	}
+	sub(0, n, [])
+}
+
+// hexsplit returns a 4-byte little-endian representation of n.
+fn hexsplit(n) intToBytes(n, 4)
+
+fn pixelBytes(pixel) if type(pixel) {
+	:string -> {
+		if len(pixel) {
+			4 -> pixel
+			_ -> ''
+		}
+	}
+	:list -> {
+		if len(pixel) {
+			4 -> bytes(pixel)
+			_ -> ''
+		}
+	}
+	:int -> bytes(intToBytes(pixel, 4))
+	_ -> ''
+}
+
+// ico encodes a single-image 32-bit icon file and returns the full file buffer.
+// pixels are expected row-major and each pixel may be:
+// - a 4-byte string
+// - a [b, g, r, a] byte list
+// - a 32-bit integer in little-endian byte order
+fn ico(width, height, pixels) {
+	buf := ''
+	last := {off: 0}
+
+	fn appd(part) {
+		buf.(last.off) := part
+		last.off <- len(buf)
+	}
+
+	maskRowBytes := int((((width + 31) / 32)) * 4)
+	maskSize := maskRowBytes * height
+	pixelDataSize := width * height * 4
+	imageSize := 40 + pixelDataSize + maskSize
+
+	fn wrow(y) {
+		offset := width * y
+		fn sub(x) if x {
+			width -> ?
+			_ -> {
+				appd(pixelBytes(pixels.(offset + x)))
+				sub(x + 1)
+			}
+		}
+		sub(0)
+	}
+
+	fn wpixels {
+		// DIB pixel rows are written bottom-up for ICO images.
+		fn sub(y) if y {
+			0 -> ?
+			_ -> {
+				wrow(y - 1)
+				sub(y - 1)
+			}
+		}
+		sub(height)
+	}
+
+	fn wmask {
+		fn sub(i) if i {
+			maskSize -> ?
+			_ -> {
+				appd(char(0))
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+
+	entryWidth := if width {
+		256 -> 0
+		_ -> width
+	}
+	entryHeight := if height {
+		256 -> 0
+		_ -> height
+	}
+
+	// ICONDIR header
+	appd(bytes([0, 0]))
+	appd(bytes([1, 0]))
+	appd(bytes([1, 0]))
+
+	// ICONDIRENTRY
+	appd(char(entryWidth))
+	appd(char(entryHeight))
+	appd(char(0))
+	appd(char(0))
+	appd(bytes([1, 0]))
+	appd(bytes([32, 0]))
+	appd(bytes(hexsplit(imageSize)))
+	appd(bytes(hexsplit(22)))
+
+	// BITMAPINFOHEADER
+	appd(bytes(hexsplit(40)))
+	appd(bytes(hexsplit(width)))
+	appd(bytes(hexsplit(height * 2)))
+	appd(bytes([1, 0]))
+	appd(bytes([32, 0]))
+	appd(bytes(hexsplit(0)))
+	appd(bytes(hexsplit(pixelDataSize)))
+	appd(bytes(hexsplit(2835)))
+	appd(bytes(hexsplit(2835)))
+	appd(bytes(hexsplit(0)))
+	appd(bytes(hexsplit(0)))
+
+	wpixels()
+	wmask()
+	buf
+}

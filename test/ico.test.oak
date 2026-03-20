@@ -1,0 +1,62 @@
+ico := import('ico')
+{
+	slice: slice
+	reduce: reduce
+} := import('std')
+
+fn bytesOf(s) s |> reduce([], fn(acc, c) acc << codepoint(c))
+
+fn run(t) {
+	'hexsplit encodes little-endian 4-byte int' |> t.eq(
+		ico.hexsplit(257)
+		[1, 1, 0, 0]
+	)
+
+	// Top row then bottom row in row-major input order.
+	image := ico.ico(1, 2, [
+		[1, 2, 3, 4]
+		[5, 6, 7, 8]
+	])
+
+	'ico writes expected file size for 1x2' |> t.eq(
+		len(image)
+		70
+	)
+
+	'ico starts with ICO signature' |> t.eq(
+		image |> slice(0, 4) |> bytesOf()
+		[0, 0, 1, 0]
+	)
+
+	'ico writes image count and directory width/height' |> t.eq(
+		image |> slice(4, 8) |> bytesOf()
+		[1, 0, 1, 2]
+	)
+
+	'ico writes image size and data offset in directory' |> t.eq(
+		[
+			image |> slice(14, 18) |> bytesOf()
+			image |> slice(18, 22) |> bytesOf()
+		]
+		[
+			[48, 0, 0, 0]
+			[22, 0, 0, 0]
+		]
+	)
+
+	'ico writes expected DIB dimensions for 1x2' |> t.eq(
+		[
+			image |> slice(26, 30) |> bytesOf()
+			image |> slice(30, 34) |> bytesOf()
+		]
+		[
+			[1, 0, 0, 0]
+			[4, 0, 0, 0]
+		]
+	)
+
+	'ico writes rows bottom-up and appends mask bytes' |> t.eq(
+		image |> slice(62, 70) |> bytesOf()
+		[5, 6, 7, 8, 1, 2, 3, 4]
+	)
+}
