@@ -1,0 +1,336 @@
+// linux-windowing provides lightweight X11 window/event helpers.
+
+sys := import('sys')
+{
+	readU32: readU32
+} := import('writes')
+
+{
+	KeyPressMask: KeyPressMask
+	ExposureMask: ExposureMask
+	StructureNotifyMask: StructureNotifyMask
+	ClientMessage: ClientMessage
+	DestroyNotify: DestroyNotify
+} := import('linux-constants')
+
+{
+	isLinux?: isLinux?
+	cstr: cstr
+	_platformError: _platformError
+	libc: libc
+} := import('linux-core')
+
+{
+	x11: x11
+} := import('linux-loader')
+
+fn _r1Positive?(res) if res {
+	? -> false
+	_ -> if res.r1 {
+		? -> false
+		_ -> res.r1 > 0
+	}
+}
+
+fn callOk?(res) if res {
+	? -> false
+	_ -> if sys.ok?(res) {
+		true -> true
+		_ -> if res.type = :error {
+			true -> _r1Positive?(res)
+			_ -> _r1Positive?(res)
+		}
+	}
+}
+
+fn _zeros(n, acc) if n {
+	0 -> acc
+	_ -> _zeros(n - 1, acc << 0)
+}
+
+fn xEventSize() if ___runtime_sys_info().arch {
+	'amd64' -> 192
+	'arm64' -> 192
+	_ -> 96
+}
+
+fn createXEventBuffer() bits(_zeros(xEventSize(), []))
+
+fn xEventType(eventPtr) readU32(eventPtr)
+
+fn openDisplay(displayName) if isLinux?() {
+	true -> if displayName {
+		? -> x11('XOpenDisplay', ?)
+		_ -> x11('XOpenDisplay', cstr(displayName))
+	}
+	_ -> _platformError('openDisplay')
+}
+
+fn closeDisplay(display) if isLinux?() {
+	true -> x11('XCloseDisplay', display)
+	_ -> _platformError('closeDisplay')
+}
+
+fn defaultScreen(display) if isLinux?() {
+	true -> x11('XDefaultScreen', display)
+	_ -> _platformError('defaultScreen')
+}
+
+fn rootWindow(display, screen) if isLinux?() {
+	true -> x11('XRootWindow', display, screen)
+	_ -> _platformError('rootWindow')
+}
+
+fn blackPixel(display, screen) if isLinux?() {
+	true -> x11('XBlackPixel', display, screen)
+	_ -> _platformError('blackPixel')
+}
+
+fn whitePixel(display, screen) if isLinux?() {
+	true -> x11('XWhitePixel', display, screen)
+	_ -> _platformError('whitePixel')
+}
+
+fn createSimpleWindow(display, parent, x, y, width, height, borderWidth, border, background) if isLinux?() {
+	true -> x11('XCreateSimpleWindow', display, parent, x, y, width, height, borderWidth, border, background)
+	_ -> _platformError('createSimpleWindow')
+}
+
+fn destroyWindow(display, window) if isLinux?() {
+	true -> x11('XDestroyWindow', display, window)
+	_ -> _platformError('destroyWindow')
+}
+
+fn storeName(display, window, title) if isLinux?() {
+	true -> x11('XStoreName', display, window, cstr(title))
+	_ -> _platformError('storeName')
+}
+
+fn selectInput(display, window, eventMask) if isLinux?() {
+	true -> x11('XSelectInput', display, window, eventMask)
+	_ -> _platformError('selectInput')
+}
+
+fn mapWindow(display, window) if isLinux?() {
+	true -> x11('XMapWindow', display, window)
+	_ -> _platformError('mapWindow')
+}
+
+fn unmapWindow(display, window) if isLinux?() {
+	true -> x11('XUnmapWindow', display, window)
+	_ -> _platformError('unmapWindow')
+}
+
+fn moveWindow(display, window, x, y) if isLinux?() {
+	true -> x11('XMoveWindow', display, window, x, y)
+	_ -> _platformError('moveWindow')
+}
+
+fn resizeWindow(display, window, width, height) if isLinux?() {
+	true -> x11('XResizeWindow', display, window, width, height)
+	_ -> _platformError('resizeWindow')
+}
+
+fn displayWidth(display, screen) if isLinux?() {
+	true -> x11('XDisplayWidth', display, screen)
+	_ -> _platformError('displayWidth')
+}
+
+fn displayHeight(display, screen) if isLinux?() {
+	true -> x11('XDisplayHeight', display, screen)
+	_ -> _platformError('displayHeight')
+}
+
+fn createGC(display, drawable, valueMask, values) if isLinux?() {
+	true -> x11('XCreateGC', display, drawable, valueMask, values)
+	_ -> _platformError('createGC')
+}
+
+fn freeGC(display, gc) if isLinux?() {
+	true -> x11('XFreeGC', display, gc)
+	_ -> _platformError('freeGC')
+}
+
+fn setForeground(display, gc, color) if isLinux?() {
+	true -> x11('XSetForeground', display, gc, color)
+	_ -> _platformError('setForeground')
+}
+
+fn drawLine(display, window, gc, x1, y1, x2, y2) if isLinux?() {
+	true -> x11('XDrawLine', display, window, gc, x1, y1, x2, y2)
+	_ -> _platformError('drawLine')
+}
+
+fn fillRectangle(display, window, gc, x, y, width, height) if isLinux?() {
+	true -> x11('XFillRectangle', display, window, gc, x, y, width, height)
+	_ -> _platformError('fillRectangle')
+}
+
+fn drawString(display, window, gc, x, y, text) if isLinux?() {
+	true -> x11('XDrawString', display, window, gc, x, y, cstr(text), len(text))
+	_ -> _platformError('drawString')
+}
+
+fn flush(display) if isLinux?() {
+	true -> x11('XFlush', display)
+	_ -> _platformError('flush')
+}
+
+fn pending(display) if isLinux?() {
+	true -> x11('XPending', display)
+	_ -> _platformError('pending')
+}
+
+fn nextEvent(display, eventPtr) if isLinux?() {
+	true -> x11('XNextEvent', display, eventPtr)
+	_ -> _platformError('nextEvent')
+}
+
+fn _openWindowFromRoot(display, screen, root, black, white, title, width, height) {
+	win := createSimpleWindow(display, root, 10, 10, width, height, 1, black, white)
+	if callOk?(win) & _r1Positive?(win) {
+		true -> {
+			storeName(display, win.r1, title)
+			selectInput(display, win.r1, ExposureMask | KeyPressMask | StructureNotifyMask)
+			mapWindow(display, win.r1)
+			flush(display)
+			{
+				type: :ok
+				display: display
+				window: win.r1
+				screen: screen
+				black: black
+				white: white
+			}
+		}
+		_ -> {
+			closeDisplay(display)
+			{
+				type: :error
+				error: 'XCreateSimpleWindow failed'
+				detail: win
+			}
+		}
+	}
+}
+
+fn _openWindowFromScreen(display, screen, title, width, height) {
+	root := rootWindow(display, screen)
+	black := blackPixel(display, screen)
+	white := whitePixel(display, screen)
+	if callOk?(root) & _r1Positive?(root) {
+		true -> _openWindowFromRoot(display, screen, root.r1, black.r1, white.r1, title, width, height)
+		_ -> {
+			closeDisplay(display)
+			{
+				type: :error
+				error: 'XRootWindow failed'
+				detail: root
+			}
+		}
+	}
+}
+
+fn _openWindowFromDisplay(display, title, width, height) {
+	screen := defaultScreen(display)
+	if callOk?(screen) {
+		true -> _openWindowFromScreen(display, screen.r1, title, width, height)
+		_ -> {
+			closeDisplay(display)
+			{
+				type: :error
+				error: 'XDefaultScreen failed'
+				detail: screen
+			}
+		}
+	}
+}
+
+fn openDefaultWindow(title, width, height) if isLinux?() {
+	true -> {
+		display := openDisplay(?)
+		if callOk?(display) & _r1Positive?(display) {
+			true -> _openWindowFromDisplay(display.r1, title, width, height)
+			_ -> {
+				{
+					type: :error
+					error: 'XOpenDisplay failed'
+					detail: display
+				}
+			}
+		}
+	}
+	_ -> _platformError('openDefaultWindow')
+}
+
+fn closeWindow(state) if isLinux?() {
+	true -> {
+		if state.type = :ok {
+			true -> {
+				destroyWindow(state.display, state.window)
+				closeDisplay(state.display)
+				0
+			}
+			_ -> 0
+		}
+	}
+	_ -> _platformError('closeWindow')
+}
+
+fn pumpWindowEvent(display, eventPtr) if isLinux?() {
+	true -> {
+		queued := pending(display)
+		if callOk?(queued) {
+			true -> if queued.r1 > 0 {
+				true -> {
+					next := nextEvent(display, eventPtr)
+					if callOk?(next) {
+						true -> {
+							etype := xEventType(eventPtr)
+							{
+								type: :dispatch
+								eventType: etype
+								detail: next
+							}
+						}
+						_ -> {
+							{
+								type: :error
+								error: 'XNextEvent failed'
+								detail: next
+							}
+						}
+					}
+				}
+				_ -> {
+					libc('usleep', 16000)
+					{type: :idle}
+				}
+			}
+			_ -> {
+				{
+					type: :error
+					error: 'XPending failed'
+					detail: queued
+				}
+			}
+		}
+	}
+	_ -> _platformError('pumpWindowEvent')
+}
+
+fn runWindowLoop(display, eventPtr) if isLinux?() {
+	true -> {
+		step := pumpWindowEvent(display, eventPtr)
+		if step.type {
+			:dispatch -> if step.eventType {
+				ClientMessage -> 0
+				DestroyNotify -> 0
+				_ -> runWindowLoop(display, eventPtr)
+			}
+			:idle -> runWindowLoop(display, eventPtr)
+			_ -> step
+		}
+	}
+	_ -> _platformError('runWindowLoop')
+}

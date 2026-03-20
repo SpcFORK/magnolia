@@ -1,6 +1,4 @@
-// libLinux provides Linux-focused native interop helpers for Magnolia.
-//
-// It wraps common libc/libdl calls using libsys for consistent result shapes.
+// libLinux aggregates Linux-focused native interop helpers for Magnolia.
 
 sys := import('sys')
 {
@@ -10,774 +8,140 @@ sys := import('sys')
 	writeU64: writeU64
 } := import('writes')
 
-LibC := [
-	'/lib/x86_64-linux-gnu/libc.so.6'
-	'/usr/lib/x86_64-linux-gnu/libc.so.6'
-	'libc.so.6'
-	'libc.so'
-]
-LibDL := [
-	'/lib/x86_64-linux-gnu/libdl.so.2'
-	'/usr/lib/x86_64-linux-gnu/libdl.so.2'
-	'libdl.so.2'
-	'libdl.so'
-]
-LibX11 := [
-	'/lib/x86_64-linux-gnu/libX11.so.6'
-	'/usr/lib/x86_64-linux-gnu/libX11.so.6'
-	'libX11.so.6'
-	'libX11.so'
-]
-
-_loadedLibraries := {}
-
-// mmap/munmap flags
-PROT_NONE := 0
-PROT_READ := 1
-PROT_WRITE := 2
-PROT_EXEC := 4
-
-MAP_SHARED := 1
-MAP_PRIVATE := 2
-MAP_FIXED := 16
-MAP_ANONYMOUS := 32
-
-// open() flags
-O_RDONLY := 0
-O_WRONLY := 1
-O_RDWR := 2
-O_CREAT := 64
-O_TRUNC := 512
-O_APPEND := 1024
-
-// lseek() whence constants
-SEEK_SET := 0
-SEEK_CUR := 1
-SEEK_END := 2
-
-// access() mode constants
-F_OK := 0
-X_OK := 1
-W_OK := 2
-R_OK := 4
-
-// dlopen() flags
-RTLD_LAZY := 1
-RTLD_NOW := 2
-RTLD_GLOBAL := 256
-RTLD_LOCAL := 0
-
-// sysconf constants
-_SC_PAGESIZE := 30
-
-// X11 event masks
-KeyPressMask := 1
-ButtonPressMask := 4
-ExposureMask := 32768
-StructureNotifyMask := 131072
-
-// X11 event types
-KeyPress := 2
-Expose := 12
-DestroyNotify := 17
-ClientMessage := 33
-
-fn isLinux? ___runtime_sys_info().os = 'linux'
-
-fn cstr(s) s + char(0)
-
-fn _readCString(ptr, maxLen) {
-	fn sub(i, out) if i {
-		maxLen -> out
-		_ -> {
-			b := (bits(memread(pointer(ptr) + i, 1))).0
-			if b = 0 {
-				true -> out
-				_ -> sub(i + 1, out + char(b))
-			}
-		}
-	}
-	sub(0, '')
-}
-
-fn _platformError(apiName) {
-	{
-		type: :error
-		error: apiName + ' is only available on Linux'
-	}
-}
-
-fn _libraryKey(library) if type(library) {
-	:list -> {
-		if len(library) > 0 {
-			true -> library.0
-			_ -> '[]'
-		}
-	}
-	_ -> library
-}
-
-fn _resolveFirst(libraries, symbol, i) if i {
-	len(libraries) -> {
-		{
-			type: :error
-			error: 'Could not resolve procedure ' + symbol + ' from any candidate library'
-			libraries: libraries
-			symbol: symbol
-		}
-	}
-	_ -> {
-		resolved := sys.resolve(libraries.(i), symbol)
-		if resolved.type {
-			:ok -> resolved
-			_ -> _resolveFirst(libraries, symbol, i + 1)
-		}
-	}
-}
-
-fn _callResolved(resolved, args...) if resolved.type {
-	:ok -> sys.call(resolved.proc, args...)
-	_ -> resolved
-}
-
-fn _normalizeHandleResult(result, apiName, library) if sys.ok?(result) & result.r1 > 0 {
-	true -> {
-		{
-			type: :ok
-			handle: result.r1
-			library: library
-		}
-	}
-	_ -> {
-		{
-			type: :error
-			error: apiName + ' failed'
-			library: library
-			detail: result
-		}
-	}
-}
-
-fn _loadDllCandidate(candidates, i, flags) if i {
-	len(candidates) -> {
-		{
-			type: :error
-			error: 'dlopen failed for all candidate libraries'
-			libraries: candidates
-		}
-	}
-	_ -> {
-		name := candidates.(i)
-		loaded := dlopen(name, flags)
-		if sys.ok?(loaded) & loaded.r1 > 0 {
-			true -> {
-				{
-					type: :ok
-					handle: loaded.r1
-					library: name
-				}
-			}
-			_ -> _loadDllCandidate(candidates, i + 1, flags)
-		}
-	}
-}
-
-fn resolve(symbol) if isLinux?() {
-	true -> _resolveFirst(LibC, symbol, 0)
-	_ -> _platformError('resolve')
-}
-
-fn resolveIn(library, symbol) if isLinux?() {
-	true -> sys.resolve(library, symbol)
-	_ -> _platformError('resolveIn')
-}
-
-fn call(target, args...) if isLinux?() {
-	true -> sys.call(target, args...)
-	_ -> _platformError('call')
-}
-
-fn libc(symbol, args...) if isLinux?() {
-	true -> _callResolved(_resolveFirst(LibC, symbol, 0), args...)
-	_ -> _platformError('libc')
-}
-
-fn libdl(symbol, args...) if isLinux?() {
-	true -> _callResolved(_resolveFirst(LibDL, symbol, 0), args...)
-	_ -> _platformError('libdl')
-}
-
-fn loadDll(library) if isLinux?() {
-	true -> {
-		key := _libraryKey(library)
-		if cached := _loadedLibraries.(key) {
-			? -> {
-				flags := RTLD_NOW | RTLD_LOCAL
-				result := if type(library) {
-					:list -> _loadDllCandidate(library, 0, flags)
-					_ -> _normalizeHandleResult(dlopen(library, flags), 'dlopen', library)
-				}
-				if result.type {
-					:ok -> {
-						_loadedLibraries.(key) := result.handle
-						result
-					}
-					_ -> result
-				}
-			}
-			_ -> {
-				{
-					type: :ok
-					handle: cached
-					library: key
-				}
-			}
-		}
-	}
-	_ -> _platformError('loadDll')
-}
-
-fn resolveInLoaded(library, symbol) if isLinux?() {
-	true -> {
-		loaded := loadDll(library)
-		if loaded.type {
-			:ok -> {
-				proc := dlsym(loaded.handle, symbol)
-				if sys.ok?(proc) & proc.r1 > 0 {
-					true -> {
-						{
-							type: :ok
-							proc: proc.r1
-							handle: loaded.handle
-							library: loaded.library
-							symbol: symbol
-						}
-					}
-					_ -> {
-						{
-							type: :error
-							error: 'Could not resolve procedure'
-							library: loaded.library
-							symbol: symbol
-							detail: proc
-						}
-					}
-				}
-			}
-			_ -> loaded
-		}
-	}
-	_ -> _platformError('resolveInLoaded')
-}
-
-fn callIn(library, symbol, args...) if isLinux?() {
-	true -> {
-		resolved := resolveInLoaded(library, symbol)
-		if resolved.type {
-			:ok -> sys.call(resolved.proc, args...)
-			_ -> {
-				fallback := if type(library) {
-					:list -> _resolveFirst(library, symbol, 0)
-					_ -> sys.resolve(library, symbol)
-				}
-				if fallback.type {
-					:ok -> sys.call(fallback.proc, args...)
-					_ -> resolved
-				}
-			}
-		}
-	}
-	_ -> _platformError('callIn')
-}
-
-fn x11(symbol, args...) if isLinux?() {
-	true -> callIn(LibX11, symbol, args...)
-	_ -> _platformError('x11')
-}
-
-fn _r1Positive?(res) if res {
-	? -> false
-	_ -> if res.r1 {
-		? -> false
-		_ -> res.r1 > 0
-	}
-}
-
-fn callOk?(res) if res {
-	? -> false
-	_ -> if sys.ok?(res) {
-		true -> true
-		_ -> if res.type = :error {
-			true -> _r1Positive?(res)
-			_ -> _r1Positive?(res)
-		}
-	}
-}
-
-fn _zeros(n, acc) if n {
-	0 -> acc
-	_ -> _zeros(n - 1, acc << 0)
-}
-
-fn xEventSize() if ___runtime_sys_info().arch {
-	'amd64' -> 192
-	'arm64' -> 192
-	_ -> 96
-}
-
-fn createXEventBuffer() bits(_zeros(xEventSize(), []))
-
-fn xEventType(eventPtr) readU32(eventPtr)
-
-fn openDisplay(displayName) if isLinux?() {
-	true -> if displayName {
-		? -> x11('XOpenDisplay', ?)
-		_ -> x11('XOpenDisplay', cstr(displayName))
-	}
-	_ -> _platformError('openDisplay')
-}
-
-fn closeDisplay(display) if isLinux?() {
-	true -> x11('XCloseDisplay', display)
-	_ -> _platformError('closeDisplay')
-}
-
-fn defaultScreen(display) if isLinux?() {
-	true -> x11('XDefaultScreen', display)
-	_ -> _platformError('defaultScreen')
-}
-
-fn rootWindow(display, screen) if isLinux?() {
-	true -> x11('XRootWindow', display, screen)
-	_ -> _platformError('rootWindow')
-}
-
-fn blackPixel(display, screen) if isLinux?() {
-	true -> x11('XBlackPixel', display, screen)
-	_ -> _platformError('blackPixel')
-}
-
-fn whitePixel(display, screen) if isLinux?() {
-	true -> x11('XWhitePixel', display, screen)
-	_ -> _platformError('whitePixel')
-}
-
-fn createSimpleWindow(display, parent, x, y, width, height, borderWidth, border, background) if isLinux?() {
-	true -> x11('XCreateSimpleWindow', display, parent, x, y, width, height, borderWidth, border, background)
-	_ -> _platformError('createSimpleWindow')
-}
-
-fn destroyWindow(display, window) if isLinux?() {
-	true -> x11('XDestroyWindow', display, window)
-	_ -> _platformError('destroyWindow')
-}
-
-fn storeName(display, window, title) if isLinux?() {
-	true -> x11('XStoreName', display, window, cstr(title))
-	_ -> _platformError('storeName')
-}
-
-fn selectInput(display, window, eventMask) if isLinux?() {
-	true -> x11('XSelectInput', display, window, eventMask)
-	_ -> _platformError('selectInput')
-}
-
-fn mapWindow(display, window) if isLinux?() {
-	true -> x11('XMapWindow', display, window)
-	_ -> _platformError('mapWindow')
-}
-
-fn unmapWindow(display, window) if isLinux?() {
-	true -> x11('XUnmapWindow', display, window)
-	_ -> _platformError('unmapWindow')
-}
-
-fn moveWindow(display, window, x, y) if isLinux?() {
-	true -> x11('XMoveWindow', display, window, x, y)
-	_ -> _platformError('moveWindow')
-}
-
-fn resizeWindow(display, window, width, height) if isLinux?() {
-	true -> x11('XResizeWindow', display, window, width, height)
-	_ -> _platformError('resizeWindow')
-}
-
-fn displayWidth(display, screen) if isLinux?() {
-	true -> x11('XDisplayWidth', display, screen)
-	_ -> _platformError('displayWidth')
-}
-
-fn displayHeight(display, screen) if isLinux?() {
-	true -> x11('XDisplayHeight', display, screen)
-	_ -> _platformError('displayHeight')
-}
-
-fn createGC(display, drawable, valueMask, values) if isLinux?() {
-	true -> x11('XCreateGC', display, drawable, valueMask, values)
-	_ -> _platformError('createGC')
-}
-
-fn freeGC(display, gc) if isLinux?() {
-	true -> x11('XFreeGC', display, gc)
-	_ -> _platformError('freeGC')
-}
-
-fn setForeground(display, gc, color) if isLinux?() {
-	true -> x11('XSetForeground', display, gc, color)
-	_ -> _platformError('setForeground')
-}
-
-fn drawLine(display, window, gc, x1, y1, x2, y2) if isLinux?() {
-	true -> x11('XDrawLine', display, window, gc, x1, y1, x2, y2)
-	_ -> _platformError('drawLine')
-}
-
-fn fillRectangle(display, window, gc, x, y, width, height) if isLinux?() {
-	true -> x11('XFillRectangle', display, window, gc, x, y, width, height)
-	_ -> _platformError('fillRectangle')
-}
-
-fn drawString(display, window, gc, x, y, text) if isLinux?() {
-	true -> x11('XDrawString', display, window, gc, x, y, cstr(text), len(text))
-	_ -> _platformError('drawString')
-}
-
-fn flush(display) if isLinux?() {
-	true -> x11('XFlush', display)
-	_ -> _platformError('flush')
-}
-
-fn pending(display) if isLinux?() {
-	true -> x11('XPending', display)
-	_ -> _platformError('pending')
-}
-
-fn nextEvent(display, eventPtr) if isLinux?() {
-	true -> x11('XNextEvent', display, eventPtr)
-	_ -> _platformError('nextEvent')
-}
-
-fn _openWindowFromRoot(display, screen, root, black, white, title, width, height) {
-	win := createSimpleWindow(display, root, 10, 10, width, height, 1, black, white)
-	if callOk?(win) & _r1Positive?(win) {
-		true -> {
-			storeName(display, win.r1, title)
-			selectInput(display, win.r1, ExposureMask | KeyPressMask | StructureNotifyMask)
-			mapWindow(display, win.r1)
-			flush(display)
-			{
-				type: :ok
-				display: display
-				window: win.r1
-				screen: screen
-				black: black
-				white: white
-			}
-		}
-		_ -> {
-			closeDisplay(display)
-			{
-				type: :error
-				error: 'XCreateSimpleWindow failed'
-				detail: win
-			}
-		}
-	}
-}
-
-fn _openWindowFromScreen(display, screen, title, width, height) {
-	root := rootWindow(display, screen)
-	black := blackPixel(display, screen)
-	white := whitePixel(display, screen)
-	if callOk?(root) & _r1Positive?(root) {
-		true -> _openWindowFromRoot(display, screen, root.r1, black.r1, white.r1, title, width, height)
-		_ -> {
-			closeDisplay(display)
-			{
-				type: :error
-				error: 'XRootWindow failed'
-				detail: root
-			}
-		}
-	}
-}
-
-fn _openWindowFromDisplay(display, title, width, height) {
-	screen := defaultScreen(display)
-	if callOk?(screen) {
-		true -> _openWindowFromScreen(display, screen.r1, title, width, height)
-		_ -> {
-			closeDisplay(display)
-			{
-				type: :error
-				error: 'XDefaultScreen failed'
-				detail: screen
-			}
-		}
-	}
-}
-
-fn openDefaultWindow(title, width, height) if isLinux?() {
-	true -> {
-		display := openDisplay(?)
-		if callOk?(display) & _r1Positive?(display) {
-			true -> _openWindowFromDisplay(display.r1, title, width, height)
-			_ -> {
-				{
-					type: :error
-					error: 'XOpenDisplay failed'
-					detail: display
-				}
-			}
-		}
-	}
-	_ -> _platformError('openDefaultWindow')
-}
-
-fn closeWindow(state) if isLinux?() {
-	true -> {
-		if state.type = :ok {
-			true -> {
-				destroyWindow(state.display, state.window)
-				closeDisplay(state.display)
-				0
-			}
-			_ -> 0
-		}
-	}
-	_ -> _platformError('closeWindow')
-}
-
-fn pumpWindowEvent(display, eventPtr) if isLinux?() {
-	true -> {
-		queued := pending(display)
-		if callOk?(queued) {
-			true -> if queued.r1 > 0 {
-				true -> {
-					next := nextEvent(display, eventPtr)
-					if callOk?(next) {
-						true -> {
-							etype := xEventType(eventPtr)
-							{
-								type: :dispatch
-								eventType: etype
-								detail: next
-							}
-						}
-						_ -> {
-							{
-								type: :error
-								error: 'XNextEvent failed'
-								detail: next
-							}
-						}
-					}
-				}
-				_ -> {
-					libc('usleep', 16000)
-					{type: :idle}
-				}
-			}
-			_ -> {
-				{
-					type: :error
-					error: 'XPending failed'
-					detail: queued
-				}
-			}
-		}
-	}
-	_ -> _platformError('pumpWindowEvent')
-}
-
-fn runWindowLoop(display, eventPtr) if isLinux?() {
-	true -> {
-		step := pumpWindowEvent(display, eventPtr)
-		if step.type {
-			:dispatch -> if step.eventType {
-				ClientMessage -> 0
-				DestroyNotify -> 0
-				_ -> runWindowLoop(display, eventPtr)
-			}
-			:idle -> runWindowLoop(display, eventPtr)
-			_ -> step
-		}
-	}
-	_ -> _platformError('runWindowLoop')
-}
-
-fn currentProcessId() if isLinux?() {
-	true -> sys.valueOr(libc('getpid'), -1)
-	_ -> -1
-}
-
-fn parentProcessId() if isLinux?() {
-	true -> sys.valueOr(libc('getppid'), -1)
-	_ -> -1
-}
-
-fn pageSize() if isLinux?() {
-	true -> sys.valueOr(libc('sysconf', _SC_PAGESIZE), -1)
-	_ -> -1
-}
-
-fn errno() if isLinux?() {
-	true -> {
-		loc := libc('__errno_location')
-		if sys.ok?(loc) & loc.r1 > 0 {
-			true -> readU32(loc.r1)
-			_ -> -1
-		}
-	}
-	_ -> -1
-}
-
-fn strerror(errorCode) if isLinux?() {
-	true -> {
-		msgPtr := libc('strerror', errorCode)
-		if sys.ok?(msgPtr) & msgPtr.r1 > 0 {
-			true -> _readCString(msgPtr.r1, 1024)
-			_ -> ?
-		}
-	}
-	_ -> ?
-}
-
-fn lastErrorMessage() if isLinux?() {
-	true -> {
-		err := errno()
-		if err >= 0 {
-			true -> strerror(err)
-			_ -> ?
-		}
-	}
-	_ -> ?
-}
-
-fn getuid() if isLinux?() {
-	true -> libc('getuid')
-	_ -> _platformError('getuid')
-}
-
-fn geteuid() if isLinux?() {
-	true -> libc('geteuid')
-	_ -> _platformError('geteuid')
-}
-
-fn getgid() if isLinux?() {
-	true -> libc('getgid')
-	_ -> _platformError('getgid')
-}
-
-fn getegid() if isLinux?() {
-	true -> libc('getegid')
-	_ -> _platformError('getegid')
-}
-
-fn gethostname(bufferPtr, size) if isLinux?() {
-	true -> libc('gethostname', bufferPtr, size)
-	_ -> _platformError('gethostname')
-}
-
-fn getcwd(bufferPtr, size) if isLinux?() {
-	true -> libc('getcwd', bufferPtr, size)
-	_ -> _platformError('getcwd')
-}
-
-fn chdir(path) if isLinux?() {
-	true -> libc('chdir', cstr(path))
-	_ -> _platformError('chdir')
-}
-
-fn access(path, mode) if isLinux?() {
-	true -> libc('access', cstr(path), mode)
-	_ -> _platformError('access')
-}
-
-fn openFile(path, flags, mode) if isLinux?() {
-	true -> libc('open', cstr(path), flags, if mode {
-		? -> 420
-		_ -> mode
-	})
-	_ -> _platformError('openFile')
-}
-
-fn closeFile(fd) if isLinux?() {
-	true -> libc('close', fd)
-	_ -> _platformError('closeFile')
-}
-
-fn readFileDescriptor(fd, bufferPtr, count) if isLinux?() {
-	true -> libc('read', fd, bufferPtr, count)
-	_ -> _platformError('readFileDescriptor')
-}
-
-fn writeFileDescriptor(fd, bufferPtr, count) if isLinux?() {
-	true -> libc('write', fd, bufferPtr, count)
-	_ -> _platformError('writeFileDescriptor')
-}
-
-fn seek(fd, offset, whence) if isLinux?() {
-	true -> libc('lseek', fd, offset, whence)
-	_ -> _platformError('seek')
-}
-
-fn unlink(path) if isLinux?() {
-	true -> libc('unlink', cstr(path))
-	_ -> _platformError('unlink')
-}
-
-fn mmap(addr, length, prot, flags, fd, offset) if isLinux?() {
-	true -> libc('mmap', addr, length, prot, flags, fd, offset)
-	_ -> _platformError('mmap')
-}
-
-fn munmap(addr, length) if isLinux?() {
-	true -> libc('munmap', addr, length)
-	_ -> _platformError('munmap')
-}
-
-fn mprotect(addr, length, prot) if isLinux?() {
-	true -> libc('mprotect', addr, length, prot)
-	_ -> _platformError('mprotect')
-}
-
-fn allocPages(size, prot) if isLinux?() {
-	true -> mmap(
-		?
-		size
-		if prot {
-			? -> PROT_READ | PROT_WRITE
-			_ -> prot
-		}
-		MAP_PRIVATE | MAP_ANONYMOUS
-		-1
-		0
-	)
-	_ -> _platformError('allocPages')
-}
-
-fn freePages(address, size) if isLinux?() {
-	true -> munmap(address, size)
-	_ -> _platformError('freePages')
-}
-
-fn protectPages(address, size, prot) if isLinux?() {
-	true -> mprotect(address, size, prot)
-	_ -> _platformError('protectPages')
-}
-
-fn dlopen(path, flags) if isLinux?() {
-	true -> libdl('dlopen', cstr(path), flags)
-	_ -> _platformError('dlopen')
-}
-
-fn dlsym(handle, symbol) if isLinux?() {
-	true -> libdl('dlsym', handle, cstr(symbol))
-	_ -> _platformError('dlsym')
-}
-
-fn dlclose(handle) if isLinux?() {
-	true -> libdl('dlclose', handle)
-	_ -> _platformError('dlclose')
-}
+{
+	LibC: LibC
+	LibDL: LibDL
+	LibX11: LibX11
+	PROT_NONE: PROT_NONE
+	PROT_READ: PROT_READ
+	PROT_WRITE: PROT_WRITE
+	PROT_EXEC: PROT_EXEC
+	MAP_SHARED: MAP_SHARED
+	MAP_PRIVATE: MAP_PRIVATE
+	MAP_FIXED: MAP_FIXED
+	MAP_ANONYMOUS: MAP_ANONYMOUS
+	O_RDONLY: O_RDONLY
+	O_WRONLY: O_WRONLY
+	O_RDWR: O_RDWR
+	O_CREAT: O_CREAT
+	O_TRUNC: O_TRUNC
+	O_APPEND: O_APPEND
+	SEEK_SET: SEEK_SET
+	SEEK_CUR: SEEK_CUR
+	SEEK_END: SEEK_END
+	F_OK: F_OK
+	X_OK: X_OK
+	W_OK: W_OK
+	R_OK: R_OK
+	RTLD_LAZY: RTLD_LAZY
+	RTLD_NOW: RTLD_NOW
+	RTLD_GLOBAL: RTLD_GLOBAL
+	RTLD_LOCAL: RTLD_LOCAL
+	_SC_PAGESIZE: _SC_PAGESIZE
+	KeyPressMask: KeyPressMask
+	ButtonPressMask: ButtonPressMask
+	ExposureMask: ExposureMask
+	StructureNotifyMask: StructureNotifyMask
+	KeyPress: KeyPress
+	Expose: Expose
+	DestroyNotify: DestroyNotify
+	ClientMessage: ClientMessage
+} := import('linux-constants')
+
+{
+	isLinux?: isLinux?
+	cstr: cstr
+	_readCString: _readCString
+	_platformError: _platformError
+	_resolveFirst: _resolveFirst
+	_callResolved: _callResolved
+	resolve: resolve
+	resolveIn: resolveIn
+	call: call
+	libc: libc
+	libdl: libdl
+} := import('linux-core')
+
+{
+	_loadedLibraries: _loadedLibraries
+	_libraryKey: _libraryKey
+	_normalizeHandleResult: _normalizeHandleResult
+	_loadDllCandidate: _loadDllCandidate
+	dlopen: dlopen
+	dlsym: dlsym
+	dlclose: dlclose
+	loadDll: loadDll
+	resolveInLoaded: resolveInLoaded
+	callIn: callIn
+	x11: x11
+} := import('linux-loader')
+
+{
+	_r1Positive?: _r1Positive?
+	callOk?: callOk?
+	_zeros: _zeros
+	xEventSize: xEventSize
+	createXEventBuffer: createXEventBuffer
+	xEventType: xEventType
+	openDisplay: openDisplay
+	closeDisplay: closeDisplay
+	defaultScreen: defaultScreen
+	rootWindow: rootWindow
+	blackPixel: blackPixel
+	whitePixel: whitePixel
+	createSimpleWindow: createSimpleWindow
+	destroyWindow: destroyWindow
+	storeName: storeName
+	selectInput: selectInput
+	mapWindow: mapWindow
+	unmapWindow: unmapWindow
+	moveWindow: moveWindow
+	resizeWindow: resizeWindow
+	displayWidth: displayWidth
+	displayHeight: displayHeight
+	createGC: createGC
+	freeGC: freeGC
+	setForeground: setForeground
+	drawLine: drawLine
+	fillRectangle: fillRectangle
+	drawString: drawString
+	flush: flush
+	pending: pending
+	nextEvent: nextEvent
+	_openWindowFromRoot: _openWindowFromRoot
+	_openWindowFromScreen: _openWindowFromScreen
+	_openWindowFromDisplay: _openWindowFromDisplay
+	openDefaultWindow: openDefaultWindow
+	closeWindow: closeWindow
+	pumpWindowEvent: pumpWindowEvent
+	runWindowLoop: runWindowLoop
+} := import('linux-windowing')
+
+{
+	currentProcessId: currentProcessId
+	parentProcessId: parentProcessId
+	pageSize: pageSize
+	errno: errno
+	strerror: strerror
+	lastErrorMessage: lastErrorMessage
+	getuid: getuid
+	geteuid: geteuid
+	getgid: getgid
+	getegid: getegid
+	gethostname: gethostname
+	getcwd: getcwd
+	chdir: chdir
+	access: access
+	openFile: openFile
+	closeFile: closeFile
+	readFileDescriptor: readFileDescriptor
+	writeFileDescriptor: writeFileDescriptor
+	seek: seek
+	unlink: unlink
+	mmap: mmap
+	munmap: munmap
+	mprotect: mprotect
+	allocPages: allocPages
+	freePages: freePages
+	protectPages: protectPages
+} := import('linux-libc')

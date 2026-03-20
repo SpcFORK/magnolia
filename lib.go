@@ -211,6 +211,21 @@ var libwindowscore string
 //go:embed lib/Linux.oak
 var liblinux string
 
+//go:embed lib/linux-constants.oak
+var liblinuxconstants string
+
+//go:embed lib/linux-core.oak
+var liblinuxcore string
+
+//go:embed lib/linux-loader.oak
+var liblinuxloader string
+
+//go:embed lib/linux-windowing.oak
+var liblinuxwindowing string
+
+//go:embed lib/linux-libc.oak
+var liblinuxlibc string
+
 //go:embed lib/websocket.oak
 var libwebsocket string
 
@@ -281,6 +296,11 @@ var stdlibs = map[string]string{
 	"sort":                libsort,
 	"random":              librandom,
 	"fs":                  libfs,
+	"linux-constants":     liblinuxconstants,
+	"linux-core":          liblinuxcore,
+	"linux-loader":        liblinuxloader,
+	"linux-windowing":     liblinuxwindowing,
+	"linux-libc":          liblinuxlibc,
 	"fmt":                 libfmt,
 	"json":                libjson,
 	"msgpack":             libmsgpack,

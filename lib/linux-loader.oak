@@ -1,0 +1,175 @@
+// linux-loader provides dlopen caching and symbol resolution helpers.
+
+sys := import('sys')
+
+{
+	LibX11: LibX11
+	RTLD_NOW: RTLD_NOW
+	RTLD_LOCAL: RTLD_LOCAL
+} := import('linux-constants')
+
+{
+	isLinux?: isLinux?
+	cstr: cstr
+	_platformError: _platformError
+	libdl: libdl
+	resolveIn: resolveIn
+	_resolveFirst: _resolveFirst
+} := import('linux-core')
+
+_loadedLibraries := {}
+
+fn _libraryKey(library) if type(library) {
+	:list -> {
+		if len(library) > 0 {
+			true -> library.0
+			_ -> '[]'
+		}
+	}
+	_ -> library
+}
+
+fn _normalizeHandleResult(result, apiName, library) if sys.ok?(result) & result.r1 > 0 {
+	true -> {
+		{
+			type: :ok
+			handle: result.r1
+			library: library
+		}
+	}
+	_ -> {
+		{
+			type: :error
+			error: apiName + ' failed'
+			library: library
+			detail: result
+		}
+	}
+}
+
+fn dlopen(path, flags) if isLinux?() {
+	true -> libdl('dlopen', cstr(path), flags)
+	_ -> _platformError('dlopen')
+}
+
+fn dlsym(handle, symbol) if isLinux?() {
+	true -> libdl('dlsym', handle, cstr(symbol))
+	_ -> _platformError('dlsym')
+}
+
+fn dlclose(handle) if isLinux?() {
+	true -> libdl('dlclose', handle)
+	_ -> _platformError('dlclose')
+}
+
+fn _loadDllCandidate(candidates, i, flags) if i {
+	len(candidates) -> {
+		{
+			type: :error
+			error: 'dlopen failed for all candidate libraries'
+			libraries: candidates
+		}
+	}
+	_ -> {
+		name := candidates.(i)
+		loaded := dlopen(name, flags)
+		if sys.ok?(loaded) & loaded.r1 > 0 {
+			true -> {
+				{
+					type: :ok
+					handle: loaded.r1
+					library: name
+				}
+			}
+			_ -> _loadDllCandidate(candidates, i + 1, flags)
+		}
+	}
+}
+
+fn loadDll(library) if isLinux?() {
+	true -> {
+		key := _libraryKey(library)
+		if cached := _loadedLibraries.(key) {
+			? -> {
+				flags := RTLD_NOW | RTLD_LOCAL
+				result := if type(library) {
+					:list -> _loadDllCandidate(library, 0, flags)
+					_ -> _normalizeHandleResult(dlopen(library, flags), 'dlopen', library)
+				}
+				if result.type {
+					:ok -> {
+						_loadedLibraries.(key) := result.handle
+						result
+					}
+					_ -> result
+				}
+			}
+			_ -> {
+				{
+					type: :ok
+					handle: cached
+					library: key
+				}
+			}
+		}
+	}
+	_ -> _platformError('loadDll')
+}
+
+fn resolveInLoaded(library, symbol) if isLinux?() {
+	true -> {
+		loaded := loadDll(library)
+		if loaded.type {
+			:ok -> {
+				proc := dlsym(loaded.handle, symbol)
+				if sys.ok?(proc) & proc.r1 > 0 {
+					true -> {
+						{
+							type: :ok
+							proc: proc.r1
+							handle: loaded.handle
+							library: loaded.library
+							symbol: symbol
+						}
+					}
+					_ -> {
+						{
+							type: :error
+							error: 'Could not resolve procedure'
+							library: loaded.library
+							symbol: symbol
+							detail: proc
+						}
+					}
+				}
+			}
+			_ -> loaded
+		}
+	}
+	_ -> _platformError('resolveInLoaded')
+}
+
+fn callIn(library, symbol, args...) if isLinux?() {
+	true -> {
+		resolved := resolveInLoaded(library, symbol)
+		if resolved.type {
+			:ok -> sys.call(resolved.proc, args...)
+			_ -> {
+				fallback := if type(library) {
+					:list -> _resolveFirst(library, symbol, 0)
+					_ -> resolveIn(library, symbol)
+				}
+				if fallback.type {
+					:ok -> sys.call(fallback.proc, args...)
+					_ -> resolved
+				}
+			}
+		}
+	}
+	_ -> _platformError('callIn')
+}
+
+fn x11(symbol, args...) if isLinux?() {
+	true -> callIn(LibX11, symbol, args...)
+	_ -> _platformError('x11')
+}

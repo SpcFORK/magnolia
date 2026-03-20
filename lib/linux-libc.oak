@@ -1,0 +1,183 @@
+// linux-libc provides Linux process, fs, and memory helpers.
+
+sys := import('sys')
+{
+	readU32: readU32
+} := import('writes')
+
+{
+	PROT_READ: PROT_READ
+	PROT_WRITE: PROT_WRITE
+	MAP_PRIVATE: MAP_PRIVATE
+	MAP_ANONYMOUS: MAP_ANONYMOUS
+	_SC_PAGESIZE: _SC_PAGESIZE
+} := import('linux-constants')
+
+{
+	isLinux?: isLinux?
+	cstr: cstr
+	_readCString: _readCString
+	_platformError: _platformError
+	libc: libc
+} := import('linux-core')
+
+fn currentProcessId() if isLinux?() {
+	true -> sys.valueOr(libc('getpid'), -1)
+	_ -> -1
+}
+
+fn parentProcessId() if isLinux?() {
+	true -> sys.valueOr(libc('getppid'), -1)
+	_ -> -1
+}
+
+fn pageSize() if isLinux?() {
+	true -> sys.valueOr(libc('sysconf', _SC_PAGESIZE), -1)
+	_ -> -1
+}
+
+fn errno() if isLinux?() {
+	true -> {
+		loc := libc('__errno_location')
+		if sys.ok?(loc) & loc.r1 > 0 {
+			true -> readU32(loc.r1)
+			_ -> -1
+		}
+	}
+	_ -> -1
+}
+
+fn strerror(errorCode) if isLinux?() {
+	true -> {
+		msgPtr := libc('strerror', errorCode)
+		if sys.ok?(msgPtr) & msgPtr.r1 > 0 {
+			true -> _readCString(msgPtr.r1, 1024)
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
+fn lastErrorMessage() if isLinux?() {
+	true -> {
+		err := errno()
+		if err >= 0 {
+			true -> strerror(err)
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
+fn getuid() if isLinux?() {
+	true -> libc('getuid')
+	_ -> _platformError('getuid')
+}
+
+fn geteuid() if isLinux?() {
+	true -> libc('geteuid')
+	_ -> _platformError('geteuid')
+}
+
+fn getgid() if isLinux?() {
+	true -> libc('getgid')
+	_ -> _platformError('getgid')
+}
+
+fn getegid() if isLinux?() {
+	true -> libc('getegid')
+	_ -> _platformError('getegid')
+}
+
+fn gethostname(bufferPtr, size) if isLinux?() {
+	true -> libc('gethostname', bufferPtr, size)
+	_ -> _platformError('gethostname')
+}
+
+fn getcwd(bufferPtr, size) if isLinux?() {
+	true -> libc('getcwd', bufferPtr, size)
+	_ -> _platformError('getcwd')
+}
+
+fn chdir(path) if isLinux?() {
+	true -> libc('chdir', cstr(path))
+	_ -> _platformError('chdir')
+}
+
+fn access(path, mode) if isLinux?() {
+	true -> libc('access', cstr(path), mode)
+	_ -> _platformError('access')
+}
+
+fn openFile(path, flags, mode) if isLinux?() {
+	true -> libc('open', cstr(path), flags, if mode {
+		? -> 420
+		_ -> mode
+	})
+	_ -> _platformError('openFile')
+}
+
+fn closeFile(fd) if isLinux?() {
+	true -> libc('close', fd)
+	_ -> _platformError('closeFile')
+}
+
+fn readFileDescriptor(fd, bufferPtr, count) if isLinux?() {
+	true -> libc('read', fd, bufferPtr, count)
+	_ -> _platformError('readFileDescriptor')
+}
+
+fn writeFileDescriptor(fd, bufferPtr, count) if isLinux?() {
+	true -> libc('write', fd, bufferPtr, count)
+	_ -> _platformError('writeFileDescriptor')
+}
+
+fn seek(fd, offset, whence) if isLinux?() {
+	true -> libc('lseek', fd, offset, whence)
+	_ -> _platformError('seek')
+}
+
+fn unlink(path) if isLinux?() {
+	true -> libc('unlink', cstr(path))
+	_ -> _platformError('unlink')
+}
+
+fn mmap(addr, length, prot, flags, fd, offset) if isLinux?() {
+	true -> libc('mmap', addr, length, prot, flags, fd, offset)
+	_ -> _platformError('mmap')
+}
+
+fn munmap(addr, length) if isLinux?() {
+	true -> libc('munmap', addr, length)
+	_ -> _platformError('munmap')
+}
+
+fn mprotect(addr, length, prot) if isLinux?() {
+	true -> libc('mprotect', addr, length, prot)
+	_ -> _platformError('mprotect')
+}
+
+fn allocPages(size, prot) if isLinux?() {
+	true -> mmap(
+		?
+		size
+		if prot {
+			? -> PROT_READ | PROT_WRITE
+			_ -> prot
+		}
+		MAP_PRIVATE | MAP_ANONYMOUS
+		-1
+		0
+	)
+	_ -> _platformError('allocPages')
+}
+
+fn freePages(address, size) if isLinux?() {
+	true -> munmap(address, size)
+	_ -> _platformError('freePages')
+}
+
+fn protectPages(address, size, prot) if isLinux?() {
+	true -> mprotect(address, size, prot)
+	_ -> _platformError('protectPages')
+}
