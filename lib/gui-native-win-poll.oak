@@ -1,0 +1,26 @@
+// gui-native-win-poll contains Win32 poll/message dispatch helpers for gui-native-win.
+
+windows := import('windows')
+
+fn pollWindowMessages(window) {
+	msg := windows.peekMessage(addr(window.msgBuf), 0, 0, 0, windows.PM_REMOVE)
+	if windows.callOk?(msg) {
+		true -> if msg.r1 > 0 {
+			true -> {
+				windows.translateMessage(addr(window.msgBuf))
+				windows.dispatchMessage(addr(window.msgBuf))
+				{type: :dispatch, detail: msg}
+			}
+			_ -> {type: :idle, detail: msg}
+		}
+		_ -> {
+			if msg.type = :error & msg.errno = 1400 {
+				true -> {
+					window.closed <- true
+					{type: :closed}
+				}
+				_ -> {type: :idle, detail: msg}
+			}
+		}
+	}
+}

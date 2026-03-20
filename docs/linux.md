@@ -169,6 +169,21 @@ Calls `symbol` from the first available `libX11` candidate.
 
 Calls `getpid` (`-1` on non-Linux).
 
+### `currentProcess()`
+
+Compatibility alias for `currentProcessId()`.
+
+### `moduleHandle(name)`
+
+Compatibility helper for Windows-style module-handle lookup:
+
+- pass `?` to get the current process image handle via `dlopen(NULL, ...)`
+- pass a shared library name/path to load and return a handle
+
+### `imageBase()`
+
+Compatibility alias for `moduleHandle(?)` value extraction.
+
 ### `parentProcessId()`
 
 Calls `getppid` (`-1` on non-Linux).
@@ -184,6 +199,14 @@ Returns the current thread-local errno value (`-1` on non-Linux or lookup failur
 ### `strerror(errorCode)`
 
 Returns a best-effort error string for a numeric errno code (or `?` on failure).
+
+### `getLastError()`
+
+Compatibility alias for `errno()`.
+
+### `formatMessage(errorCode)`
+
+Compatibility alias for `strerror(errorCode)`.
 
 ### `lastErrorMessage()`
 
@@ -212,6 +235,7 @@ Calls `access(2)`; use `F_OK`, `R_OK`, `W_OK`, `X_OK`.
 
 ### `openFile(path, flags, mode?)`
 ### `closeFile(fd)`
+### `closeHandle(handle)`
 ### `readFileDescriptor(fd, bufferPtr, count)`
 ### `writeFileDescriptor(fd, bufferPtr, count)`
 ### `seek(fd, offset, whence)`
@@ -221,6 +245,7 @@ Thin wrappers over POSIX fd APIs (`open`, `close`, `read`, `write`, `lseek`,
 `unlink`).
 
 - `openFile(..., mode?)` defaults mode to decimal `420` (`0644`) when omitted.
+- `closeHandle(handle)` is a compatibility alias for `closeFile(handle)`.
 
 ## Virtual Memory APIs
 
@@ -245,6 +270,25 @@ Convenience wrapper over `munmap`.
 
 Convenience wrapper over `mprotect`.
 
+### `virtualAlloc(baseAddress, size, allocationType, protection)`
+### `virtualAllocEx(process, baseAddress, size, allocationType, protection)`
+### `virtualFree(address, size, freeType)`
+### `virtualFreeEx(process, address, size, freeType)`
+### `virtualProtect(address, size, newProtect, oldProtectOutPtr)`
+### `virtualQuery(address, mbiBufferPtr, mbiSize)`
+### `virtualQueryEx(process, address, mbiBufferPtr, mbiSize)`
+### `openProcess(desiredAccess, inheritHandle, processId)`
+### `readProcessMemory(process, address, outBufferPtr, size, bytesReadOutPtr)`
+### `writeProcessMemory(process, address, inBufferPtr, size, bytesWrittenOutPtr)`
+
+Compatibility aliases for Windows-style virtual-memory APIs:
+
+- `virtualAlloc(...)` maps to `allocPages(size, protection)`
+- `virtualFree(...)` maps to `freePages(address, size)`
+- `virtualProtect(...)` maps to `protectPages(address, size, newProtect)`
+- `virtualAllocEx(...)`, `virtualFreeEx(...)`, `virtualQuery(...)`, `virtualQueryEx(...)`, `openProcess(...)`, `readProcessMemory(...)`, and `writeProcessMemory(...)` are exported compatibility stubs and currently return `{type: :error, ...}` on Linux.
+- Stub errors include `api`, `platform`, and `supported` fields for consistent cross-platform capability checks.
+
 ## Dynamic Loader APIs
 
 ### `dlopen(path, flags)`
@@ -252,6 +296,16 @@ Convenience wrapper over `mprotect`.
 ### `dlclose(handle)`
 
 Thin wrappers over dynamic loader APIs.
+
+### `loadLibrary(path)`
+### `procAddress(module, symbol)`
+### `freeLibrary(handle)`
+
+Compatibility aliases for Windows-style loader naming:
+
+- `loadLibrary(path)` calls `dlopen(path, RTLD_NOW | RTLD_LOCAL)`
+- `procAddress(module, symbol)` calls `dlsym(module, symbol)`
+- `freeLibrary(handle)` calls `dlclose(handle)`
 
 ## X11 Windowing and Drawing APIs
 

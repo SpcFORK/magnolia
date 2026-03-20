@@ -1,0 +1,102 @@
+// gui-native-win-opengl contains OpenGL 2D layer bootstrap helpers for Win32 windows.
+
+windows := import('windows')
+
+PFD_DRAW_TO_WINDOW := 4
+PFD_SUPPORT_OPENGL := 32
+PFD_DOUBLEBUFFER := 1
+
+fn _initOpenGLWithContext(window, hdcHandle, chosen) {
+	ctx := windows.opengl32('wglCreateContext', hdcHandle)
+	if windows.callOk?(ctx) & ctx.r1 > 0 {
+		true -> {
+			mk := windows.opengl32('wglMakeCurrent', hdcHandle, ctx.r1)
+			if windows.callOk?(mk) & mk.r1 > 0 {
+				true -> {
+					windows.opengl32('wglMakeCurrent', 0, 0)
+					windows.releaseDC(window.hwnd, hdcHandle)
+					{
+						type: :ok
+						context: ctx.r1
+						pixelFormat: chosen.r1
+						makeCurrentResult: mk
+					}
+				}
+				_ -> {
+					windows.opengl32('wglDeleteContext', ctx.r1)
+					windows.releaseDC(window.hwnd, hdcHandle)
+					{
+						type: :error
+						error: 'wglMakeCurrent failed during OpenGL initialization'
+						pixelFormat: chosen.r1
+						makeCurrentResult: mk
+					}
+				}
+			}
+		}
+		_ -> {
+			windows.releaseDC(window.hwnd, hdcHandle)
+			{
+				type: :error
+				error: 'wglCreateContext failed'
+				pixelFormat: chosen.r1
+				createContextResult: ctx
+			}
+		}
+	}
+}
+
+fn initOpenGL2DLayer(window) {
+	hdc := windows.getDC(window.hwnd)
+	if windows.callOk?(hdc) & hdc.r1 > 0 {
+		true -> {
+			pfd := bits({
+				fn zeros(n, acc) if n {
+					0 -> acc
+					_ -> zeros(n - 1, acc << 0)
+				}
+				zeros(40, [])
+			})
+			pfdPtr := addr(pfd)
+
+			windows.writeU32(pfdPtr + 0, 40 + (1 << 16))
+			windows.writeU32(pfdPtr + 4, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER)
+			windows.writeU32(pfdPtr + 8, 32 << 8)
+			windows.writeU32(pfdPtr + 24, 24 + (8 << 8))
+
+			chosen := windows.gdi32('ChoosePixelFormat', hdc.r1, pfdPtr)
+			if windows.callOk?(chosen) & chosen.r1 > 0 {
+				true -> {
+					setpf := windows.gdi32('SetPixelFormat', hdc.r1, chosen.r1, pfdPtr)
+					if windows.callOk?(setpf) & setpf.r1 > 0 {
+						true -> _initOpenGLWithContext(window, hdc.r1, chosen)
+						_ -> {
+							windows.releaseDC(window.hwnd, hdc.r1)
+							{
+								type: :error
+								error: 'SetPixelFormat failed'
+								pixelFormat: chosen.r1
+								setPixelFormatResult: setpf
+							}
+						}
+					}
+				}
+				_ -> {
+					windows.releaseDC(window.hwnd, hdc.r1)
+					{
+						type: :error
+						error: 'ChoosePixelFormat failed'
+						choosePixelFormatResult: chosen
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'GetDC failed during OpenGL initialization'
+				detail: hdc
+			}
+		}
+	}
+}

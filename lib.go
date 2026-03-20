@@ -253,6 +253,33 @@ var libguiweb string
 //go:embed lib/gui-native-win.oak
 var libguinativewin string
 
+//go:embed lib/gui-native-win-present.oak
+var libguinativewinpresent string
+
+//go:embed lib/gui-native-win-icons.oak
+var libguinativewinicons string
+
+//go:embed lib/gui-native-win-frame.oak
+var libguinativewinframe string
+
+//go:embed lib/gui-native-win-poll.oak
+var libguinativewinpoll string
+
+//go:embed lib/gui-native-win-close.oak
+var libguinativewinclose string
+
+//go:embed lib/gui-native-win-ddraw.oak
+var libguinativewinddraw string
+
+//go:embed lib/gui-native-win-vulkan.oak
+var libguinativewinvulkan string
+
+//go:embed lib/gui-native-win-opengl.oak
+var libguinativewinopengl string
+
+//go:embed lib/gui-native-win-probe.oak
+var libguinativewinprobe string
+
 //go:embed lib/gui-native-linux.oak
 var libguinativelinux string
 
@@ -372,6 +399,15 @@ var stdlibs = map[string]string{
 	"gui-raster":          libguiraster,
 	"gui-web":             libguiweb,
 	"gui-native-win":      libguinativewin,
+	"gui-native-win-present": libguinativewinpresent,
+	"gui-native-win-icons": libguinativewinicons,
+	"gui-native-win-frame": libguinativewinframe,
+	"gui-native-win-poll":  libguinativewinpoll,
+	"gui-native-win-close": libguinativewinclose,
+	"gui-native-win-ddraw": libguinativewinddraw,
+	"gui-native-win-vulkan": libguinativewinvulkan,
+	"gui-native-win-opengl": libguinativewinopengl,
+	"gui-native-win-probe": libguinativewinprobe,
 	"gui-native-linux":    libguinativelinux,
 	"gui-draw":            libguidraw,
 	"gui-2d":              libgui2d,

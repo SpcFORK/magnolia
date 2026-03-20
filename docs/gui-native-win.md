@@ -23,6 +23,7 @@ Layer options
 
 - `options.layer2D` / `options.layer2d`: `auto` (default), `vulkan`, `opengl`, `ddraw`, or `gdi`
 - `options.vulkanAuto`: opt-in Vulkan selection in `auto` mode (default: `false`)
+- `options.dllLoadMode`: `sync` (default) or `async` for background DLL capability probing
 - `options.layer3D` / `options.layer3d`: `auto` (default), `d3d9`, `cpu`, or `none`
 
 Window state fields
@@ -48,6 +49,9 @@ Window state fields
 - `window.vulkanSurface` — cached Vulkan Win32 surface pointer (0 when unavailable or after cleanup).
 - `window.vulkanPhysicalDevice` — selected Vulkan physical device handle (0 when unavailable or after cleanup).
 - `window.vulkanQueueFamily` — selected Vulkan graphics+present queue family index (`-1` when unavailable).
+- `window.ready` — `true` after deferred layer bootstrap completes.
+- `window._dllProbePending` — `true` while async DLL probing is still running.
+- `window._dllLoadMode` — normalized DLL probe mode (`sync` or `async`).
 
 Notes
 
@@ -66,6 +70,7 @@ Notes
 - The registered Win32 window class uses a null background brush (`hbrBackground = 0`) so frame clears are controlled by the renderer and do not flash the system background between presents.
 - When DirectDraw has a primary surface, `endFrame` attempts present via `IDirectDrawSurface7::GetDC` and GDI blit to that surface. If this per-frame present fails, the backend immediately falls back to GDI blit path for subsequent frames.
 - If Direct3D9 initialization is degraded (for example, release status is not healthy), the backend now automatically falls back to CPU for stable 3D behavior.
+- With `options.dllLoadMode: 'async'`, capability DLL probing (`opengl32.dll`, `vulkan-1.dll`, `ddraw.dll`, `d3d9.dll`) runs in a background task so `createWindow(...)` can return faster.
 
 Related samples
 

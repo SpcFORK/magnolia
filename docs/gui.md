@@ -97,6 +97,9 @@ Useful `options` fields:
     `onFrame` (default: `false`)
 - `className` (Windows) - override the Win32 class name used during
     registration. Defaults to a generated unique class name.
+- `dllLoadMode` (Windows) - DLL probe strategy for renderer capability checks:
+    `sync` (default) probes during `createWindow`; `async` starts probing in
+    the background so window creation stays responsive.
 - Windows icon options:
     - `icon` - base icon spec used for both big/small icon when specific values
         are not provided
@@ -171,6 +174,7 @@ Optional frame batching helpers.
 - Windows layer selection options are available via `createWindow(..., options)`:
     - `options.layer2D`: `auto` (default), `vulkan`, `opengl`, `ddraw`, `gdi`
     - `options.vulkanAuto`: allow `auto` to select Vulkan when available (default `false`)
+    - `options.dllLoadMode`: `sync` (default) or `async` for background DLL probing
         - `options.layer3D`: `auto` (default), `d3d9`, `cpu`, `none`
     Selected capabilities are exposed on `window.layers` when using the Windows backend.
     Vulkan selection currently bootstraps Vulkan instance/surface state but still uses a stable fallback presenter for frame display.

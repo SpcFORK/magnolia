@@ -4,6 +4,7 @@
 } := import('std')
 
 gui := import('GUI')
+windows := import('windows')
 
 // ----
 // @ Comps
@@ -15,11 +16,92 @@ menuScene := import('scenes/menu')
 // ---
 // @ Window
 
+fn sleepMs(ms) windows.kernel32('Sleep', ms)
+
+fn drawPreload(preloadWindow, message, progress) {
+	bg := gui.rgb(12, 16, 24)
+	panel := gui.rgb(26, 36, 56)
+	barBase := gui.rgb(34, 44, 64)
+	barFill := gui.rgb(94, 188, 255)
+	text := gui.rgb(232, 244, 255)
+	clampedProgress := if progress < 0 {
+		true -> 0.0
+		_ -> if progress > 1 {
+			true -> 1.0
+			_ -> progress
+		}
+	}
+
+	gui.beginFrame(preloadWindow)
+	gui.fillRect(preloadWindow, 0, 0, preloadWindow.width, preloadWindow.height, bg)
+	gui.fillRect(preloadWindow, 24, 24, preloadWindow.width - 48, preloadWindow.height - 48, panel)
+	gui.drawText(preloadWindow, 40, 74, 'Loading Magnolia...', text)
+	gui.fillRect(preloadWindow, 40, 116, preloadWindow.width - 80, 10, barBase)
+	gui.fillRect(preloadWindow, 40, 116, int(float(preloadWindow.width - 80) * clampedProgress), 10, barFill)
+	gui.drawText(preloadWindow, 40, 140, message, text)
+	gui.endFrame(preloadWindow)
+
+	gui.poll(preloadWindow)
+}
+
+fn animatePreload(preloadWindow, frame, total, startProgress, endProgress, message) {
+	if frame < total -> {
+		frameRatio := float(frame + 1) / float(total)
+		progress := startProgress + (endProgress - startProgress) * frameRatio
+		drawPreload(preloadWindow, message, progress)
+		sleepMs(16)
+		animatePreload(preloadWindow, frame + 1, total, startProgress, endProgress, message)
+	}
+}
+
+fn drawMainBoot(win, message, progress) {
+	bg := gui.rgb(9, 14, 22)
+	panel := gui.rgb(20, 30, 50)
+	barBase := gui.rgb(32, 44, 66)
+	barFill := gui.rgb(120, 205, 255)
+	text := gui.rgb(225, 241, 255)
+	clampedProgress := if progress < 0 {
+		true -> 0.0
+		_ -> if progress > 1 {
+			true -> 1.0
+			_ -> progress
+		}
+	}
+
+	gui.fillRect(win, 0, 0, win.width, win.height, bg)
+	gui.fillRect(win, 80, 140, win.width - 160, 170, panel)
+	gui.drawText(win, 108, 190, message, text)
+	gui.fillRect(win, 108, 232, win.width - 216, 12, barBase)
+	gui.fillRect(win, 108, 232, int(float(win.width - 216) * clampedProgress), 12, barFill)
+}
+
+preloadWindow := gui.createWindow('Blank Space - Loading', 520, 220, {
+	frameMs: 16
+	layer2D: 'ddraw'
+	resizable: false
+	updateOnDispatch: true
+	dllLoadMode: 'async'
+})
+
+if preloadWindow.type = :ok -> {
+	gui.show(preloadWindow)
+	animatePreload(preloadWindow, 0, 18, 0.05, 0.55, 'Bootstrapping runtime...')
+	drawPreload(preloadWindow, 'Creating main window...', 0.72)
+}
+
 window := gui.createWindow('Blank Space', 960, 540, {
 	frameMs: 16
 	layer2D: 'auto'
 	resizable: false
+	dllLoadMode: 'async'
 })
+
+if preloadWindow.type = :ok -> {
+	if window.type = :ok {
+		true -> drawPreload(preloadWindow, 'Handing off to main window...', 1.0)
+	}
+	gui.close(preloadWindow)
+}
 
 fn clampDt(dt) if dt < 0 {
 	true -> 0
@@ -33,43 +115,69 @@ if window.type {
 	:ok -> {
 		sm := sm.SceneManager()
 		currentSceneModule := introScene
+		boot := {
+			frames: 0
+			sceneReady: false
+		}
 		sm.setClockMs('frameDtMs', 0)
 
 		gui.show(window)
-		introScene.setupScene(window, sm)
 
 		gui.run(window, ?, fn(win, _dt) {
 			dt := float(_dt) |> clampDt()
 			sm.setClockMs('frameDtMs', int(dt * 1000))
 
-			if sm.isSceneChange(sm) -> {
-				sm.updateScene(sm)
-
-				gui.clearListeners(win, :keyDown)
-				gui.clearListeners(win, :keyUp)
-				gui.clearListeners(win, :mouseDown)
-				gui.clearListeners(win, :mouseUp)
-				gui.clearListeners(win, :mouseMove)
-				gui.clearListeners(win, :mouseWheel)
-				gui.clearListeners(win, :textInput)
-				gui.clearListeners(win, :resize)
-				gui.clearListeners(win, :close)
-				gui.clearListeners(win, :focus)
-				gui.clearListeners(win, :blur)
-				
-				if sm.currentScene {
-					:intro -> {
-						currentSceneModule <- introScene
-						introScene.setupScene(win, sm)
+			if !boot.sceneReady {
+				true -> {
+					boot.frames <- boot.frames + 1
+					progress := if boot.frames < 6 {
+						true -> float(boot.frames) / 6.0
+						_ -> 1.0
 					}
-					:menu -> {
-						currentSceneModule <- menuScene
-						menuScene.setupScene(win, sm)
+					drawMainBoot(win, 'Initializing intro scene...', progress)
+					if boot.frames >= 6 {
+						true -> {
+							introScene.setupScene(win, sm)
+							boot.sceneReady <- true
+						}
 					}
-					_ -> ?
 				}
 			}
-			currentSceneModule.draw(win, sm, dt)
+
+			if !boot.sceneReady {
+				true -> ?
+				_ -> {
+
+				if sm.isSceneChange(sm) -> {
+					sm.updateScene(sm)
+
+					gui.clearListeners(win, :keyDown)
+					gui.clearListeners(win, :keyUp)
+					gui.clearListeners(win, :mouseDown)
+					gui.clearListeners(win, :mouseUp)
+					gui.clearListeners(win, :mouseMove)
+					gui.clearListeners(win, :mouseWheel)
+					gui.clearListeners(win, :textInput)
+					gui.clearListeners(win, :resize)
+					gui.clearListeners(win, :close)
+					gui.clearListeners(win, :focus)
+					gui.clearListeners(win, :blur)
+				
+					if sm.currentScene {
+						:intro -> {
+							currentSceneModule <- introScene
+							introScene.setupScene(win, sm)
+						}
+						:menu -> {
+							currentSceneModule <- menuScene
+							menuScene.setupScene(win, sm)
+						}
+						_ -> ?
+					}
+				}
+				currentSceneModule.draw(win, sm, dt)
+			}
+			}
 		})
 
 		gui.close(window)

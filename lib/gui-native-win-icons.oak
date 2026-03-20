@@ -1,0 +1,117 @@
+// gui-native-win-icons contains Win32 icon load/apply helpers for gui-native-win.
+
+windows := import('windows')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+WM_SETICON := 128
+ICON_SMALL := 0
+ICON_BIG := 1
+ICON_SMALL2 := 2
+IMAGE_ICON := 1
+LR_DEFAULTSIZE := 64
+LR_LOADFROMFILE := 16
+GCLP_HICON := -14
+GCLP_HICONSM := -34
+SWP_NOMOVE := 2
+SWP_NOSIZE := 1
+SWP_NOZORDER := 4
+SWP_NOACTIVATE := 16
+SWP_FRAMECHANGED := 32
+
+fn _loadWindowsIconSized(iconSpec, width, height) {
+	if iconSpec {
+		? -> 0
+		_ -> if type(iconSpec) {
+			:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec))
+			:string -> windows.callValueOrZero(windows.user32(
+				'LoadImageW'
+				0
+				windows.wstr(iconSpec)
+				IMAGE_ICON
+				width
+				height
+				LR_LOADFROMFILE | LR_DEFAULTSIZE
+			))
+			:object -> if type(iconSpec.handle) {
+				:int -> iconSpec.handle
+				_ -> if type(iconSpec.id) {
+					:int -> windows.callValueOrZero(windows.loadIcon(0, iconSpec.id))
+					_ -> if type(iconSpec.path) {
+						:string -> windows.callValueOrZero(windows.user32(
+							'LoadImageW'
+							0
+							windows.wstr(iconSpec.path)
+							IMAGE_ICON
+							width
+							height
+							LR_LOADFROMFILE | LR_DEFAULTSIZE
+						))
+						_ -> 0
+					}
+				}
+			}
+			_ -> 0
+		}
+	}
+}
+
+fn resolveWindowIcons(opts) {
+	baseIconSpec := _default(opts.icon, ?)
+	bigIconSpec := _default(opts.taskbarIcon, _default(opts.iconBig, baseIconSpec))
+	smallIconSpec := _default(opts.windowIcon, _default(opts.iconSmall, baseIconSpec))
+
+	bigIcon := _loadWindowsIconSized(bigIconSpec, 32, 32)
+	smallIcon := _loadWindowsIconSized(smallIconSpec, 16, 16)
+
+	if smallIcon = 0 & bigIcon > 0 {
+		true -> {
+			derived := windows.callValueOrZero(windows.user32('CopyImage', bigIcon, IMAGE_ICON, 16, 16, 0))
+			if derived > 0 {
+				true -> smallIcon <- derived
+				_ -> smallIcon <- bigIcon
+			}
+		}
+	}
+
+	{
+		big: bigIcon
+		small: smallIcon
+	}
+}
+
+fn applyWindowIcons(hwnd, iconState) {
+	if type(iconState) = :object {
+		true -> {
+			if iconState.bigIcon > 0 {
+				true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICON, iconState.bigIcon)
+			}
+			if iconState.smallIcon > 0 {
+				true -> windows.user32('SetClassLongPtrW', hwnd, GCLP_HICONSM, iconState.smallIcon)
+			}
+			if iconState.bigIcon > 0 {
+				true -> windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_BIG, iconState.bigIcon)
+			}
+			if iconState.smallIcon > 0 {
+				true -> {
+					windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL, iconState.smallIcon)
+					windows.user32('SendMessageW', hwnd, WM_SETICON, ICON_SMALL2, iconState.smallIcon)
+				}
+			}
+			windows.user32(
+				'SetWindowPos'
+				hwnd
+				0
+				0
+				0
+				0
+				0
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+			)
+		}
+	}
+	0
+}

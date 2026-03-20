@@ -1,0 +1,225 @@
+// gui-native-win-probe contains DLL probe and layer-selection helpers.
+
+windows := import('windows')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _probeDdraw() {
+	loaded := windows.loadDll(windows.Ddraw)
+	if loaded.type {
+		:ok -> {
+			hasDirectDrawCreateEx := windows.resolveInLoaded(windows.Ddraw, 'DirectDrawCreateEx').type = :ok
+			hasDirectDrawCreate := windows.resolveInLoaded(windows.Ddraw, 'DirectDrawCreate').type = :ok
+			hasThreadLockAcquire := windows.resolveInLoaded(windows.Ddraw, 'AcquireDDThreadLock').type = :ok
+			hasThreadLockRelease := windows.resolveInLoaded(windows.Ddraw, 'ReleaseDDThreadLock').type = :ok
+			canUseDdraw := hasDirectDrawCreateEx | hasDirectDrawCreate
+			{
+				available: canUseDdraw
+				library: windows.Ddraw
+				handle: loaded.handle
+				useThreadLock: canUseDdraw & hasThreadLockAcquire & hasThreadLockRelease
+				backend: if canUseDdraw {
+					true -> :ddraw
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.Ddraw
+				useThreadLock: false
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _probeD3d9() {
+	loaded := windows.loadDll(windows.D3d9)
+	if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.D3d9, 'Direct3DCreate9').type = :ok
+			{
+				available: hasCreate
+				library: windows.D3d9
+				handle: loaded.handle
+				backend: if hasCreate {
+					true -> :d3d9
+					_ -> :cpu
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.D3d9
+				backend: :cpu
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _probeOpenGL() {
+	loaded := windows.loadDll(windows.OpenGL32)
+	if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.OpenGL32, 'wglCreateContext').type = :ok
+			hasDelete := windows.resolveInLoaded(windows.OpenGL32, 'wglDeleteContext').type = :ok
+			hasMakeCurrent := windows.resolveInLoaded(windows.OpenGL32, 'wglMakeCurrent').type = :ok
+			canUseOpenGL := hasCreate & hasDelete & hasMakeCurrent
+			{
+				available: canUseOpenGL
+				library: windows.OpenGL32
+				handle: loaded.handle
+				backend: if canUseOpenGL {
+					true -> :opengl
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.OpenGL32
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _probeVulkan() {
+	loaded := windows.loadDll(windows.Vulkan1)
+	if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.Vulkan1, 'vkCreateInstance').type = :ok
+			hasDestroy := windows.resolveInLoaded(windows.Vulkan1, 'vkDestroyInstance').type = :ok
+			hasEnumerate := windows.resolveInLoaded(windows.Vulkan1, 'vkEnumeratePhysicalDevices').type = :ok
+			hasCreateSurface := windows.resolveInLoaded(windows.Vulkan1, 'vkCreateWin32SurfaceKHR').type = :ok
+			hasDestroySurface := windows.resolveInLoaded(windows.Vulkan1, 'vkDestroySurfaceKHR').type = :ok
+			hasQueueProps := windows.resolveInLoaded(windows.Vulkan1, 'vkGetPhysicalDeviceQueueFamilyProperties').type = :ok
+			hasSurfaceSupport := windows.resolveInLoaded(windows.Vulkan1, 'vkGetPhysicalDeviceSurfaceSupportKHR').type = :ok
+			canUseVulkan := hasCreate & hasDestroy & hasEnumerate & hasCreateSurface & hasDestroySurface & hasQueueProps & hasSurfaceSupport
+			{
+				available: canUseVulkan
+				library: windows.Vulkan1
+				handle: loaded.handle
+				backend: if canUseVulkan {
+					true -> :vulkan
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.Vulkan1
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+}
+
+fn _pendingProbe(library, backend) {
+	{
+		available: false
+		library: library
+		backend: backend
+		pending: true
+		detail: {
+			type: :pending
+			error: 'DLL probe still loading'
+		}
+	}
+}
+
+fn _pendingDdrawProbe() {
+	{
+		available: false
+		library: windows.Ddraw
+		useThreadLock: false
+		backend: :gdi
+		pending: true
+		detail: {
+			type: :pending
+			error: 'DLL probe still loading'
+		}
+	}
+}
+
+fn pendingProbeSet() {
+	{
+		opengl: _pendingProbe(windows.OpenGL32, :gdi)
+		vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+		ddraw: _pendingDdrawProbe()
+		d3d9: _pendingProbe(windows.D3d9, :cpu)
+	}
+}
+
+fn probeAllDlls() {
+	{
+		opengl: _probeOpenGL()
+		vulkan: _probeVulkan()
+		ddraw: _probeDdraw()
+		d3d9: _probeD3d9()
+	}
+}
+
+fn select2DLayer(opts, opengl, ddraw, vulkan) {
+	requested := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
+	if requested {
+		'vulkan' -> if vulkan.available {
+			true -> :vulkan
+			_ -> if opengl.available {
+				true -> :opengl
+				_ -> if ddraw.available {
+					true -> :ddraw
+					_ -> :gdi
+				}
+			}
+		}
+		'opengl' -> if opengl.available {
+			true -> :opengl
+			_ -> if ddraw.available {
+				true -> :ddraw
+				_ -> :gdi
+			}
+		}
+		'ddraw' -> if ddraw.available {
+			true -> :ddraw
+			_ -> :gdi
+		}
+		// In 'auto' mode prefer DDraw/GDI: Vulkan swapchain present is not yet
+		// wired and the OpenGL path falls back to GDI BitBlt anyway, so eagerly
+		// selecting them only causes slow probing / driver-init hangs for no
+		// rendering gain. Users can request 'vulkan'/'opengl' explicitly.
+		'gdi' -> :gdi
+		_ -> if ddraw.available {
+			true -> :ddraw
+			_ -> :gdi
+		}
+	}
+}
+
+fn select3DLayer(opts, d3d9) {
+	requested := _default(opts.layer3D, _default(opts.layer3d, 'auto'))
+	if requested {
+		'd3d9' -> if d3d9.available {
+			true -> :d3d9
+			_ -> :cpu
+		}
+		'cpu' -> :cpu
+		'none' -> :none
+		_ -> if d3d9.available {
+			true -> :d3d9
+			_ -> :cpu
+		}
+	}
+}

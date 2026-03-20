@@ -10,6 +10,8 @@ sys := import('sys')
 	PROT_WRITE: PROT_WRITE
 	MAP_PRIVATE: MAP_PRIVATE
 	MAP_ANONYMOUS: MAP_ANONYMOUS
+	RTLD_NOW: RTLD_NOW
+	RTLD_LOCAL: RTLD_LOCAL
 	_SC_PAGESIZE: _SC_PAGESIZE
 } := import('linux-constants')
 
@@ -19,7 +21,12 @@ sys := import('sys')
 	_readCString: _readCString
 	_platformError: _platformError
 	libc: libc
+	libdl: libdl
 } := import('linux-core')
+
+{
+	loadLibrary: loadLibrary
+} := import('linux-loader')
 
 fn currentProcessId() if isLinux?() {
 	true -> sys.valueOr(libc('getpid'), -1)
@@ -67,6 +74,26 @@ fn lastErrorMessage() if isLinux?() {
 		}
 	}
 	_ -> ?
+}
+
+// Compatibility aliases for cross-platform interop callsites.
+fn getLastError() errno()
+
+fn formatMessage(errorCode) strerror(errorCode)
+
+fn currentProcess() currentProcessId()
+
+fn moduleHandle(name) if isLinux?() {
+	true -> if name {
+		? -> libdl('dlopen', 0, RTLD_NOW | RTLD_LOCAL)
+		_ -> loadLibrary(name)
+	}
+	_ -> _platformError('moduleHandle')
+}
+
+fn imageBase() if isLinux?() {
+	true -> sys.valueOr(moduleHandle(?), 0)
+	_ -> 0
 }
 
 fn getuid() if isLinux?() {
@@ -121,6 +148,8 @@ fn closeFile(fd) if isLinux?() {
 	true -> libc('close', fd)
 	_ -> _platformError('closeFile')
 }
+
+fn closeHandle(handle) closeFile(handle)
 
 fn readFileDescriptor(fd, bufferPtr, count) if isLinux?() {
 	true -> libc('read', fd, bufferPtr, count)
@@ -180,4 +209,58 @@ fn freePages(address, size) if isLinux?() {
 fn protectPages(address, size, prot) if isLinux?() {
 	true -> mprotect(address, size, prot)
 	_ -> _platformError('protectPages')
+}
+
+fn virtualAlloc(baseAddress, size, allocationType, protection) if isLinux?() {
+	true -> allocPages(size, protection)
+	_ -> _platformError('virtualAlloc')
+}
+
+fn virtualFree(address, size, freeType) if isLinux?() {
+	true -> freePages(address, size)
+	_ -> _platformError('virtualFree')
+}
+
+fn virtualProtect(address, size, newProtect, oldProtectOutPtr) if isLinux?() {
+	true -> protectPages(address, size, newProtect)
+	_ -> _platformError('virtualProtect')
+}
+
+// Windows-only API compatibility stubs exposed for cross-platform symbol parity.
+fn _compatNotImplemented(apiName) {
+	{
+		type: :error
+		error: apiName + ' is not implemented on Linux compatibility layer'
+		api: apiName
+		platform: 'linux'
+		supported: false
+	}
+}
+
+fn openProcess(desiredAccess, inheritHandle, processId) {
+	_compatNotImplemented('openProcess')
+}
+
+fn readProcessMemory(process, address, outBufferPtr, size, bytesReadOutPtr) {
+	_compatNotImplemented('readProcessMemory')
+}
+
+fn writeProcessMemory(process, address, inBufferPtr, size, bytesWrittenOutPtr) {
+	_compatNotImplemented('writeProcessMemory')
+}
+
+fn virtualAllocEx(process, baseAddress, size, allocationType, protection) {
+	_compatNotImplemented('virtualAllocEx')
+}
+
+fn virtualFreeEx(process, address, size, freeType) {
+	_compatNotImplemented('virtualFreeEx')
+}
+
+fn virtualQuery(address, mbiBufferPtr, mbiSize) {
+	_compatNotImplemented('virtualQuery')
+}
+
+fn virtualQueryEx(process, address, mbiBufferPtr, mbiSize) {
+	_compatNotImplemented('virtualQueryEx')
 }

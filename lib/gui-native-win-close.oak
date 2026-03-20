@@ -1,0 +1,53 @@
+// gui-native-win-close contains Win32 close/teardown helpers for gui-native-win.
+
+windows := import('windows')
+
+fn cleanupFrameBuffers(window) {
+	if window.frameHdc > 0 {
+		true -> {
+			if window.framePrevBitmap > 0 {
+				true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+			}
+			if window.frameBitmap > 0 {
+				true -> windows.deleteObject(window.frameBitmap)
+			}
+			windows.gdi32('DeleteDC', window.frameHdc)
+			window.frameBitmap <- 0
+			window.framePrevBitmap <- 0
+			window.frameHdc <- 0
+			window.frameWidth <- 0
+			window.frameHeight <- 0
+		}
+	}
+	0
+}
+
+fn cleanupOpenGL(window) {
+	if window.openglContext > 0 {
+		true -> {
+			windows.opengl32('wglMakeCurrent', 0, 0)
+			windows.opengl32('wglDeleteContext', window.openglContext)
+			window.openglContext <- 0
+			window.openglPixelFormat <- 0
+		}
+	}
+	0
+}
+
+fn cleanupVulkan(window) {
+	if window.vulkanInstance > 0 {
+		true -> {
+			if window.vulkanSurface > 0 {
+				true -> {
+					windows.vulkan1('vkDestroySurfaceKHR', window.vulkanInstance, window.vulkanSurface, 0)
+					window.vulkanSurface <- 0
+				}
+			}
+			windows.vulkan1('vkDestroyInstance', window.vulkanInstance, 0)
+			window.vulkanInstance <- 0
+			window.vulkanPhysicalDevice <- 0
+			window.vulkanQueueFamily <- -1
+		}
+	}
+	0
+}

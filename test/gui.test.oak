@@ -93,6 +93,61 @@ fn run(t) {
 		true
 	)
 
+	'windows poll is safe immediately after window creation' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				window := gui.createWindow('Magnolia Poll Bootstrap Test', 240, 140, {
+					layer2D: 'auto'
+					layer3D: 'auto'
+				})
+				if window.type {
+					:ok -> {
+						readyBefore := window.ready
+						step := gui.poll(window)
+						ok :=
+							(type(step) = :object) &
+							((step.type = :idle) | (step.type = :dispatch) | (step.type = :closed)) &
+							((readyBefore = false) | (readyBefore = ?)) &
+							(window.ready = true) &
+							(type(window.layers.twoD.init) = :object)
+						gui.close(window)
+						ok
+					}
+					_ -> false
+				}
+			}
+			_ -> true
+		}
+		true
+	)
+
+	'windows async dllLoadMode keeps startup responsive' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				window := gui.createWindow('Magnolia Async DLL Probe Test', 240, 140, {
+					layer2D: 'auto'
+					layer3D: 'auto'
+					dllLoadMode: 'async'
+				})
+				if window.type {
+					:ok -> {
+						step := gui.poll(window)
+						ok :=
+							(window._dllLoadMode = 'async') &
+							(type(window._dllProbePending) = :bool) &
+							(type(step) = :object) &
+							((step.type = :idle) | (step.type = :dispatch) | (step.type = :closed))
+						gui.close(window)
+						ok
+					}
+					_ -> false
+				}
+			}
+			_ -> true
+		}
+		true
+	)
+
 	// form geometry helpers
 	'formInRect? includes rectangle boundaries' |> t.eq(
 		[

@@ -1,0 +1,278 @@
+// gui-native-win-ddraw contains Win32 DirectDraw init/present/release helpers.
+
+windows := import('windows')
+
+COM_RELEASE := 2
+IDirectDraw7_CreateSurface := 6
+IDirectDraw7_SetCooperativeLevel := 20
+IDirectDrawSurface7_GetDC := 17
+IDirectDrawSurface7_ReleaseDC := 26
+DDSCL_NORMAL := 8
+DDSD_CAPS := 1
+DDSCAPS_PRIMARYSURFACE := 512
+SRCCOPY := 13369376
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn _ptrRead(address) if windows.ptrSize() {
+	8 -> windows.readU64(address)
+	_ -> windows.readU32(address)
+}
+
+fn _comCall(comObj, methodIndex, args...) {
+	vtbl := _ptrRead(comObj)
+	methodPtr := _ptrRead(vtbl + methodIndex * windows.ptrSize())
+	windows.call(methodPtr, comObj, args...)
+}
+
+fn _releaseOk?(res) windows.callOk?(res) | (res.type = :error & res.errno = 31)
+
+fn _iidDirectDraw7() bits([
+	192, 94, 230, 21,
+	156, 59,
+	210, 17,
+	185, 47, 0, 96, 151, 151, 234, 91
+])
+
+fn _readOutPointer(outBuf) if windows.ptrSize() {
+	8 -> windows.readU64(addr(outBuf))
+	_ -> windows.readU32(addr(outBuf))
+}
+
+fn _ddrawCreatePrimarySurface(ddrawObj) {
+	// DDSURFACEDESC2 fixed-size header with caps-only request for primary surface.
+	desc := bits({
+		fn zeros(n, acc) if n {
+			0 -> acc
+			_ -> zeros(n - 1, acc << 0)
+		}
+		zeros(124, [])
+	})
+	outBuf := if windows.ptrSize() {
+		8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+		_ -> bits([0, 0, 0, 0])
+	}
+
+	windows.writeU32(addr(desc) + 0, 124)
+	windows.writeU32(addr(desc) + 4, DDSD_CAPS)
+	windows.writeU32(addr(desc) + 104, DDSCAPS_PRIMARYSURFACE)
+
+	create := _comCall(ddrawObj, IDirectDraw7_CreateSurface, addr(desc), addr(outBuf), 0)
+	surfacePtr := _readOutPointer(outBuf)
+	if windows.callOk?(create) & windows.statusOk?(create) & surfacePtr > 0 {
+		true -> {
+			{
+				type: :ok
+				surface: surfacePtr
+				createResult: create
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'CreateSurface for primary surface failed'
+				createResult: create
+			}
+		}
+	}
+}
+
+fn _ddrawPresentViaPrimarySurface(window) {
+	if window.ddrawPrimarySurface > 0 {
+		true -> {
+			hdcOut := if windows.ptrSize() {
+				8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+				_ -> bits([0, 0, 0, 0])
+			}
+
+			getdc := _comCall(window.ddrawPrimarySurface, IDirectDrawSurface7_GetDC, addr(hdcOut))
+			surfaceHdc := _readOutPointer(hdcOut)
+			if windows.callOk?(getdc) & windows.statusOk?(getdc) & surfaceHdc > 0 {
+				true -> {
+					blt := windows.gdi32(
+						'BitBlt'
+						surfaceHdc
+						0
+						0
+						window.width
+						window.height
+						window.frameHdc
+						0
+						0
+						SRCCOPY
+					)
+					reldc := _comCall(window.ddrawPrimarySurface, IDirectDrawSurface7_ReleaseDC, surfaceHdc)
+					if windows.callOk?(blt) & blt.r1 > 0 & windows.callOk?(reldc) & windows.statusOk?(reldc) {
+						true -> {
+							{
+								type: :ok
+								getDcResult: getdc
+								bitBltResult: blt
+								releaseDcResult: reldc
+							}
+						}
+						_ -> {
+							{
+								type: :error
+								error: 'DirectDraw surface present failed'
+								getDcResult: getdc
+								bitBltResult: blt
+								releaseDcResult: reldc
+							}
+						}
+					}
+				}
+				_ -> {
+					{
+						type: :error
+						error: 'IDirectDrawSurface7::GetDC failed'
+						getDcResult: getdc
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				type: :error
+				error: 'No DirectDraw primary surface is available'
+			}
+		}
+	}
+}
+
+fn initDdraw2DLayer(window) {
+	fn freshOutBuffer() if windows.ptrSize() {
+		8 -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+		_ -> bits([0, 0, 0, 0])
+	}
+
+	iid := _iidDirectDraw7()
+	exOut := freshOutBuffer()
+	createEx := windows.directDrawCreateEx(0, addr(exOut), addr(iid), 0)
+	exObj := _readOutPointer(exOut)
+
+	if windows.callOk?(createEx) & windows.statusOk?(createEx) & exObj > 0 {
+		true -> {
+			coop := _comCall(exObj, IDirectDraw7_SetCooperativeLevel, window.hwnd, DDSCL_NORMAL)
+			surface := if windows.statusOk?(coop) {
+				true -> _ddrawCreatePrimarySurface(exObj)
+				_ -> {
+					{
+						type: :skipped
+						reason: 'SetCooperativeLevel failed; skipping primary surface creation'
+					}
+				}
+			}
+			if surface.type = :ok {
+				true -> _comCall(surface.surface, COM_RELEASE)
+			}
+			rel := _comCall(exObj, COM_RELEASE)
+			{
+				type: if windows.statusOk?(coop) & (surface.type = :ok | surface.type = :skipped) { true -> :ok, _ -> :warn }
+				created: true
+				setCooperativeLevelOk: windows.statusOk?(coop)
+				primarySurfaceCreated: surface.type = :ok
+				surfaceCreateResult: surface
+				releaseOk: _releaseOk?(rel)
+				createResult: createEx
+				cooperativeResult: coop
+				releaseResult: rel
+				interface: :IDirectDraw7
+				path: :DirectDrawCreateEx
+			}
+		}
+		_ -> {
+			legacyOut := freshOutBuffer()
+			createLegacy := windows.directDrawCreate(0, addr(legacyOut), 0)
+			legacyObj := _readOutPointer(legacyOut)
+
+			if windows.callOk?(createLegacy) & windows.statusOk?(createLegacy) & legacyObj > 0 {
+				true -> {
+					surface := _ddrawCreatePrimarySurface(legacyObj)
+					if surface.type = :ok {
+						true -> _comCall(surface.surface, COM_RELEASE)
+					}
+					rel := _comCall(legacyObj, COM_RELEASE)
+					{
+						type: if surface.type = :ok { true -> :ok, _ -> :warn }
+						created: true
+						setCooperativeLevelOk: ?
+						primarySurfaceCreated: surface.type = :ok
+						surfaceCreateResult: surface
+						releaseOk: _releaseOk?(rel)
+						createResult: createLegacy
+						cooperativeResult: ?
+						releaseResult: rel
+						interface: :IDirectDraw
+						path: :DirectDrawCreate
+						primaryFailure: createEx
+					}
+				}
+				_ -> {
+					{
+						type: :error
+						error: 'DirectDraw initialization failed for both DirectDrawCreateEx and DirectDrawCreate'
+						createResult: createEx
+						fallbackCreateResult: createLegacy
+					}
+				}
+			}
+		}
+	}
+}
+
+fn presentFrameViaDdraw(window) {
+	useDdrawThreadLock := window.presenterBackend = :ddraw & _default(window.ddraw.useThreadLock, false)
+	if window.presenterBackend = :ddraw & window.ddrawPrimarySurface > 0 {
+		true -> {
+			if useDdrawThreadLock {
+				true -> windows.ddraw('AcquireDDThreadLock')
+			}
+			ddrawPresent := _ddrawPresentViaPrimarySurface(window)
+			if useDdrawThreadLock {
+				true -> windows.ddraw('ReleaseDDThreadLock')
+			}
+			if ddrawPresent.type = :ok {
+				true -> {
+					{
+						presented: true
+						detail: ddrawPresent
+					}
+				}
+				_ -> {
+					window.presenterBackend <- :gdi
+					window.layers.twoD.selected <- :gdi
+					window.layers.twoD.fallback <- {
+						from: :ddraw
+						to: :gdi
+						reason: 'DirectDraw present failed at runtime'
+						detail: ddrawPresent
+					}
+					releasePrimarySurface(window)
+					{
+						presented: false
+						detail: ddrawPresent
+					}
+				}
+			}
+		}
+		_ -> {
+			{
+				presented: false
+			}
+		}
+	}
+}
+
+fn releasePrimarySurface(window) {
+	if window.ddrawPrimarySurface > 0 {
+		true -> {
+			_comCall(window.ddrawPrimarySurface, COM_RELEASE)
+			window.ddrawPrimarySurface <- 0
+		}
+	}
+	0
+}

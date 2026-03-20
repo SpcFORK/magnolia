@@ -1,0 +1,136 @@
+// gui-native-win-frame contains Win32 beginFrame/backbuffer helpers for gui-native-win.
+
+windows := import('windows')
+
+fn _err(message, detail) {
+	{
+		type: :error
+		error: message
+		detail: detail
+	}
+}
+
+fn _windowClientSize(window) {
+	rect := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+	res := windows.user32('GetClientRect', window.hwnd, addr(rect))
+	if windows.callOk?(res) & res.r1 > 0 {
+		true -> {
+			left := windows.readU32(addr(rect) + 0)
+			top := windows.readU32(addr(rect) + 4)
+			right := windows.readU32(addr(rect) + 8)
+			bottom := windows.readU32(addr(rect) + 12)
+			{
+				type: :ok
+				width: if right > left {
+					true -> right - left
+					_ -> window.width
+				}
+				height: if bottom > top {
+					true -> bottom - top
+					_ -> window.height
+				}
+			}
+		}
+		_ -> _err('GetClientRect failed', res)
+	}
+}
+
+fn _ensureBackbuffer(window, targetHdc) {
+	if window.frameHdc = 0 {
+		true -> {
+			memdc := windows.gdi32('CreateCompatibleDC', targetHdc)
+			if windows.callOk?(memdc) & memdc.r1 > 0 {
+				true -> window.frameHdc <- memdc.r1
+				_ -> _err('CreateCompatibleDC failed', memdc)
+			}
+		}
+		_ -> ?
+	}
+
+	needsResize := (window.frameBitmap = 0) | (window.frameWidth != window.width) | (window.frameHeight != window.height)
+	if needsResize {
+		true -> {
+			if window.frameBitmap > 0 {
+				true -> {
+					if window.framePrevBitmap > 0 {
+						true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+					}
+					windows.deleteObject(window.frameBitmap)
+					window.frameBitmap <- 0
+				}
+			}
+
+			bmp := windows.gdi32('CreateCompatibleBitmap', targetHdc, window.width, window.height)
+			if windows.callOk?(bmp) & bmp.r1 > 0 {
+				true -> {
+					window.frameBitmap <- bmp.r1
+					prev := windows.selectObject(window.frameHdc, window.frameBitmap)
+					if windows.callOk?(prev) {
+						true -> window.framePrevBitmap <- prev.r1
+					}
+					window.frameWidth <- window.width
+					window.frameHeight <- window.height
+					{type: :ok}
+				}
+				_ -> _err('CreateCompatibleBitmap failed', bmp)
+			}
+		}
+		_ -> {type: :ok}
+	}
+}
+
+fn _retryEnsureBackbuffer(window, targetHdc) {
+	if window.frameBitmap > 0 {
+		true -> {
+			if window.framePrevBitmap > 0 & window.frameHdc > 0 {
+				true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+			}
+			windows.deleteObject(window.frameBitmap)
+			window.frameBitmap <- 0
+			window.framePrevBitmap <- 0
+		}
+	}
+	if window.frameHdc > 0 {
+		true -> {
+			windows.gdi32('DeleteDC', window.frameHdc)
+			window.frameHdc <- 0
+		}
+	}
+	_ensureBackbuffer(window, targetHdc)
+}
+
+fn prepareBeginFrameTarget(window, targetHdc) {
+	window.frameTargetHdc <- targetHdc
+	size := _windowClientSize(window)
+	if size.type {
+		:ok -> {
+			window.width <- size.width
+			window.height <- size.height
+			ready := _ensureBackbuffer(window, targetHdc)
+			finalReady := if ready.type = :ok {
+				true -> ready
+				_ -> _retryEnsureBackbuffer(window, targetHdc)
+			}
+			if finalReady.type {
+				:ok -> {
+					{
+						type: :ok
+						hdc: window.frameHdc
+						width: window.width
+						height: window.height
+					}
+				}
+				_ -> {
+					windows.releaseDC(window.hwnd, targetHdc)
+					window.frameTargetHdc <- 0
+					finalReady
+				}
+			}
+		}
+		_ -> {
+			windows.releaseDC(window.hwnd, targetHdc)
+			window.frameTargetHdc <- 0
+			size
+		}
+	}
+}
