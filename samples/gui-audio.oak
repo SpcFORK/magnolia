@@ -1,0 +1,164 @@
+// GUI + audio sample.
+//
+// - Opens a GUI window and draws a tiny synthesized waveform preview.
+// - Press Space or Enter to play the next note in a short melody.
+// - On Windows this uses Kernel32!Beep for audible playback.
+// - On non-Windows backends, the sample still runs and displays status text.
+
+{
+	println: println
+	string: string
+	int: int
+	float: float
+	range: range
+	map: map
+} := import('std')
+{
+	sin: sin
+	Pi: Pi
+} := import('math')
+
+gui := import('GUI')
+windows := import('windows')
+
+fn makeSineWave(freq, sampleRate, length) {
+	step := 2.0 * Pi * float(freq) / float(sampleRate)
+	range(length) |> map(fn(i) sin(float(i) * step))
+}
+
+fn sampleAt(samples, i) if i < 0 {
+	true -> 0.0
+	_ -> if i >= len(samples) {
+		true -> 0.0
+		_ -> samples.(i)
+	}
+}
+
+fn drawWave(window, samples, i, maxI, x, y, w, h, color) if i < maxI {
+	true -> {
+		a := sampleAt(samples, i)
+		b := sampleAt(samples, i + 1)
+		x0 := x + int(float(i) / float(maxI) * float(w))
+		x1 := x + int(float(i + 1) / float(maxI) * float(w))
+		y0 := y + int((1.0 - (a + 1.0) / 2.0) * float(h))
+		y1 := y + int((1.0 - (b + 1.0) / 2.0) * float(h))
+		gui.drawLine(window, x0, y0, x1, y1, color)
+		drawWave(window, samples, i + 1, maxI, x, y, w, h, color)
+	}
+	_ -> ?
+}
+
+fn playBeep(freq, durMs) {
+	res := windows.kernel32('Beep', freq, durMs)
+	windows.callOk?(res) & res.r1 > 0
+}
+
+fn playNextTone(state) {
+	note := state.melody.(state.noteIndex)
+	ok := if windows.isWindows?() {
+		true -> playBeep(note.freq, note.dur)
+		_ -> false
+	}
+
+	state.noteIndex <- state.noteIndex + 1
+	if state.noteIndex >= len(state.melody) -> state.noteIndex <- 0
+
+	state.playCount <- state.playCount + 1
+	state.lastNote <- note.name
+	state.status <- if ok {
+		true -> 'played ' + note.name + ' (' + string(note.freq) + ' Hz)'
+		_ -> 'audio playback unavailable on this backend'
+	}
+}
+
+fn draw(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> {
+		bg := gui.rgb(14, 16, 24)
+		panel := gui.rgb(24, 30, 44)
+		accent := gui.rgb(74, 210, 255)
+		wave := gui.rgb(255, 210, 120)
+
+		gui.fillRect(window, 0, 0, window.width, window.height, bg)
+		gui.fillRect(window, 24, 24, window.width - 48, window.height - 48, panel)
+
+		gui.drawText(window, 40, 52, 'Magnolia GUI + Audio Sample')
+		gui.drawText(window, 40, 78, 'Press Space/Enter: play note   Esc/Q: close')
+		gui.drawText(window, 40, 104, 'Backend: ' + string(window.backend))
+		gui.drawText(window, 40, 130, 'Status: ' + state.status)
+		gui.drawText(window, 40, 156, 'Notes played: ' + string(state.playCount))
+		gui.drawText(window, 40, 182, 'Last note: ' + state.lastNote)
+
+		plotX := 40
+		plotY := 228
+		plotW := window.width - 80
+		plotH := 180
+		gui.drawRect2D(window, plotX, plotY, plotW, plotH, accent, false)
+		drawWave(window, state.wave, 0, len(state.wave) - 1, plotX + 8, plotY + 8, plotW - 16, plotH - 16, wave)
+
+		gui.drawText(window, 40, window.height - 36, 'Auto-close after ~10 seconds for unattended runs.')
+		gui.endFrame(window)
+	}
+}
+
+fn run(window) {
+	state := {
+		status: if windows.isWindows?() {
+			true -> 'ready (Windows Beep enabled)'
+			_ -> 'ready (GUI-only mode)'
+		}
+		playCount: 0
+		lastNote: '-'
+		noteIndex: 0
+		lifeSec: 0.0
+		wave: makeSineWave(220, 4800, 240)
+		melody: [
+			{name: 'C5', freq: 523, dur: 120}
+			{name: 'E5', freq: 659, dur: 120}
+			{name: 'G5', freq: 784, dur: 160}
+			{name: 'E5', freq: 659, dur: 120}
+		]
+	}
+
+	gui.show(window)
+	gui.setTitle(window, 'Magnolia GUI + Audio')
+
+	gui.onKeyDown(window, fn(vk) {
+		if vk = 32 | vk = 13 -> playNextTone(state)
+		if vk = 27 | vk = 81 -> gui.close(window)
+	})
+
+	gui.onKeyDownEvent(window, fn(key, _evt) {
+		if key = ' ' | key = 'space' | key = 'enter' | key = 'return' {
+			true -> playNextTone(state)
+		}
+		if key = 'escape' | key = 'q' | key = 'Q' -> gui.close(window)
+	})
+
+	draw(window, state)
+	gui.run(window, ?, fn(win, dt) {
+		state.lifeSec <- state.lifeSec + float(dt)
+		draw(win, state)
+		if state.lifeSec >= 10.0 -> gui.close(win)
+	})
+
+	gui.close(window)
+}
+
+println('== GUI + Audio Sample ==')
+
+window := gui.createWindow('Magnolia GUI + Audio', 900, 520, {
+	frameMs: 16
+	layer2D: 'auto'
+	icon: './build/magnolia.ico'
+	taskbarIcon: './build/magnolia.ico'
+	windowIcon: './build/magnolia.ico'
+})
+
+if window.type {
+	:ok -> run(window)
+	_ -> {
+		println('Could not create GUI window.')
+		println(string(window))
+	}
+}
