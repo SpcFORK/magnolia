@@ -403,6 +403,13 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 		true -> windows.CS_OWNDC
 		_ -> 0
 	}
+	// If the selected layer requires CS_OWNDC (OpenGL/Vulkan) and the caller
+	// supplied the pre-registered default class name, fall back to a unique
+	// class name so RegisterClassExW is called with the correct style flags.
+	effectiveClassName := if className = windows.DefaultClassName & (layer2D = :opengl | layer2D = :vulkan) {
+		true -> 'MagnoliaGUIWindowClass_' + string(nanotime())
+		_ -> className
+	}
 	// user32.dll and gdi32.dll are pre-loaded at module init (top of file).
 	// This loadDll call is a no-op cache hit (~0ms) but ensures correctness
 	// if this function is somehow called before module-level init completes.
@@ -415,7 +422,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 	_t4 := _cwsTime()
 	classBigIcon := classIcons.big
 	classSmallIcon := classIcons.small
-	reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?, classStyle)
+	reg := windows.registerWindowClassEx(effectiveClassName, classBigIcon, classSmallIcon, ?, classStyle)
 	if windows.callOk?(reg) & reg.r1 = 0 {
 		true -> {
 			_releaseWindowThreadLock()
@@ -423,7 +430,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 		}
 		_ -> {
 			_t5 := _cwsTime()
-			hwnd := windows.createTopLevelWindow(className, title, width, height)
+			hwnd := windows.createTopLevelWindow(effectiveClassName, title, width, height)
 			_t6 := _cwsTime()
 			if hwnd.type {
 				:ok -> if hwnd.r1 > 0 {
@@ -441,7 +448,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							width: width
 							height: height
 							hwnd: hwnd.r1
-							className: className
+							className: effectiveClassName
 							frameMs: frameMs
 							_options: opts
 							_dllLoadMode: dllLoadMode
@@ -534,6 +541,41 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 			}
 		}
 	}
+}
+
+// Asynchronous window creation — runs createWindowState in a background goroutine.
+// Returns a future object immediately: {type: :future, done: false, result: ?}
+// The caller can poll future.done or pass the future to awaitWindow() which blocks
+// until the result is ready.
+fn createWindowAsync(title, width, height, options, className, frameMs, updateOnDispatch) {
+	future := {
+		type: :future
+		done: false
+		result: ?
+		_t0: _cwsTime()
+	}
+	go(fn(f) {
+		f.result <- createWindowState(title, width, height, options, className, frameMs, updateOnDispatch)
+		f.done <- true
+	}, future)
+	future
+}
+
+// Blocks the current thread until an async window future completes.
+// Returns the window state (same as createWindowState would return).
+fn awaitWindow(future) {
+	fn _spin(f) if f.done {
+		true -> f.result
+		_ -> {
+			wait(0.001)
+			_spin(f)
+		}
+	}
+	result := _spin(future)
+	if result.type = :ok -> {
+		result._asyncWaitMs <- int((_cwsTime() - future._t0) * 1000.0)
+	}
+	result
 }
 
 fn showWindow(window) {

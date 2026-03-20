@@ -1,0 +1,92 @@
+// Benchmark: class caching — creates two windows with the same class name.
+// The second window should skip RegisterClassExW and save ~488ms.
+
+{
+	println: println
+	string: string
+	int: int
+	time: time
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+windowsWindowing := import('windows-windowing')
+
+sharedClassName := 'BenchClassCache_' + string(nanotime())
+opts := {
+	frameMs: 16
+	layer2D: 'gdi'
+	layer3D: 'none'
+	className: sharedClassName
+	updateOnDispatch: true
+}
+
+// --- First window (cold: class not yet registered) ---
+t1 := time()
+win1 := gui.createWindow('Bench Window 1 (cold)', 400, 300, opts)
+t2 := time()
+rct1 := windowsWindowing.getRegClassTimings()
+
+if win1.type = :ok {
+	true -> {
+		ms1 := int((t2 - t1) * 1000.0)
+		ct1 := win1._createTimings
+		println('=== Window 1 (cold — first registration) ===')
+		printf('  total createWindow: {{ 0 }}ms\n', string(ms1))
+		if ct1 != ? -> {
+			fn ms(v) string(int(v * 1000.0))
+			printf('  registerClass=   {{ 0 }}ms  createWindow=   {{ 1 }}ms\n', ms(ct1.registerClass), ms(ct1.createWindow))
+		}
+		if rct1 != ? -> {
+			fn ms2(v) string(int(v * 1000.0))
+			printf('  regClass sub: resolveDefProc={{ 0 }} loadCursor={{ 1 }} registerClassEx={{ 2 }} cacheHit={{ 3 }}\n'
+				ms2(rct1.resolveDefProc), ms2(rct1.loadCursor), ms2(rct1.registerClassEx), string(rct1.cacheHit))
+		}
+
+		gui.show(win1)
+
+		// --- Second window (warm: class already registered, should cache hit) ---
+		t3 := time()
+		win2 := gui.createWindow('Bench Window 2 (warm)', 400, 300, opts)
+		t4 := time()
+		rct2 := windowsWindowing.getRegClassTimings()
+
+		if win2.type = :ok {
+			true -> {
+				ms2 := int((t4 - t3) * 1000.0)
+				ct2 := win2._createTimings
+				println('')
+				println('=== Window 2 (warm — class cached) ===')
+				printf('  total createWindow: {{ 0 }}ms\n', string(ms2))
+				if ct2 != ? -> {
+					fn ms3(v) string(int(v * 1000.0))
+					printf('  registerClass=   {{ 0 }}ms  createWindow=   {{ 1 }}ms\n', ms3(ct2.registerClass), ms3(ct2.createWindow))
+				}
+				if rct2 != ? -> {
+					fn ms4(v) string(int(v * 1000.0))
+					printf('  regClass sub: resolveDefProc={{ 0 }} loadCursor={{ 1 }} registerClassEx={{ 2 }} cacheHit={{ 3 }}\n'
+						ms4(rct2.resolveDefProc), ms4(rct2.loadCursor), ms4(rct2.registerClassEx), string(rct2.cacheHit))
+				}
+
+				gui.show(win2)
+
+				println('')
+				printf('savings: {{ 0 }}ms\n', string(int((t2 - t1) * 1000.0) - int((t4 - t3) * 1000.0)))
+
+				gui.close(win2)
+			}
+			_ -> {
+				println('failed to create window 2:')
+				println(string(win2))
+			}
+		}
+
+		gui.close(win1)
+	}
+	_ -> {
+		println('failed to create window 1:')
+		println(string(win1))
+	}
+}

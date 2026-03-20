@@ -20,6 +20,22 @@ sys := import('sys')
 	IDI_APPLICATION: IDI_APPLICATION
 	PM_REMOVE: PM_REMOVE
 } := import('windows-flags')
+{time: _windTime} := import('std')
+
+// Cached Win32 resources resolved once and reused across registerWindowClassEx calls.
+_cachedDefProcAddr := ?
+_cachedCursor := ?
+_cachedIcon := ?
+_cachedImageBase := ?
+// Sub-phase timing for the most recent registerWindowClassEx call.
+_regClassTimings := {}
+// Cache of already-registered window class names → atom values.
+// Lets second+ windows with the same className skip RegisterClassExW entirely.
+_registeredClasses := {}
+// Standard class name pre-registered at module init.
+// Windows that don't need a custom class style can reuse this to skip
+// the ~500ms RegisterClassExW call entirely on first window creation.
+DefaultClassName := 'MagnoliaGUIWindowClass'
 
 fn _platformError(apiName) {
 	{
@@ -240,8 +256,11 @@ fn loadIcon(instance, iconId) if isWindows?() {
 
 // Registers a top-level window class using DefWindowProcW.
 // classStyle can override default CS_HREDRAW|CS_VREDRAW.
+// If className was already registered, returns the cached atom immediately.
 fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, classStyle) if isWindows?() {
-	true -> {
+	true -> if cached := _registeredClasses.(className) {
+		? -> {
+		_rt0 := _windTime()
 		size := if ptrSize() {
 			8 -> 80
 			_ -> 48
@@ -256,27 +275,66 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, c
 		})
 		wcPtr := addr(wcBuf)
 
-		defProcAddr := sys.valueOr(
-			kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
-			0
-		)
+		// Cache DefWindowProcW address — never changes per process.
+		defProcAddr := if _cachedDefProcAddr {
+			? -> {
+				addr := sys.valueOr(
+					kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
+					0
+				)
+				_cachedDefProcAddr <- addr
+				addr
+			}
+			_ -> _cachedDefProcAddr
+		}
+		_rt1 := _windTime()
 
+		// Cache default cursor — only resolved when no custom cursor.
 		resolvedCursor := if cursorHandle {
-			? -> callValueOrZero(loadCursor(0, IDC_ARROW))
+			? -> if _cachedCursor {
+				? -> {
+					c := callValueOrZero(loadCursor(0, IDC_ARROW))
+					_cachedCursor <- c
+					c
+				}
+				_ -> _cachedCursor
+			}
 			_ -> cursorHandle
 		}
+		_rt2 := _windTime()
+
+		// Cache default icon — only resolved when no custom icon.
 		resolvedIcon := if iconHandle {
-			? -> callValueOrZero(loadIcon(0, IDI_APPLICATION))
+			? -> if _cachedIcon {
+				? -> {
+					ic := callValueOrZero(loadIcon(0, IDI_APPLICATION))
+					_cachedIcon <- ic
+					ic
+				}
+				_ -> _cachedIcon
+			}
 			_ -> iconHandle
 		}
 		resolvedSmallIcon := if smallIconHandle {
 			? -> resolvedIcon
 			_ -> smallIconHandle
 		}
+		_rt3 := _windTime()
+
 		resolvedClassStyle := if classStyle {
 			? -> CS_HREDRAW | CS_VREDRAW
 			_ -> classStyle
 		}
+		// Cache imageBase — never changes per process.
+		base := if _cachedImageBase {
+			? -> {
+				b := imageBase()
+				_cachedImageBase <- b
+				b
+			}
+			_ -> _cachedImageBase
+		}
+
 		classWide := wstr(className)
 		classWidePtr := ptrInt(addr(classWide))
 
@@ -285,7 +343,7 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, c
 		writePtr(wcPtr + 8, defProcAddr)
 		writeU32(wcPtr + 16, 0)
 		writeU32(wcPtr + 20, 0)
-		writePtr(wcPtr + 24, imageBase())
+		writePtr(wcPtr + 24, base)
 		writePtr(wcPtr + 24 + ptrSize(), resolvedIcon)
 		writePtr(wcPtr + 24 + ptrSize() * 2, resolvedCursor)
 		writePtr(wcPtr + 24 + ptrSize() * 3, 0)
@@ -293,10 +351,60 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, c
 		writePtr(wcPtr + 24 + ptrSize() * 5, classWidePtr)
 		writePtr(wcPtr + 24 + ptrSize() * 6, resolvedSmallIcon)
 
-		registerClassEx(wcPtr)
+		_rt4 := _windTime()
+		result := registerClassEx(wcPtr)
+		_rt5 := _windTime()
+
+		_regClassTimings <- {
+			resolveDefProc: _rt1 - _rt0
+			loadCursor: _rt2 - _rt1
+			loadIcon: _rt3 - _rt2
+			structWrite: _rt4 - _rt3
+			registerClassEx: _rt5 - _rt4
+			cacheHit: false
+		}
+
+		if sys.ok?(result) | (result.type = :error & result.r1 > 0) {
+			true -> _registeredClasses.(className) <- result
+		}
+
+		result
+		}
+		_ -> {
+			_regClassTimings <- {
+				resolveDefProc: 0
+				loadCursor: 0
+				loadIcon: 0
+				structWrite: 0
+				registerClassEx: 0
+				cacheHit: true
+			}
+			cached
+		}
 	}
 	_ -> _platformError('registerWindowClassEx')
 }
+
+// Pre-resolve commonly needed Win32 resources at module init.
+// DefWindowProcW, default cursor, and imageBase never change per process.
+// Resolving them here avoids ~1s of syscall overhead in createWindowState.
+if isWindows?() -> {
+	// Ensure user32.dll is loaded before resolving any user32 procs.
+	kernel32('LoadLibraryW', wstr(User32))
+
+	_cachedImageBase <- imageBase()
+	_cachedDefProcAddr <- sys.valueOr(
+		kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
+		0
+	)
+	_cachedCursor <- callValueOrZero(loadCursor(0, IDC_ARROW))
+
+	// Pre-register the default window class so the first createWindow call
+	// gets a cache hit and skips the ~500ms RegisterClassExW syscall.
+	registerWindowClassEx(DefaultClassName, ?, ?, ?, ?)
+}
+
+fn getRegClassTimings() _regClassTimings
 
 // Registers a top-level window class using DefWindowProcW.
 fn registerDefaultWindowClass(className) if isWindows?() {

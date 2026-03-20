@@ -1,0 +1,78 @@
+// Benchmark: async window creation.
+// Tests cold-start async creation with parallel simulated work,
+// then a warm second creation for comparison.
+
+std := import('std')
+{
+	println: println
+	string: string
+	int: int
+	time: time
+	float: float
+} := std
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+
+commonOpts := {
+	frameMs: 16
+	layer2D: 'gdi'
+	layer3D: 'none'
+	updateOnDispatch: true
+}
+
+// --- Cold-start async: first window ever, created in background ---
+println('=== Async window creation (cold start) ===')
+tAsync0 := time()
+future := gui.createWindowAsync('Async Window', 400, 300, commonOpts)
+
+// Simulate app setup work (e.g. loading assets, config) while window creates.
+setupStart := time()
+simulatedWorkMs := 500
+wait(float(simulatedWorkMs) / 1000.0)
+setupEnd := time()
+actualSetupMs := int((setupEnd - setupStart) * 1000.0)
+
+// Block until window is ready.
+winAsync := gui.awaitWindow(future)
+tAsync1 := time()
+asyncTotalMs := int((tAsync1 - tAsync0) * 1000.0)
+
+if winAsync.type = :ok {
+	true -> {
+		asyncWaitMs := if winAsync._asyncWaitMs {
+			? -> '?'
+			_ -> string(winAsync._asyncWaitMs)
+		}
+		printf('  parallel setup work:  {{ 0 }}ms\n', string(actualSetupMs))
+		printf('  awaitWindow total:    {{ 0 }}ms (goroutine wall: {{ 1 }}ms)\n', string(asyncTotalMs), asyncWaitMs)
+		printf('  effective wait after setup: {{ 0 }}ms\n', string(asyncTotalMs - actualSetupMs))
+		gui.close(winAsync)
+	}
+	_ -> {
+		println('  FAILED: ' + string(winAsync))
+	}
+}
+
+// --- Synchronous baseline for comparison (warm — OS DLLs already cached) ---
+println('')
+println('=== Synchronous window creation (warm) ===')
+tSync0 := time()
+winSync := gui.createWindow('Sync Window', 400, 300, commonOpts)
+tSync1 := time()
+syncMs := int((tSync1 - tSync0) * 1000.0)
+
+if winSync.type = :ok {
+	true -> {
+		printf('  createWindow: {{ 0 }}ms\n', string(syncMs))
+		gui.close(winSync)
+	}
+	_ -> {
+		println('  FAILED: ' + string(winSync))
+	}
+}
+
+println('')
+printf('async total={{ 0 }}ms  sync(warm)={{ 1 }}ms\n', string(asyncTotalMs), string(syncMs))

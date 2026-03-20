@@ -94,7 +94,20 @@ fn createWindow(title, width, height, options) {
 	resolvedWidth := _default(width, 960)
 	resolvedHeight := _default(height, 540)
 	opts := _default(options, {})
-	className := _default(opts.className, 'MagnoliaGUIWindowClass_' + string(nanotime()))
+	// Use the pre-registered default class name when no custom className
+	// or classStyle is specified.  This avoids the ~500ms RegisterClassExW
+	// call on the first window because the class is already registered at
+	// module init time in windows-windowing.
+	className := if opts.className {
+		? -> if opts.classStyle {
+			? -> if backend() {
+				:windows -> windows.DefaultClassName
+				_ -> 'MagnoliaGUIWindowClass_' + string(nanotime())
+			}
+			_ -> 'MagnoliaGUIWindowClass_' + string(nanotime())
+		}
+		_ -> opts.className
+	}
 	frameMs := _default(opts.frameMs, 16)
 	updateOnDispatch := _default(opts.updateOnDispatch, false)
 
@@ -112,6 +125,53 @@ fn createWindow(title, width, height, options) {
 		}
 		_ -> created
 	}
+}
+
+// Starts window creation in a background goroutine and returns a future immediately.
+// Call awaitWindow(future) to block until the window is ready.
+// This lets the caller do other setup work while the window is being created.
+fn createWindowAsync(title, width, height, options) {
+	resolvedTitle := _default(title, 'Magnolia GUI Window')
+	resolvedWidth := _default(width, 960)
+	resolvedHeight := _default(height, 540)
+	opts := _default(options, {})
+	className := if opts.className {
+		? -> if opts.classStyle {
+			? -> if backend() {
+				:windows -> windows.DefaultClassName
+				_ -> 'MagnoliaGUIWindowClass_' + string(nanotime())
+			}
+			_ -> 'MagnoliaGUIWindowClass_' + string(nanotime())
+		}
+		_ -> opts.className
+	}
+	frameMs := _default(opts.frameMs, 16)
+	updateOnDispatch := _default(opts.updateOnDispatch, false)
+
+	if backend() {
+		:windows -> guiNativeWin.createWindowAsync(resolvedTitle, resolvedWidth, resolvedHeight, opts, className, frameMs, updateOnDispatch)
+		_ -> {
+			// Non-Windows backends: create synchronously and wrap in future.
+			result := createWindow(title, width, height, options)
+			{type: :future, done: true, result: result}
+		}
+	}
+}
+
+// Blocks until an async window future completes, then returns the window state.
+fn awaitWindow(future) if future.type {
+	:future -> {
+		result := if future.done {
+			true -> future.result
+			_ -> if backend() {
+				:windows -> guiNativeWin.awaitWindow(future)
+				_ -> future.result
+			}
+		}
+		if result.type = :ok -> _ensureEventBus(result)
+		result
+	}
+	_ -> future
 }
 
 fn show(window) if window.type {
