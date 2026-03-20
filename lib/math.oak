@@ -5,13 +5,22 @@
 // where the angle is measured in radians from the +x axis, counterclockwise.
 
 {
-	default: default
-	map: map
-	reduce: reduce
-} := import('std')
+	hypot: _hypotFromModule
+	scale: _scaleFromModule
+	bearing: _bearingFromModule
+	orient: _orientFromModule
+} := import('math-geo')
 {
-	sort: sort
-} := import('sort')
+	sum: _sumFromModule
+	prod: _prodFromModule
+	min: _minFromModule
+	max: _maxFromModule
+	clamp: _clampFromModule
+	mean: _meanFromModule
+	median: _medianFromModule
+	stddev: _stddevFromModule
+	round: _roundFromModule
+} := import('math-stats')
 
 // Pi, the circle constant
 Pi := 3.14159265358979323846264338327950288419716939937510
@@ -55,10 +64,7 @@ fn sqrt(n) if n >= 0 -> pow(n, 0.5)
 // Example:
 //   hypot(0, 0, 3, 4)  // => 5
 //   hypot(3, 4)        // => 5 (assumes origin)
-fn hypot(x0, y0, x1, y1) {
-	if x1 = ? & y1 = ? -> x1 <- y1 <- 0
-	sqrt((x0 - x1) * (x0 - x1) + (y0 - y1) * (y0 - y1))
-}
+fn hypot(x0, y0, x1, y1) _hypotFromModule(x0, y0, x1, y1)
 
 // scale maps the value x in the range [a, b] to the range [c, d]. If [c, d]
 // are not provided, they are assumed to be [0, 1]. x may be outside the range
@@ -68,13 +74,7 @@ fn hypot(x0, y0, x1, y1) {
 // Example:
 //   scale(5, 0, 10)         // => 0.5 (maps to [0, 1])
 //   scale(5, 0, 10, 0, 100) // => 50 (maps to [0, 100])
-fn scale(x, a, b, c, d) {
-	normed := (x - a) / (b - a)
-	if {
-		c = ? & d = ? -> normed
-		_ -> (d - c) * normed + c
-	}
-}
+fn scale(x, a, b, c, d) _scaleFromModule(x, a, b, c, d)
 
 // bearing returns the point [x', y'] at the other end of a line segment
 // starting at (x, y) and extending by distance d at angle t.
@@ -82,61 +82,42 @@ fn scale(x, a, b, c, d) {
 // Example:
 //   bearing(0, 0, 10, 0)        // => [10, 0]
 //   bearing(0, 0, 10, Pi / 2)   // => [0, 10]
-fn bearing(x, y, d, t) [
-	x + d * cos(t)
-	y + d * sin(t)
-]
+fn bearing(x, y, d, t) _bearingFromModule(x, y, d, t)
 
 // orient returns the angle of the line extending from (x0, y0) to (x1, y1). If
 // (x1, y1) is not provided, the given coordinate point is assumed to be (x1,
 // y1) and (x0, y0) is assumed to be the origin (0, 0). Return values are in
 // the range (-Pi, Pi]. This function is more commonly known in the form
 // `atan2(y, x)` (note the reversed argument order).
-fn orient(x0, y0, x1, y1) {
-	[x, y] := if x1 = ? & y1 = ? {
-		true -> [x0, y0]
-		_ -> [x1 - x0, y1 - y0]
-	}
-	if {
-		x > 0 -> 2 * atan(y / (hypot(x, y) + x))
-		x <= 0 & y != 0 -> 2 * atan((hypot(x, y) - x) / y)
-		x < 0 & y = 0 -> Pi
-	}
-}
+fn orient(x0, y0, x1, y1) _orientFromModule(x0, y0, x1, y1)
 
 // sum takes a sequence of values and returns their sum
 //
 // Example:
 //   sum(1, 2, 3, 4)  // => 10
 //   sum(5)           // => 5
-fn sum(xs...) xs |> reduce(0, fn(a, b) a + b)
+fn sum(xs...) _sumFromModule(xs...)
 
 // prod takes a sequence of values and returns their product
 //
 // Example:
 //   prod(2, 3, 4)  // => 24
 //   prod(5)        // => 5
-fn prod(xs...) xs |> reduce(1, fn(a, b) a * b)
+fn prod(xs...) _prodFromModule(xs...)
 
 // min returns the minimum value of all given values
 //
 // Example:
 //   min(5, 2, 8, 1)  // => 1
 //   min(-3, -1, -5)  // => -5
-fn min(xs...) xs |> reduce(xs.0, fn(acc, n) if n < acc {
-	true -> n
-	_ -> acc
-})
+fn min(xs...) _minFromModule(xs...)
 
 // max returns the maximum value of all given values
 //
 // Example:
 //   max(5, 2, 8, 1)  // => 8
 //   max(-3, -1, -5)  // => -1
-fn max(xs...) xs |> reduce(xs.0, fn(acc, n) if n > acc {
-	true -> n
-	_ -> acc
-})
+fn max(xs...) _maxFromModule(xs...)
 
 // clamp returns a value bounded by some upper and lower bounds a and b. If the
 // given x is between a and b, it is returned as-is; if it is outside the
@@ -146,11 +127,7 @@ fn max(xs...) xs |> reduce(xs.0, fn(acc, n) if n > acc {
 //   clamp(5, 0, 10)   // => 5
 //   clamp(-5, 0, 10)  // => 0
 //   clamp(15, 0, 10)  // => 10
-fn clamp(x, a, b) if {
-	x < a -> a
-	x > b -> b
-	_ -> x
-}
+fn clamp(x, a, b) _clampFromModule(x, a, b)
 
 // mean returns the arithmetic mean, or average, of all given values. If the
 // list is empty, mean returns ?.
@@ -158,30 +135,16 @@ fn clamp(x, a, b) if {
 // Example:
 //   mean([1, 2, 3, 4, 5])  // => 3
 //   mean([10, 20])         // => 15
-fn mean(xs) if len(xs) {
-	0 -> ?
-	_ -> sum(xs...) / len(xs)
-}
+fn mean(xs) _meanFromModule(xs)
 
 // median returns the median, or "middle value", of all given values. If there
 // is an even number of values given, median computes the mean of the middle
 // two values in the list. If the list is empty, median returns ?.
-fn median(xs) {
-	xs := sort(xs)
-	count := len(xs)
-	half := int(count / 2)
-	if 0 {
-		count -> ?
-		count % 2 -> (xs.(half - 1) + xs.(half)) / 2
-		_ -> xs.(half)
-	}
-}
+fn median(xs) _medianFromModule(xs)
 
 // stddev returns the population standard deviation computed from the given
 // list of values. If the list is empty, stddev returns ?.
-fn stddev(xs) if ? != xmean := mean(xs) -> {
-	xs |> map(fn(x) pow(xmean - x, 2)) |> mean() |> sqrt()
-}
+fn stddev(xs) _stddevFromModule(xs)
 
 // round takes a number `n` and returns a floating-point number that represents
 // `n` round to the nearest `decimals`-th decimal place. For negative values of
@@ -191,17 +154,5 @@ fn stddev(xs) if ? != xmean := mean(xs) -> {
 //   round(3.14159, 2)   // => 3.14
 //   round(123.456, 0)   // => 123
 //   round(123.456, -1)  // => 123.456
-fn round(n, decimals) {
-	decimals := int(decimals) |> default(0)
-	if decimals < 0 {
-		true -> n
-		_ -> {
-			order := pow(10, decimals)
-			if n >= 0 {
-				true -> int(n * order + 0.5) / order
-				_ -> -int(-n * order + 0.5) / order
-			}
-		}
-	}
-}
+fn round(n, decimals) _roundFromModule(n, decimals)
 

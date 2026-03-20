@@ -1,0 +1,196 @@
+// libaudio-wav provides WAV encoding/parsing helpers for libaudio.
+
+{
+	map: map
+	default: default
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// _clipF32 clamps a float sample to [-1, 1].
+fn _clipF32(s) if {
+	s > 1 -> 1
+	s < -1 -> -1
+	_ -> s
+}
+
+fn _f32ToI16(s) int(s * 32767)
+fn _i16ToF32(s) s / 32768
+
+fn _f32ToI32(s) int(s * 2147483647)
+fn _i32ToF32(s) s / 2147483648
+
+fn _f32ToU8(s) int((s + 1) / 2 * 255)
+fn _u8ToF32(s) s / 127.5 - 1
+
+// _byteStr converts a list of byte integers into a binary string.
+fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
+
+fn _u16LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256]
+}
+
+fn _i16LE(n) {
+	n := int(n)
+	u := if n < 0 { true -> n + 65536, _ -> n }
+	_u16LE(u)
+}
+
+fn _u32LE(n) {
+	n := int(n)
+	b0 := n % 256
+	b1 := int(n / 256) % 256
+	b2 := int(n / 65536) % 256
+	b3 := int(n / 16777216) % 256
+	[b0, b1, b2, b3]
+}
+
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readU16LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b0 + b1 * 256
+}
+
+fn _readI16LE(s, off) {
+	u := _readU16LE(s, off)
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+fn _readU32LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+fn _readI32LE(s, off) {
+	u := _readU32LE(s, off)
+	if u > 2147483647 { true -> u - 4294967296, _ -> u }
+}
+
+fn _wavSampleBytes(sample, bitDepth) {
+	sc := _clipF32(sample)
+	if bitDepth {
+		8 -> _byteStr([_f32ToU8(sc)])
+		16 -> _byteStr(_i16LE(_f32ToI16(sc)))
+		32 -> _byteStr(_u32LE(_f32ToI32(sc)))
+		_ -> _byteStr(_i16LE(_f32ToI16(sc)))
+	}
+}
+
+fn _wavDataChunk(samples, bitDepth) {
+	samples |> map(fn(s) _wavSampleBytes(s, bitDepth)) |> join('')
+}
+
+fn _wavHeader(fileLen, sampleRate, channels, bitDepth, byteRate, blockAlign, dataLen) {
+	'RIFF' +
+		_byteStr(_u32LE(fileLen)) +
+		'WAVE' +
+		'fmt ' +
+		_byteStr(_u32LE(16)) +
+		_byteStr(_u16LE(1)) +
+		_byteStr(_u16LE(channels)) +
+		_byteStr(_u32LE(sampleRate)) +
+		_byteStr(_u32LE(byteRate)) +
+		_byteStr(_u16LE(blockAlign)) +
+		_byteStr(_u16LE(bitDepth)) +
+		'data' +
+		_byteStr(_u32LE(dataLen))
+}
+
+fn wav(samples, sampleRate, channels, bitDepth) {
+	sampleRate := default(sampleRate, 44100)
+	channels := default(channels, 1)
+	bitDepth := default(bitDepth, 16)
+
+	bytesPerSample := int(bitDepth / 8)
+	blockAlign := channels * bytesPerSample
+	byteRate := sampleRate * blockAlign
+	dataLen := len(samples) * bytesPerSample
+	fileLen := 36 + dataLen
+
+	sampleData := _wavDataChunk(samples, bitDepth)
+	_wavHeader(fileLen, sampleRate, channels, bitDepth, byteRate, blockAlign, dataLen) + sampleData
+}
+
+fn _wavHeaderValid(data) {
+	riff := data.(0) + data.(1) + data.(2) + data.(3)
+	wave := data.(8) + data.(9) + data.(10) + data.(11)
+	fmtTag := data.(12) + data.(13) + data.(14) + data.(15)
+	riff = 'RIFF' & wave = 'WAVE' & fmtTag = 'fmt '
+}
+
+fn _wavFindDataChunk(data, off) if off + 8 > len(data) {
+	true -> ?
+	_ -> {
+		tag := data.(off) + data.(off + 1) + data.(off + 2) + data.(off + 3)
+		chunkSize := _readU32LE(data, off + 4)
+		if tag = 'data' {
+			true -> { off: off + 8, size: chunkSize }
+			_ -> _wavFindDataChunk(data, off + 8 + chunkSize)
+		}
+	}
+}
+
+fn _wavReadSample(data, off, bitDepth) if bitDepth {
+	8 -> _u8ToF32(_readU8(data, off))
+	16 -> _i16ToF32(_readI16LE(data, off))
+	32 -> _i32ToF32(_readI32LE(data, off))
+	_ -> _i16ToF32(_readI16LE(data, off))
+}
+
+fn _wavReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth) {
+	fn readSamples(acc, i) if i >= totalSamples {
+		true -> acc
+		_ -> {
+			off := dataOff + i * bytesPerSample
+			s := _wavReadSample(data, off, bitDepth)
+			readSamples(acc << s, i + 1)
+		}
+	}
+	readSamples([], 0)
+}
+
+fn parseWav(data) {
+	if len(data) < 44 {
+		true -> ?
+		_ -> {
+			if !_wavHeaderValid(data) {
+				true -> ?
+				_ -> {
+					audioFmt := _readU16LE(data, 20)
+					if audioFmt != 1 {
+						true -> ?
+						_ -> {
+							channels := _readU16LE(data, 22)
+							sampleRate := _readU32LE(data, 24)
+							bitDepth := _readU16LE(data, 34)
+
+							chunk := _wavFindDataChunk(data, 36)
+							if chunk = ? {
+								true -> ?
+								_ -> {
+									dataOff := chunk.off
+									bytesPerSample := int(bitDepth / 8)
+									totalSamples := int(chunk.size / bytesPerSample)
+
+									{
+										sampleRate: sampleRate
+										channels: channels
+										bitDepth: bitDepth
+										samples: _wavReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

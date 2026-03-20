@@ -16,6 +16,12 @@ var libstr string
 //go:embed lib/math.oak
 var libmath string
 
+//go:embed lib/math-geo.oak
+var libmathgeo string
+
+//go:embed lib/math-stats.oak
+var libmathstats string
+
 //go:embed lib/sort.oak
 var libsort string
 
@@ -313,6 +319,15 @@ var libaudio string
 //go:embed lib/audio-complex.oak
 var libaudiocomplex string
 
+//go:embed lib/audio-fft.oak
+var libaudiofft string
+
+//go:embed lib/audio-dsp.oak
+var libaudiodsp string
+
+//go:embed lib/audio-wav.oak
+var libaudiowav string
+
 //go:embed lib/video.oak
 var libvideo string
 
@@ -323,6 +338,8 @@ var stdlibs = map[string]string{
 	"std":                    libstd,
 	"str":                    libstr,
 	"math":                   libmath,
+	"math-geo":               libmathgeo,
+	"math-stats":             libmathstats,
 	"sort":                   libsort,
 	"random":                 librandom,
 	"fs":                     libfs,
@@ -424,6 +441,9 @@ var stdlibs = map[string]string{
 	"ai":                     libai,
 	"audio":                  libaudio,
 	"audio-complex":          libaudiocomplex,
+	"audio-fft":              libaudiofft,
+	"audio-dsp":              libaudiodsp,
+	"audio-wav":              libaudiowav,
 	"video":                  libvideo,
 	"async/event-bus":        libasynceventbus,
 }

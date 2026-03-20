@@ -1,0 +1,162 @@
+// libaudio-fft provides FFT/IFFT and frequency-domain helpers for libaudio.
+//
+// Functions here are factored out of audio.oak to keep heavier complex-number
+// math and radix-2 implementation details isolated in a focused module.
+
+{
+	range: range
+	map: map
+	each: each
+	clone: clone
+	default: default
+} := import('std')
+{
+	sin: sin
+	cos: cos
+	Pi: Pi
+} := import('math')
+{
+	complexMag: _complexMag
+	phaseAt: _phaseAt
+} := import('audio-complex')
+
+// TwoPi is 2π, a commonly needed constant for angular calculations.
+TwoPi := 2 * Pi
+
+// _nextPow2 returns the smallest power of 2 >= n.
+fn _nextPow2(n) {
+	fn sub(p) if p >= n { true -> p, _ -> sub(p * 2) }
+	sub(1)
+}
+
+// _log2Floor returns floor(log2(n)) for positive integers.
+fn _log2Floor(n) {
+	fn sub(x, acc) if x <= 1 { true -> acc, _ -> sub(int(x / 2), acc + 1) }
+	sub(n, 0)
+}
+
+// _bitrev reverses the low `bits` bits of integer `x`.
+fn _bitrev(x, bits) {
+	fn sub(x, bits, r) if bits = 0 {
+		true -> r
+		_ -> sub(int(x / 2), bits - 1, r * 2 + x % 2)
+	}
+	sub(x, bits, 0)
+}
+
+// _fftSwap swaps real/imag values at two indices.
+fn _fftSwap(re, im, i, j) {
+	tmp := re.(i)
+	re.(i) := re.(j)
+	re.(j) := tmp
+	tmp2 := im.(i)
+	im.(i) := im.(j)
+	im.(j) := tmp2
+}
+
+// _fftTwiddle computes the twiddle factor for stage position j.
+fn _fftTwiddle(sign, j, step) {
+	angle := sign * TwoPi * j / step
+	{ wr: cos(angle), wi: sin(angle) }
+}
+
+// _fftButterflyApply applies one radix-2 butterfly operation.
+fn _fftButterflyApply(re, im, u, v, wr, wi) {
+	tr := wr * re.(v) - wi * im.(v)
+	ti := wr * im.(v) + wi * re.(v)
+	re.(v) := re.(u) - tr
+	im.(v) := im.(u) - ti
+	re.(u) := re.(u) + tr
+	im.(u) := im.(u) + ti
+}
+
+// _fftButterflyRange runs all butterfly operations for one group.
+fn _fftButterflyRange(re, im, sign, step, k, half, j) if j >= half {
+	true -> ?
+	_ -> {
+		tw := _fftTwiddle(sign, j, step)
+		u := k + j
+		v := u + half
+		_fftButterflyApply(re, im, u, v, tw.wr, tw.wi)
+		_fftButterflyRange(re, im, sign, step, k, half, j + 1)
+	}
+}
+
+// _fftGroupPass runs grouped butterflies for one FFT stage.
+fn _fftGroupPass(re, im, sign, step, n, k, half) if k >= n {
+	true -> ?
+	_ -> {
+		_fftButterflyRange(re, im, sign, step, k, half, 0)
+		_fftGroupPass(re, im, sign, step, n, k + step, half)
+	}
+}
+
+// _fftCore is the shared forward/inverse implementation.
+// sign = -1 for forward FFT; sign = +1 for inverse.
+fn _fftCore(re, im, sign) {
+	n := len(re)
+	re := clone(re)
+	im := clone(im)
+	bits := _log2Floor(n)
+
+	// Bit-reversal permutation
+	range(n) |> each(fn(i) {
+		j := _bitrev(i, bits)
+		if j > i {
+			true -> _fftSwap(re, im, i, j)
+		}
+	})
+
+	// Cooley-Tukey butterfly passes
+	fn pass(step) if step > n {
+		true -> { re: re, im: im }
+		_ -> {
+			half := int(step / 2)
+			_fftGroupPass(re, im, sign, step, n, 0, half)
+			pass(step * 2)
+		}
+	}
+
+	pass(2)
+}
+
+// fft computes the forward DFT of a real (or complex) signal.
+// `im` may be omitted and will default to zeros.
+fn fft(re, im) {
+	im := default(im, range(len(re)) |> map(fn(_) 0))
+	_fftCore(re, im, -1)
+}
+
+// ifft computes the inverse DFT. Output is scaled by 1/N.
+fn ifft(re, im) {
+	n := len(re)
+	result := _fftCore(re, im, 1)
+	{
+		re: result.re |> map(fn(s) s / n)
+		im: result.im |> map(fn(s) s / n)
+	}
+}
+
+// magnitude computes complex magnitude per FFT bin.
+fn magnitude(re, im) range(len(re)) |> map(fn(i) {
+	r := re.(i)
+	g := im.(i)
+	_complexMag(r, g)
+})
+
+// phase computes phase angle in radians per FFT bin.
+fn phase(re, im) range(len(re)) |> map(fn(i) {
+	x := re.(i)
+	y := im.(i)
+	_phaseAt(x, y)
+})
+
+// powerSpectrum computes magnitude bins from a real signal.
+// The signal is zero-padded to the next power of 2 if needed.
+fn powerSpectrum(samples) {
+	sLen := len(samples)
+	n := _nextPow2(sLen)
+	padded := range(n) |> map(fn(i) if i < sLen { true -> samples.(i), _ -> 0 })
+	result := fft(padded, ?)
+	magnitude(result.re, result.im)
+}

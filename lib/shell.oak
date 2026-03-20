@@ -96,19 +96,19 @@ cs Shell(vfs?) {
 		HOME: '/home'
 		PWD: '/'
 	}
-	
-	// determine which filesystem to use  
+
+	// determine which filesystem to use
 	filesystem := if vfs? {
 		? -> fs
 		_ -> vfs?
 	}
-	
+
 	// Built-in commands
 	fn cmd_pwd(args) {
 		printf('{{ 0 }}\n', currentDir)
 		0
 	}
-	
+
 	fn cmd_cd(args) if len(args) {
 		0 -> {
 			currentDir <- env.HOME
@@ -122,13 +122,13 @@ cs Shell(vfs?) {
 			0
 		}
 	}
-	
+
 	fn cmd_ls(args) {
 		target := if len(args) > 0 {
 			true -> normalizePath(currentDir, args.0)
 			_ -> currentDir
 		}
-		
+
 		files := if vfs? != ? {
 			// VFS: list all files and filter by path prefix
 			true -> {
@@ -157,11 +157,11 @@ cs Shell(vfs?) {
 				}
 			}
 		}
-		
+
 		each(files, fn(f) printf('{{ 0 }}\n', f))
 		0
 	}
-	
+
 	fn cmd_cat(args) if len(args) {
 		0 -> {
 			printf('cat: missing file argument\n')
@@ -182,7 +182,7 @@ cs Shell(vfs?) {
 					}
 				}
 			}
-			
+
 			results := args |> map(printFile)
 			if contains?(results, 1) {
 				true -> 1
@@ -190,12 +190,12 @@ cs Shell(vfs?) {
 			}
 		}
 	}
-	
+
 	fn cmd_echo(args) {
 		printf('{{ 0 }}\n', join(args, ' '))
 		0
 	}
-	
+
 	fn cmd_mkdir(args) if len(args) {
 		0 -> {
 			printf('mkdir: missing directory argument\n')
@@ -224,7 +224,7 @@ cs Shell(vfs?) {
 			}
 		}
 	}
-	
+
 	fn cmd_rm(args) {
 		recursive? := false
 		files := args |> filter(fn(arg) if arg {
@@ -234,7 +234,7 @@ cs Shell(vfs?) {
 			}
 			_ -> true
 		})
-		
+
 		if len(files) {
 			0 -> {
 				printf('rm: missing file argument\n')
@@ -254,12 +254,12 @@ cs Shell(vfs?) {
 			}
 		}
 	}
-	
+
 	fn cmd_mv(args) if len(args) {
 		2 -> {
 			src := normalizePath(currentDir, args.0)
 			dst := normalizePath(currentDir, args.1)
-			
+
 			if vfs? != ? {
 				// VFS move (read, write, delete)
 				true -> {
@@ -294,12 +294,12 @@ cs Shell(vfs?) {
 			1
 		}
 	}
-	
+
 	fn cmd_cp(args) if len(args) {
 		2 -> {
 			src := normalizePath(currentDir, args.0)
 			dst := normalizePath(currentDir, args.1)
-			
+
 			content := filesystem.readFile(src)
 			if content {
 				? -> {
@@ -317,7 +317,7 @@ cs Shell(vfs?) {
 			1
 		}
 	}
-	
+
 	fn cmd_touch(args) if len(args) {
 		0 -> {
 			printf('touch: missing file argument\n')
@@ -334,14 +334,14 @@ cs Shell(vfs?) {
 			0
 		}
 	}
-	
+
 	fn cmd_env(args) {
 		entries(env) |> each(fn(entry) {
 			printf('{{ 0 }}={{ 1 }}\n', entry.0, entry.1)
 		})
 		0
 	}
-	
+
 	fn cmd_export(args) if len(args) {
 		0 -> {
 			cmd_env([])
@@ -357,7 +357,7 @@ cs Shell(vfs?) {
 			0
 		}
 	}
-	
+
 	fn cmd_help(args) {
 		printf('Available commands:\n')
 		printf('  pwd              - print working directory\n')
@@ -376,7 +376,7 @@ cs Shell(vfs?) {
 		printf('  exit             - exit shell\n')
 		0
 	}
-	
+
 	builtins := {
 		pwd: cmd_pwd
 		cd: cmd_cd
@@ -392,7 +392,7 @@ cs Shell(vfs?) {
 		export: cmd_export
 		help: cmd_help
 	}
-	
+
 	// Execute a single command
 	fn exec(cmdline) {
 		line := trim(cmdline)
@@ -406,7 +406,7 @@ cs Shell(vfs?) {
 					_ -> {
 						cmd := tokens.0
 						args := slice(tokens, 1, len(tokens))
-						
+
 						// Check for exit
 						if cmd = 'exit' {
 							true -> :exit
@@ -427,15 +427,15 @@ cs Shell(vfs?) {
 			}
 		}
 	}
-	
+
 	// REPL - read-eval-print loop
 	fn repl() {
 		printf('Oak Shell v0.1 (type "help" for commands, "exit" to quit)\n')
-		
+
 		fn loop() {
 			printf('{{ 0 }}> ', currentDir)
 			line := input()
-			
+
 			if line {
 				? -> :exit // EOF
 				_ -> {
@@ -447,10 +447,10 @@ cs Shell(vfs?) {
 				}
 			}
 		}
-		
+
 		loop()
 	}
-	
+
 	// Batch mode - execute commands from string
 	fn batch(script) {
 		lines := split(script, '\n')
@@ -466,7 +466,7 @@ cs Shell(vfs?) {
 		}
 		runLine(0)
 	}
-	
+
 	{
 		exec: exec
 		repl: repl

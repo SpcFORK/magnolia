@@ -1,0 +1,128 @@
+// libaudio-dsp provides DSP-heavy helpers for libaudio.
+//
+// This module isolates windowing, FIR convolution/filter kernels, and ADSR
+// envelope shaping so audio.oak can stay focused on high-level API surface.
+
+{
+	range: range
+	map: map
+	reduce: reduce
+	default: default
+} := import('std')
+{
+	sin: sin
+	cos: cos
+	Pi: Pi
+} := import('math')
+
+// TwoPi is 2π, commonly used for window phase math.
+TwoPi := 2 * Pi
+
+// _windowPhase computes the canonical window angular position for index i.
+fn _windowPhase(i, n) TwoPi * i / (n - 1)
+
+// windowRect returns a rectangular (boxcar) window of length `n` (all ones).
+fn windowRect(n) range(n) |> map(fn(_) 1)
+
+// windowHann returns a Hann window of length `n`.
+fn windowHann(n) range(n) |> map(fn(i) {
+	0.5 * (1 - cos(_windowPhase(i, n)))
+})
+
+// windowHamming returns a Hamming window of length `n`.
+fn windowHamming(n) range(n) |> map(fn(i) {
+	0.54 - 0.46 * cos(_windowPhase(i, n))
+})
+
+// windowBlackman returns a Blackman window of length `n`.
+fn windowBlackman(n) range(n) |> map(fn(i) {
+	ph := _windowPhase(i, n)
+	0.42 - 0.5 * cos(ph) + 0.08 * cos(2 * ph)
+})
+
+// applyWindow multiplies `samples` element-wise by `window`.
+fn applyWindow(samples, window) range(len(samples)) |> map(fn(i) {
+	samples.(i) * window.(i)
+})
+
+// _convolveBounds computes valid kernel-index bounds for output index n.
+fn _convolveBounds(n, sLen, kLen) {
+	kLo := if n - sLen + 1 > 0 { true -> n - sLen + 1, _ -> 0 }
+	kHi := if n < kLen - 1 { true -> n, _ -> kLen - 1 }
+	{ lo: kLo, hi: kHi }
+}
+
+// _convolveAt computes one output sample of linear convolution.
+fn _convolveAt(signal, kernel, n, sLen, kLen) {
+	bounds := _convolveBounds(n, sLen, kLen)
+	range(bounds.hi - bounds.lo + 1) |> reduce(0, fn(acc, ki) {
+		k := ki + bounds.lo
+		acc + kernel.(k) * signal.(n - k)
+	})
+}
+
+// convolve computes the full linear convolution of signal and kernel.
+fn convolve(signal, kernel) {
+	sLen := len(signal)
+	kLen := len(kernel)
+	outLen := sLen + kLen - 1
+	range(outLen) |> map(fn(n) _convolveAt(signal, kernel, n, sLen, kLen))
+}
+
+// _sincNorm returns the normalised sinc: sin(π x) / (π x).
+fn _sincNorm(x) if x = 0 { true -> 1, _ -> sin(Pi * x) / (Pi * x) }
+
+// lowPassFIR generates a Hamming-windowed sinc low-pass FIR kernel.
+fn lowPassFIR(cutoff, sampleRate, size) {
+	size := default(size, 63)
+	fc := cutoff / sampleRate
+	half := int(size / 2)
+	win := windowHamming(size)
+	raw := range(size) |> map(fn(i) 2 * fc * _sincNorm(2 * fc * (i - half)))
+	total := raw |> reduce(0, fn(a, b) a + b)
+	range(size) |> map(fn(i) raw.(i) * win.(i) / total)
+}
+
+// highPassFIR generates a high-pass FIR kernel via spectral inversion.
+fn highPassFIR(cutoff, sampleRate, size) {
+	size := default(size, 63)
+	lp := lowPassFIR(cutoff, sampleRate, size)
+	half := int(size / 2)
+	range(size) |> map(fn(i) {
+		delta := if i = half { true -> 1, _ -> 0 }
+		delta - lp.(i)
+	})
+}
+
+// _adsrEnv computes envelope value at sample index i.
+fn _adsrEnv(i, aS, dS, sustain, rStart, rS) if {
+	i < aS -> if aS > 0 { true -> i / aS, _ -> 1 }
+	i < aS + dS -> {
+		t := (i - aS) / if dS > 0 { true -> dS, _ -> 1 }
+		1 - t * (1 - sustain)
+	}
+	i < rStart -> sustain
+	_ -> {
+		t := (i - rStart) / if rS > 0 { true -> rS, _ -> 1 }
+		sustain * (1 - t)
+	}
+}
+
+// adsr applies an ADSR volume envelope to samples.
+fn adsr(samples, sampleRate, attack, decay, sustain, release) {
+	attack := default(attack, 0.01)
+	decay := default(decay, 0.1)
+	sustain := default(sustain, 0.7)
+	release := default(release, 0.2)
+
+	aS := int(attack * sampleRate)
+	dS := int(decay * sampleRate)
+	rS := int(release * sampleRate)
+	total := len(samples)
+	rStart := total - rS
+
+	range(total) |> map(fn(i) {
+		env := _adsrEnv(i, aS, dS, sustain, rStart, rS)
+		samples.(i) * env
+	})
+}
