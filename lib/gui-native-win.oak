@@ -10,6 +10,13 @@ guiNativeWinDdraw := import('gui-native-win-ddraw')
 guiNativeWinVulkan := import('gui-native-win-vulkan')
 guiNativeWinOpenGL := import('gui-native-win-opengl')
 guiNativeWinProbe := import('gui-native-win-probe')
+{time: _cwsTime} := import('std')
+
+// Pre-load user32.dll and gdi32.dll at module init time.
+// These are required for all Win32 window operations and loading them early
+// prevents a 1+ second delay inside createWindowState.
+windows.loadDll(windows.User32)
+windows.loadDll(windows.Gdi32)
 
 fn _default(value, fallback) if value {
 	? -> fallback
@@ -54,6 +61,18 @@ fn _startDllProbeAsync(state) {
 	state._dllProbeResult <- ?
 	go(fn(win) {
 		win._dllProbeResult <- guiNativeWinProbe.probeAllDlls()
+		win._dllProbeDone <- true
+	}, state)
+	state
+}
+
+// Lightweight async: only probes D3D9 in background (for GDI-only windows).
+fn _startD3d9ProbeAsync(state) {
+	state._dllProbePending <- true
+	state._dllProbeDone <- false
+	state._dllProbeResult <- ?
+	go(fn(win) {
+		win._dllProbeResult <- guiNativeWinProbe.probe2DGdiOnly()
 		win._dllProbeDone <- true
 	}, state)
 	state
@@ -337,18 +356,43 @@ fn _ensureLayerInit(window) {
 }
 
 fn createWindowState(title, width, height, options, className, frameMs, updateOnDispatch) {
+	_t0 := _cwsTime()
 	opts := _default(options, {})
 	dllLoadModeRaw := _default(opts.dllLoadMode, _default(opts.dllLoad, 'sync'))
+	requestedLayer2D := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
+	requestedLayer3D := _default(opts.layer3D, _default(opts.layer3d, 'auto'))
 	dllLoadMode := if dllLoadModeRaw {
 		'async' -> 'async'
 		'deferred' -> 'async'
 		'lazy' -> 'async'
 		_ -> 'sync'
 	}
+	_t1 := _cwsTime()
+	// Determine probe strategy based on load mode and requested layer.
+	// Avoid expensive GPU DLL probes if not requested or in gdi mode.
+	// For GDI mode, use pending probes to avoid blocking window creation;
+	// D3D9 will be probed asynchronously in background after creation.
+	_deferD3d9 := if requestedLayer2D = 'gdi' {
+		true -> true
+		_ -> false
+	}
 	probes := if dllLoadMode = 'async' {
 		true -> guiNativeWinProbe.pendingProbeSet()
-		_ -> guiNativeWinProbe.probeAllDlls()
+		_ -> if _deferD3d9 {
+			// Explicit GDI: no GPU probes needed, defer D3D9 to background.
+			true -> guiNativeWinProbe.probeNoGpu()
+			_ -> if requestedLayer2D = 'ddraw' {
+				// Explicit DDraw: probe DDraw but skip expensive GPU probes.
+				true -> guiNativeWinProbe.probe2DGraphicsStack()
+				_ -> if requestedLayer2D = 'auto' {
+					// Auto mode: use fast fallback stack.
+					true -> guiNativeWinProbe.probe2DGraphicsStack()
+					_ -> guiNativeWinProbe.probeAllDlls()
+				}
+			}
+		}
 	}
+	_t2 := _cwsTime()
 	opengl := probes.opengl
 	vulkan := probes.vulkan
 	ddraw := probes.ddraw
@@ -359,8 +403,16 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 		true -> windows.CS_OWNDC
 		_ -> 0
 	}
+	// user32.dll and gdi32.dll are pre-loaded at module init (top of file).
+	// This loadDll call is a no-op cache hit (~0ms) but ensures correctness
+	// if this function is somehow called before module-level init completes.
+	windows.loadDll(windows.User32)
+	windows.loadDll(windows.Gdi32)
+	_t2b := _cwsTime()
+	_t3 := _cwsTime()
 	_acquireWindowThreadLock()
 	classIcons := guiNativeWinIcons.resolveWindowIcons(opts)
+	_t4 := _cwsTime()
 	classBigIcon := classIcons.big
 	classSmallIcon := classIcons.small
 	reg := windows.registerWindowClassEx(className, classBigIcon, classSmallIcon, ?, classStyle)
@@ -370,7 +422,9 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 			_err('RegisterClassExW failed', reg)
 		}
 		_ -> {
+			_t5 := _cwsTime()
 			hwnd := windows.createTopLevelWindow(className, title, width, height)
+			_t6 := _cwsTime()
 			if hwnd.type {
 				:ok -> if hwnd.r1 > 0 {
 					true -> {
@@ -449,7 +503,22 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 						state._layerInitInProgress <- false
 						if dllLoadMode = 'async' {
 							true -> _startDllProbeAsync(state)
-							_ -> state._dllProbeDone <- true
+							_ -> if _deferD3d9 {
+								// GDI mode: window created with pending probes,
+								// now start D3D9 probe in background.
+								true -> _startD3d9ProbeAsync(state)
+								_ -> state._dllProbeDone <- true
+							}
+						}
+						state._createTimings <- {
+							parseOpts: _t1 - _t0
+							probes: _t2 - _t1
+							sysDllLoad: _t2b - _t2
+							layerSelect: _t3 - _t2b
+							icons: _t4 - _t3
+							registerClass: _t5 - _t4
+							createWindow: _t6 - _t5
+							stateInit: _cwsTime() - _t6
 						}
 						state
 					}

@@ -1,6 +1,16 @@
 // gui-native-win-probe contains DLL probe and layer-selection helpers.
 
+// gui-native-win-probe contains DLL probe and layer-selection helpers.
+
 windows := import('windows')
+{time: probeTime} := import('std')
+
+_probeCacheReady := false
+_probeCache := ?
+_probeDdrawTiming := 0.0
+_probeD3d9Timing := 0.0
+_probeOpenGLTiming := 0.0
+_probeVulkanTiming := 0.0
 
 fn _default(value, fallback) if value {
 	? -> fallback
@@ -8,8 +18,9 @@ fn _default(value, fallback) if value {
 }
 
 fn _probeDdraw() {
+	start := probeTime()
 	loaded := windows.loadDll(windows.Ddraw)
-	if loaded.type {
+	result := if loaded.type {
 		:ok -> {
 			hasDirectDrawCreateEx := windows.resolveInLoaded(windows.Ddraw, 'DirectDrawCreateEx').type = :ok
 			hasDirectDrawCreate := windows.resolveInLoaded(windows.Ddraw, 'DirectDrawCreate').type = :ok
@@ -37,11 +48,14 @@ fn _probeDdraw() {
 			}
 		}
 	}
+	_probeDdrawTiming <- probeTime() - start
+	result
 }
 
 fn _probeD3d9() {
+	start := probeTime()
 	loaded := windows.loadDll(windows.D3d9)
-	if loaded.type {
+	result := if loaded.type {
 		:ok -> {
 			hasCreate := windows.resolveInLoaded(windows.D3d9, 'Direct3DCreate9').type = :ok
 			{
@@ -63,11 +77,14 @@ fn _probeD3d9() {
 			}
 		}
 	}
+	_probeD3d9Timing <- probeTime() - start
+	result
 }
 
 fn _probeOpenGL() {
+	start := probeTime()
 	loaded := windows.loadDll(windows.OpenGL32)
-	if loaded.type {
+	result := if loaded.type {
 		:ok -> {
 			hasCreate := windows.resolveInLoaded(windows.OpenGL32, 'wglCreateContext').type = :ok
 			hasDelete := windows.resolveInLoaded(windows.OpenGL32, 'wglDeleteContext').type = :ok
@@ -92,11 +109,14 @@ fn _probeOpenGL() {
 			}
 		}
 	}
+	_probeOpenGLTiming <- probeTime() - start
+	result
 }
 
 fn _probeVulkan() {
+	start := probeTime()
 	loaded := windows.loadDll(windows.Vulkan1)
-	if loaded.type {
+	result := if loaded.type {
 		:ok -> {
 			hasCreate := windows.resolveInLoaded(windows.Vulkan1, 'vkCreateInstance').type = :ok
 			hasDestroy := windows.resolveInLoaded(windows.Vulkan1, 'vkDestroyInstance').type = :ok
@@ -125,6 +145,8 @@ fn _probeVulkan() {
 			}
 		}
 	}
+	_probeVulkanTiming <- probeTime() - start
+	result
 }
 
 fn _pendingProbe(library, backend) {
@@ -164,11 +186,109 @@ fn pendingProbeSet() {
 }
 
 fn probeAllDlls() {
+	if _probeCacheReady {
+		true -> _probeCache
+		_ -> {
+			_probeDdrawTiming <- 0.0
+			_probeD3d9Timing <- 0.0
+			_probeOpenGLTiming <- 0.0
+			_probeVulkanTiming <- 0.0
+			result := {
+				opengl: _probeOpenGL()
+				vulkan: _probeVulkan()
+				ddraw: _probeDdraw()
+				d3d9: _probeD3d9()
+			}
+			_probeCache <- result
+			_probeCacheReady <- true
+			result
+		}
+	}
+}
+
+// Fallback pipeline: attempts graphics backends in priority order.
+// Returns immediately when a working backend is found.
+// Vulkan -> OpenGL -> DDraw -> GDI
+fn probe2DGraphicsStack() {
+	_probeDdrawTiming <- 0.0
+	_probeD3d9Timing <- 0.0
+	_probeOpenGLTiming <- 0.0
+	_probeVulkanTiming <- 0.0
+	
+	// Try Vulkan first
+	vulkanProbe := _probeVulkan()
+	if vulkanProbe.available {
+		true -> {
+			opengl: _pendingProbe(windows.OpenGL32, :gdi)
+			vulkan: vulkanProbe
+			ddraw: _pendingDdrawProbe()
+			d3d9: _probeD3d9()
+		}
+		_ -> {
+			// Vulkan unavailable, try OpenGL
+			openglProbe := _probeOpenGL()
+			if openglProbe.available {
+				true -> {
+					opengl: openglProbe
+					vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+					ddraw: _pendingDdrawProbe()
+					d3d9: _probeD3d9()
+				}
+				_ -> {
+					// OpenGL unavailable, try DDraw
+					ddrawProbe := _probeDdraw()
+					if ddrawProbe.available {
+						true -> {
+							opengl: _pendingProbe(windows.OpenGL32, :gdi)
+							vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+							ddraw: ddrawProbe
+							d3d9: _probeD3d9()
+						}
+						_ -> {
+							// DDraw unavailable, fall through to GDI
+							{
+								opengl: _pendingProbe(windows.OpenGL32, :gdi)
+								vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+								ddraw: _pendingDdrawProbe()
+								d3d9: _probeD3d9()
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// GDI-only mode: no GPU DLL probes, all GPU backends return pending.
+// Used when layer2D='gdi' is explicitly requested to avoid expensive GPU probing.
+fn probe2DGdiOnly() {
+	_probeDdrawTiming <- 0.0
+	_probeD3d9Timing <- 0.0
+	_probeOpenGLTiming <- 0.0
+	_probeVulkanTiming <- 0.0
+	
 	{
-		opengl: _probeOpenGL()
-		vulkan: _probeVulkan()
-		ddraw: _probeDdraw()
+		opengl: _pendingProbe(windows.OpenGL32, :gdi)
+		vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+		ddraw: _pendingDdrawProbe()
 		d3d9: _probeD3d9()
+	}
+}
+
+// No GPU probes at all: used when layer2D='gdi' AND layer3D='none'.
+// Skips every DLL load including D3D9, returning all backends as pending.
+fn probeNoGpu() {
+	_probeDdrawTiming <- 0.0
+	_probeD3d9Timing <- 0.0
+	_probeOpenGLTiming <- 0.0
+	_probeVulkanTiming <- 0.0
+	
+	{
+		opengl: _pendingProbe(windows.OpenGL32, :gdi)
+		vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+		ddraw: _pendingDdrawProbe()
+		d3d9: _pendingProbe(windows.D3d9, :cpu)
 	}
 }
 
@@ -205,6 +325,15 @@ fn select2DLayer(opts, opengl, ddraw, vulkan) {
 			true -> :ddraw
 			_ -> :gdi
 		}
+	}
+}
+
+fn getProbeTimings() {
+	{
+		ddraw: _probeDdrawTiming
+		d3d9: _probeD3d9Timing
+		opengl: _probeOpenGLTiming
+		vulkan: _probeVulkanTiming
 	}
 }
 
