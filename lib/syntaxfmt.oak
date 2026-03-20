@@ -21,44 +21,58 @@ fn formatContent(content) syntax.print(content)
 
 // formatFile reads a file and returns its formatted content
 // Returns { ok: true, content: <formatted> } or { ok: false, error: <msg> }
-fn formatFile(path) with readFile(path) fn(file) if file {
-	? -> { ok: false, error: 'Could not read file' }
-	_ -> { ok: true, content: syntax.print(file) }
+fn formatFile(path) {
+	file := readFile(path)
+	if file {
+		? -> { ok: false, error: 'Could not read file' }
+		_ -> { ok: true, content: syntax.print(file) }
+	}
 }
 
 // formatFileInPlace reads a file, formats it, and writes it back
 // Returns { ok: true } or { ok: false, error: <msg> }
-fn formatFileInPlace(path) with readFile(path) fn(file) if file {
-	? -> { ok: false, error: 'Could not read file' }
-	_ -> with writeFile(path, syntax.print(file)) fn(res) if res {
-		? -> { ok: false, error: 'Could not write file' }
-		_ -> { ok: true }
+fn formatFileInPlace(path) {
+	file := readFile(path)
+	if file {
+		? -> { ok: false, error: 'Could not read file' }
+		_ -> {
+			res := writeFile(path, syntax.print(file))
+			if res {
+				? -> { ok: false, error: 'Could not write file' }
+				_ -> { ok: true }
+			}
+		}
 	}
 }
 
 // formatFileWithDiff reads a file, formats it, and returns diff output
 // Uses system 'diff' command to generate the diff
 // Returns { ok: true, diff: <output> } or { ok: false, error: <msg> }
-fn formatFileWithDiff(path) with readFile(path) fn(file) if file {
-	? -> { ok: false, error: 'Could not read file' }
-	_ -> with exec(
-		'diff'
-		[path, '-']
-		syntax.print(file)
-	) fn(evt) if evt.type {
-		:error -> { ok: false, error: evt.error }
-		_ -> { ok: true, diff: evt.stdout }
+fn formatFileWithDiff(path) {
+	file := readFile(path)
+	if file {
+		? -> { ok: false, error: 'Could not read file' }
+		_ -> {
+			evt := exec('diff', [path, '-'], syntax.print(file))
+			if evt.type {
+				:error -> { ok: false, error: evt.error }
+				_ -> { ok: true, diff: evt.stdout }
+			}
+		}
 	}
 }
 
 // getChangedOakFiles returns a list of .oak files from git diff
 // Returns { ok: true, files: [...] } or { ok: false, error: <msg> }
-fn getChangedOakFiles() with exec('git', ['diff', '--name-only'], '') fn(evt) if evt.type {
-	:error -> { ok: false, error: evt.error }
-	_ -> {
-		ok: true
-		files: evt.stdout |> trim() |> split('\n') |> with filter() fn(path) {
-			path |> endsWith?('.oak')
+fn getChangedOakFiles() {
+	evt := exec('git', ['diff', '--name-only'], '')
+	if evt.type {
+		:error -> { ok: false, error: evt.error }
+		_ -> {
+			ok: true
+			files: evt.stdout |> trim() |> split('\n') |> with filter() fn(path) {
+				path |> endsWith?('.oak')
+			}
 		}
 	}
 }
