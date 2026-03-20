@@ -1,0 +1,130 @@
+{
+	string: string
+} := import('std')
+
+gui := import('GUI')
+
+fn _default(value, fallback) if value {
+	? -> fallback
+	_ -> value
+}
+
+fn clampProgress(progress) if progress < 0 {
+	true -> 0.0
+	_ -> if progress > 1 {
+		true -> 1.0
+		_ -> progress
+	}
+}
+
+fn bootPercentText(progress) string(int(clampProgress(progress) * 100.0)) + '%'
+
+fn bootBar(progress) if {
+	clamped := clampProgress(progress)
+
+	clamped < 0.1 -> '[..........]'
+	clamped < 0.2 -> '[#.........]'
+	clamped < 0.3 -> '[##........]'
+	clamped < 0.4 -> '[###.......]'
+	clamped < 0.5 -> '[####......]'
+	clamped < 0.6 -> '[#####.....]'
+	clamped < 0.7 -> '[######....]'
+	clamped < 0.8 -> '[#######...]'
+	clamped < 0.9 -> '[########..]'
+	clamped < 1.0 -> '[#########.]'
+	_ -> '[##########]'
+}
+
+fn drawBootText(window, heading, message, progress) {
+	text := gui.rgb(255, 255, 255)
+	line1 := 'magnolia :: boot'
+	line2 := heading
+	line3 := '[' + bootPercentText(progress) + '] ' + bootBar(progress)
+	line4 := '> ' + message
+
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> {
+		gui.drawText(window, 28, 42, line1, text)
+		gui.drawText(window, 28, 68, line2, text)
+		gui.drawText(window, 28, 104, line3, text)
+		gui.drawText(window, 28, 132, line4, text)
+	}
+	gui.endFrame(window)
+}
+
+fn drawPreload(preloadWindow, message, progress) {
+	frame := gui.beginFrame(preloadWindow)
+	if frame.type = :ok -> {
+		gui.fillRect(preloadWindow, 0, 0, preloadWindow.width, preloadWindow.height, gui.rgb(18, 20, 26))
+		gui.drawText(preloadWindow, 28, 42, 'magnolia :: boot', gui.rgb(255, 255, 255))
+		gui.drawText(preloadWindow, 28, 68, 'preloading assets...', gui.rgb(255, 255, 255))
+		gui.drawText(preloadWindow, 28, 104, '[' + bootPercentText(progress) + '] ' + bootBar(progress), gui.rgb(255, 255, 255))
+		gui.drawText(preloadWindow, 28, 132, '> ' + message, gui.rgb(255, 255, 255))
+	}
+	gui.endFrame(preloadWindow)
+}
+
+fn pumpPreload(preloadWindow, count) {
+	if count > 0 -> {
+		gui.poll(preloadWindow)
+		pumpPreload(preloadWindow, count - 1)
+	}
+}
+
+fn renderPreloadStep(preloadWindow, message, progress, pumpCount) {
+	drawPreload(preloadWindow, message, progress)
+	pumpPreload(preloadWindow, pumpCount)
+}
+
+fn createPreloadWindow() {
+	gui.createWindow('Blank Space - Loading', 520, 220, {
+		frameMs: 16
+		layer2D: 'gdi'
+		resizable: false
+		updateOnDispatch: true
+		dllLoadMode: 'sync'
+	})
+}
+
+fn createMainWindowWithPreload(title, width, height, options) {
+	preloadWindow := createPreloadWindow()
+
+	if preloadWindow.type = :ok -> {
+		gui.show(preloadWindow)
+		renderPreloadStep(preloadWindow, 'Bootstrapping runtime...', 0.22, 2)
+		renderPreloadStep(preloadWindow, 'Creating main window...', 0.48, 2)
+	}
+
+	window := gui.createWindow(
+		_default(title, 'Blank Space')
+		_default(width, 960)
+		_default(height, 540)
+		_default(options, {
+			frameMs: 16
+			layer2D: 'auto'
+			resizable: false
+			dllLoadMode: 'sync'
+		})
+	)
+
+	if preloadWindow.type = :ok -> {
+		if window.type = :ok {
+			true -> renderPreloadStep(preloadWindow, 'Handing off to main window...', 1.0, 1)
+		}
+		gui.close(preloadWindow)
+	}
+
+	window
+}
+
+fn drawMainBoot(win, message, progress) {
+	frame := gui.beginFrame(win)
+	if frame.type = :ok -> {
+		gui.fillRect(win, 0, 0, win.width, win.height, gui.rgb(18, 20, 26))
+		gui.drawText(win, 28, 42, 'magnolia :: boot', gui.rgb(255, 255, 255))
+		gui.drawText(win, 28, 68, 'initializing main window...', gui.rgb(255, 255, 255))
+		gui.drawText(win, 28, 104, '[' + bootPercentText(progress) + '] ' + bootBar(progress), gui.rgb(255, 255, 255))
+		gui.drawText(win, 28, 132, '> ' + message, gui.rgb(255, 255, 255))
+	}
+	gui.endFrame(win)
+}
