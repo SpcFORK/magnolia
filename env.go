@@ -170,6 +170,7 @@ func syscallErrObj(message string) ObjectValue {
 var (
 	sysProcMu    sync.Mutex
 	sysProcCache = map[string]uintptr{}
+	dllCache     = map[string]*syscall.LazyDLL{}
 	wsConnMu     sync.Mutex
 	wsConnMap    = map[int64]*websocket.Conn{}
 	wsNextConnID int64
@@ -281,54 +282,25 @@ func lookupSysProc(library, name string) (uintptr, error) {
 		sysProcMu.Unlock()
 		return addr, nil
 	}
+
+	// Resolve DLL via Go's native LazyDLL (caches loaded module handles).
+	dll, ok := dllCache[library]
+	if !ok {
+		dll = syscall.NewLazyDLL(library)
+		dllCache[library] = dll
+	}
 	sysProcMu.Unlock()
 
-	script := fmt.Sprintf(`
-$native = @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class OakNative {
-	[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-	public static extern IntPtr LoadLibrary(string fileName);
-
-	[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi, ExactSpelling = true)]
-	public static extern IntPtr GetProcAddress(IntPtr module, string procName);
-}
-"@
-
-Add-Type -TypeDefinition $native -ErrorAction Stop
-$module = [OakNative]::LoadLibrary(%q)
-if ($module -eq [IntPtr]::Zero) {
-	throw "LoadLibrary failed"
-}
-
-$proc = [OakNative]::GetProcAddress($module, %q)
-if ($proc -eq [IntPtr]::Zero) {
-	throw "GetProcAddress failed"
-}
-
-[Console]::Out.Write([UInt64] $proc.ToInt64())
-`, library, name)
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	stdout, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return 0, fmt.Errorf("%s", strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return 0, err
+	proc := dll.NewProc(name)
+	if err := proc.Find(); err != nil {
+		return 0, fmt.Errorf("GetProcAddress(%s, %s): %w", library, name, err)
 	}
-
-	addr, err := strconv.ParseUint(strings.TrimSpace(string(stdout)), 10, 64)
-	if err != nil {
-		return 0, err
-	}
+	addr := proc.Addr()
 
 	sysProcMu.Lock()
-	sysProcCache[cacheKey] = uintptr(addr)
+	sysProcCache[cacheKey] = addr
 	sysProcMu.Unlock()
-	return uintptr(addr), nil
+	return addr, nil
 }
 
 func (c *Context) getGoChan(arg Value, fnName string) (chan Value, *runtimeError) {

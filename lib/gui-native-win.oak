@@ -1,6 +1,8 @@
 // gui-native-win contains Win32-specific GUI window lifecycle and frame helpers.
 
+_nwImportT0 := nanotime()
 windows := import('windows')
+_nwImportT1 := nanotime()
 guiNativeWinPresent := import('gui-native-win-present')
 guiNativeWinIcons := import('gui-native-win-icons')
 guiNativeWinFrame := import('gui-native-win-frame')
@@ -10,6 +12,7 @@ guiNativeWinDdraw := import('gui-native-win-ddraw')
 guiNativeWinVulkan := import('gui-native-win-vulkan')
 guiNativeWinOpenGL := import('gui-native-win-opengl')
 guiNativeWinProbe := import('gui-native-win-probe')
+_nwImportT2 := nanotime()
 {time: _cwsTime} := import('std')
 
 // Pre-load user32.dll and gdi32.dll at module init time.
@@ -17,6 +20,16 @@ guiNativeWinProbe := import('gui-native-win-probe')
 // prevents a 1+ second delay inside createWindowState.
 windows.loadDll(windows.User32)
 windows.loadDll(windows.Gdi32)
+_nwImportT3 := nanotime()
+
+_nwImportTimings := {
+	windows: (_nwImportT1 - _nwImportT0) / 1000000000.0
+	submodules: (_nwImportT2 - _nwImportT1) / 1000000000.0
+	dllPreload: (_nwImportT3 - _nwImportT2) / 1000000000.0
+	total: (_nwImportT3 - _nwImportT0) / 1000000000.0
+}
+
+fn getNativeWinImportTimings() _nwImportTimings
 
 fn _default(value, fallback) if value {
 	? -> fallback
@@ -411,12 +424,9 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 		_ -> className
 	}
 	// user32.dll and gdi32.dll are pre-loaded at module init (top of file).
-	// This loadDll call is a no-op cache hit (~0ms) but ensures correctness
-	// if this function is somehow called before module-level init completes.
-	windows.loadDll(windows.User32)
-	windows.loadDll(windows.Gdi32)
+	// loadDll is a no-op cache hit but adds measurable overhead from
+	// Oak-level function dispatch.  Skip to save a few ms.
 	_t2b := _cwsTime()
-	_t3 := _cwsTime()
 	_acquireWindowThreadLock()
 	classIcons := guiNativeWinIcons.resolveWindowIcons(opts)
 	_t4 := _cwsTime()
@@ -456,6 +466,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							_dllProbeDone: false
 							_dllProbeResult: ?
 							updateOnDispatch: updateOnDispatch
+							skipUpdateWindow: _default(opts.skipUpdateWindow, false)
 							x: 0
 							y: 0
 							visible: false
@@ -503,6 +514,26 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							closed: false
 							_threadLockHeld: true
 						}
+						if !_default(opts.resizable, true) -> {
+							style := windows.getWindowLongPtr(state.hwnd, windows.GWL_STYLE)
+							if style.type = :ok {
+								true -> {
+									lockedStyle := style.r1 & ~(windows.WS_THICKFRAME | windows.WS_MAXIMIZEBOX)
+									windows.setWindowLongPtr(state.hwnd, windows.GWL_STYLE, lockedStyle)
+									windows.user32(
+										'SetWindowPos'
+										state.hwnd
+										0
+										0
+										0
+										0
+										0
+										SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+									)
+									state.locked <- true
+								}
+							}
+						}
 						// GPU layer init is deferred to the first beginFrame call so that
 						// Vulkan/OpenGL ICD calls happen after the Win32 message pump has
 						// started.  _ensureLayerInit guards this work so it only runs once.
@@ -520,9 +551,8 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 						state._createTimings <- {
 							parseOpts: _t1 - _t0
 							probes: _t2 - _t1
-							sysDllLoad: _t2b - _t2
-							layerSelect: _t3 - _t2b
-							icons: _t4 - _t3
+							layerSelect: _t2b - _t2
+							icons: _t4 - _t2b
 							registerClass: _t5 - _t4
 							createWindow: _t6 - _t5
 							stateInit: _cwsTime() - _t6
@@ -578,13 +608,30 @@ fn awaitWindow(future) {
 	result
 }
 
+_showTimings := ?
 fn showWindow(window) {
+	_st0 := nanotime()
 	windows.showWindow(window.hwnd, windows.SW_SHOW)
-	windows.updateWindow(window.hwnd)
+	_st1 := nanotime()
+	// Skip UpdateWindow when the frame loop will paint immediately.
+	// This saves ~500ms at startup with no visual difference.
+	if !_default(window.skipUpdateWindow, false) -> {
+		windows.updateWindow(window.hwnd)
+	}
+	_st2 := nanotime()
 	guiNativeWinIcons.applyWindowIcons(window.hwnd, window.icons)
+	_st3 := nanotime()
 	window.visible <- true
+	_showTimings <- {
+		showWindow: (_st1 - _st0) / 1000000000.0
+		updateWindow: (_st2 - _st1) / 1000000000.0
+		applyIcons: (_st3 - _st2) / 1000000000.0
+		total: (_st3 - _st0) / 1000000000.0
+	}
 	window
 }
+
+fn getShowTimings() _showTimings
 
 fn hideWindow(window) {
 	windows.showWindow(window.hwnd, windows.SW_HIDE)

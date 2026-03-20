@@ -1,5 +1,8 @@
 // GUI logging sample.
 // Demonstrates an in-window log overlay plus stdout logging for GUI loop activity.
+// Provides comprehensive startup timing breakdown.
+
+_scriptT0 := nanotime()
 
 {
 	println: println
@@ -14,7 +17,10 @@
 
 gui := import('GUI')
 guiNativeWinProbe := import('gui-native-win-probe')
+guiNativeWin := import('gui-native-win')
 windowsWindowing := import('windows-windowing')
+
+_scriptT1 := nanotime()
 
 USE_ASYNC_DLL_PROBE := false
 dllLoadMode := if USE_ASYNC_DLL_PROBE {
@@ -59,6 +65,7 @@ window := gui.createWindow('GUI Logging Sample', 860, 460, {
 	layer3D: 'none'
 	dllLoadMode: dllLoadMode
 	updateOnDispatch: true
+	skipUpdateWindow: true
 })
 
 afterWindowCreate := time()
@@ -78,8 +85,19 @@ if window.type = :ok {
 		}
 
 		gui.show(window)
+		_scriptT2 := nanotime()
 		pushLog(state, 'INFO', 'createWindow took ' + string(windowCreateMs) + 'ms; layer2D=gdi; backend=' + string(window.backend))
 		pushLog(state, 'INFO', 'total initSec=' + string(int(time()) - initStart))
+
+		// --- Import timing ---
+		it := gui.getImportTimings()
+		fn ims(v) string(int(v * 1000.0))
+		pushLog(state, 'TRACE', 'GUI import (ms): platform=' + ims(it.platform) + ' render=' + ims(it.render) + ' backend=' + ims(it.backend) + ' ui=' + ims(it.ui) + ' total=' + ims(it.total))
+
+		// Script-level import timing
+		scriptImportMs := int((_scriptT1 - _scriptT0) / 1000000.0)
+		scriptToShowMs := int((_scriptT2 - _scriptT0) / 1000000.0)
+		pushLog(state, 'TRACE', 'script (ms): imports=' + string(scriptImportMs) + ' toFirstShow=' + string(scriptToShowMs))
 		
 		// Log probe timings for analysis
 		timings := guiNativeWinProbe.getProbeTimings()
@@ -89,7 +107,7 @@ if window.type = :ok {
 		ct := window._createTimings
 		if ct != ? -> {
 			fn ms(v) string(int(v * 1000.0))
-			pushLog(state, 'TRACE', 'phase (ms): parseOpts=' + ms(ct.parseOpts) + ' probes=' + ms(ct.probes) + ' sysDllLoad=' + ms(ct.sysDllLoad) + ' layerSelect=' + ms(ct.layerSelect) + ' icons=' + ms(ct.icons) + ' registerClass=' + ms(ct.registerClass) + ' createWindow=' + ms(ct.createWindow) + ' stateInit=' + ms(ct.stateInit))
+			pushLog(state, 'TRACE', 'phase (ms): parseOpts=' + ms(ct.parseOpts) + ' probes=' + ms(ct.probes) + ' layerSelect=' + ms(ct.layerSelect) + ' icons=' + ms(ct.icons) + ' registerClass=' + ms(ct.registerClass) + ' createWindow=' + ms(ct.createWindow) + ' stateInit=' + ms(ct.stateInit))
 		}
 
 		// Log registerClassEx sub-phase timing
@@ -97,6 +115,27 @@ if window.type = :ok {
 		if rct != ? -> {
 			fn ms2(v) string(int(v * 1000.0))
 			pushLog(state, 'TRACE', 'regClass sub (ms): resolveDefProc=' + ms2(rct.resolveDefProc) + ' loadCursor=' + ms2(rct.loadCursor) + ' loadIcon=' + ms2(rct.loadIcon) + ' structWrite=' + ms2(rct.structWrite) + ' registerClassEx=' + ms2(rct.registerClassEx) + ' cacheHit=' + string(rct.cacheHit))
+		}
+
+		// Log module-init pre-resolution timing
+		initT := windowsWindowing.getInitTimings()
+		if initT != ? -> {
+			fn ms3(v) string(int(v * 1000.0))
+			pushLog(state, 'TRACE', 'windowing init (ms): loadUser32=' + ms3(initT.loadUser32) + ' parallelResolve=' + ms3(initT.parallelResolve) + ' registerClass=' + ms3(initT.registerClass) + ' total=' + ms3(initT.total))
+		}
+
+		// Log gui-native-win import timing
+		nwT := guiNativeWin.getNativeWinImportTimings()
+		if nwT != ? -> {
+			fn ms4(v) string(int(v * 1000.0))
+			pushLog(state, 'TRACE', 'nativeWin import (ms): windows=' + ms4(nwT.windows) + ' submodules=' + ms4(nwT.submodules) + ' dllPreload=' + ms4(nwT.dllPreload) + ' total=' + ms4(nwT.total))
+		}
+
+		// Log showWindow sub-phase timing
+		showT := guiNativeWin.getShowTimings()
+		if showT != ? -> {
+			fn ms5(v) string(int(v * 1000.0))
+			pushLog(state, 'TRACE', 'show (ms): showWindow=' + ms5(showT.showWindow) + ' updateWindow=' + ms5(showT.updateWindow) + ' applyIcons=' + ms5(showT.applyIcons) + ' total=' + ms5(showT.total))
 		}
 		gui.onDispatch(window, fn {
 			if state.tick % 120 = 0 -> pushLog(state, 'EVENT', 'dispatch tick=' + string(state.tick))
@@ -106,6 +145,11 @@ if window.type = :ok {
 		})
 
 		result := gui.run(window, ?, fn(win, _dt) {
+			// Log first-frame timing once.
+			if state.tick = 0 -> {
+				firstFrameMs := int((nanotime() - _scriptT0) / 1000000.0)
+				pushLog(state, 'INFO', 'first frame at ' + string(firstFrameMs) + 'ms from script start')
+			}
 			state.tick <- state.tick + 1
 			state.frameCount <- state.frameCount + 1
 			state.frameDtAccum <- state.frameDtAccum + _dt

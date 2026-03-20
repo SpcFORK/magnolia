@@ -386,25 +386,63 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, c
 }
 
 // Pre-resolve commonly needed Win32 resources at module init.
-// DefWindowProcW, default cursor, and imageBase never change per process.
-// Resolving them here avoids ~1s of syscall overhead in createWindowState.
+// DefWindowProcW, default cursor, icon, and imageBase never change per process.
+// Resolving them here avoids ~2s of syscall overhead in createWindowState.
+_initTimings := ?
 if isWindows?() -> {
+	_initT0 := nanotime()
+
 	// Ensure user32.dll is loaded before resolving any user32 procs.
 	kernel32('LoadLibraryW', wstr(User32))
+	_initT1 := nanotime()
 
-	_cachedImageBase <- imageBase()
-	_cachedDefProcAddr <- sys.valueOr(
-		kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
-		0
-	)
-	_cachedCursor <- callValueOrZero(loadCursor(0, IDC_ARROW))
+	// Run independent resolutions in parallel via goroutines.
+	_initParallelDone := 0
+	_initParallelTarget := 4
+
+	go(fn {
+		_cachedImageBase <- imageBase()
+		_initParallelDone <- _initParallelDone + 1
+	})
+	go(fn {
+		_cachedDefProcAddr <- sys.valueOr(
+			kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
+			0
+		)
+		_initParallelDone <- _initParallelDone + 1
+	})
+	go(fn {
+		_cachedCursor <- callValueOrZero(loadCursor(0, IDC_ARROW))
+		_initParallelDone <- _initParallelDone + 1
+	})
+	go(fn {
+		_cachedIcon <- callValueOrZero(loadIcon(0, IDI_APPLICATION))
+		_initParallelDone <- _initParallelDone + 1
+	})
+
+	// Wait for all parallel resolutions.
+	fn _waitParallelInit() if _initParallelDone < _initParallelTarget -> {
+		wait(0.001)
+		_waitParallelInit()
+	}
+	_waitParallelInit()
+	_initT2 := nanotime()
 
 	// Pre-register the default window class so the first createWindow call
 	// gets a cache hit and skips the ~500ms RegisterClassExW syscall.
 	registerWindowClassEx(DefaultClassName, ?, ?, ?, ?)
+	_initT3 := nanotime()
+
+	_initTimings <- {
+		loadUser32: (_initT1 - _initT0) / 1000000000.0
+		parallelResolve: (_initT2 - _initT1) / 1000000000.0
+		registerClass: (_initT3 - _initT2) / 1000000000.0
+		total: (_initT3 - _initT0) / 1000000000.0
+	}
 }
 
 fn getRegClassTimings() _regClassTimings
+fn getInitTimings() _initTimings
 
 // Registers a top-level window class using DefWindowProcW.
 fn registerDefaultWindowClass(className) if isWindows?() {
@@ -413,20 +451,27 @@ fn registerDefaultWindowClass(className) if isWindows?() {
 }
 
 fn createTopLevelWindow(className, title, width, height) if isWindows?() {
-	true -> createWindowEx(
-		0
-		className
-		title
-		WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
-		CW_USEDEFAULT
-		CW_USEDEFAULT
-		width
-		height
-		0
-		0
-		imageBase()
-		0
-	)
+	true -> {
+		// Use cached imageBase when available to avoid redundant GetModuleHandleW call.
+		base := if _cachedImageBase {
+			? -> imageBase()
+			_ -> _cachedImageBase
+		}
+		createWindowEx(
+			0
+			className
+			title
+			WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+			CW_USEDEFAULT
+			CW_USEDEFAULT
+			width
+			height
+			0
+			0
+			base
+			0
+		)
+	}
 	_ -> _platformError('createTopLevelWindow')
 }
 
