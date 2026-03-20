@@ -13,6 +13,20 @@ It is intended for:
 
 All public calls are OS-gated and return structured error objects on non-Windows hosts.
 
+## Split modules
+
+The `windows` facade is composed of these focused modules:
+
+- [windows-constants](windows-constants.md)
+- [windows-flags](windows-flags.md)
+- [windows-core](windows-core.md)
+- [windows-loader](windows-loader.md)
+- [windows-kernel](windows-kernel.md)
+- [windows-gdi](windows-gdi.md)
+- [windows-windowing](windows-windowing.md)
+- [windows-net](windows-net.md)
+- [windows-registry](windows-registry.md)
+
 ## Import
 
 ```oak

@@ -27,6 +27,27 @@ linux := import('linux')
 linux := import('Linux')
 ```
 
+## Module Map
+
+The Linux interop surface is split into focused modules and re-exported by
+`linux`/`Linux`.
+
+- [linux-constants](linux-constants.md): constants and shared-library candidate lists
+- [linux-core](linux-core.md): OS guard, C-string helpers, symbol resolution/call dispatch
+- [linux-loader](linux-loader.md): `dlopen`/`dlsym` helpers and cached call-by-symbol
+- [linux-windowing](linux-windowing.md): X11 display/window/event/drawing helpers
+- [linux-libc](linux-libc.md): process, errno, file descriptor, and virtual-memory wrappers
+
+You can import these modules directly when you only need part of the Linux API:
+
+```oak
+constants := import('linux-constants')
+core := import('linux-core')
+loader := import('linux-loader')
+x11 := import('linux-windowing')
+libc := import('linux-libc')
+```
+
 ## Constants
 
 ### Library candidates

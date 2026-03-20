@@ -12,6 +12,16 @@ Backends:
 
 This library is intentionally small and focuses on a consistent API shape.
 
+## Split modules
+
+GUI internals are split into focused modules that can also be imported directly:
+
+- [gui-color](gui-color.md)
+- [gui-events](gui-events.md)
+- [gui-graph](gui-graph.md)
+- [gui-form](gui-form.md)
+- [gui-loop](gui-loop.md)
+
 Because Magnolia does not currently expose direct DOM built-ins, the web backend
 uses a command queue model. You can optionally pass `options.webBridge` to
 `createWindow(...)` to forward recorded Canvas/WebGL operations to host-side
