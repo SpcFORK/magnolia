@@ -369,10 +369,42 @@ func (c *Context) unwrapThunk(thunk thunkValue) (v Value, err *runtimeError) {
 type scope struct {
 	parent *scope
 	vars   map[string]Value
+	mu     *sync.RWMutex
+}
+
+func newScope(parent *scope) scope {
+	return scope{
+		parent: parent,
+		vars:   map[string]Value{},
+		mu:     &sync.RWMutex{},
+	}
+}
+
+func (sc *scope) lockRef() *sync.RWMutex {
+	if sc.mu == nil {
+		sc.mu = &sync.RWMutex{}
+	}
+	return sc.mu
+}
+
+func (sc *scope) snapshotVars() map[string]Value {
+	mu := sc.lockRef()
+	mu.RLock()
+	defer mu.RUnlock()
+
+	clone := make(map[string]Value, len(sc.vars))
+	for key, val := range sc.vars {
+		clone[key] = val
+	}
+	return clone
 }
 
 func (sc *scope) get(name string) (Value, *runtimeError) {
-	if v, ok := sc.vars[name]; ok {
+	mu := sc.lockRef()
+	mu.RLock()
+	v, ok := sc.vars[name]
+	mu.RUnlock()
+	if ok {
 		return v, nil
 	}
 	if sc.parent != nil {
@@ -384,14 +416,21 @@ func (sc *scope) get(name string) (Value, *runtimeError) {
 }
 
 func (sc *scope) put(name string, v Value) {
+	mu := sc.lockRef()
+	mu.Lock()
 	sc.vars[name] = v
+	mu.Unlock()
 }
 
 func (sc *scope) update(name string, v Value) *runtimeError {
+	mu := sc.lockRef()
+	mu.Lock()
 	if _, ok := sc.vars[name]; ok {
 		sc.vars[name] = v
+		mu.Unlock()
 		return nil
 	}
+	mu.Unlock()
 	if sc.parent != nil {
 		return sc.parent.update(name, v)
 	}
@@ -406,7 +445,8 @@ type engine struct {
 	// interpreter event loop waitgroup
 	sync.WaitGroup
 	// for deduplicating imports
-	importMap map[string]scope
+	importMap  map[string]scope
+	importLock sync.RWMutex
 	// file fd -> Go's File map
 	fileMap map[uintptr]*os.File
 	fdLock  sync.Mutex
@@ -450,11 +490,8 @@ func NewContext(rootPath string) Context {
 	return Context{
 		eng:      &eng,
 		rootPath: rootPath,
-		scope: scope{
-			parent: nil,
-			vars:   map[string]Value{},
-		},
-		vm: nil,
+		scope:    newScope(nil),
+		vm:       nil,
 	}
 }
 
@@ -471,18 +508,12 @@ func (c *Context) ChildContext(rootPath string) Context {
 	return Context{
 		eng:      c.eng,
 		rootPath: rootPath,
-		scope: scope{
-			parent: nil,
-			vars:   map[string]Value{},
-		},
+		scope:    newScope(nil),
 	}
 }
 
 func (c *Context) subScope(parent *scope) {
-	c.scope = scope{
-		parent: parent,
-		vars:   map[string]Value{},
-	}
+	c.scope = newScope(parent)
 }
 
 func (c *Context) Lock() {
@@ -575,10 +606,7 @@ func normalizeCallArgs(paramCount int, args []Value) []Value {
 }
 
 func bindCallScope(parent *scope, params []string, restArg string, args []Value) scope {
-	callScope := scope{
-		parent: parent,
-		vars:   map[string]Value{},
-	}
+	callScope := newScope(parent)
 
 	for i, argName := range params {
 		if argName != "" {
@@ -940,10 +968,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		sc.put(n.name, class)
 
 		if len(n.staticExprs) != 0 {
-			staticScope := scope{
-				parent: &sc,
-				vars:   map[string]Value{},
-			}
+			staticScope := newScope(&sc)
 			staticScope.put(n.name, class)
 
 			for _, expr := range n.staticExprs {
@@ -952,7 +977,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				}
 			}
 
-			for key, val := range staticScope.vars {
+			for key, val := range staticScope.snapshotVars() {
 				if key != n.name {
 					class.static[key] = val
 				}
@@ -1588,10 +1613,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return null, nil
 		}
 
-		blockScope := scope{
-			parent: &sc,
-			vars:   map[string]Value{},
-		}
+		blockScope := newScope(&sc)
 
 		last := len(n.exprs) - 1
 		for _, expr := range n.exprs[:last] {

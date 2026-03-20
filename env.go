@@ -168,9 +168,6 @@ func syscallErrObj(message string) ObjectValue {
 }
 
 var (
-	sysProcMu    sync.Mutex
-	sysProcCache = map[string]uintptr{}
-	dllCache     = map[string]*syscall.LazyDLL{}
 	wsConnMu     sync.Mutex
 	wsConnMap    = map[int64]*websocket.Conn{}
 	wsNextConnID int64
@@ -268,39 +265,6 @@ func removeWebsocket(id int64) {
 	wsConnMu.Lock()
 	delete(wsConnMap, id)
 	wsConnMu.Unlock()
-}
-
-func lookupSysProc(library, name string) (uintptr, error) {
-	if runtime.GOOS != "windows" {
-		return 0, fmt.Errorf("sysproc is only supported on Windows")
-	}
-
-	cacheKey := library + "\x00" + name
-
-	sysProcMu.Lock()
-	if addr, ok := sysProcCache[cacheKey]; ok {
-		sysProcMu.Unlock()
-		return addr, nil
-	}
-
-	// Resolve DLL via Go's native LazyDLL (caches loaded module handles).
-	dll, ok := dllCache[library]
-	if !ok {
-		dll = syscall.NewLazyDLL(library)
-		dllCache[library] = dll
-	}
-	sysProcMu.Unlock()
-
-	proc := dll.NewProc(name)
-	if err := proc.Find(); err != nil {
-		return 0, fmt.Errorf("GetProcAddress(%s, %s): %w", library, name, err)
-	}
-	addr := proc.Addr()
-
-	sysProcMu.Lock()
-	sysProcCache[cacheKey] = addr
-	sysProcMu.Unlock()
-	return addr, nil
 }
 
 func (c *Context) getGoChan(arg Value, fnName string) (chan Value, *runtimeError) {
@@ -449,12 +413,17 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 	}
 	defer file.Close()
 
-	if imported, ok := c.eng.importMap[filePath]; ok {
+	c.eng.importLock.RLock()
+	imported, ok := c.eng.importMap[filePath]
+	c.eng.importLock.RUnlock()
+	if ok {
 		return ObjectValue(imported.vars), nil
 	}
 
 	ctx := c.ChildContext(path.Dir(filePath))
+	c.eng.importLock.Lock()
 	c.eng.importMap[filePath] = ctx.scope
+	c.eng.importLock.Unlock()
 	ctx.LoadBuiltins()
 
 	ctx.Unlock()

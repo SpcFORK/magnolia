@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -1523,6 +1524,69 @@ func TestGoBuiltinCoordinatesOverChannel(t *testing.T) {
 		})
 		chan_recv(ch).data
 	`, AtomValue("ready"))
+}
+
+func TestScopeConcurrentGetAndUpdate(t *testing.T) {
+	prevMaxProcs := runtime.GOMAXPROCS(0)
+	if prevMaxProcs < 4 {
+		runtime.GOMAXPROCS(4)
+		defer runtime.GOMAXPROCS(prevMaxProcs)
+	}
+
+	root := newScope(nil)
+	root.put("shared", IntValue(0))
+	child := newScope(&root)
+	grandchild := newScope(&child)
+
+	const workers = 8
+	const iterations = 4000
+
+	start := make(chan struct{})
+	errCh := make(chan error, workers*2)
+	var wg sync.WaitGroup
+
+	for worker := 0; worker < workers; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				if err := grandchild.update("shared", IntValue(worker*iterations+i)); err != nil {
+					errCh <- err
+					return
+				}
+				if _, err := grandchild.get("shared"); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				if _, err := root.get("shared"); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("concurrent scope access failed: %v", err)
+	}
+
+	if _, err := child.get("shared"); err != nil {
+		t.Fatalf("expected shared binding to remain readable after concurrent access: %v", err)
+	}
 }
 
 func TestGoRejectsBuiltinTarget(t *testing.T) {
