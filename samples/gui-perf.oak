@@ -94,6 +94,7 @@ fn main() {
 				nowNs := nanotime()
 				totalNs <- totalNs + int(dt * 1000000000)
 				mode := int((nowNs - startNs) / modeSwitchNs) % 2
+				frame := gui.beginFrame(window)
 
 				// Update animations (slow rotation for visual interest)
 				cubeRotX <- cubeRotX + 0.3 * dt
@@ -102,61 +103,63 @@ fn main() {
 				gridRotY <- gridRotY + 0.15 * dt
 				circlePhase <- circlePhase + 2 * dt
 
-				// Clear and render frame
-				rendererStable.clear()
+				if frame.type = :ok -> {
+					// Clear and render frame
+					rendererStable.clear()
 
-				// Render 3D elements (A/B mode every 3 seconds)
-				if mode = 0 {
-					true -> {
-						rendererStable.renderCubeSolid(2.0, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
-						rendererStable.renderGrid(10, 1, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
-						rendererStable.renderAxes(3, { tz: 0 })
-					}
-					_ -> {
-						rendererExp.enqueueMeshSolid(cubeMesh, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
-						rendererExp.enqueueMeshWire(gridMesh, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
-						rendererExp.enqueueMeshWire(axesMesh, { tz: 0 }, gui.rgb(180, 220, 255))
-						rendererExp.flushQueue()
-					}
-				}
-
-				if nowNs - lastCacheResetNs >= 5000000000 {
-					true -> {
-						rendererExp.clearInstanceCache()
-						lastCacheResetNs <- nowNs
-					}
-					_ -> 0
-				}
-
-				// Render 2D elements (circle grid pattern)
-				fn drawCircleGrid(x, y, cols, rows, radius, color) {
-					step := radius * 2.2
-					fn row(r) if r >= rows {
-						true -> 0
+					// Render 3D elements (A/B mode every 3 seconds)
+					if mode = 0 {
+						true -> {
+							rendererStable.renderCubeSolid(2.0, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
+							rendererStable.renderGrid(10, 1, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
+							rendererStable.renderAxes(3, { tz: 0 })
+						}
 						_ -> {
-							fn col(c) if c >= cols {
-								true -> 0
-								_ -> {
-									cx := int(x + c * step)
-									cy := int(y + r * step)
-									gui.drawCircle2D(window, cx, cy, int(radius), color, false)
-									col(c + 1)
-								}
-							}
-							col(0)
-							row(r + 1)
+							rendererExp.enqueueMeshSolid(cubeMesh, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
+							rendererExp.enqueueMeshWire(gridMesh, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
+							rendererExp.enqueueMeshWire(axesMesh, { tz: 0 }, gui.rgb(180, 220, 255))
+							rendererExp.flushQueue()
 						}
 					}
-					row(0)
+
+					if nowNs - lastCacheResetNs >= 5000000000 {
+						true -> {
+							rendererExp.clearInstanceCache()
+							lastCacheResetNs <- nowNs
+						}
+						_ -> 0
+					}
+
+					// Render 2D elements (circle grid pattern)
+					fn drawCircleGrid(x, y, cols, rows, radius, color) {
+						step := radius * 2.2
+						fn row(r) if r >= rows {
+							true -> 0
+							_ -> {
+								fn col(c) if c >= cols {
+									true -> 0
+									_ -> {
+										cx := int(x + c * step)
+										cy := int(y + r * step)
+										gui.drawCircle2D(window, cx, cy, int(radius), color, false)
+										col(c + 1)
+									}
+								}
+								col(0)
+								row(r + 1)
+							}
+						}
+						row(0)
+					}
+
+					// Draw circles with phase-based color cycling
+					hue := int(circlePhase * 256) % 256
+					color1 := gui.rgb(150 + int(hue / 2), 100, 150)
+					color2 := gui.rgb(100, 150 + int(hue / 2), 150)
+
+					drawCircleGrid(50, 50, 4, 3, 20, color1)
+					drawCircleGrid(350, 50, 4, 3, 20, color2)
 				}
-
-				// Draw circles with phase-based color cycling
-				hue := int(circlePhase * 256) % 256
-				color1 := gui.rgb(150 + int(hue / 2), 100, 150)
-				color2 := gui.rgb(100, 150 + int(hue / 2), 150)
-
-				drawCircleGrid(50, 50, 4, 3, 20, color1)
-				drawCircleGrid(350, 50, 4, 3, 20, color2)
 
 				gui.endFrame(window)
 

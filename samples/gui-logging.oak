@@ -14,8 +14,21 @@
 
 gui := import('GUI')
 
+USE_ASYNC_DLL_PROBE := false
+dllLoadMode := if USE_ASYNC_DLL_PROBE {
+	true -> 'async'
+	_ -> 'sync'
+}
+
+initStart := int(time())
+
 fn pushLog(state, level, message) {
-	line := '[' + string(int(time())) + '] ' + level + ' ' + message
+	nowSec := int(time())
+	deltaSec := nowSec - state.lastLogSec
+	sinceStartSec := nowSec - state.startSec
+	state.lastLogSec <- nowSec
+	state.logIndex <- state.logIndex + 1
+	line := '[' + string(nowSec) + '] #' + string(state.logIndex) + ' +' + string(deltaSec) + 's t+' + string(sinceStartSec) + 's ' + level + ' ' + message
 	state.entries <- state.entries << line
 	println(line)
 }
@@ -39,17 +52,27 @@ fn drawFrame(win, state) {
 
 window := gui.createWindow('GUI Logging Sample', 860, 460, {
 	frameMs: 16
-	layer2D: 'auto'
+	layer2D: 'gdi'
+	layer3D: 'none'
+	dllLoadMode: dllLoadMode
+	updateOnDispatch: true
 })
 
 if window.type = :ok {
 	true -> {
+		nowSec := int(time())
 		state := {
 			tick: 0
 			entries: []
+			startSec: nowSec
+			lastLogSec: nowSec
+			logIndex: 0
+			frameCount: 0
+			frameDtAccum: 0.0
 		}
 
 		gui.show(window)
+		pushLog(state, 'INFO', 'createWindow initSec=' + string(int(time()) - initStart) + '; layer2D=gdi; dllLoadMode=' + dllLoadMode)
 		pushLog(state, 'INFO', 'window created; backend=' + string(window.backend))
 		gui.onDispatch(window, fn(_) {
 			if state.tick % 120 = 0 ->
@@ -61,13 +84,22 @@ if window.type = :ok {
 
 		result := gui.run(window, ?, fn(win, _dt) {
 			state.tick <- state.tick + 1
-			if state.tick % 90 = 0 ->
-				pushLog(state, 'TRACE', 'frame tick=' + string(state.tick))
+			state.frameCount <- state.frameCount + 1
+			state.frameDtAccum <- state.frameDtAccum + _dt
+			if state.tick % 90 = 0 -> {
+				avgDtMs := int((state.frameDtAccum / float(state.frameCount)) * 1000.0)
+				pushLog(state, 'TRACE', 'frame tick=' + string(state.tick) + '; avgDtMs=' + string(avgDtMs))
+			}
 			drawFrame(win, state)
 		})
 
 		pushLog(state, 'INFO', 'loop ended with status=' + string(result.type))
 		gui.close(window)
+		avgDtMs := if state.frameCount > 0 {
+			true -> int((state.frameDtAccum / float(state.frameCount)) * 1000.0)
+			_ -> 0
+		}
+		pushLog(state, 'INFO', 'runtime summary: frames=' + string(state.frameCount) + '; avgDtMs=' + string(avgDtMs))
 		printf('logged {{ 0 }} entries\n', string(len(state.entries)))
 	} 
 	_ ->  {
