@@ -541,8 +541,13 @@ fn run(window, onEvent, onFrame) if window.type {
 				}
 			}
 			:closed -> {
-				_publish(window, :closed, step)
-				0
+				if window.backend = :windows {
+					true -> close(window)
+					_ -> {
+						_publish(window, :closed, step)
+						0
+					}
+				}
 			}
 			_ -> step
 		}
@@ -551,7 +556,7 @@ fn run(window, onEvent, onFrame) if window.type {
 }
 
 fn close(window) if window.type {
-	:ok -> if window.closed {
+	:ok -> if _default(window._nativeClosed, false) {
 		true -> 0
 		_ -> {
 			_publish(window, :closing, {
@@ -563,10 +568,12 @@ fn close(window) if window.type {
 				:linux -> guiNativeLinux.close(window)
 				:web -> {
 					window.closed <- true
+					window._nativeClosed <- true
 					0
 				}
 				_ -> _err('Unknown window backend', window)
 			}
+			window._nativeClosed <- true
 			_publish(window, :closed, {
 				type: :closed
 			})
