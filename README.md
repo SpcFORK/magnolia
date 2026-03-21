@@ -424,6 +424,17 @@ cs Bag(items...,) {
     items
 }
 len(Bag(1, 2, 3)) // 3
+
+// Assignment-only class bodies build instance fields directly
+cs LocalCounter {
+    a := 2
+    set := fn {
+        a <- 3
+    }
+}
+counter := LocalCounter()
+counter.set()
+counter.a // 3
 ```
 
 Key features of classes:
@@ -431,6 +442,7 @@ Key features of classes:
 - **Parameter capture**: Constructor parameters are available in the class body and can be used to initialize object properties
 - **Closure over state**: Methods defined in the class body can close over constructor parameters
 - **Variadic support**: Classes support variadic parameters using the `...` syntax
+- **Assignment-only sugar**: In assignment-only class bodies, method reads/writes target the constructed instance fields
 - **Return value**: Classes with an empty block body (`{}`) return `?` (null), while classes with an object expression return that object
 
 Under the hood, classes are simply functions that return objects, but the `cs` syntax provides a cleaner way to define object constructors with shared behavior.

@@ -253,6 +253,12 @@ var libwebsocket string
 //go:embed lib/p2p.oak
 var libp2p string
 
+//go:embed lib/gui-common.oak
+var libguicommon string
+
+//go:embed lib/win-common.oak
+var libwincommon string
+
 //go:embed lib/GUI.oak
 var libgui string
 
@@ -434,6 +440,8 @@ var stdlibs = map[string]string{
 	"websocket":              libwebsocket,
 	"p2p":                    libp2p,
 	"gui-mesh":               libguimesh,
+	"gui-common":             libguicommon,
+	"win-common":             libwincommon,
 	"gui-render":             libguirender,
 	"gui-3dmath":             libgui3dmath,
 	"gui-raster":             libguiraster,

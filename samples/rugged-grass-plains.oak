@@ -6,194 +6,194 @@
 gui := import('GUI')
 
 window := gui.createWindow('Rugged Grass Plains', 1024, 720, {
-    frameMs: 16
-    canvasId: 'rugged-grass-plains-canvas'
-    icon: './build/magnolia.ico'
-    taskbarIcon: './build/magnolia.ico'
-    windowIcon: './build/magnolia.ico'
+	frameMs: 16
+	canvasId: 'rugged-grass-plains-canvas'
+	icon: './build/magnolia.ico'
+	taskbarIcon: './build/magnolia.ico'
+	windowIcon: './build/magnolia.ico'
 })
 
 if window.type {
-    :ok -> {
-        // sky blue background
-        renderer := gui.Renderer3D(window, {
-            camera: { z: 0, fov: 88 }
-            background: gui.rgb(135, 206, 235)
-            lineColor: gui.rgb(80, 200, 90)
-            light: { x: 0.4, y: 0.8, z: -0.6, ambient: 0.35, diffuse: 0.65 }
-        })
+	:ok -> {
+		// sky blue background
+		renderer := gui.Renderer3D(window, {
+			camera: { z: 0, fov: 88 }
+			background: gui.rgb(135, 206, 235)
+			lineColor: gui.rgb(80, 200, 90)
+			light: { x: 0.4, y: 0.8, z: -0.6, ambient: 0.35, diffuse: 0.65 }
+		})
 
-        // Build a procedural terrain mesh (height field)
-        fn buildTerrain(gridN, step, amp, freq) {
-            // vertices: row-major order (x from 0..gridN-1, z from 0..gridN-1)
-            fn height(x, z) {
-                nx := (x - gridN / 2) * step
-                nz := (z - gridN / 2) * step
-                (sin(nx * freq) * cos(nz * freq) + sin(nx * freq * 0.6) * cos(nz * freq * 0.8) * 0.6) * amp
-            }
+		// Build a procedural terrain mesh (height field)
+		fn buildTerrain(gridN, step, amp, freq) {
+			// vertices: row-major order (x from 0..gridN-1, z from 0..gridN-1)
+			fn height(x, z) {
+				nx := (x - gridN / 2) * step
+				nz := (z - gridN / 2) * step
+				(sin(nx * freq) * cos(nz * freq) + sin(nx * freq * 0.6) * cos(nz * freq * 0.8) * 0.6) * amp
+			}
 
-            fn buildRow(x, z, verts) if x >= gridN {
-                true -> verts
-                _ -> {
-                    h := height(x, z)
-                    vx := gui.Vec3((x - gridN / 2) * step, h, (z - gridN / 2) * step)
-                    buildRow(x + 1, z, verts << vx)
-                }
-            }
+			fn buildRow(x, z, verts) if x >= gridN {
+				true -> verts
+				_ -> {
+					h := height(x, z)
+					vx := gui.Vec3((x - gridN / 2) * step, h, (z - gridN / 2) * step)
+					buildRow(x + 1, z, verts << vx)
+				}
+			}
 
-            fn buildAll(z, verts) if z >= gridN {
-                true -> verts
-                _ -> buildAll(z + 1, buildRow(0, z, verts))
-            }
+			fn buildAll(z, verts) if z >= gridN {
+				true -> verts
+				_ -> buildAll(z + 1, buildRow(0, z, verts))
+			}
 
-            verts := buildAll(0, [])
+			verts := buildAll(0, [])
 
-            // build triangular faces (two tris per grid cell)
-            fn facesForCell(x, z, acc) if x >= gridN - 1 {
-                true -> acc
-                _ -> facesForCell(x + 1, z, acc << [z * gridN + x, z * gridN + x + 1, (z + 1) * gridN + x] << [(z * gridN + x + 1), ((z + 1) * gridN + x + 1), ((z + 1) * gridN + x)])
-            }
+			// build triangular faces (two tris per grid cell)
+			fn facesForCell(x, z, acc) if x >= gridN - 1 {
+				true -> acc
+				_ -> facesForCell(x + 1, z, acc << [z * gridN + x, z * gridN + x + 1, (z + 1) * gridN + x] << [(z * gridN + x + 1), ((z + 1) * gridN + x + 1), ((z + 1) * gridN + x)])
+			}
 
-            fn buildFaceRows(z, acc) if z >= gridN - 1 {
-                true -> acc
-                _ -> buildFaceRows(z + 1, facesForCell(0, z, acc))
-            }
+			fn buildFaceRows(z, acc) if z >= gridN - 1 {
+				true -> acc
+				_ -> buildFaceRows(z + 1, facesForCell(0, z, acc))
+			}
 
-            faces := buildFaceRows(0, [])
+			faces := buildFaceRows(0, [])
 
-            { vertices: verts, faces: faces }
-        }
+			{ vertices: verts, faces: faces }
+		}
 
-        // reduce resolution to lower startup cost and avoid crashes on fast loads
-        terrain := buildTerrain(48, 0.6, 1.6, 0.25)
+		// reduce resolution to lower startup cost and avoid crashes on fast loads
+		terrain := buildTerrain(48, 0.6, 1.6, 0.25)
 
-        gui.show(window)
+		gui.show(window)
 
-        // Camera / player state
-        cam := { x: 0.0, y: 1.4, z: 8.0, yaw: 180.0, pitch: 0.0 }
+		// Camera / player state
+		cam := { x: 0.0, y: 1.4, z: 8.0, yaw: 180.0, pitch: 0.0 }
 
-        // Canonical movement key state
-        keys := {
-            forward: false
-            back: false
-            strafeLeft: false
-            strafeRight: false
-            turnLeft: false
-            turnRight: false
-        }
+		// Canonical movement key state
+		keys := {
+			forward: false
+			back: false
+			strafeLeft: false
+			strafeRight: false
+			turnLeft: false
+			turnRight: false
+		}
 
-        moveSpeed := 6.8
-        turnSpeed := 140.0
+		moveSpeed := 6.8
+		turnSpeed := 140.0
 
-        fn setByName(key, down) {
-            if key = 'w' | key = 'W' -> keys.forward <- down
-            if key = 's' | key = 'S' -> keys.back <- down
-            if key = 'a' | key = 'A' -> keys.strafeLeft <- down
-            if key = 'd' | key = 'D' -> keys.strafeRight <- down
-            if key = 'q' | key = 'Q' | key = 'ArrowLeft' | key = 'left' -> keys.turnLeft <- down
-            if key = 'e' | key = 'E' | key = 'ArrowRight' | key = 'right' -> keys.turnRight <- down
-        }
+		fn setByName(key, down) {
+			if key = 'w' | key = 'W' -> keys.forward <- down
+			if key = 's' | key = 'S' -> keys.back <- down
+			if key = 'a' | key = 'A' -> keys.strafeLeft <- down
+			if key = 'd' | key = 'D' -> keys.strafeRight <- down
+			if key = 'q' | key = 'Q' | key = 'ArrowLeft' | key = 'left' -> keys.turnLeft <- down
+			if key = 'e' | key = 'E' | key = 'ArrowRight' | key = 'right' -> keys.turnRight <- down
+		}
 
-        fn setByVk(vk, down) {
-            if vk = 87 -> keys.forward <- down
-            if vk = 83 -> keys.back <- down
-            if vk = 65 -> keys.strafeLeft <- down
-            if vk = 68 -> keys.strafeRight <- down
-            if vk = 81 | vk = 37 -> keys.turnLeft <- down
-            if vk = 69 | vk = 39 -> keys.turnRight <- down
-        }
+		fn setByVk(vk, down) {
+			if vk = 87 -> keys.forward <- down
+			if vk = 83 -> keys.back <- down
+			if vk = 65 -> keys.strafeLeft <- down
+			if vk = 68 -> keys.strafeRight <- down
+			if vk = 81 | vk = 37 -> keys.turnLeft <- down
+			if vk = 69 | vk = 39 -> keys.turnRight <- down
+		}
 
-        if window.backend = :windows {
-            true -> {
-                gui.onKeyDown(window, fn(vk) setByVk(vk, true))
-                gui.onKeyUp(window, fn(vk) setByVk(vk, false))
-            }
-            _ -> {
-                gui.onKeyDownEvent(window, fn(key, _evt) setByName(key, true))
-                gui.onKeyUpEvent(window, fn(key, _evt) setByName(key, false))
-            }
-        }
+		if window.backend = :windows {
+			true -> {
+				gui.onKeyDown(window, fn(vk) setByVk(vk, true))
+				gui.onKeyUp(window, fn(vk) setByVk(vk, false))
+			}
+			_ -> {
+				gui.onKeyDownEvent(window, fn(key, _evt) setByName(key, true))
+				gui.onKeyUpEvent(window, fn(key, _evt) setByName(key, false))
+			}
+		}
 
-        // Frame loop: update camera from keys and render scene
-        onFrame := fn(win, dt) {
-            dtSec := float(dt)
-            if dtSec < 0.001 -> dtSec <- 0.001
-            if dtSec > 0.050 -> dtSec <- 0.050
+		// Frame loop: update camera from keys and render scene
+		onFrame := fn(win, dt) {
+			dtSec := float(dt)
+			if dtSec < 0.001 -> dtSec <- 0.001
+			if dtSec > 0.050 -> dtSec <- 0.050
 
-            // movement: W/S forward-back, A/D strafe, Q/E (or arrows) turn yaw
-            yawRad := cam.yaw * 3.141592653589793 / 180.0
-            forwardX := sin(yawRad)
-            forwardZ := cos(yawRad)
-            rightX := cos(yawRad)
-            rightZ := 0 - sin(yawRad)
-            moveStep := moveSpeed * dtSec
-            turnStep := turnSpeed * dtSec
+			// movement: W/S forward-back, A/D strafe, Q/E (or arrows) turn yaw
+			yawRad := cam.yaw * 3.141592653589793 / 180.0
+			forwardX := sin(yawRad)
+			forwardZ := cos(yawRad)
+			rightX := cos(yawRad)
+			rightZ := 0 - sin(yawRad)
+			moveStep := moveSpeed * dtSec
+			turnStep := turnSpeed * dtSec
 
-            if keys.forward -> {
-                cam.x <- cam.x + forwardX * moveStep
-                cam.z <- cam.z + forwardZ * moveStep
-            }
-            if keys.back -> {
-                cam.x <- cam.x - forwardX * moveStep
-                cam.z <- cam.z - forwardZ * moveStep
-            }
-            if keys.strafeLeft -> {
-                cam.x <- cam.x - rightX * moveStep
-                cam.z <- cam.z - rightZ * moveStep
-            }
-            if keys.strafeRight -> {
-                cam.x <- cam.x + rightX * moveStep
-                cam.z <- cam.z + rightZ * moveStep
-            }
-            if keys.turnLeft -> {
-                cam.yaw <- cam.yaw - turnStep
-            }
-            if keys.turnRight -> {
-                cam.yaw <- cam.yaw + turnStep
-            }
+			if keys.forward -> {
+				cam.x <- cam.x + forwardX * moveStep
+				cam.z <- cam.z + forwardZ * moveStep
+			}
+			if keys.back -> {
+				cam.x <- cam.x - forwardX * moveStep
+				cam.z <- cam.z - forwardZ * moveStep
+			}
+			if keys.strafeLeft -> {
+				cam.x <- cam.x - rightX * moveStep
+				cam.z <- cam.z - rightZ * moveStep
+			}
+			if keys.strafeRight -> {
+				cam.x <- cam.x + rightX * moveStep
+				cam.z <- cam.z + rightZ * moveStep
+			}
+			if keys.turnLeft -> {
+				cam.yaw <- cam.yaw - turnStep
+			}
+			if keys.turnRight -> {
+				cam.yaw <- cam.yaw + turnStep
+			}
 
-            // keep yaw in 0..360
-            if cam.yaw >= 360 -> cam.yaw <- cam.yaw - 360
-            if cam.yaw < 0 -> cam.yaw <- cam.yaw + 360
+			// keep yaw in 0..360
+			if cam.yaw >= 360 -> cam.yaw <- cam.yaw - 360
+			if cam.yaw < 0 -> cam.yaw <- cam.yaw + 360
 
-            // Build a single world transform that represents the inverse of the camera
-            worldTransform := {
-                // translate world by negative camera position
-                tx: 0 - cam.x
-                ty: 0 - cam.y
-                tz: 0 - cam.z
-                // rotate world by negative camera angles (pitch then yaw)
-                rx: 0 - cam.pitch
-                ry: 0 - cam.yaw
-                rz: 0
-            }
+			// Build a single world transform that represents the inverse of the camera
+			worldTransform := {
+				// translate world by negative camera position
+				tx: 0 - cam.x
+				ty: 0 - cam.y
+				tz: 0 - cam.z
+				// rotate world by negative camera angles (pitch then yaw)
+				rx: 0 - cam.pitch
+				ry: 0 - cam.yaw
+				rz: 0
+			}
 
-            frame := gui.beginFrame(win)
-            if frame.type = :ok -> {
-                renderer.clear()
+			frame := gui.beginFrame(win)
+			if frame.type = :ok -> {
+				renderer.clear()
 
-                // ground plane grid (wireframe) for reference
-                renderer.renderGrid(40, 1, worldTransform, gui.rgb(80, 140, 120))
+				// ground plane grid (wireframe) for reference
+				renderer.renderGrid(40, 1, worldTransform, gui.rgb(80, 140, 120))
 
-                // render terrain solid
-                renderer.renderMeshSolid(terrain, worldTransform, gui.rgb(80, 180, 90))
+				// render terrain solid
+				renderer.renderMeshSolid(terrain, worldTransform, gui.rgb(80, 180, 90))
 
-                // small marker at player's feet
-                renderer.renderCubeSolid(0.2, {tx: 0, ty: -cam.y + 0.12, tz: 0}, gui.rgb(255, 220, 120))
+				// small marker at player's feet
+				renderer.renderCubeSolid(0.2, { tx: 0, ty: -cam.y + 0.12, tz: 0 }, gui.rgb(255, 220, 120))
 
-                // HUD
-                gui.drawText(win, 16, 18, 'Rugged Grass Plains - WASD move, Q/E or arrows turn')
-                gui.drawText(win, 16, 40, 'Position: ' + string(cam.x) + ', ' + string(cam.y) + ', ' + string(cam.z))
-                gui.drawText(win, 16, 62, 'Yaw: ' + string(int(cam.yaw)))
-            }
+				// HUD
+				gui.drawText(win, 16, 18, 'Rugged Grass Plains - WASD move, Q/E or arrows turn')
+				gui.drawText(win, 16, 40, 'Position: ' + string(cam.x) + ', ' + string(cam.y) + ', ' + string(cam.z))
+				gui.drawText(win, 16, 62, 'Yaw: ' + string(int(cam.yaw)))
+			}
 
-            gui.endFrame(win)
-        }
+			gui.endFrame(win)
+		}
 
-        gui.run(window, ?, onFrame)
-        gui.close(window)
-    }
-    _ -> {
-        println('Failed to create window: ' + string(window))
-    }
+		gui.run(window, ?, onFrame)
+		gui.close(window)
+	}
+	_ -> {
+		println('Failed to create window: ' + string(window))
+	}
 }

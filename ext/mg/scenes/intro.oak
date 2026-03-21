@@ -11,55 +11,64 @@
 gui := import('GUI')
 
 {
-	// typewrite: typewrite
+	typewrite: typewrite
 	guiTypewrite: guiTypewrite
+
+	Channels: Channels
 } := import('comps/type')
+
+// ---
+// @ Clocks
+
+IntroMs := :IntroMs
+fn makeIntroElapsedClock(sm) sm.watchSceneDt(IntroMs)
+fn getIntroMs(sm) sm.clockMs(IntroMs)
+
+IntroAMs := :IntroAMs
+fn makeIntroAutoAdvanceClock(sm) sm.setClockMs(IntroAMs, 120000)
+fn getIntroAMs(sm) sm.clockMs(IntroAMs)
 
 // ---
 // @ Scene
 
-introElapsedMs := :introElapsedMs
-introAutoAdvanceMs := :introAutoAdvanceMs
-
-fn makeIntroElapsedMs(sm) sm.setClockMs(introElapsedMs, 0)
-fn getIntroElapsedMs(sm) sm.clockMs(introElapsedMs)
-
-fn makeIntroAutoAdvanceMs(sm) sm.setClockMs(introAutoAdvanceMs, 120000)
-fn getIntroAutoAdvanceMs(sm) sm.clockMs(introAutoAdvanceMs)
-
-// ---
-
 fn setupScene(window, sm) {
-	makeIntroElapsedMs(sm)
-	makeIntroAutoAdvanceMs(sm)
+	makeIntroElapsedClock(sm)
+	makeIntroAutoAdvanceClock(sm)
 
-	gui.onKeyDown(window, fn(_vk) {
-		sm.changeScene(:menu)
-	})
+	with gui.onKeyDown(window) fn(_vk) sm.changeScene(:menu)
 }
 
-fn introTypewrite(window, sm, str, ps) guiTypewrite(gui, window, 120, 260, str, getIntroElapsedMs(sm), ps)
+fn draw(window, sm, dt) {
+	sm.tickSceneDt(dt)
+
+	if getIntroMs(sm) >= getIntroAMs(sm) -> sm.changeScene(:menu)
+
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> introP1(window, sm, dt)
+
+	gui.endFrame(window)
+}
+
+// ---
+// @ Ext
+
+// fn introTypewrite(window, sm, str, ps) guiTypewrite(gui, window, 120, 260, str, getIntroMs(sm), ps)
+introChan := 
+fn introTimeWrite(window, sm, str, tx, ps) if getIntroMs(sm) < tx -> introTypewrite(window, sm, str, ps)
 
 fn introP1(window, sm, dt) {
 	gui.fillRect(window, 0, 0, window.width, window.height, gui.rgb(18, 20, 26))
 
 	// MS 20% opacity debug text
 	gui.drawText(window, 120, 140
-		string(int(getIntroElapsedMs(sm))) + 'ms / ' + string(int(getIntroAutoAdvanceMs(sm))) + 'ms'
+		string(int(getIntroMs(sm))) + 'ms / ' + string(int(getIntroAMs(sm))) + 'ms'
 		gui.opacity(gui.rgb(248, 232, 242), 0.2, gui.rgb(18, 20, 26))
 	)
 
-	if getIntroElapsedMs(sm) < 6000 -> {
-		introTypewrite(window, sm, 'In the beginning, there was only darkness...', 30)
-	}
-}
+	
 
-fn draw(window, sm, dt) {
-	introElapsedMs := sm.tickClockSec(introElapsedMs, dt)
-	if introElapsedMs >= getIntroAutoAdvanceMs(sm) -> sm.changeScene(:menu)
-
-	frame := gui.beginFrame(window)
-	if frame.type = :ok -> introP1(window, sm, dt)
-
-	gui.endFrame(window)
+	// if currentWriter = ? -> currentWriter <- introTimeWrite(window, sm, 'Welcome to', 10000, 20)
+	// if currentWriter = ? -> currentWriter <- introTimeWrite(window, sm, 'Magnolia', 20000, 40)
+	writeLine('Welcome to', 3000, 20)
+	writeLine('Magnolia', 7000, 40)
 }

@@ -281,6 +281,44 @@ func TestDestrctureToReassignObject(t *testing.T) {
 	`, AtomValue("aa"))
 }
 
+func TestDoubleDestructureObjectFromList(t *testing.T) {
+	expectProgramToReturn(t, `
+	structs := { a: a, b: b } := [1, 2]
+	[a, b, structs]
+	`, MakeList(
+		IntValue(1),
+		IntValue(2),
+		ObjectValue{
+			"a": IntValue(1),
+			"b": IntValue(2),
+		},
+	))
+}
+
+func TestDoubleDestructureObjectFromListOverflow(t *testing.T) {
+	expectProgramToReturn(t, `
+	{ x: x, y: y, z: z } := [10, 20]
+	[x, y, z]
+	`, MakeList(
+		IntValue(10),
+		IntValue(20),
+		null,
+	))
+}
+
+func TestDoubleDestructureObjectFromListUnderscore(t *testing.T) {
+	expectProgramToReturn(t, `
+	result := { a: _, b: b } := [1, 2]
+	[b, result]
+	`, MakeList(
+		IntValue(2),
+		ObjectValue{
+			"a": IntValue(1),
+			"b": IntValue(2),
+		},
+	))
+}
+
 func TestUnderscoreVarNames(t *testing.T) {
 	expectProgramToReturn(t, `
 	_a := 'A'
@@ -1658,6 +1696,21 @@ func TestClassConstructorWithoutArgs(t *testing.T) {
 		}
 		type(Empty())
 	`, AtomValue("object"))
+}
+
+func TestClassAssignmentSugarMethodsMutateInstanceFields(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Counter {
+			a := 2
+			set := fn {
+				a <- 3
+			}
+		}
+
+		counter := Counter()
+		counter.set()
+		counter.a
+	`, IntValue(3))
 }
 
 func TestClassConstructorEmptyBodyActsLikeEmptyBlock(t *testing.T) {

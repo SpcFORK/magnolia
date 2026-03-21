@@ -1,9 +1,6 @@
 // gui-raster contains scanline fill, shading, culling, and mesh raster routines.
 
-fn _default(value, fallback) if value {
-	? -> fallback
-	_ -> value
-}
+{ _default: _default, _clamp: _clamp } := import('gui-common')
 
 fn _pointOutCode(window, p) {
 	left := if p.x < 0 {
@@ -25,7 +22,7 @@ fn _pointOutCode(window, p) {
 	left | right | top | bottom
 }
 
-fn _lineVisible?(window, a, b) (_pointOutCode(window, a) & _pointOutCode(window, b)) = 0
+fn _lineVisible?(window, a, b)(_pointOutCode(window, a) & _pointOutCode(window, b)) = 0
 
 fn _min2(a, b) if a < b {
 	true -> a
@@ -56,8 +53,8 @@ fn _buildEdgeTable(p0, p1, p2) {
 	miny1 := _min2(p0.y, p2.y)
 	maxy1 := _max2(p0.y, p2.y)
 	{
-		edge0: {p: p0, q: p1, miny: miny0, maxy: maxy0, xAtMin: _lerpX(if p0.y < p1.y {true -> p0, _ -> p1}, if p0.y < p1.y {true -> p1, _ -> p0}, int(miny0))},
-		edge1: {p: p0, q: p2, miny: miny1, maxy: maxy1, xAtMin: _lerpX(if p0.y < p2.y {true -> p0, _ -> p2}, if p0.y < p2.y {true -> p2, _ -> p0}, int(miny1))}
+		edge0: { p: p0, q: p1, miny: miny0, maxy: maxy0, xAtMin: _lerpX(if p0.y < p1.y { true -> p0, _ -> p1 }, if p0.y < p1.y { true -> p1, _ -> p0 }, int(miny0)) }
+		edge1: { p: p0, q: p2, miny: miny1, maxy: maxy1, xAtMin: _lerpX(if p0.y < p2.y { true -> p0, _ -> p2 }, if p0.y < p2.y { true -> p2, _ -> p0 }, int(miny1)) }
 	}
 }
 
@@ -73,7 +70,7 @@ fn _edgeSlope(pa, pb) if pb.y = pa.y {
 }
 
 fn _fillScanStepped(deps, window, y, splitY, maxY, xaTop, xaBot, xb, slopeATop, slopeABot, slopeB, color) if y > maxY {
-	true -> {type: :ok}
+	true -> { type: :ok }
 	_ -> {
 		xa := if y <= splitY {
 			true -> xaTop + slopeATop * (y - splitY + (splitY - int(splitY)))
@@ -93,7 +90,7 @@ fn _fillScan(deps, window, y, maxY, p0, p1, p2, color) {
 	xaBot := p1.x
 	xb := p0.x
 	fn _step(y) if y > maxY {
-		true -> {type: :ok}
+		true -> { type: :ok }
 		_ -> {
 			xa := if y <= p1.y {
 				true -> xaTop + slopeATop * (y - p0.y)
@@ -193,14 +190,6 @@ fn _sortDepth(tris) if len(tris) <= 1 {
 	}
 }
 
-fn _clamp(v, minV, maxV) if v < minV {
-	true -> minV
-	_ -> if v > maxV {
-		true -> maxV
-		_ -> v
-	}
-}
-
 fn _vecSub(deps, a, b) deps.Vec3(a.x - b.x, a.y - b.y, a.z - b.z)
 
 fn _vecCross(deps, a, b) deps.Vec3(
@@ -286,8 +275,8 @@ fn computeLightParams(deps, light) {
 }
 
 fn faceShadeGeneric(deps, lp, pa3, pb3, pc3) {
-	eb := {x: pb3.x - pa3.x, y: pb3.y - pa3.y, z: pb3.z - pa3.z}
-	ec := {x: pc3.x - pa3.x, y: pc3.y - pa3.y, z: pc3.z - pa3.z}
+	eb := { x: pb3.x - pa3.x, y: pb3.y - pa3.y, z: pb3.z - pa3.z }
+	ec := { x: pc3.x - pa3.x, y: pc3.y - pa3.y, z: pc3.z - pa3.z }
 	cx := eb.y * ec.z - eb.z * ec.y
 	cy := eb.z * ec.x - eb.x * ec.z
 	cz := eb.x * ec.y - eb.y * ec.x
@@ -305,8 +294,8 @@ fn faceShadeGeneric(deps, lp, pa3, pb3, pc3) {
 }
 
 fn _colorR(c) c & 255
-fn _colorG(c) (c >> 8) & 255
-fn _colorB(c) (c >> 16) & 255
+fn _colorG(c)(c >> 8) & 255
+fn _colorB(c)(c >> 16) & 255
 
 fn _shadeColor(deps, color, intensity) {
 	i := _clamp(intensity, 0, 1)
@@ -316,7 +305,7 @@ fn _shadeColor(deps, color, intensity) {
 	deps.rgb(int(cr * i), int(cg * i), int(cb * i))
 }
 
-fn _frontFacing?(pa, pb, pc) ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
+fn _frontFacing?(pa, pb, pc)((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) < 0
 
 fn _computeDepth(pa3, pb3, pc3, pd3) {
 	sumZ := pa3.z + pb3.z + pc3.z

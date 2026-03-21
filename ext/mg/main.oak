@@ -8,12 +8,13 @@ gui := import('GUI')
 // ----
 // @ Comps
 
-sm := import('comps/scene-manager')
+sceneManagerComp := import('comps/scene-manager')
 
 boot := import('boot')
+core := import('scenes/core')
 
-introScene := import('scenes/intro')
-menuScene := import('scenes/menu')
+// ---
+// @ Window
 
 USE_ASYNC_DLL_PROBE := true
 dllLoadMode := if USE_ASYNC_DLL_PROBE {
@@ -21,167 +22,36 @@ dllLoadMode := if USE_ASYNC_DLL_PROBE {
 	_ -> 'sync'
 }
 
-// ---
-// @ Window
-
-fn clearInputListeners(win) {
-	gui.clearListeners(win, :keyDown)
-	gui.clearListeners(win, :keyUp)
-	gui.clearListeners(win, :mouseDown)
-	gui.clearListeners(win, :mouseUp)
-	gui.clearListeners(win, :mouseMove)
-	gui.clearListeners(win, :mouseWheel)
-	gui.clearListeners(win, :textInput)
-	gui.clearListeners(win, :resize)
-	gui.clearListeners(win, :close)
-	gui.clearListeners(win, :focus)
-	gui.clearListeners(win, :blur)
-}
-
-fn getSceneModule(sceneId) if sceneId {
-	:intro -> introScene
-	:menu -> menuScene
-	_ -> introScene
-}
-
-fn hasFn(value) type(value) = :function
-
-fn makeSceneSetup(sceneId, sceneModule) {
-	stepFn := sceneModule.setupSceneStep
-	readyFn := sceneModule.sceneSetupReady
-	useStepped := hasFn(stepFn) & hasFn(readyFn)
-
-	{
-		sceneId: sceneId
-		sceneModule: sceneModule
-		stepFn: stepFn
-		readyFn: readyFn
-		useStepped: useStepped
-		frames: 0
-		done: false
-	}
-}
-
-fn beginSceneSetup(sceneId) {
-	makeSceneSetup(sceneId, getSceneModule(sceneId))
-}
-
-fn sceneSetupProgress(sceneSetup) if sceneSetup.useStepped {
-	true -> clampDt(float(sceneSetup.frames) / 60.0)
-	_ -> if sceneSetup.frames < 4 {
-		true -> float(sceneSetup.frames) / 4.0
-		_ -> 0.92
-	}
-}
-
-fn sceneSetupStatusText(sceneSetup) {
-	if sceneSetup.useStepped {
-		true -> 'initializing scene ' + string(sceneSetup.sceneId) + ' (stepped)...'
-		_ -> 'initializing scene ' + string(sceneSetup.sceneId) + '...'
-	}
-}
-
-fn advanceSceneSetup(win, sm, sceneSetup) {
-	sceneSetup.frames <- sceneSetup.frames + 1
-
-	if sceneSetup.useStepped {
-		true -> {
-			sceneSetup.stepFn(win, sm)
-			if sceneSetup.readyFn(sm) -> sceneSetup.done <- true
-		}
-		_ -> {
-			// For classic setupScene, defer by a few frames so the loading frame
-			// and pending OS dispatch are processed first.
-			if sceneSetup.frames >= 3 -> {
-				sceneSetup.sceneModule.setupScene(win, sm)
-				sceneSetup.done <- true
-			}
-		}
-	}
-
-	sceneSetup
-}
-
-window := boot.createMainWindowWithPreload('Blank Space', 960, 540, {
+window := with boot.createMainWindowWithPreload('Blank Space', 960, 540) {
 	frameMs: 16
 	layer2D: 'auto'
 	resizable: false
 	dllLoadMode: dllLoadMode
 	updateOnDispatch: true
-})
-
-fn clampDt(dt) if dt < 0 {
-	true -> 0
-	_ -> if dt > 0.05 {
-		true -> 0.05
-		_ -> dt
-	}
 }
+
+// ---
+// @ Window
 
 if window.type {
 	:ok -> {
-		sm := sm.SceneManager()
-		currentSceneModule := introScene
-		bootState := {
-			sceneSetup: ?
-			sceneReady: false
-		}
-		sm.setClockMs('frameDtMs', 0)
-		sm.currentScene <- :intro
-		sm.nextScene <- :intro
-		bootState.sceneSetup <- beginSceneSetup(:intro)
+		sm := sceneManagerComp.SceneManager()
+		Scene := core.SceneModule()
 
 		gui.show(window)
 
-		gui.run(window, ?, fn(win, _dt) {
-			dt := float(_dt) |> clampDt()
+		bootState := boot.BootState()
+		bootState.sceneSetup <- boot.beginSceneSetup(:intro, Scene)
+
+		with gui.run(window, ?) fn(win, _dt) {
+			dt := float(_dt) |> boot.clampDt()
 			sm.setClockMs('frameDtMs', int(dt * 1000))
-
-			if !bootState.sceneReady {
-				true -> {
-					sceneSetup := bootState.sceneSetup
-					boot.drawMainBoot(win, sceneSetupStatusText(sceneSetup), sceneSetupProgress(sceneSetup))
-					sceneSetup <- advanceSceneSetup(win, sm, sceneSetup)
-					bootState.sceneSetup <- sceneSetup
-
-					if sceneSetup.done -> {
-						currentSceneModule <- sceneSetup.sceneModule
-						bootState.sceneReady <- true
-						bootState.sceneSetup <- ?
-					}
-				}
-				_ -> {
-					if sm.isSceneChange(sm) -> {
-						sm.updateScene(sm)
-						clearInputListeners(win)
-						bootState.sceneReady <- false
-						bootState.sceneSetup <- beginSceneSetup(sm.currentScene)
-						boot.drawMainBoot(win, sceneSetupStatusText(bootState.sceneSetup), 0.0)
-					}
-
-					if !bootState.sceneReady {
-						true -> {
-							sceneSetup := bootState.sceneSetup
-							boot.drawMainBoot(win, sceneSetupStatusText(sceneSetup), sceneSetupProgress(sceneSetup))
-							sceneSetup <- advanceSceneSetup(win, sm, sceneSetup)
-							bootState.sceneSetup <- sceneSetup
-
-							if sceneSetup.done -> {
-								currentSceneModule <- sceneSetup.sceneModule
-								bootState.sceneReady <- true
-								bootState.sceneSetup <- ?
-							}
-						}
-						_ -> {
-							currentSceneModule.draw(win, sm, dt)
-						}
-					}
-				}
-			}
-		})
+			boot.bootTick(win, sm, bootState, Scene, dt)
+		}
 
 		gui.close(window)
 	}
+
 	_ -> {
 		println('Failed to create GUI window.')
 		println(string(window))

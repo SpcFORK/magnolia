@@ -13,7 +13,7 @@ guiNativeWinVulkan := import('gui-native-win-vulkan')
 guiNativeWinOpenGL := import('gui-native-win-opengl')
 guiNativeWinProbe := import('gui-native-win-probe')
 _nwImportT2 := nanotime()
-{time: _cwsTime} := import('std')
+{ time: _cwsTime } := import('std')
 
 // Pre-load user32.dll and gdi32.dll at module init time.
 // These are required for all Win32 window operations and loading them early
@@ -31,18 +31,8 @@ _nwImportTimings := {
 
 fn getNativeWinImportTimings() _nwImportTimings
 
-fn _default(value, fallback) if value {
-	? -> fallback
-	_ -> value
-}
-
-fn _err(message, detail) {
-	{
-		type: :error
-		error: message
-		detail: detail
-	}
-}
+{ _default: _default, _err: _err } := import('gui-common')
+{ _ptrRead: _ptrRead, _comCall: _comCall, _releaseOk?: _releaseOk? } := import('win-common')
 
 D3D_SDK_VERSION := 32
 COM_RELEASE := 2
@@ -118,19 +108,6 @@ fn _applyDllProbeResult(state) {
 	state._dllProbeResult <- ?
 	state
 }
-
-fn _ptrRead(address) if windows.ptrSize() {
-	8 -> windows.readU64(address)
-	_ -> windows.readU32(address)
-}
-
-fn _comCall(comObj, methodIndex, args...) {
-	vtbl := _ptrRead(comObj)
-	methodPtr := _ptrRead(vtbl + methodIndex * windows.ptrSize())
-	windows.call(methodPtr, comObj, args...)
-}
-
-fn _releaseOk?(res) windows.callOk?(res) | (res.type = :error & res.errno = 31)
 
 fn _init2DLayer(window) if window.presenterBackend {
 	:vulkan -> guiNativeWinVulkan.initVulkan2DLayer(window)
@@ -333,7 +310,7 @@ fn _ensureLayerInit(window) {
 	if _default(window._layerReady, false) {
 		true -> {
 			window.ready <- true
-			{type: :ok, alreadyReady: true}
+			{ type: :ok, alreadyReady: true }
 		}
 		_ -> {
 			if _default(window._dllProbePending, false) {
@@ -352,9 +329,9 @@ fn _ensureLayerInit(window) {
 				}
 			}
 			if _default(window._dllProbePending, false) {
-				true -> {type: :busy, stage: :dllProbe}
+				true -> { type: :busy, stage: :dllProbe }
 				_ -> if _default(window._layerInitInProgress, false) {
-					true -> {type: :busy}
+					true -> { type: :busy }
 					_ -> {
 						window._layerInitInProgress <- true
 						initResult := _runLayerInit(window)
@@ -499,13 +476,13 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 									vulkan: vulkan
 									opengl: opengl
 									ddraw: ddraw
-									gdi: {available: true, backend: :gdi}
+									gdi: { available: true, backend: :gdi }
 								}
 								threeD: {
 									requested: _default(opts.layer3D, _default(opts.layer3d, 'auto'))
 									selected: layer3D
 									d3d9: d3d9
-									cpu: {available: true, backend: :cpu}
+									cpu: { available: true, backend: :cpu }
 								}
 							}
 							icons: iconState
@@ -775,7 +752,7 @@ fn setTitle(window, title) {
 
 fn _ensureLayerInitForFrame(window) if !_default(window._layerReady, false) {
 	true -> _ensureLayerInit(window)
-	_ -> {type: :ok, alreadyReady: true}
+	_ -> { type: :ok, alreadyReady: true }
 }
 
 fn beginFrame(window) {
@@ -812,14 +789,14 @@ fn poll(window) {
 	// Ensure deferred GPU/layer bootstrap finishes before dispatching messages.
 	init := _ensureLayerInitForFrame(window)
 	if init.type = :busy {
-		true -> {type: :idle, detail: init}
+		true -> { type: :idle, detail: init }
 		_ -> if windows.windowAlive?(window.hwnd) {
-		true -> guiNativeWinPoll.pollWindowMessages(window)
-		_ -> {
-			window.closed <- true
-			{type: :closed}
+			true -> guiNativeWinPoll.pollWindowMessages(window)
+			_ -> {
+				window.closed <- true
+				{ type: :closed }
+			}
 		}
-	}
 	}
 }
 

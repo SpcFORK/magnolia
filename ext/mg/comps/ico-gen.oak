@@ -1,0 +1,77 @@
+{
+	default: default
+	map: map
+} := import('std')
+
+{
+	writeFile: writeFile
+} := import('fs')
+
+{
+	ico: ico
+} := import('ico')
+
+// --- Pixel helpers ---
+
+// solidPixels returns a flat list of `w * h` pixels, all set to `color`.
+// color should be a [B, G, R, A] list.
+fn solidPixels(w, h, color) {
+	total := w * h
+	pixels := []
+	fn fill(i) if i < total -> {
+		pixels << color
+		fill(i + 1)
+	}
+	fill(0)
+	pixels
+}
+
+// fillRect mutates a flat pixel list, painting a rectangle.
+fn _colFill(pixels, imgW, x, y, w, h, color, ry, rx) if rx < w -> {
+	idx := (y + ry) * imgW + (x + rx)
+	pixels.(idx) <- color
+	_colFill(ry, rx + 1)
+}
+
+fn _rowFill(ry, pixels, imgW, x, y, w, h, color) if ry < h -> {
+	_colFill(pixels, imgW, x, y, w, h, color, ry, 0)
+	_rowFill(ry + 1, pixels, imgW, x, y, w, h, color)
+}
+
+fn fillRect(pixels, imgW, x, y, w, h, color) {
+	_rowFill(0, pixels, imgW, x, y, w, h, color)
+	pixels
+}
+
+// --- Color constructors (BGRA order for ICO) ---
+
+fn bgra(b, g, r, a) [b, g, r, a]
+fn rgb(r, g, b) bgra(b, g, r, 255)
+fn rgba(r, g, b, a) bgra(b, g, r, a)
+
+Transparent := bgra(0, 0, 0, 0)
+
+// --- Icon generator ---
+
+// generate builds an ICO binary string from a spec object.
+//   spec.size   — icon width/height in pixels (square, default 32)
+//   spec.bg     — background color [B,G,R,A] (default transparent)
+//   spec.draw   — fn(pixels, size) that mutates pixel list and returns it
+fn generate(spec) {
+	size := default(spec.size, 32)
+	bg := default(spec.bg, Transparent)
+
+	pixels := solidPixels(size, size, bg)
+
+	if type(spec.draw) = :function -> {
+		pixels <- spec.draw(pixels, size)
+	}
+
+	ico(size, size, pixels)
+}
+
+// save encodes a spec and writes the .ico file to `path`.
+fn save(path, spec, cb) {
+	data := generate(spec)
+	writeFile(path, data, cb)
+}

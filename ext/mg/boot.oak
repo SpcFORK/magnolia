@@ -1,91 +1,88 @@
 {
+	default: default
 	string: string
 } := import('std')
 
+{
+	clamp: clamp
+} := import('math')
+
 gui := import('GUI')
 
-fn _default(value, fallback) if value {
-	? -> fallback
-	_ -> value
+BOOT_TITLE := 'magnolia :: boot'
+BOOT_BG := gui.rgb(18, 20, 26)
+BOOT_TEXT := gui.rgb(255, 255, 255)
+PRELOAD_HEADING := 'preloading assets...'
+MAIN_BOOT_HEADING := 'initializing main window...'
+DEFAULT_WINDOW_TITLE := 'Blank Space'
+
+fn windowOptions(options) with default(options) {
+	frameMs: 16
+	layer2D: 'gdi'
+	layer3D: 'none'
+	resizable: false
+	updateOnDispatch: true
+	dllLoadMode: 'sync'
 }
 
-fn clampProgress(progress) if progress < 0 {
-	true -> 0.0
-	_ -> if progress > 1 {
-		true -> 1.0
-		_ -> progress
-	}
-}
+fn bootPercentText(progress) string(int(clamp(progress, 0.0, 1.0) * 100.0)) + '%'
 
-fn bootPercentText(progress) string(int(clampProgress(progress) * 100.0)) + '%'
+BARS := [
+	'[..........]'
+	'[#.........]'
+	'[##........]'
+	'[###.......]'
+	'[####......]'
+	'[#####.....]'
+	'[######....]'
+	'[#######...]'
+	'[########..]'
+	'[#########.]'
+	'[##########]'
+]
 
-fn bootBar(progress) if {
-	clamped := clampProgress(progress)
+fn bootBar(progress) BARS.(int(clamp(progress, 0.0, 1.0) * 10))
 
-	clamped < 0.1 -> '[..........]'
-	clamped < 0.2 -> '[#.........]'
-	clamped < 0.3 -> '[##........]'
-	clamped < 0.4 -> '[###.......]'
-	clamped < 0.5 -> '[####......]'
-	clamped < 0.6 -> '[#####.....]'
-	clamped < 0.7 -> '[######....]'
-	clamped < 0.8 -> '[#######...]'
-	clamped < 0.9 -> '[########..]'
-	clamped < 1.0 -> '[#########.]'
-	_ -> '[##########]'
-}
+fn clearInputListeners(win) [
+	:keyDown
+	:keyUp
+	:mouseDown
+	:mouseUp
+	:mouseMove
+	:mouseWheel
+	:textInput
+	:resize
+	:close
+	:focus
+	:blur
+] |> with std.each() fn(listener) gui.clearListeners(win, listener)
 
-fn drawBootText(window, heading, message, progress) {
-	text := gui.rgb(255, 255, 255)
-	line1 := 'magnolia :: boot'
-	line2 := heading
-	line3 := '[' + bootPercentText(progress) + '] ' + bootBar(progress)
-	line4 := '> ' + message
-
+fn drawBootScreen(window, heading, message, progress) {
 	frame := gui.beginFrame(window)
 	if frame.type = :ok -> {
-		gui.drawText(window, 28, 42, line1, text)
-		gui.drawText(window, 28, 68, line2, text)
-		gui.drawText(window, 28, 104, line3, text)
-		gui.drawText(window, 28, 132, line4, text)
+		gui.fillRect(window, 0, 0, window.width, window.height, BOOT_BG)
+		gui.drawText(window, 28, 42, BOOT_TITLE, BOOT_TEXT)
+		gui.drawText(window, 28, 68, heading, BOOT_TEXT)
+		gui.drawText(window, 28, 104, '[' + bootPercentText(progress) + '] ' + bootBar(progress), BOOT_TEXT)
+		gui.drawText(window, 28, 132, '> ' + message, BOOT_TEXT)
 	}
 	gui.endFrame(window)
 }
 
-fn drawPreload(preloadWindow, message, progress) {
-	frame := gui.beginFrame(preloadWindow)
-	if frame.type = :ok -> {
-		gui.fillRect(preloadWindow, 0, 0, preloadWindow.width, preloadWindow.height, gui.rgb(18, 20, 26))
-		gui.drawText(preloadWindow, 28, 42, 'magnolia :: boot', gui.rgb(255, 255, 255))
-		gui.drawText(preloadWindow, 28, 68, 'preloading assets...', gui.rgb(255, 255, 255))
-		gui.drawText(preloadWindow, 28, 104, '[' + bootPercentText(progress) + '] ' + bootBar(progress), gui.rgb(255, 255, 255))
-		gui.drawText(preloadWindow, 28, 132, '> ' + message, gui.rgb(255, 255, 255))
-	}
-	gui.endFrame(preloadWindow)
+fn pumpPreload(preloadWindow, count) if count > 0 -> {
+	gui.poll(preloadWindow)
+	pumpPreload(preloadWindow, count - 1)
 }
 
-fn pumpPreload(preloadWindow, count) {
-	if count > 0 -> {
-		gui.poll(preloadWindow)
-		pumpPreload(preloadWindow, count - 1)
-	}
-}
 
 fn renderPreloadStep(preloadWindow, message, progress, pumpCount) {
-	drawPreload(preloadWindow, message, progress)
+	drawBootScreen(preloadWindow, PRELOAD_HEADING, message, progress)
 	pumpPreload(preloadWindow, pumpCount)
 }
 
-fn createPreloadWindow() {
-	gui.createWindow('Blank Space - Loading', 520, 220, {
-		frameMs: 16
-		layer2D: 'gdi'
-		layer3D: 'none'
-		resizable: false
-		updateOnDispatch: true
-		dllLoadMode: 'sync'
-	})
-}
+fn createPreloadWindow() gui.createWindow(
+	'Blank Space - Loading', 520, 220, windowOptions()
+)
 
 fn createMainWindowWithPreload(title, width, height, options) {
 	preloadWindow := createPreloadWindow()
@@ -97,37 +94,105 @@ fn createMainWindowWithPreload(title, width, height, options) {
 	}
 
 	window := gui.createWindow(
-		_default(title, 'Blank Space')
-		_default(width, 960)
-		_default(height, 540)
-		_default(options, {
-			frameMs: 16
-			layer2D: 'gdi'
-			layer3D: 'none'
-			resizable: false
-			dllLoadMode: 'sync'
-			updateOnDispatch: true
-		})
+		default(title, DEFAULT_WINDOW_TITLE)
+		default(width, 960)
+		default(height, 540)
+		windowOptions(options)
 	)
 
 	if preloadWindow.type = :ok -> {
-		if window.type = :ok {
-			true -> renderPreloadStep(preloadWindow, 'Handing off to main window...', 1.0, 1)
-		}
+		if window.type = :ok -> renderPreloadStep(preloadWindow, 'Handing off to main window...', 1.0, 1)
 		gui.close(preloadWindow)
 	}
 
 	window
 }
 
-fn drawMainBoot(win, message, progress) {
-	frame := gui.beginFrame(win)
-	if frame.type = :ok -> {
-		gui.fillRect(win, 0, 0, win.width, win.height, gui.rgb(18, 20, 26))
-		gui.drawText(win, 28, 42, 'magnolia :: boot', gui.rgb(255, 255, 255))
-		gui.drawText(win, 28, 68, 'initializing main window...', gui.rgb(255, 255, 255))
-		gui.drawText(win, 28, 104, '[' + bootPercentText(progress) + '] ' + bootBar(progress), gui.rgb(255, 255, 255))
-		gui.drawText(win, 28, 132, '> ' + message, gui.rgb(255, 255, 255))
+fn clampDt(dt) clamp(dt, 0, 0.05)
+fn hasFn(value) type(value) = :function
+
+cs MakeSceneSetup(sceneId?, sceneModule?) {
+	sceneId := sceneId?
+	sceneModule := sceneModule?
+	frames := 0
+	done := false
+	step := sceneModule.setupSceneStep
+	ready := sceneModule.sceneSetupReady
+	useStepped := hasFn(step) & hasFn(ready)
+}
+
+fn beginSceneSetup(sceneId, Scene) {
+	mod := Scene.(sceneId)
+	MakeSceneSetup(sceneId, if hasFn(mod) { true -> mod(), _ -> mod })
+}
+
+fn sceneSetupProgress(sceneSetup) if sceneSetup.useStepped {
+	true -> clamp(float(sceneSetup.frames) / 60.0, 0.0, 1.0)
+	_ -> if sceneSetup.frames < 4 {
+		true -> float(sceneSetup.frames) / 4.0
+		_ -> 0.92
 	}
-	gui.endFrame(win)
+}
+
+fn sceneSetupStatusText(sceneSetup) {
+	'initializing scene ' + string(sceneSetup.sceneId) + if sceneSetup.useStepped {
+		true -> ' (stepped)...'
+		_ -> '...'
+	}
+}
+
+fn advanceSceneSetup(win, sm, sceneSetup) {
+	sceneSetup.frames <- sceneSetup.frames + 1
+
+	if sceneSetup.useStepped {
+		true -> {
+			sceneSetup.step(win, sm)
+			if sceneSetup.ready(sm) -> sceneSetup.done <- true
+		}
+
+		_ -> {
+			// For classic setupScene, defer by a few frames so the loading frame
+			// and pending OS dispatch are processed first.
+			if sceneSetup.frames >= 3 -> {
+				sceneSetup.sceneModule.setupScene(win, sm)
+				sceneSetup.done <- true
+			}
+		}
+	}
+
+	sceneSetup
+}
+
+cs BootState(sceneSetup?, sceneReady?) {
+	sceneSetup := sceneSetup?
+	sceneReady := default(sceneReady?, false)
+}
+
+fn bootTick(win, sm, bootState, Scene, dt) {
+	if sm.isSceneChange() -> {
+		sm.updateScene()
+		clearInputListeners(win)
+
+		bootState.sceneReady <- false
+		bootState.sceneSetup <- beginSceneSetup(sm.currentScene, Scene)
+
+		drawBootScreen(win, MAIN_BOOT_HEADING, sceneSetupStatusText(bootState.sceneSetup), 0.0)
+	}
+
+	if bootState.sceneReady {
+		true -> Scene.current.draw(win, sm, dt)
+
+		_ -> {
+			sceneSetup := bootState.sceneSetup
+			drawBootScreen(win, MAIN_BOOT_HEADING, sceneSetupStatusText(sceneSetup), sceneSetupProgress(sceneSetup))
+			sceneSetup <- advanceSceneSetup(win, sm, sceneSetup)
+			bootState.sceneSetup <- sceneSetup
+
+			if sceneSetup.done -> {
+				Scene.current <- sceneSetup.sceneModule
+				bootState.sceneReady <- true
+				bootState.sceneSetup <- ?
+			}
+		}
+	}
 }

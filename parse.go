@@ -447,13 +447,240 @@ func (p *parser) restore(index int, minPrecLen int) {
 	p.minBinaryPrec = p.minBinaryPrec[:minPrecLen]
 }
 
-func classBodyFromAssignmentBlock(body astNode) (astNode, bool) {
+func cloneNameSet(src map[string]struct{}) map[string]struct{} {
+	clone := make(map[string]struct{}, len(src))
+	for key := range src {
+		clone[key] = struct{}{}
+	}
+	return clone
+}
+
+func addPatternBindings(dst map[string]struct{}, node astNode) {
+	switch n := node.(type) {
+	case identifierNode:
+		if n.payload != "" {
+			dst[n.payload] = struct{}{}
+		}
+	case listNode:
+		for _, elem := range n.elems {
+			addPatternBindings(dst, elem)
+		}
+	case objectNode:
+		for _, entry := range n.entries {
+			addPatternBindings(dst, entry.val)
+		}
+	}
+}
+
+func makeClassSugarSelfNode(name string, tok *token) identifierNode {
+	return identifierNode{payload: name, tok: tok}
+}
+
+func rewriteClassSugarAssignmentLeft(node astNode, visibleFields, allFields, shadowed map[string]struct{}, selfName string, isLocal bool) astNode {
+	switch n := node.(type) {
+	case identifierNode:
+		if isLocal {
+			return n
+		}
+		if _, ok := shadowed[n.payload]; ok {
+			return n
+		}
+		if _, ok := visibleFields[n.payload]; ok {
+			return propertyAccessNode{
+				left:  makeClassSugarSelfNode(selfName, n.tok),
+				right: n,
+				tok:   n.tok,
+			}
+		}
+		return n
+	case listNode:
+		elems := make([]astNode, len(n.elems))
+		for i, elem := range n.elems {
+			elems[i] = rewriteClassSugarAssignmentLeft(elem, visibleFields, allFields, shadowed, selfName, isLocal)
+		}
+		return listNode{elems: elems, tok: n.tok}
+	case objectNode:
+		entries := make([]objectEntry, len(n.entries))
+		for i, entry := range n.entries {
+			key := entry.key
+			if _, ok := key.(identifierNode); !ok {
+				key = rewriteClassSugarNode(key, visibleFields, allFields, shadowed, selfName)
+			}
+			entries[i] = objectEntry{
+				key: key,
+				val: rewriteClassSugarAssignmentLeft(entry.val, visibleFields, allFields, shadowed, selfName, isLocal),
+			}
+		}
+		return objectNode{entries: entries, tok: n.tok}
+	case propertyAccessNode:
+		left := rewriteClassSugarNode(n.left, visibleFields, allFields, shadowed, selfName)
+		right := n.right
+		if _, ok := right.(identifierNode); !ok {
+			right = rewriteClassSugarNode(right, visibleFields, allFields, shadowed, selfName)
+		}
+		return propertyAccessNode{left: left, right: right, tok: n.tok}
+	default:
+		return rewriteClassSugarNode(node, visibleFields, allFields, shadowed, selfName)
+	}
+}
+
+func rewriteClassSugarNode(node astNode, visibleFields, allFields, shadowed map[string]struct{}, selfName string) astNode {
+	switch n := node.(type) {
+	case identifierNode:
+		if n.payload == selfName {
+			return n
+		}
+		if _, ok := shadowed[n.payload]; ok {
+			return n
+		}
+		if _, ok := visibleFields[n.payload]; ok {
+			return propertyAccessNode{
+				left:  makeClassSugarSelfNode(selfName, n.tok),
+				right: n,
+				tok:   n.tok,
+			}
+		}
+		return n
+	case listNode:
+		elems := make([]astNode, len(n.elems))
+		for i, elem := range n.elems {
+			elems[i] = rewriteClassSugarNode(elem, visibleFields, allFields, shadowed, selfName)
+		}
+		return listNode{elems: elems, tok: n.tok}
+	case objectNode:
+		entries := make([]objectEntry, len(n.entries))
+		for i, entry := range n.entries {
+			key := entry.key
+			if _, ok := key.(identifierNode); !ok {
+				key = rewriteClassSugarNode(key, visibleFields, allFields, shadowed, selfName)
+			}
+			entries[i] = objectEntry{
+				key: key,
+				val: rewriteClassSugarNode(entry.val, visibleFields, allFields, shadowed, selfName),
+			}
+		}
+		return objectNode{entries: entries, tok: n.tok}
+	case fnNode:
+		fnShadowed := cloneNameSet(shadowed)
+		if n.name != "" {
+			fnShadowed[n.name] = struct{}{}
+		}
+		for _, arg := range n.args {
+			if arg != "" {
+				fnShadowed[arg] = struct{}{}
+			}
+		}
+		if n.restArg != "" {
+			fnShadowed[n.restArg] = struct{}{}
+		}
+		return fnNode{
+			name:    n.name,
+			args:    append([]string{}, n.args...),
+			restArg: n.restArg,
+			body:    rewriteClassSugarNode(n.body, allFields, allFields, fnShadowed, selfName),
+			tok:     n.tok,
+		}
+	case classNode:
+		classShadowed := cloneNameSet(shadowed)
+		classShadowed[n.name] = struct{}{}
+		for _, arg := range n.args {
+			if arg != "" {
+				classShadowed[arg] = struct{}{}
+			}
+		}
+		if n.restArg != "" {
+			classShadowed[n.restArg] = struct{}{}
+		}
+		staticExprs := make([]astNode, len(n.staticExprs))
+		for i, expr := range n.staticExprs {
+			staticExprs[i] = rewriteClassSugarNode(expr, visibleFields, allFields, classShadowed, selfName)
+		}
+		parents := make([]astNode, len(n.parents))
+		for i, parent := range n.parents {
+			parents[i] = rewriteClassSugarNode(parent, allFields, allFields, classShadowed, selfName)
+		}
+		return classNode{
+			name:        n.name,
+			args:        append([]string{}, n.args...),
+			restArg:     n.restArg,
+			body:        rewriteClassSugarNode(n.body, allFields, allFields, classShadowed, selfName),
+			staticExprs: staticExprs,
+			parents:     parents,
+			tok:         n.tok,
+		}
+	case assignmentNode:
+		return assignmentNode{
+			isLocal: n.isLocal,
+			left:    rewriteClassSugarAssignmentLeft(n.left, visibleFields, allFields, shadowed, selfName, n.isLocal),
+			right:   rewriteClassSugarNode(n.right, visibleFields, allFields, shadowed, selfName),
+			tok:     n.tok,
+		}
+	case propertyAccessNode:
+		left := rewriteClassSugarNode(n.left, visibleFields, allFields, shadowed, selfName)
+		right := n.right
+		if _, ok := right.(identifierNode); !ok {
+			right = rewriteClassSugarNode(right, visibleFields, allFields, shadowed, selfName)
+		}
+		return propertyAccessNode{left: left, right: right, tok: n.tok}
+	case unaryNode:
+		return unaryNode{op: n.op, right: rewriteClassSugarNode(n.right, visibleFields, allFields, shadowed, selfName), tok: n.tok}
+	case binaryNode:
+		return binaryNode{
+			op:    n.op,
+			left:  rewriteClassSugarNode(n.left, visibleFields, allFields, shadowed, selfName),
+			right: rewriteClassSugarNode(n.right, visibleFields, allFields, shadowed, selfName),
+			tok:   n.tok,
+		}
+	case fnCallNode:
+		args := make([]astNode, len(n.args))
+		for i, arg := range n.args {
+			args[i] = rewriteClassSugarNode(arg, visibleFields, allFields, shadowed, selfName)
+		}
+		var restArg astNode
+		if n.restArg != nil {
+			restArg = rewriteClassSugarNode(n.restArg, visibleFields, allFields, shadowed, selfName)
+		}
+		return fnCallNode{
+			fn:      rewriteClassSugarNode(n.fn, visibleFields, allFields, shadowed, selfName),
+			args:    args,
+			restArg: restArg,
+			tok:     n.tok,
+		}
+	case ifExprNode:
+		branches := make([]ifBranch, len(n.branches))
+		for i, branch := range n.branches {
+			branches[i] = ifBranch{
+				target: rewriteClassSugarNode(branch.target, visibleFields, allFields, shadowed, selfName),
+				body:   rewriteClassSugarNode(branch.body, visibleFields, allFields, shadowed, selfName),
+			}
+		}
+		return ifExprNode{
+			cond:     rewriteClassSugarNode(n.cond, visibleFields, allFields, shadowed, selfName),
+			branches: branches,
+			tok:      n.tok,
+		}
+	case blockNode:
+		blockShadowed := cloneNameSet(shadowed)
+		exprs := make([]astNode, len(n.exprs))
+		for i, expr := range n.exprs {
+			exprs[i] = rewriteClassSugarNode(expr, visibleFields, allFields, blockShadowed, selfName)
+			if assign, ok := expr.(assignmentNode); ok && assign.isLocal {
+				addPatternBindings(blockShadowed, assign.left)
+			}
+		}
+		return blockNode{exprs: exprs, tok: n.tok}
+	default:
+		return node
+	}
+}
+
+func classBodyFromAssignmentBlock(body astNode, reservedNames []string) (astNode, bool) {
 	block, ok := body.(blockNode)
 	if !ok || len(block.exprs) == 0 {
 		return nil, false
 	}
 
-	entries := make([]objectEntry, 0, len(block.exprs))
+	fieldNames := make(map[string]struct{}, len(block.exprs))
 	for _, expr := range block.exprs {
 		assign, ok := expr.(assignmentNode)
 		if !ok || !assign.isLocal {
@@ -465,16 +692,55 @@ func classBodyFromAssignmentBlock(body astNode) (astNode, bool) {
 			return nil, false
 		}
 
-		entries = append(entries, objectEntry{
-			key: ident,
-			val: ident,
-		})
+		fieldNames[ident.payload] = struct{}{}
 	}
 
-	newExprs := append(append([]astNode{}, block.exprs...), objectNode{
-		entries: entries,
+	selfName := "__oakClassSelf"
+	reserved := make(map[string]struct{}, len(reservedNames)+len(fieldNames))
+	for _, name := range reservedNames {
+		if name != "" {
+			reserved[name] = struct{}{}
+		}
+	}
+	for {
+		if _, used := fieldNames[selfName]; used {
+			selfName += "_"
+			continue
+		}
+		if _, used := reserved[selfName]; used {
+			selfName += "_"
+			continue
+		}
+		break
+	}
+
+	newExprs := make([]astNode, 0, len(block.exprs)+2)
+	newExprs = append(newExprs, assignmentNode{
+		isLocal: true,
+		left:    identifierNode{payload: selfName, tok: block.tok},
+		right:   objectNode{entries: []objectEntry{}, tok: block.tok},
 		tok:     block.tok,
 	})
+
+	visibleFields := map[string]struct{}{}
+	shadowed := map[string]struct{}{selfName: {}}
+	for _, expr := range block.exprs {
+		assign := expr.(assignmentNode)
+		ident := assign.left.(identifierNode)
+		newExprs = append(newExprs, assignmentNode{
+			isLocal: false,
+			left: propertyAccessNode{
+				left:  identifierNode{payload: selfName, tok: ident.tok},
+				right: ident,
+				tok:   assign.tok,
+			},
+			right: rewriteClassSugarNode(assign.right, visibleFields, fieldNames, shadowed, selfName),
+			tok:   assign.tok,
+		})
+		visibleFields[ident.payload] = struct{}{}
+	}
+
+	newExprs = append(newExprs, identifierNode{payload: selfName, tok: block.tok})
 	return blockNode{exprs: newExprs, tok: block.tok}, true
 }
 
@@ -1015,7 +1281,11 @@ func (p *parser) parseUnit() (astNode, error) {
 			body = blockNode{exprs: []astNode{}, tok: objBody.tok}
 		}
 
-		if desugaredBody, ok := classBodyFromAssignmentBlock(body); ok {
+		reservedNames := append([]string{}, args...)
+		if restArg != "" {
+			reservedNames = append(reservedNames, restArg)
+		}
+		if desugaredBody, ok := classBodyFromAssignmentBlock(body, reservedNames); ok {
 			body = desugaredBody
 		}
 

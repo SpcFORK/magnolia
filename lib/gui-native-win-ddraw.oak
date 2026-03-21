@@ -1,6 +1,8 @@
 // gui-native-win-ddraw contains Win32 DirectDraw init/present/release helpers.
 
 windows := import('windows')
+{ _default: _default } := import('gui-common')
+{ _ptrRead: _ptrRead, _comCall: _comCall, _readOutPointer: _readOutPointer, _releaseOk?: _releaseOk? } := import('win-common')
 
 COM_RELEASE := 2
 IDirectDraw7_CreateSurface := 6
@@ -12,35 +14,12 @@ DDSD_CAPS := 1
 DDSCAPS_PRIMARYSURFACE := 512
 SRCCOPY := 13369376
 
-fn _default(value, fallback) if value {
-	? -> fallback
-	_ -> value
-}
-
-fn _ptrRead(address) if windows.ptrSize() {
-	8 -> windows.readU64(address)
-	_ -> windows.readU32(address)
-}
-
-fn _comCall(comObj, methodIndex, args...) {
-	vtbl := _ptrRead(comObj)
-	methodPtr := _ptrRead(vtbl + methodIndex * windows.ptrSize())
-	windows.call(methodPtr, comObj, args...)
-}
-
-fn _releaseOk?(res) windows.callOk?(res) | (res.type = :error & res.errno = 31)
-
 fn _iidDirectDraw7() bits([
-	192, 94, 230, 21,
-	156, 59,
-	210, 17,
+	192, 94, 230, 21
+	156, 59
+	210, 17
 	185, 47, 0, 96, 151, 151, 234, 91
 ])
-
-fn _readOutPointer(outBuf) if windows.ptrSize() {
-	8 -> windows.readU64(addr(outBuf))
-	_ -> windows.readU32(addr(outBuf))
-}
 
 fn _ddrawCreatePrimarySurface(ddrawObj) {
 	// DDSURFACEDESC2 fixed-size header with caps-only request for primary surface.

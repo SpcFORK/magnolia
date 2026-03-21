@@ -2,41 +2,66 @@
 	default: default
 } := import('std')
 
-cs SceneManager() SCtx := {
-	currentScene: :intro
-	nextScene: :intro
-	clocks: {}
-
-	changeScene: fn(newScene) changeScene(SCtx, newScene)
-	isSceneChange: fn() isSceneChange(SCtx)
-	updateScene: fn() updateScene(SCtx)
-	setClockMs: fn(name, ms) setClockMs(SCtx, name, ms)
-	clockMs: fn(name) clockMs(SCtx, name)
-	tickClockSec: fn(name, dtSec) tickClockSec(SCtx, name, dtSec)
+fn _defaultCall(x, fx) if x = ? {
+	_ -> x
+	_ -> fx()
 }
 
-fn changeScene(manager, newScene) {
-	manager.nextScene <- newScene
+cs Clock(name?, time?, watcher?) {
+	name := name? |> _defaultCall(nanotime)
+	time := time? |> default(0)
+	watching? := watcher?
 }
 
-fn isSceneChange(manager) {
-	manager.currentScene != manager.nextScene
+cs SceneManager {
+	currentScene := :intro
+	nextScene := :intro
+	clocks := {}
+
+	changeScene := fn(newScene) changeScene(SCtx, newScene)
+	isSceneChange := fn() isSceneChange(SCtx)
+	updateScene := fn() updateScene(SCtx)
+	
+	setClockMs := fn(name, ms) setClockMs(SCtx, name, ms)
+	clockMs := fn(name) getClockMs(SCtx, name)
+	tickClockSec := fn(name, dtSec) tickClockSec(SCtx, name, dtSec)
+
+	watchClock := fn(name, watchName) watchClock(SCtx, name, watchName)
+	watching? := fn(name) watching?(SCtx, name)
+	clockName := fn(name) clocks.(name).name
+
+	sceneDt := :sceneDt
+	sceneDtClock := clocks.(sceneDt) := Clock(sceneDt)
+	tickSceneDt := fn(dtSec) tickClockSec(SCtx, sceneDt, dtSec)
+	watchSceneDt := fn(name) watchClock(SCtx, name, sceneDt)
 }
 
-fn updateScene(manager) {
-	manager.currentScene <- manager.nextScene
+fn changeScene(manager, newScene) manager.nextScene <- newScene
+fn isSceneChange(manager) manager.currentScene != manager.nextScene
+fn updateScene(manager) manager.currentScene <- manager.nextScene
+
+fn getClockMs(manager, name) if clock := manager.clocks.(name) {
+	? -> ?
+	_ -> if clock.watching? {
+		name, ? -> clock.time
+		_ -> getClockMs(manager, clock.watching?) + clock.time
+	}
 }
 
-fn setClockMs(manager, name, ms) {
-	manager.clocks.(name) <- ms
-}
-
-fn clockMs(manager, name) {
-	manager.clocks.(name) |> default(0)
+fn setClockMs(manager, name, ms, watchName?) if clock := manager.clocks.(name) {
+	? -> manager.clocks.(name) <- Clock(name, ms, watchName?)
+	_ -> manager.clocks.(name).time <- ms
 }
 
 fn tickClockSec(manager, name, dtSec) {
-	nextMs := clockMs(manager, name) + int(dtSec * 1000)
+	nextMs := getClockMs(manager, name) + int(dtSec * 1000)
 	setClockMs(manager, name, nextMs)
 	nextMs
 }
+
+fn watchClock(manager, name, watchName) if clock := manager.clocks.(name) {
+	? -> manager.clocks.(name) <- Clock(name, 0, watchName)
+	_ -> manager.clocks.(name).watching? <- watchName
+}
+
+fn watching?(manager, name) manager.clocks.(name).watching?

@@ -64,6 +64,27 @@ cs Bag(items...,) {
 len(Bag(1, 2, 3)) // => 3
 ```
 
+### Assignment-Only Body Sugar
+
+When a class body contains only local assignments, Magnolia treats those
+assignments as instance fields and returns the constructed object.
+
+```oak
+cs Counter {
+    a := 2
+    set := fn {
+        a <- 3
+    }
+}
+
+counter := Counter()
+counter.set()
+counter.a // => 3
+```
+
+Methods defined in assignment-only class bodies mutate the same instance fields
+that are returned from construction.
+
 ## Empty Body Behavior
 
 ```oak
@@ -105,3 +126,5 @@ When parent objects share keys, values from later parents in the list take prece
 - Classes are syntax sugar for constructor-style behavior.
 - Constructor arguments are available in the class body scope.
 - Class values are invoked like functions (for example, `Pair(1, 2)`).
+- In assignment-only class bodies, field reads/writes inside methods are bound to
+    the constructed instance.

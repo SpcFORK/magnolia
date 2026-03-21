@@ -1,0 +1,22 @@
+// win-common contains shared Win32 low-level helpers used across
+// gui-native-win, gui-native-win-ddraw, and gui-native-win-vulkan.
+
+windows := import('windows')
+
+fn _ptrRead(address) if windows.ptrSize() {
+	8 -> windows.readU64(address)
+	_ -> windows.readU32(address)
+}
+
+fn _comCall(comObj, methodIndex, args...) {
+	vtbl := _ptrRead(comObj)
+	methodPtr := _ptrRead(vtbl + methodIndex * windows.ptrSize())
+	windows.call(methodPtr, comObj, args...)
+}
+
+fn _readOutPointer(outBuf) if windows.ptrSize() {
+	8 -> windows.readU64(addr(outBuf))
+	_ -> windows.readU32(addr(outBuf))
+}
+
+fn _releaseOk?(res) windows.callOk?(res) | (res.type = :error & res.errno = 31)

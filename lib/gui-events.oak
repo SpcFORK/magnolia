@@ -2,13 +2,9 @@
 // key-event helpers, and Win32 window-message event subscribers for the
 // Magnolia GUI facade.
 
-windows    := import('windows')
+windows := import('windows')
 eventBusLib := import('async/event-bus')
-
-fn _default(value, fallback) if value {
-	? -> fallback
-	_ -> value
-}
+{ _default: _default } := import('gui-common')
 
 // ─── Event bus lazy init ────────────────────────────────────────────────────
 
@@ -69,53 +65,53 @@ fn publish(window, event, payload) {
 
 // ─── Named lifecycle event subscribers ─────────────────────────────────────
 
-fn onDispatch(window, handler)     on(window, :dispatch, handler)
-fn onceDispatch(window, handler)   once(window, :dispatch, handler)
-fn onRunStart(window, handler)     on(window, :runStart, handler)
-fn onceRunStart(window, handler)   once(window, :runStart, handler)
-fn onIdle(window, handler)         on(window, :idle, handler)
-fn onceIdle(window, handler)       once(window, :idle, handler)
-fn onFrame(window, handler)        on(window, :frame, handler)
-fn onceFrame(window, handler)      once(window, :frame, handler)
-fn onClosing(window, handler)      on(window, :closing, handler)
-fn onceClosing(window, handler)    once(window, :closing, handler)
-fn onClosed(window, handler)       on(window, :closed, handler)
-fn onceClosed(window, handler)     once(window, :closed, handler)
+fn onDispatch(window, handler) on(window, :dispatch, handler)
+fn onceDispatch(window, handler) once(window, :dispatch, handler)
+fn onRunStart(window, handler) on(window, :runStart, handler)
+fn onceRunStart(window, handler) once(window, :runStart, handler)
+fn onIdle(window, handler) on(window, :idle, handler)
+fn onceIdle(window, handler) once(window, :idle, handler)
+fn onFrame(window, handler) on(window, :frame, handler)
+fn onceFrame(window, handler) once(window, :frame, handler)
+fn onClosing(window, handler) on(window, :closing, handler)
+fn onceClosing(window, handler) once(window, :closing, handler)
+fn onClosed(window, handler) on(window, :closed, handler)
+fn onceClosed(window, handler) once(window, :closed, handler)
 
 // ─── Win32 window-message constants ────────────────────────────────────────
 
-MSG_OFF_TYPE   := 8
+MSG_OFF_TYPE := 8
 MSG_OFF_WPARAM := 16
 MSG_OFF_LPARAM := 24
 
-FORM_WM_MOUSEMOVE   := 512
+FORM_WM_MOUSEMOVE := 512
 FORM_WM_LBUTTONDOWN := 513
-FORM_WM_LBUTTONUP   := 514
+FORM_WM_LBUTTONUP := 514
 FORM_WM_RBUTTONDOWN := 516
-FORM_WM_RBUTTONUP   := 517
-FORM_WM_KEYDOWN     := 256
-FORM_WM_KEYUP       := 257
-FORM_WM_CHAR        := 258
-GUI_WM_SIZE             := 5
-GUI_WM_PAINT            := 15
-GUI_WM_ERASEBKGND       := 20
-GUI_WM_SIZING           := 532
+FORM_WM_RBUTTONUP := 517
+FORM_WM_KEYDOWN := 256
+FORM_WM_KEYUP := 257
+FORM_WM_CHAR := 258
+GUI_WM_SIZE := 5
+GUI_WM_PAINT := 15
+GUI_WM_ERASEBKGND := 20
+GUI_WM_SIZING := 532
 GUI_WM_WINDOWPOSCHANGED := 71
-GUI_WM_ENTERSIZEMOVE    := 561
-GUI_WM_EXITSIZEMOVE     := 562
+GUI_WM_ENTERSIZEMOVE := 561
+GUI_WM_EXITSIZEMOVE := 562
 
-FORM_VK_BACK   := 8
-FORM_VK_TAB    := 9
+FORM_VK_BACK := 8
+FORM_VK_TAB := 9
 FORM_VK_RETURN := 13
 FORM_VK_ESCAPE := 27
 
 // ─── Win32 message buffer readers ───────────────────────────────────────────
 
-fn formMsgType(window)   windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+fn formMsgType(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
 fn formMsgWParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
 fn formMsgLParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
 fn formLoWord(v) v & 65535
-fn formHiWord(v) (v >> 16) & 65535
+fn formHiWord(v)(v >> 16) & 65535
 
 fn formEventContext(window) {
 	lp := formMsgLParam(window)
@@ -142,25 +138,25 @@ fn _vkKeyName(vk) {
 	if vk = 39 -> 'right'
 	if vk = 40 -> 'down'
 	if vk = 32 -> ' '
-	if vk = FORM_VK_TAB    -> 'tab'
+	if vk = FORM_VK_TAB -> 'tab'
 	if vk = FORM_VK_RETURN -> 'enter'
 	if vk = FORM_VK_ESCAPE -> 'escape'
-	if vk = FORM_VK_BACK   -> 'backspace'
+	if vk = FORM_VK_BACK -> 'backspace'
 	'vk-' + string(vk)
 }
 
 fn _extractKeyEvent(window, evt, expectedMsgType, expectedEvtType) {
 	if evt.type = expectedEvtType {
 		true -> {
-			{matched: true, key: _default(evt.key, ?), evt: evt}
+			{ matched: true, key: _default(evt.key, ?), evt: evt }
 		}
 		_ -> if formMsgType(window) = expectedMsgType {
 			true -> {
 				vk := formMsgWParam(window)
 				key := _vkKeyName(vk)
-				{matched: true, key: key, evt: {type: expectedEvtType, key: key, vk: vk, raw: evt}}
+				{ matched: true, key: key, evt: { type: expectedEvtType, key: key, vk: vk, raw: evt } }
 			}
-			_ -> {matched: false, key: ?, evt: evt}
+			_ -> { matched: false, key: ?, evt: evt }
 		}
 	}
 }
@@ -272,12 +268,12 @@ fn isResizeDispatch?(window, step) {
 		true -> {
 			msgType := formMsgType(window)
 			(msgType = GUI_WM_SIZE) |
-			(msgType = GUI_WM_PAINT) |
-			(msgType = GUI_WM_ERASEBKGND) |
-			(msgType = GUI_WM_SIZING) |
-			(msgType = GUI_WM_WINDOWPOSCHANGED) |
-			(msgType = GUI_WM_ENTERSIZEMOVE) |
-			(msgType = GUI_WM_EXITSIZEMOVE)
+				(msgType = GUI_WM_PAINT) |
+				(msgType = GUI_WM_ERASEBKGND) |
+				(msgType = GUI_WM_SIZING) |
+				(msgType = GUI_WM_WINDOWPOSCHANGED) |
+				(msgType = GUI_WM_ENTERSIZEMOVE) |
+				(msgType = GUI_WM_EXITSIZEMOVE)
 		}
 		_ -> false
 	}

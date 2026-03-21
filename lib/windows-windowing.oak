@@ -20,7 +20,7 @@ sys := import('sys')
 	IDI_APPLICATION: IDI_APPLICATION
 	PM_REMOVE: PM_REMOVE
 } := import('windows-flags')
-{time: _windTime} := import('std')
+{ time: _windTime } := import('std')
 
 // Cached Win32 resources resolved once and reused across registerWindowClassEx calls.
 _cachedDefProcAddr := ?
@@ -77,7 +77,7 @@ fn callOk?(res) sys.ok?(res) | (res.type = :error & res.r1 > 0)
 
 fn noMessage?(res) {
 	(sys.ok?(res) & res.r1 = 0) |
-	(res.type = :error & res.errno = 1400)
+		(res.type = :error & res.errno = 1400)
 }
 
 fn kernel32(symbol, args...) if isWindows?() {
@@ -227,19 +227,19 @@ fn pumpWindowMessage(hwnd, msgPtr) if isWindows?() {
 					true -> {
 						translateMessage(msgPtr)
 						dispatchMessage(msgPtr)
-						{type: :dispatch, detail: msg}
+						{ type: :dispatch, detail: msg }
 					}
 					_ -> {
 						waitMessage()
-						{type: :idle, detail: msg}
+						{ type: :idle, detail: msg }
 					}
 				}
 				_ -> {
-					{type: :error, error: 'PeekMessageW failed', detail: msg}
+					{ type: :error, error: 'PeekMessageW failed', detail: msg }
 				}
 			}
 		}
-		_ -> {type: :closed}
+		_ -> { type: :closed }
 	}
 	_ -> _platformError('pumpWindowMessage')
 }
@@ -260,115 +260,115 @@ fn loadIcon(instance, iconId) if isWindows?() {
 fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, classStyle) if isWindows?() {
 	true -> if cached := _registeredClasses.(className) {
 		? -> {
-		_rt0 := _windTime()
-		size := if ptrSize() {
-			8 -> 80
-			_ -> 48
-		}
-
-		wcBuf := bits({
-			fn zeros(n, acc) if n {
-				0 -> acc
-				_ -> zeros(n - 1, acc << 0)
+			_rt0 := _windTime()
+			size := if ptrSize() {
+				8 -> 80
+				_ -> 48
 			}
-			zeros(size, [])
-		})
-		wcPtr := addr(wcBuf)
 
-		// Cache DefWindowProcW address — never changes per process.
-		defProcAddr := if _cachedDefProcAddr {
-			? -> {
-				addr := sys.valueOr(
-					kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
-					0
-				)
-				_cachedDefProcAddr <- addr
-				addr
-			}
-			_ -> _cachedDefProcAddr
-		}
-		_rt1 := _windTime()
-
-		// Cache default cursor — only resolved when no custom cursor.
-		resolvedCursor := if cursorHandle {
-			? -> if _cachedCursor {
-				? -> {
-					c := callValueOrZero(loadCursor(0, IDC_ARROW))
-					_cachedCursor <- c
-					c
+			wcBuf := bits({
+				fn zeros(n, acc) if n {
+					0 -> acc
+					_ -> zeros(n - 1, acc << 0)
 				}
-				_ -> _cachedCursor
-			}
-			_ -> cursorHandle
-		}
-		_rt2 := _windTime()
+				zeros(size, [])
+			})
+			wcPtr := addr(wcBuf)
 
-		// Cache default icon — only resolved when no custom icon.
-		resolvedIcon := if iconHandle {
-			? -> if _cachedIcon {
+			// Cache DefWindowProcW address — never changes per process.
+			defProcAddr := if _cachedDefProcAddr {
 				? -> {
-					ic := callValueOrZero(loadIcon(0, IDI_APPLICATION))
-					_cachedIcon <- ic
-					ic
+					addr := sys.valueOr(
+						kernel32('GetProcAddress', sys.valueOr(moduleHandle(User32), 0), cstr('DefWindowProcW'))
+						0
+					)
+					_cachedDefProcAddr <- addr
+					addr
 				}
-				_ -> _cachedIcon
+				_ -> _cachedDefProcAddr
 			}
-			_ -> iconHandle
-		}
-		resolvedSmallIcon := if smallIconHandle {
-			? -> resolvedIcon
-			_ -> smallIconHandle
-		}
-		_rt3 := _windTime()
+			_rt1 := _windTime()
 
-		resolvedClassStyle := if classStyle {
-			? -> CS_HREDRAW | CS_VREDRAW
-			_ -> classStyle
-		}
-		// Cache imageBase — never changes per process.
-		base := if _cachedImageBase {
-			? -> {
-				b := imageBase()
-				_cachedImageBase <- b
-				b
+			// Cache default cursor — only resolved when no custom cursor.
+			resolvedCursor := if cursorHandle {
+				? -> if _cachedCursor {
+					? -> {
+						c := callValueOrZero(loadCursor(0, IDC_ARROW))
+						_cachedCursor <- c
+						c
+					}
+					_ -> _cachedCursor
+				}
+				_ -> cursorHandle
 			}
-			_ -> _cachedImageBase
-		}
+			_rt2 := _windTime()
 
-		classWide := wstr(className)
-		classWidePtr := ptrInt(addr(classWide))
+			// Cache default icon — only resolved when no custom icon.
+			resolvedIcon := if iconHandle {
+				? -> if _cachedIcon {
+					? -> {
+						ic := callValueOrZero(loadIcon(0, IDI_APPLICATION))
+						_cachedIcon <- ic
+						ic
+					}
+					_ -> _cachedIcon
+				}
+				_ -> iconHandle
+			}
+			resolvedSmallIcon := if smallIconHandle {
+				? -> resolvedIcon
+				_ -> smallIconHandle
+			}
+			_rt3 := _windTime()
 
-		writeU32(wcPtr + 0, size)
-		writeU32(wcPtr + 4, resolvedClassStyle)
-		writePtr(wcPtr + 8, defProcAddr)
-		writeU32(wcPtr + 16, 0)
-		writeU32(wcPtr + 20, 0)
-		writePtr(wcPtr + 24, base)
-		writePtr(wcPtr + 24 + ptrSize(), resolvedIcon)
-		writePtr(wcPtr + 24 + ptrSize() * 2, resolvedCursor)
-		writePtr(wcPtr + 24 + ptrSize() * 3, 0)
-		writePtr(wcPtr + 24 + ptrSize() * 4, 0)
-		writePtr(wcPtr + 24 + ptrSize() * 5, classWidePtr)
-		writePtr(wcPtr + 24 + ptrSize() * 6, resolvedSmallIcon)
+			resolvedClassStyle := if classStyle {
+				? -> CS_HREDRAW | CS_VREDRAW
+				_ -> classStyle
+			}
+			// Cache imageBase — never changes per process.
+			base := if _cachedImageBase {
+				? -> {
+					b := imageBase()
+					_cachedImageBase <- b
+					b
+				}
+				_ -> _cachedImageBase
+			}
 
-		_rt4 := _windTime()
-		result := registerClassEx(wcPtr)
-		_rt5 := _windTime()
+			classWide := wstr(className)
+			classWidePtr := ptrInt(addr(classWide))
 
-		_regClassTimings <- {
-			resolveDefProc: _rt1 - _rt0
-			loadCursor: _rt2 - _rt1
-			loadIcon: _rt3 - _rt2
-			structWrite: _rt4 - _rt3
-			registerClassEx: _rt5 - _rt4
-			cacheHit: false
-		}
+			writeU32(wcPtr + 0, size)
+			writeU32(wcPtr + 4, resolvedClassStyle)
+			writePtr(wcPtr + 8, defProcAddr)
+			writeU32(wcPtr + 16, 0)
+			writeU32(wcPtr + 20, 0)
+			writePtr(wcPtr + 24, base)
+			writePtr(wcPtr + 24 + ptrSize(), resolvedIcon)
+			writePtr(wcPtr + 24 + ptrSize() * 2, resolvedCursor)
+			writePtr(wcPtr + 24 + ptrSize() * 3, 0)
+			writePtr(wcPtr + 24 + ptrSize() * 4, 0)
+			writePtr(wcPtr + 24 + ptrSize() * 5, classWidePtr)
+			writePtr(wcPtr + 24 + ptrSize() * 6, resolvedSmallIcon)
 
-		if sys.ok?(result) | (result.type = :error & result.r1 > 0) {
-			true -> _registeredClasses.(className) <- result
-		}
+			_rt4 := _windTime()
+			result := registerClassEx(wcPtr)
+			_rt5 := _windTime()
 
-		result
+			_regClassTimings <- {
+				resolveDefProc: _rt1 - _rt0
+				loadCursor: _rt2 - _rt1
+				loadIcon: _rt3 - _rt2
+				structWrite: _rt4 - _rt3
+				registerClassEx: _rt5 - _rt4
+				cacheHit: false
+			}
+
+			if sys.ok?(result) | (result.type = :error & result.r1 > 0) {
+				true -> _registeredClasses.(className) <- result
+			}
+
+			result
 		}
 		_ -> {
 			_regClassTimings <- {

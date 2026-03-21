@@ -1060,18 +1060,89 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return assignedValue, nil
 		case objectNode:
 			assignedObj, ok := assignedValue.(ObjectValue)
+			if ok {
+				for _, entryNode := range left.entries {
+					key, err := c.evalAsObjKey(entryNode.key, sc)
+					if err != nil {
+						return nil, err
+					}
+
+					mustBeIdent := entryNode.val
+					ident, ok := mustBeIdent.(identifierNode)
+					if !ok {
+						if _, ok = mustBeIdent.(emptyNode); ok {
+							continue
+						}
+
+						return nil, &runtimeError{
+							reason: fmt.Sprintf("value %s in destructured object %s is not an identifier", mustBeIdent, left),
+							pos:    n.pos(),
+						}
+					}
+
+					var keyString string
+					if k, ok := key.(*StringValue); ok {
+						keyString = string(*k)
+					} else if k, ok := key.(AtomValue); ok {
+						keyString = string(k)
+					} else {
+						keyString = key.String()
+					}
+
+					var destructuredEl Value
+					if val, ok := assignedObj[keyString]; ok {
+						destructuredEl = val
+					} else {
+						destructuredEl = null
+					}
+
+					if n.isLocal {
+						sc.put(ident.payload, destructuredEl)
+					} else {
+						err := sc.update(ident.payload, destructuredEl)
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+				return assignedValue, nil
+			}
+
+			// Double destructuring: object pattern := list
+			// Maps list elements by position to object keys, binds variables,
+			// and returns the constructed object.
+			assignedList, ok := assignedValue.(*ListValue)
 			if !ok {
 				return nil, &runtimeError{
-					reason: fmt.Sprintf("right side %s of object destructuring is not an object", n.right),
+					reason: fmt.Sprintf("right side %s of object destructuring is not an object or list", n.right),
 					pos:    n.pos(),
 				}
 			}
 
-			for _, entryNode := range left.entries {
+			constructedObj := ObjectValue{}
+			for i, entryNode := range left.entries {
 				key, err := c.evalAsObjKey(entryNode.key, sc)
 				if err != nil {
 					return nil, err
 				}
+
+				var keyString string
+				if k, ok := key.(*StringValue); ok {
+					keyString = string(*k)
+				} else if k, ok := key.(AtomValue); ok {
+					keyString = string(k)
+				} else {
+					keyString = key.String()
+				}
+
+				var destructuredEl Value
+				if i < len(*assignedList) {
+					destructuredEl = (*assignedList)[i]
+				} else {
+					destructuredEl = null
+				}
+
+				constructedObj[keyString] = destructuredEl
 
 				mustBeIdent := entryNode.val
 				ident, ok := mustBeIdent.(identifierNode)
@@ -1086,22 +1157,6 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					}
 				}
 
-				var keyString string
-				if k, ok := key.(*StringValue); ok {
-					keyString = string(*k)
-				} else if k, ok := key.(AtomValue); ok {
-					keyString = string(k)
-				} else {
-					keyString = key.String()
-				}
-
-				var destructuredEl Value
-				if val, ok := assignedObj[keyString]; ok {
-					destructuredEl = val
-				} else {
-					destructuredEl = null
-				}
-
 				if n.isLocal {
 					sc.put(ident.payload, destructuredEl)
 				} else {
@@ -1111,7 +1166,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					}
 				}
 			}
-			return assignedValue, nil
+			return constructedObj, nil
 		case propertyAccessNode:
 			assign := left
 
@@ -1214,6 +1269,11 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					delete(target.static, objKeyString)
 				} else {
 					target.static[objKeyString] = assignedValue
+				}
+			case NullValue:
+				return nil, &runtimeError{
+					reason: fmt.Sprintf("Cannot assign to property of undefined value in %s", left.String()),
+					pos:    n.pos(),
 				}
 			default:
 				return nil, &runtimeError{
