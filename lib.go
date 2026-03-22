@@ -190,6 +190,12 @@ var libruntimejs string
 //go:embed lib/runtime-codegen.oak
 var libruntimecodegen string
 
+//go:embed lib/wasm-vm.oak
+var libwasmvm string
+
+//go:embed lib/wasm-vm-runtime.oak
+var libwasmvmruntime string
+
 //go:embed lib/codegen-common.oak
 var libcodegencommon string
 
@@ -422,6 +428,8 @@ var stdlibs = map[string]string{
 	"runtime-native":         libruntimenative,
 	"runtime-js":             libruntimejs,
 	"runtime-codegen":        libruntimecodegen,
+	"wasm-vm":                libwasmvm,
+	"wasm-vm-runtime":        libwasmvmruntime,
 	"codegen-common":         libcodegencommon,
 	"sys":                    libsys,
 	"writes":                 libwrites,

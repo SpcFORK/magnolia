@@ -92,6 +92,29 @@ fn Tokenizer(source) {
 		}
 		sub('')
 	}
+	fn hexDigit?(c) if c {
+		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'
+		'a', 'b', 'c', 'd', 'e', 'f'
+		'A', 'B', 'C', 'D', 'E', 'F' -> true
+		_ -> false
+	}
+	fn binDigit?(c) c = '0' | c = '1'
+	fn readValidNumeralBase(digitCheck?) {
+		fn sub(acc) if eof?() {
+			true -> acc
+			_ -> {
+				c := next()
+				if digitCheck?(c) {
+					true -> sub(acc << c)
+					_ -> {
+						back()
+						acc
+					}
+				}
+			}
+		}
+		sub('')
+	}
 	fn readValidNumeral {
 		sawDot? := false
 		fn sub(acc) if eof?() {
@@ -214,7 +237,20 @@ fn Tokenizer(source) {
 				TokenAt(:stringLiteral, pos, sub(''))
 			}
 			_ -> if {
-				digit?(c) -> TokenAt(:numberLiteral, pos, c << readValidNumeral())
+				digit?(c) -> {
+					payload := c << readValidNumeral()
+					if c = '0' & !eof?() -> if peek() {
+						'x', 'X' -> {
+							basePrefix := next()
+							payload <- '0' << basePrefix << readValidNumeralBase(hexDigit?)
+						}
+						'b', 'B' -> {
+							basePrefix := next()
+							payload <- '0' << basePrefix << readValidNumeralBase(binDigit?)
+						}
+					}
+					TokenAt(:numberLiteral, pos, payload)
+				}
 				_ -> if payload := c << readValidIdentifier() {
 					'_' -> TokenAt(:underscore, pos)
 					'if' -> TokenAt(:ifKeyword, pos)

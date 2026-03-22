@@ -78,6 +78,21 @@ fn renderOakBundle(bundleNode, vfsFiles, encodeJSON, oakNativeRuntime, formatIde
 				_ -> node.args |> map(renderNode) |> append([renderNode(node.restArg) << '...']) |> join(',')
 			}
 		)
+		:class -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(formatIdent) |> join(',')
+				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
+			} << ')'
+			head := 'cs ' << formatIdent(node.name) << args
+			if len(node.parents) = 0 & len(node.staticExprs) = 0 {
+				true -> head << ' ' << renderNode(node.body)
+				_ -> {
+					staticParts := node.staticExprs |> map(renderNode)
+					parentsPart := '(' << node.parents |> map(renderNode) |> join(',') << ')->' << renderNode(node.body)
+					head << '{' << append(staticParts, [parentsPart]) |> join(',') << '}'
+				}
+			}
+		}
 		_ -> abort('[oak build] Unexpected AST node type ' << string(node.type))
 	}
 
@@ -244,6 +259,48 @@ fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, c
 				_ -> node.args |> map(renderNode) |> append(['...' << renderNode(node.restArg)]) |> join(',')
 			}
 		)
+		:class -> {
+			fmtName := formatIdent(node.name)
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(fn(a, i) formatIdent(a, i) << '=null') |> join(',')
+				_ -> node.args |> map(fn(a, i) formatIdent(a, i) << '=null') |> append(['...' << formatIdent(node.restArg)]) |> join(',')
+			} << ')'
+			decls := if node.decls {
+				? -> ''
+				_ -> node.decls |> sort!() |> map(fn(decl) 'let ' << formatIdent(decl) << ';') |> join()
+			}
+
+			ctorBody := if len(node.parents) {
+				0 -> decls << 'return ' << renderNode(node.body)
+				_ -> {
+					parentMerges := node.parents |> map(fn(p) {
+						'__oak_p=' << renderNode(p) << ';if(typeof __oak_p===\'function\')__oak_p=__oak_p(' << node.args |> map(fn(a) formatIdent(a)) |> join(',') << ');if(__oak_p!==null&&typeof __oak_p===\'object\')Object.assign(__oak_inst,__oak_p);'
+					}) |> join()
+					decls << 'let __oak_inst={},__oak_p;' << parentMerges << 'let __oak_own=' << renderNode(node.body) << ';if(__oak_own!==null&&typeof __oak_own===\'object\')Object.assign(__oak_inst,__oak_own);return __oak_inst;'
+				}
+			}
+
+			ctor := 'function ' << fmtName << args << '{' << ctorBody << '}'
+
+			if len(node.staticExprs) {
+				0 -> fmtName << '=__Oak_Class(\'' << node.name << '\',' << ctor << ')'
+				_ -> {
+					staticNames := []
+					node.staticExprs |> map(fn(expr) if expr.type {
+						:assignment -> if expr.local? & expr.left.type = :identifier -> staticNames << formatIdent(expr.left.val)
+						:function -> if expr.name != '' -> staticNames << formatIdent(expr.name)
+					})
+					declPart := if len(staticNames) {
+						0 -> ''
+						_ -> 'let ' << staticNames |> join(',') << ';'
+					}
+					exprsPart := node.staticExprs |> map(renderNode) |> join(';') << ';'
+					copyPart := staticNames |> map(fn(n) '__oak_cls.' << n << '=' << n) |> join(';')
+
+					fmtName << '=(()=>{let __oak_cls=__Oak_Class(\'' << node.name << '\',' << ctor << ');let ' << fmtName << '=__oak_cls;' << declPart << exprsPart << copyPart << ';return __oak_cls;})()'
+				}
+			}
+		}
 	}
 
 	vfsInit := if len(vfsFiles |> keys()) {

@@ -7,6 +7,7 @@ append := std.append
 last := std.last
 filter := std.filter
 map := std.map
+each := std.each
 str := import('str')
 strContains? := str.contains?
 fmt := import('fmt')
@@ -15,6 +16,251 @@ format := fmt.format
 	tokenize: tokenize
 	renderToken: renderToken
 } := import('syntax-tokenize')
+
+// --- Class sugar desugaring helpers ---
+
+fn cloneNameSet(set) {
+	result := {}
+	keys(set) |> each(fn(k) result.(k) <- set.(k))
+	result
+}
+
+fn addPatternBindings(shadowed, node) if node.type {
+	:identifier -> shadowed.(node.val) <- true
+	:list -> node.elems |> each(fn(el) addPatternBindings(shadowed, el))
+	:object -> node.entries |> each(fn(entry) addPatternBindings(shadowed, entry.val))
+}
+
+fn rewriteClassSugarAssignmentLeft(node, visibleFields, allFields, shadowed, selfName, isLocal) if node.type {
+	:identifier -> if {
+		isLocal -> node
+		shadowed.(node.val) != ? -> node
+		node.val = 'Self' -> { type: :identifier, tok: node.tok, val: selfName }
+		visibleFields.(node.val) != ? -> {
+			type: :propertyAccess
+			tok: node.tok
+			left: { type: :identifier, tok: node.tok, val: selfName }
+			right: node
+		}
+		_ -> node
+	}
+	:list -> {
+		type: :list
+		tok: node.tok
+		elems: node.elems |> map(fn(el) rewriteClassSugarAssignmentLeft(el, visibleFields, allFields, shadowed, selfName, isLocal))
+	}
+	:object -> {
+		type: :object
+		tok: node.tok
+		entries: node.entries |> map(fn(entry) {
+			key: entry.key
+			val: rewriteClassSugarAssignmentLeft(entry.val, visibleFields, allFields, shadowed, selfName, isLocal)
+		})
+	}
+	:propertyAccess -> {
+		type: :propertyAccess
+		tok: node.tok
+		left: rewriteClassSugarNode(node.left, visibleFields, allFields, shadowed, selfName)
+		right: node.right
+	}
+	_ -> node
+}
+
+fn rewriteClassSugarNode(node, visibleFields, allFields, shadowed, selfName) if node.type {
+	:identifier -> if {
+		node.val = selfName -> node
+		shadowed.(node.val) != ? -> node
+		node.val = 'Self' -> { type: :identifier, tok: node.tok, val: selfName }
+		visibleFields.(node.val) != ? -> {
+			type: :propertyAccess
+			tok: node.tok
+			left: { type: :identifier, tok: node.tok, val: selfName }
+			right: node
+		}
+		_ -> node
+	}
+	:list -> {
+		type: :list
+		tok: node.tok
+		elems: node.elems |> map(fn(el) rewriteClassSugarNode(el, visibleFields, allFields, shadowed, selfName))
+	}
+	:object -> {
+		type: :object
+		tok: node.tok
+		entries: node.entries |> map(fn(entry) {
+			key: if entry.key.type {
+				:identifier -> entry.key
+				_ -> rewriteClassSugarNode(entry.key, visibleFields, allFields, shadowed, selfName)
+			}
+			val: rewriteClassSugarNode(entry.val, visibleFields, allFields, shadowed, selfName)
+		})
+	}
+	:function -> {
+		fnShadowed := cloneNameSet(shadowed)
+		if node.name != '' -> fnShadowed.(node.name) <- true
+		node.args |> each(fn(arg) if arg != '' & arg != '_' -> fnShadowed.(arg) <- true)
+		if node.restArg != '' -> fnShadowed.(node.restArg) <- true
+		{
+			type: :function
+			name: node.name
+			tok: node.tok
+			args: node.args
+			restArg: node.restArg
+			body: rewriteClassSugarNode(node.body, allFields, allFields, fnShadowed, selfName)
+		}
+	}
+	:class -> {
+		classShadowed := cloneNameSet(shadowed)
+		classShadowed.(node.name) <- true
+		node.args |> each(fn(arg) if arg != '' & arg != '_' -> classShadowed.(arg) <- true)
+		if node.restArg != '' -> classShadowed.(node.restArg) <- true
+		{
+			type: :class
+			name: node.name
+			tok: node.tok
+			args: node.args
+			restArg: node.restArg
+			body: rewriteClassSugarNode(node.body, allFields, allFields, classShadowed, selfName)
+			staticExprs: node.staticExprs |> map(fn(expr) rewriteClassSugarNode(expr, visibleFields, allFields, classShadowed, selfName))
+			parents: node.parents |> map(fn(p) rewriteClassSugarNode(p, allFields, allFields, classShadowed, selfName))
+		}
+	}
+	:assignment -> {
+		type: :assignment
+		tok: node.tok
+		local?: node.local?
+		left: rewriteClassSugarAssignmentLeft(node.left, visibleFields, allFields, shadowed, selfName, node.local?)
+		right: rewriteClassSugarNode(node.right, visibleFields, allFields, shadowed, selfName)
+	}
+	:propertyAccess -> {
+		type: :propertyAccess
+		tok: node.tok
+		left: rewriteClassSugarNode(node.left, visibleFields, allFields, shadowed, selfName)
+		right: if node.right.type {
+			:identifier -> node.right
+			_ -> rewriteClassSugarNode(node.right, visibleFields, allFields, shadowed, selfName)
+		}
+	}
+	:unary -> {
+		type: :unary
+		tok: node.tok
+		op: node.op
+		right: rewriteClassSugarNode(node.right, visibleFields, allFields, shadowed, selfName)
+	}
+	:binary -> {
+		type: :binary
+		tok: node.tok
+		op: node.op
+		left: rewriteClassSugarNode(node.left, visibleFields, allFields, shadowed, selfName)
+		right: rewriteClassSugarNode(node.right, visibleFields, allFields, shadowed, selfName)
+	}
+	:fnCall -> {
+		type: :fnCall
+		tok: node.tok
+		function: rewriteClassSugarNode(node.function, visibleFields, allFields, shadowed, selfName)
+		args: node.args |> map(fn(arg) rewriteClassSugarNode(arg, visibleFields, allFields, shadowed, selfName))
+		restArg: if node.restArg {
+			? -> ?
+			_ -> rewriteClassSugarNode(node.restArg, visibleFields, allFields, shadowed, selfName)
+		}
+	}
+	:ifExpr -> {
+		type: :ifExpr
+		tok: node.tok
+		cond: rewriteClassSugarNode(node.cond, visibleFields, allFields, shadowed, selfName)
+		branches: node.branches |> map(fn(br) {
+			type: :ifBranch
+			target: rewriteClassSugarNode(br.target, visibleFields, allFields, shadowed, selfName)
+			body: rewriteClassSugarNode(br.body, visibleFields, allFields, shadowed, selfName)
+		})
+	}
+	:block -> {
+		blockShadowed := cloneNameSet(shadowed)
+		{
+			type: :block
+			tok: node.tok
+			exprs: node.exprs |> map(fn(expr) {
+				result := rewriteClassSugarNode(expr, visibleFields, allFields, blockShadowed, selfName)
+				if expr.type = :assignment & expr.local? -> addPatternBindings(blockShadowed, expr.left)
+				result
+			})
+		}
+	}
+	_ -> node
+}
+
+fn classBodyFromAssignmentBlock(body, reservedNames) if body.type {
+	:block -> if len(body.exprs) {
+		0 -> [?, false]
+		_ -> {
+			// Verify all expressions are local assignments to identifiers
+			fieldNames := {}
+			allLocal? := true
+			allIdentLHS? := true
+			body.exprs |> each(fn(expr) {
+				if !(expr.type = :assignment & expr.local?) -> allLocal? <- false
+				if expr.type = :assignment & expr.local? -> if expr.left.type {
+					:identifier -> fieldNames.(expr.left.val) <- true
+					_ -> allIdentLHS? <- false
+				}
+			})
+
+			if !allLocal? | !allIdentLHS? {
+				true -> [?, false]
+				_ -> {
+					// Generate unique self name
+					selfName := '__oakClassSelf'
+					reserved := {}
+					reservedNames |> each(fn(name) if name != '' & name != '_' -> reserved.(name) <- true)
+					fn findUniqueSelf if fieldNames.(selfName) != ? | reserved.(selfName) != ? -> {
+						selfName <- selfName << '_'
+						findUniqueSelf()
+					}
+					findUniqueSelf()
+
+					// Build desugared body
+					visibleFields := {}
+					shadowed := {}
+					shadowed.(selfName) <- true
+
+					newExprs := [{
+						type: :assignment
+						tok: body.tok
+						local?: true
+						left: { type: :identifier, tok: body.tok, val: selfName }
+						right: { type: :object, tok: body.tok, entries: [] }
+					}]
+
+					body.exprs |> each(fn(expr) {
+						ident := expr.left
+						newExprs << {
+							type: :assignment
+							tok: expr.tok
+							local?: false
+							left: {
+								type: :propertyAccess
+								tok: expr.tok
+								left: { type: :identifier, tok: ident.tok, val: selfName }
+								right: ident
+							}
+							right: rewriteClassSugarNode(expr.right, visibleFields, fieldNames, shadowed, selfName)
+						}
+						visibleFields.(ident.val) <- true
+					})
+
+					newExprs << { type: :identifier, tok: body.tok, val: selfName }
+
+					[{
+						type: :block
+						tok: body.tok
+						exprs: newExprs
+					}, true]
+				}
+			}
+		}
+	}
+	_ -> [?, false]
+}
 
 // Parser takes a raw token stream, potentially including newlines and
 // comments, and generates a list of clean Oak AST nodes.
@@ -176,6 +422,132 @@ fn Parser(tokens) {
 					args: sig.args
 					restArg: sig.restArg
 					body: normalizeFnBody(body)
+				}
+			}
+		}
+	}
+
+	// tryParseClassParentsClause attempts to parse (parent1, parent2, ...) -> body
+	// Returns { parents, body } on success, or ? on failure (with state restored).
+	fn tryParseClassParentsClause {
+		if eof?() | peek().type != :leftParen -> ?
+
+		savedIdx := index
+		savedMPLen := len(minBinaryPrec)
+
+		pushMinPrec(0)
+		next() // eat (
+
+		parents := []
+		parseFailed? := false
+		fn subParent if !eof?() & !parseFailed? -> if peek().type {
+			:rightParen -> ?
+			_ -> {
+				parent := parseNode()
+				if type(parent) = :object & parent.type = :error {
+					true -> parseFailed? <- true
+					_ -> {
+						parents << parent
+						if peek().type {
+							:comma -> {
+								next()
+								subParent()
+							}
+							:rightParen -> ?
+							_ -> parseFailed? <- true
+						}
+					}
+				}
+			}
+		}
+		subParent()
+
+		result := if parseFailed? {
+			true -> :fail
+			_ -> {
+				rp := expect(:rightParen)
+				if type(rp) = :object & rp.type = :error {
+					true -> :fail
+					_ -> if eof?() | peek().type != :branchArrow {
+						true -> :fail
+						_ -> {
+							next() // eat ->
+							body := parseNode()
+							if type(body) = :object & body.type = :error {
+								true -> :fail
+								_ -> {
+									popMinPrec()
+									{ parents: parents, body: body }
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if result = :fail {
+			true -> {
+				index <- savedIdx
+				minBinaryPrec <- slice(minBinaryPrec, 0, savedMPLen)
+				?
+			}
+			_ -> result
+		}
+	}
+
+	// tryParseInheritedClassBody attempts to parse { statics..., (parents) -> body }
+	// Returns { staticExprs, parents, body } on success, or ? on failure (with state restored).
+	fn tryParseInheritedClassBody {
+		if eof?() | peek().type != :leftBrace -> ?
+
+		savedIdx := index
+		savedMPLen := len(minBinaryPrec)
+
+		next() // eat {
+
+		staticExprs := []
+		fn subStatic {
+			if eof?() | peek().type = :rightBrace -> { found: false }
+
+			// Try parsing parents clause
+			pr := tryParseClassParentsClause()
+			if pr != ? -> {
+				if !eof?() & peek().type = :comma -> next()
+				{ found: true, parents: pr.parents, body: pr.body }
+			}
+
+			// Parse static expression
+			expr := parseNode()
+			if type(expr) = :object & expr.type = :error -> { found: false }
+
+			cm := expect(:comma)
+			if type(cm) = :object & cm.type = :error -> { found: false }
+
+			staticExprs << expr
+			subStatic()
+		}
+
+		r := subStatic()
+		if !r.found {
+			true -> {
+				index <- savedIdx
+				minBinaryPrec <- slice(minBinaryPrec, 0, savedMPLen)
+				?
+			}
+			_ -> {
+				rb := expect(:rightBrace)
+				if type(rb) = :object & rb.type = :error {
+					true -> {
+						index <- savedIdx
+						minBinaryPrec <- slice(minBinaryPrec, 0, savedMPLen)
+						?
+					}
+					_ -> {
+						staticExprs: staticExprs
+						parents: r.parents
+						body: r.body
+					}
 				}
 			}
 		}
@@ -408,17 +780,61 @@ fn Parser(tokens) {
 					nameTok := expect(:identifier)
 					if nameTok.type = :error -> nameTok
 
-					with notError(fnNode := parseFunctionLiteral(tok, nameTok.val)) fn {
-						{
-							type: :assignment
-							tok: tok
-							isLocal: true
-							left: {
-								type: :identifier
-								tok: nameTok
-								val: nameTok.val
+					with notError(nameTok) fn {
+						with notError(sig := parseOptionalParamList()) fn {
+							// Try parsing inherited class body { statics, (parents) -> body }
+							inheritedResult := if !eof?() & peek().type = :leftBrace {
+								true -> tryParseInheritedClassBody()
+								_ -> ?
 							}
-							right: fnNode
+
+							if inheritedResult != ? {
+								true -> {
+									popMinPrec()
+									reservedNames := if sig.restArg {
+										'' -> sig.args
+										_ -> append(sig.args, [sig.restArg])
+									}
+									[desugaredBody, sugarOk] := classBodyFromAssignmentBlock(inheritedResult.body, reservedNames)
+
+									{
+										type: :class
+										name: nameTok.val
+										tok: tok
+										args: sig.args
+										restArg: sig.restArg
+										body: if sugarOk { true -> desugaredBody, _ -> inheritedResult.body }
+										staticExprs: inheritedResult.staticExprs
+										parents: inheritedResult.parents
+									}
+								}
+								_ -> with notError(body := parseNode()) fn {
+									popMinPrec()
+
+									// Empty {} is empty block body for classes
+									normalizedBody := if body.type = :object & len(body.entries) = 0 {
+										true -> { type: :block, tok: body.tok, exprs: [] }
+										_ -> body
+									}
+
+									reservedNames := if sig.restArg {
+										'' -> sig.args
+										_ -> append(sig.args, [sig.restArg])
+									}
+									[desugaredBody, sugarOk] := classBodyFromAssignmentBlock(normalizedBody, reservedNames)
+
+									{
+										type: :class
+										name: nameTok.val
+										tok: tok
+										args: sig.args
+										restArg: sig.restArg
+										body: if sugarOk { true -> desugaredBody, _ -> normalizedBody }
+										staticExprs: []
+										parents: []
+									}
+								}
+							}
 						}
 					}
 				}

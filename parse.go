@@ -485,6 +485,9 @@ func rewriteClassSugarAssignmentLeft(node astNode, visibleFields, allFields, sha
 		if _, ok := shadowed[n.payload]; ok {
 			return n
 		}
+		if n.payload == "Self" {
+			return identifierNode{payload: selfName, tok: n.tok}
+		}
 		if _, ok := visibleFields[n.payload]; ok {
 			return propertyAccessNode{
 				left:  makeClassSugarSelfNode(selfName, n.tok),
@@ -532,6 +535,9 @@ func rewriteClassSugarNode(node astNode, visibleFields, allFields, shadowed map[
 		}
 		if _, ok := shadowed[n.payload]; ok {
 			return n
+		}
+		if n.payload == "Self" {
+			return identifierNode{payload: selfName, tok: n.tok}
 		}
 		if _, ok := visibleFields[n.payload]; ok {
 			return propertyAccessNode{

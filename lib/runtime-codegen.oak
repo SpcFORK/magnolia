@@ -2,10 +2,13 @@
 
 { OakNativeRuntime: OakNativeRuntime } := import('runtime-native')
 { OakJSRuntime: OakJSRuntime } := import('runtime-js')
+vm := import('wasm-vm')
+vmRuntime := import('wasm-vm-runtime')
 
 std := import('std')
 map := std.map
 toHex := std.toHex
+
 str := import('str')
 join := str.join
 padStart := str.padStart
@@ -14,7 +17,7 @@ lower := str.lower
 fn _hexByte(n) toHex(n) |> padStart(2, '0') |> lower()
 
 // _escapeWATCodepoint converts one Oak string byte to a WAT \xx escape.
-fn _escapeWATCodepoint(cp) '\\' << _hexByte(cp & 0 xFF)
+fn _escapeWATCodepoint(cp) '\\' << _hexByte(cp & 0xFF)
 
 // encodeWATString encodes a string as a WAT (data ...) element value.
 // Returns { escaped, byteLen } where:
@@ -93,9 +96,69 @@ fn renderWasmBundle(bundleNode, renderOakBundle) {
 '
 }
 
+// renderWasmVMBundle compiles Oak AST to bytecodes and generates a
+// self-contained WASM module with an embedded bytecode VM.
+// No external Oak interpreter import is needed — the VM executes
+// the bytecodes directly. Only minimal I/O host imports are required.
+fn renderWasmVMBundle(bundleNode) {
+	// Compile the AST to bytecodes
+	compiler := vm.compileProgram(bundleNode)
+
+	// Serialize compiler output to binary strings
+	bytecodeStr  := vm.serializeBytecodeToString(compiler)
+	constpoolStr := vm.serializeConstantPool(compiler)
+	fntableStr   := vm.serializeFunctionTable(compiler)
+
+	// Encode binary data as WAT hex escape strings
+	bcEncoded := encodeWATString(bytecodeStr)
+	cpEncoded := encodeWATString(constpoolStr)
+	ftEncoded := encodeWATString(fntableStr)
+
+	// Generate the WAT module with embedded VM runtime
+	watSource := vmRuntime.generateVMWat(
+		bcEncoded.escaped, bcEncoded.byteLen
+		cpEncoded.escaped, cpEncoded.byteLen
+		ftEncoded.escaped, ftEncoded.byteLen
+	)
+
+	// Inject the $set_local_at helper function before the closing ')' of the module
+	helperWat := vmRuntime.generateSetLocalAtHelper()
+	// Insert helper before the last line (the closing parenthesis of the module)
+	// by replacing the final ')' with helper + ')'
+	idx := len(watSource) - 2
+	fn findClose(i) if i >= 0 {
+		true -> if watSource.(i) = ')' {
+			true -> i
+			_ -> findClose(i - 1)
+		}
+		_ -> idx
+	}
+	closeIdx := findClose(idx)
+	// Rebuild: everything before the closing ')' + helper + closing ')\n'
+	prefix := ''
+	fn buildPrefix(i) if i < closeIdx {
+		true -> {
+			prefix <- prefix << watSource.(i)
+			buildPrefix(i + 1)
+		}
+	}
+	buildPrefix(0)
+	suffix := ''
+	fn buildSuffix(i) if i < len(watSource) {
+		true -> {
+			suffix <- suffix << watSource.(i)
+			buildSuffix(i + 1)
+		}
+	}
+	buildSuffix(closeIdx)
+
+	prefix << helperWat << suffix
+}
+
 {
 	OakNativeRuntime: OakNativeRuntime
 	OakJSRuntime: OakJSRuntime
 	encodeWATString: encodeWATString
 	renderWasmBundle: renderWasmBundle
+	renderWasmVMBundle: renderWasmVMBundle
 }

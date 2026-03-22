@@ -2,6 +2,9 @@
 
 sys := import('sys')
 {
+	readU32: readU32
+} := import('writes')
+{
 	Gdi32: Gdi32
 	User32: User32
 } := import('windows-constants')
@@ -106,6 +109,23 @@ fn ellipse(hdc, left, top, right, bottom) if isWindows?() {
 fn createSolidBrush(colorRef) if isWindows?() {
 	true -> gdi32('CreateSolidBrush', colorRef)
 	_ -> _platformError('createSolidBrush')
+}
+
+fn getTextExtentPoint32(hdc, text) if isWindows?() {
+	true -> {
+		szBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+		res := gdi32('GetTextExtentPoint32W', hdc, wstr(text), len(text), )
+		if res.r1 > 0 {
+			true -> {
+				base := addr(szBuf)
+				cx := readU32(base)
+				cy := readU32(base + 4)
+				{ type: :ok, cx: cx, cy: cy }
+			}
+			_ -> _platformError('getTextExtentPoint32')
+		}
+	}
+	_ -> _platformError('getTextExtentPoint32')
 }
 
 fn deleteObject(gdiObject) if isWindows?() {

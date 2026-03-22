@@ -1775,6 +1775,49 @@ func TestClassMatchBuiltin(t *testing.T) {
 	))
 }
 
+func TestClassSelfSugarReferencesInstance(t *testing.T) {
+	expectProgramToReturn(t, `
+		cs Widget {
+			x := 10
+			y := 20
+			getSelf := fn() Self
+		}
+
+		w := Widget()
+		s := w.getSelf()
+		[s.x, s.y]
+	`, MakeList(IntValue(10), IntValue(20)))
+}
+
+func TestClassSelfSugarPassedToExternalFn(t *testing.T) {
+	expectProgramToReturn(t, `
+		fn extract(obj) obj.value
+
+		cs Box {
+			value := 42
+			extractSelf := fn() extract(Self)
+		}
+
+		Box().extractSelf()
+	`, IntValue(42))
+}
+
+func TestClassSelfSugarMutateViaSelf(t *testing.T) {
+	expectProgramToReturn(t, `
+		fn bumpN(obj) obj.n <- obj.n + 1
+
+		cs Counter {
+			n := 0
+			bump := fn() bumpN(Self)
+		}
+
+		c := Counter()
+		c.bump()
+		c.bump()
+		c.n
+	`, IntValue(2))
+}
+
 func TestBitsBuiltinRoundTrip(t *testing.T) {
 	expectProgramToReturn(t, `
 		bits(bits([65, 66, 67]))

@@ -410,9 +410,7 @@ func (sc *scope) get(name string) (Value, *runtimeError) {
 	if sc.parent != nil {
 		return sc.parent.get(name)
 	}
-	return nil, &runtimeError{
-		reason: fmt.Sprintf("%s is undefined", name),
-	}
+	return null, nil
 }
 
 func (sc *scope) put(name string, v Value) {

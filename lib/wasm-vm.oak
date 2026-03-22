@@ -1,0 +1,943 @@
+// wasm-vm -- Oak AST to bytecode compiler for the WASM VM target
+//
+// Compiles Oak AST nodes (as produced by the build pipeline) into a
+// compact bytecode format. The bytecode, constant pool, and function
+// templates are later embedded in WASM linear memory by the VM runtime
+// generator (wasm-vm-runtime).
+//
+// Bytecode format: a flat byte array. Multi-byte operands are
+// little-endian. The value stack uses 8-byte tagged entries
+// [type:i32][payload:i32].
+
+std := import('std')
+map := std.map
+each := std.each
+reduce := std.reduce
+append := std.append
+indexOf := std.indexOf
+len := std.len
+clone := std.clone
+slice := std.slice
+str := import('str')
+join := str.join
+fmt := import('fmt')
+format := fmt.format
+
+// ---------------------------------------------------------------------------
+// Opcodes (contiguous 0..N for efficient br_table dispatch in WASM)
+// ---------------------------------------------------------------------------
+
+OP_HALT          := 0
+OP_NOP           := 1
+OP_CONST_NULL    := 2
+OP_CONST_EMPTY   := 3
+OP_CONST_TRUE    := 4
+OP_CONST_FALSE   := 5
+OP_CONST_INT     := 6   // i32 operand
+OP_CONST_FLOAT   := 7   // u16 constant pool index
+OP_CONST_STRING  := 8   // u16 constant pool index
+OP_CONST_ATOM    := 9   // u16 constant pool index
+OP_POP           := 10
+OP_DUP           := 11
+OP_LOAD_LOCAL    := 12  // u16 slot index
+OP_STORE_LOCAL   := 13  // u16 slot index
+OP_LOAD_UPVAL    := 14  // u16 depth, u16 slot index
+OP_STORE_UPVAL   := 15  // u16 depth, u16 slot index
+OP_ADD           := 16
+OP_SUB           := 17
+OP_MUL           := 18
+OP_DIV           := 19
+OP_MOD           := 20
+OP_POW           := 21
+OP_NEG           := 22
+OP_BAND          := 23
+OP_BOR           := 24
+OP_BXOR          := 25
+OP_BRSHIFT       := 26
+OP_EQ            := 27
+OP_NEQ           := 28
+OP_GT            := 29
+OP_LT            := 30
+OP_GEQ           := 31
+OP_LEQ           := 32
+OP_NOT           := 33
+OP_CONCAT        := 34  // <<
+OP_MAKE_LIST     := 35  // u16 element count
+OP_MAKE_OBJECT   := 36  // u16 pair count
+OP_GET_PROP      := 37  // pop key, pop obj, push obj[key]
+OP_SET_PROP      := 38  // pop val, pop key, pop obj, obj[key]=val, push obj
+OP_JUMP          := 39  // i32 absolute bytecode offset
+OP_JUMP_FALSE    := 40  // i32 absolute bytecode offset (pops condition)
+OP_CLOSURE       := 41  // u16 function template index
+OP_CALL          := 42  // u8 arity
+OP_RETURN        := 43
+OP_TAIL_CALL     := 44  // u8 arity
+OP_BUILTIN       := 45  // u16 builtin index, u8 arity
+OP_IMPORT        := 46
+OP_DEEP_EQ       := 47
+OP_SWAP          := 48  // swap top two stack entries
+OP_MATCH_JUMP    := 49  // pop value, compare with TOS, jump i32 if no match
+OP_SCOPE_PUSH    := 50  // push a new scope level
+OP_SCOPE_POP     := 51  // pop scope level
+
+NUM_OPCODES      := 52
+
+// Opcode names for debugging / disassembly
+OpcodeName := [
+	'HALT', 'NOP', 'CONST_NULL', 'CONST_EMPTY'
+	'CONST_TRUE', 'CONST_FALSE', 'CONST_INT', 'CONST_FLOAT'
+	'CONST_STRING', 'CONST_ATOM', 'POP', 'DUP'
+	'LOAD_LOCAL', 'STORE_LOCAL', 'LOAD_UPVAL', 'STORE_UPVAL'
+	'ADD', 'SUB', 'MUL', 'DIV', 'MOD', 'POW', 'NEG'
+	'BAND', 'BOR', 'BXOR', 'BRSHIFT'
+	'EQ', 'NEQ', 'GT', 'LT', 'GEQ', 'LEQ'
+	'NOT', 'CONCAT', 'MAKE_LIST', 'MAKE_OBJECT'
+	'GET_PROP', 'SET_PROP'
+	'JUMP', 'JUMP_FALSE'
+	'CLOSURE', 'CALL', 'RETURN', 'TAIL_CALL'
+	'BUILTIN', 'IMPORT', 'DEEP_EQ'
+	'SWAP', 'MATCH_JUMP'
+	'SCOPE_PUSH', 'SCOPE_POP'
+]
+
+// ---------------------------------------------------------------------------
+// Built-in function indices (matched by the VM runtime)
+// ---------------------------------------------------------------------------
+
+BUILTIN_PRINT     := 0
+BUILTIN_LEN       := 1
+BUILTIN_TYPE      := 2
+BUILTIN_STRING    := 3
+BUILTIN_INT       := 4
+BUILTIN_FLOAT     := 5
+BUILTIN_CODEPOINT := 6
+BUILTIN_CHAR      := 7
+BUILTIN_KEYS      := 8
+BUILTIN_VALUES    := 9
+BUILTIN_SLICE     := 10
+BUILTIN_APPEND    := 11
+BUILTIN_WAIT      := 12
+BUILTIN_EXIT      := 13
+
+BuiltinName := [
+	'print', 'len', 'type', 'string', 'int', 'float'
+	'codepoint', 'char', 'keys', 'values', 'slice'
+	'append', 'wait', 'exit'
+]
+
+// ---------------------------------------------------------------------------
+// Value type tags (shared with the runtime)
+// ---------------------------------------------------------------------------
+
+TAG_NULL     := 0
+TAG_EMPTY    := 1
+TAG_INT      := 2
+TAG_FLOAT    := 3
+TAG_BOOL     := 4
+TAG_STRING   := 5
+TAG_ATOM     := 6
+TAG_LIST     := 7
+TAG_OBJECT   := 8
+TAG_FUNCTION := 9
+
+// ---------------------------------------------------------------------------
+// Compiler state
+// ---------------------------------------------------------------------------
+
+fn createCompiler() {
+	{
+		// Output bytecode (array of integer byte values 0-255)
+		bytecode: []
+		// Constant pool entries: { type: :string|:float|:atom, value: ... }
+		constants: []
+		// Function templates: { offset, arity, localCount, name, hasRestArg }
+		functions: []
+		// Current scope's local variable names (list of strings)
+		locals: []
+		// Scope stack for entering/leaving functions
+		scopeStack: []
+		// Compilation errors
+		errors: []
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bytecode emission helpers
+// ---------------------------------------------------------------------------
+
+fn emitByte(c, b) {
+	c.bytecode <- c.bytecode |> append([int(b) & 0xFF])
+}
+
+fn emitU16(c, v) {
+	iv := int(v)
+	emitByte(c, iv & 0xFF)
+	emitByte(c, (iv >> 8) & 0xFF)
+}
+
+fn emitI32(c, v) {
+	iv := int(v)
+	emitByte(c, iv & 0xFF)
+	emitByte(c, (iv >> 8) & 0xFF)
+	emitByte(c, (iv >> 16) & 0xFF)
+	emitByte(c, (iv >> 24) & 0xFF)
+}
+
+fn patchI32(c, offset, v) {
+	iv := int(v)
+	c.bytecode.(offset) <- iv & 0xFF
+	c.bytecode.(offset + 1) <- (iv >> 8) & 0xFF
+	c.bytecode.(offset + 2) <- (iv >> 16) & 0xFF
+	c.bytecode.(offset + 3) <- (iv >> 24) & 0xFF
+}
+
+fn currentOffset(c) len(c.bytecode)
+
+// ---------------------------------------------------------------------------
+// Constant pool
+// ---------------------------------------------------------------------------
+
+fn addConstant(c, entry) {
+	idx := len(c.constants)
+	c.constants <- c.constants |> append([entry])
+	idx
+}
+
+fn addString(c, s) {
+	// Deduplicate
+	fn find(i) if i < len(c.constants) {
+		true -> if c.constants.(i).type = :string & c.constants.(i).value = s {
+			true -> i
+			_ -> find(i + 1)
+		}
+		_ -> addConstant(c, { type: :string, value: s })
+	}
+	find(0)
+}
+
+fn addAtom(c, name) {
+	fn find(i) if i < len(c.constants) {
+		true -> if c.constants.(i).type = :atom & c.constants.(i).value = name {
+			true -> i
+			_ -> find(i + 1)
+		}
+		_ -> addConstant(c, { type: :atom, value: name })
+	}
+	find(0)
+}
+
+fn addFloat(c, v) {
+	fn find(i) if i < len(c.constants) {
+		true -> if c.constants.(i).type = :float & c.constants.(i).value = v {
+			true -> i
+			_ -> find(i + 1)
+		}
+		_ -> addConstant(c, { type: :float, value: v })
+	}
+	find(0)
+}
+
+// ---------------------------------------------------------------------------
+// Local variable management
+// ---------------------------------------------------------------------------
+
+fn resolveLocal(c, name) {
+	fn find(i) if i >= 0 {
+		true -> if c.locals.(i) = name {
+			true -> i
+			_ -> find(i - 1)
+		}
+		_ -> ~1
+	}
+	find(len(c.locals) - 1)
+}
+
+fn declareLocal(c, name) {
+	idx := resolveLocal(c, name)
+	if idx < 0 {
+		true -> {
+			idx <- len(c.locals)
+			c.locals <- c.locals |> append([name])
+			idx
+		}
+		_ -> idx
+	}
+}
+
+fn pushScope(c) {
+	c.scopeStack <- c.scopeStack |> append([{
+		locals: clone(c.locals)
+	}])
+}
+
+fn popScope(c) {
+	depth := len(c.scopeStack)
+	if depth > 0 {
+		true -> {
+			saved := c.scopeStack.(depth - 1)
+			c.scopeStack <- slice(c.scopeStack, 0, depth - 1)
+			c.locals <- saved.locals
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Resolve built-in function names to indices
+// ---------------------------------------------------------------------------
+
+fn resolveBuiltin(name) {
+	fn find(i) if i < len(BuiltinName) {
+		true -> if BuiltinName.(i) = name {
+			true -> i
+			_ -> find(i + 1)
+		}
+		_ -> ~1
+	}
+	find(0)
+}
+
+// ---------------------------------------------------------------------------
+// AST → Bytecode compilation
+// ---------------------------------------------------------------------------
+
+fn compileNode(c, node) if node {
+	? -> emitByte(c, OP_CONST_NULL)
+	_ -> if node.type {
+		:null -> emitByte(c, OP_CONST_NULL)
+
+		:empty -> emitByte(c, OP_CONST_EMPTY)
+
+		:bool -> if node.val {
+			true -> emitByte(c, OP_CONST_TRUE)
+			_ -> emitByte(c, OP_CONST_FALSE)
+		}
+
+		:int -> {
+			emitByte(c, OP_CONST_INT)
+			emitI32(c, node.val)
+		}
+
+		:float -> {
+			idx := addFloat(c, node.val)
+			emitByte(c, OP_CONST_FLOAT)
+			emitU16(c, idx)
+		}
+
+		:string -> {
+			idx := addString(c, node.val)
+			emitByte(c, OP_CONST_STRING)
+			emitU16(c, idx)
+		}
+
+		:atom -> {
+			idx := addAtom(c, node.val)
+			emitByte(c, OP_CONST_ATOM)
+			emitU16(c, idx)
+		}
+
+		:identifier -> {
+			localIdx := resolveLocal(c, node.val)
+			if localIdx >= 0 {
+				true -> {
+					emitByte(c, OP_LOAD_LOCAL)
+					emitU16(c, localIdx)
+				}
+				_ -> {
+					// Implicit global / forward reference — declare as local
+					newIdx := declareLocal(c, node.val)
+					emitByte(c, OP_LOAD_LOCAL)
+					emitU16(c, newIdx)
+				}
+			}
+		}
+
+		:unary -> {
+			compileNode(c, node.right)
+			if node.op {
+				:minus -> emitByte(c, OP_NEG)
+				:exclam -> emitByte(c, OP_NOT)
+			}
+		}
+
+		:binary -> {
+			compileNode(c, node.left)
+			compileNode(c, node.right)
+			if node.op {
+				:plus -> emitByte(c, OP_ADD)
+				:minus -> emitByte(c, OP_SUB)
+				:times -> emitByte(c, OP_MUL)
+				:divide -> emitByte(c, OP_DIV)
+				:modulus -> emitByte(c, OP_MOD)
+				:power -> emitByte(c, OP_POW)
+				:and -> emitByte(c, OP_BAND)
+				:or -> emitByte(c, OP_BOR)
+				:xor -> emitByte(c, OP_BXOR)
+				:rshift -> emitByte(c, OP_BRSHIFT)
+				:eq -> emitByte(c, OP_EQ)
+				:deepEq -> emitByte(c, OP_DEEP_EQ)
+				:neq -> emitByte(c, OP_NEQ)
+				:greater -> emitByte(c, OP_GT)
+				:less -> emitByte(c, OP_LT)
+				:geq -> emitByte(c, OP_GEQ)
+				:leq -> emitByte(c, OP_LEQ)
+				:pushArrow -> emitByte(c, OP_CONCAT)
+			}
+		}
+
+		:assignment -> {
+			compileAssignment(c, node)
+		}
+
+		:propertyAccess -> {
+			compileNode(c, node.left)
+			if node.right.type {
+				:identifier -> {
+					idx := addString(c, node.right.val)
+					emitByte(c, OP_CONST_STRING)
+					emitU16(c, idx)
+				}
+				_ -> compileNode(c, node.right)
+			}
+			emitByte(c, OP_GET_PROP)
+		}
+
+		:list -> {
+			node.elems |> each(fn(elem) compileNode(c, elem))
+			emitByte(c, OP_MAKE_LIST)
+			emitU16(c, len(node.elems))
+		}
+
+		:object -> {
+			node.entries |> each(fn(entry) {
+				compileNode(c, entry.key)
+				compileNode(c, entry.val)
+			})
+			emitByte(c, OP_MAKE_OBJECT)
+			emitU16(c, len(node.entries))
+		}
+
+		:block -> {
+			if len(node.exprs) {
+				0 -> emitByte(c, OP_CONST_NULL)
+				_ -> node.exprs |> each(fn(expr, i) {
+					compileNode(c, expr)
+					if i < len(node.exprs) - 1 -> emitByte(c, OP_POP)
+				})
+			}
+		}
+
+		:ifExpr -> {
+			compileIfExpr(c, node)
+		}
+
+		:function -> {
+			compileFunction(c, node)
+		}
+
+		:fnCall -> {
+			compileFnCall(c, node)
+		}
+
+		_ -> {
+			c.errors <- c.errors |> append([
+				'Unknown AST node type: ' << string(node.type)
+			])
+			emitByte(c, OP_CONST_NULL)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compile assignment expressions
+// ---------------------------------------------------------------------------
+
+fn compileAssignment(c, node) {
+	if node.left.type {
+		:identifier -> {
+			compileNode(c, node.right)
+			idx := if node.local? {
+				true -> declareLocal(c, node.left.val)
+				_ -> {
+					existing := resolveLocal(c, node.left.val)
+					if existing >= 0 {
+						true -> existing
+						_ -> declareLocal(c, node.left.val)
+					}
+				}
+			}
+			emitByte(c, OP_DUP)
+			emitByte(c, OP_STORE_LOCAL)
+			emitU16(c, idx)
+		}
+		:propertyAccess -> {
+			// obj.key <- value  →  push obj, push key, push value, SET_PROP
+			compileNode(c, node.left.left)
+			if node.left.right.type {
+				:identifier -> {
+					idx := addString(c, node.left.right.val)
+					emitByte(c, OP_CONST_STRING)
+					emitU16(c, idx)
+				}
+				_ -> compileNode(c, node.left.right)
+			}
+			compileNode(c, node.right)
+			emitByte(c, OP_SET_PROP)
+		}
+		:list -> {
+			// Destructuring: [a, b, c] := expr
+			// Compile RHS, then extract each element
+			compileNode(c, node.right)
+			node.left.elems |> each(fn(elem, i) {
+				if elem.type != :empty {
+					true -> {
+						emitByte(c, OP_DUP)
+						emitByte(c, OP_CONST_INT)
+						emitI32(c, i)
+						emitByte(c, OP_GET_PROP)
+						idx := declareLocal(c, elem.val)
+						emitByte(c, OP_STORE_LOCAL)
+						emitU16(c, idx)
+					}
+				}
+			})
+		}
+		:object -> {
+			// Destructuring: { a: x, b: y } := expr
+			compileNode(c, node.right)
+			node.left.entries |> each(fn(entry) {
+				emitByte(c, OP_DUP)
+				compileNode(c, entry.key)
+				emitByte(c, OP_GET_PROP)
+				if entry.val.type = :identifier {
+					true -> {
+						idx := declareLocal(c, entry.val.val)
+						emitByte(c, OP_STORE_LOCAL)
+						emitU16(c, idx)
+					}
+					_ -> emitByte(c, OP_POP)
+				}
+			})
+		}
+		_ -> {
+			compileNode(c, node.right)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compile if-expressions (pattern matching)
+// ---------------------------------------------------------------------------
+
+fn compileIfExpr(c, node) {
+	compileNode(c, node.cond)
+	endJumps := []
+
+	node.branches |> each(fn(br) {
+		if br.target.type = :empty {
+			// Default/wildcard branch
+			true -> {
+				emitByte(c, OP_POP)
+				compileNode(c, br.body)
+			}
+			_ -> {
+				// Duplicate condition for comparison
+				emitByte(c, OP_DUP)
+				compileNode(c, br.target)
+				emitByte(c, OP_EQ)
+				// Jump past this branch body if no match
+				emitByte(c, OP_JUMP_FALSE)
+				skipOffset := currentOffset(c)
+				emitI32(c, 0)
+				// Match: pop condition, execute body, jump to end
+				emitByte(c, OP_POP)
+				compileNode(c, br.body)
+				emitByte(c, OP_JUMP)
+				endJumpOffset := currentOffset(c)
+				emitI32(c, 0)
+				endJumps <- endJumps |> append([endJumpOffset])
+				// Patch skip to land here
+				patchI32(c, skipOffset, currentOffset(c))
+			}
+		}
+	})
+
+	// Patch all end-of-branch jumps to here
+	endTarget := currentOffset(c)
+	endJumps |> each(fn(off) patchI32(c, off, endTarget))
+}
+
+// ---------------------------------------------------------------------------
+// Compile function definitions
+// ---------------------------------------------------------------------------
+
+fn compileFunction(c, node) {
+	fnIdx := len(c.functions)
+	savedLocals := clone(c.locals)
+
+	// Jump over the inline function body in the bytecode stream
+	emitByte(c, OP_JUMP)
+	jumpOverOffset := currentOffset(c)
+	emitI32(c, 0)
+
+	fnBodyStart := currentOffset(c)
+
+	// Start fresh locals for the function body
+	c.locals <- []
+	node.args |> each(fn(arg) declareLocal(c, arg))
+	if node.restArg != '' & node.restArg != ? {
+		true -> declareLocal(c, node.restArg)
+	}
+
+	// Compile body
+	compileNode(c, node.body)
+	emitByte(c, OP_RETURN)
+
+	fnBodyEnd := currentOffset(c)
+	localCount := len(c.locals)
+
+	// Restore outer locals
+	c.locals <- savedLocals
+
+	// Patch the jump-over
+	patchI32(c, jumpOverOffset, fnBodyEnd)
+
+	// Register function template
+	c.functions <- c.functions |> append([{
+		offset: fnBodyStart
+		arity: len(node.args)
+		localCount: localCount
+		name: if node.name { ?, '' -> '', _ -> node.name }
+		hasRestArg: node.restArg != '' & node.restArg != ?
+	}])
+
+	// Emit CLOSURE instruction in the outer code
+	emitByte(c, OP_CLOSURE)
+	emitU16(c, fnIdx)
+
+	// If named, also bind it as a local
+	if node.name != '' & node.name != ? {
+		true -> {
+			idx := declareLocal(c, node.name)
+			emitByte(c, OP_DUP)
+			emitByte(c, OP_STORE_LOCAL)
+			emitU16(c, idx)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compile function calls
+// ---------------------------------------------------------------------------
+
+fn compileFnCall(c, node) {
+	// Check for built-in calls
+	if node.function.type = :identifier {
+		true -> {
+			builtinIdx := resolveBuiltin(node.function.val)
+			if builtinIdx >= 0 {
+				true -> {
+					// Emit args then BUILTIN
+					node.args |> each(fn(arg) compileNode(c, arg))
+					emitByte(c, OP_BUILTIN)
+					emitU16(c, builtinIdx)
+					emitByte(c, len(node.args) & 0xFF)
+				}
+				_ -> {
+					// Regular function call
+					compileNode(c, node.function)
+					node.args |> each(fn(arg) compileNode(c, arg))
+					emitByte(c, OP_CALL)
+					emitByte(c, len(node.args) & 0xFF)
+				}
+			}
+		}
+		_ -> {
+			// Expression function call (e.g. obj.method(...), (fn()...)())
+			compileNode(c, node.function)
+			node.args |> each(fn(arg) compileNode(c, arg))
+			emitByte(c, OP_CALL)
+			emitByte(c, len(node.args) & 0xFF)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Top-level compilation entry point
+// ---------------------------------------------------------------------------
+
+fn compileProgram(node) {
+	c := createCompiler()
+	compileNode(c, node)
+	emitByte(c, OP_HALT)
+	c
+}
+
+// ---------------------------------------------------------------------------
+// Serialization: convert compiler output to binary data for WASM embedding
+// ---------------------------------------------------------------------------
+
+// serializeBytecodeToString converts the bytecode array into an Oak string
+// where each byte is a character, suitable for encodeWATString.
+fn serializeBytecodeToString(c) {
+	c.bytecode |> map(fn(b) char(b & 0xFF)) |> join('')
+}
+
+// serializeConstantPool produces a binary string of the constant pool.
+// Format: [count:u32] then for each entry:
+//   :string or :atom → [type:u8][len:u32][bytes]
+//   :float           → [type:u8][f64 as string of 8 chars via IEEE 754]
+fn serializeConstantPool(c) {
+	result := ''
+	count := len(c.constants)
+
+	// Encode count as 4 little-endian bytes
+	result <- result <<
+		char(count & 0xFF) <<
+		char((count >> 8) & 0xFF) <<
+		char((count >> 16) & 0xFF) <<
+		char((count >> 24) & 0xFF)
+
+	c.constants |> each(fn(entry) {
+		if entry.type {
+			:string -> {
+				result <- result << char(0)
+				slen := len(entry.value)
+				result <- result <<
+					char(slen & 0xFF) <<
+					char((slen >> 8) & 0xFF) <<
+					char((slen >> 16) & 0xFF) <<
+					char((slen >> 24) & 0xFF) <<
+					entry.value
+			}
+			:atom -> {
+				result <- result << char(1)
+				slen := len(entry.value)
+				result <- result <<
+					char(slen & 0xFF) <<
+					char((slen >> 8) & 0xFF) <<
+					char((slen >> 16) & 0xFF) <<
+					char((slen >> 24) & 0xFF) <<
+					entry.value
+			}
+			:float -> {
+				// Store as a string representation followed by null terminator
+				// The VM will parse it at runtime
+				result <- result << char(2)
+				fs := string(entry.value)
+				slen := len(fs)
+				result <- result <<
+					char(slen & 0xFF) <<
+					char((slen >> 8) & 0xFF) <<
+					char((slen >> 16) & 0xFF) <<
+					char((slen >> 24) & 0xFF) <<
+					fs
+			}
+		}
+	})
+
+	result
+}
+
+// serializeFunctionTable produces a binary string of function templates.
+// Format: [count:u32] then for each:
+//   [offset:u32][arity:u16][localCount:u16][hasRestArg:u8]
+fn serializeFunctionTable(c) {
+	result := ''
+	count := len(c.functions)
+
+	result <- result <<
+		char(count & 0xFF) <<
+		char((count >> 8) & 0xFF) <<
+		char((count >> 16) & 0xFF) <<
+		char((count >> 24) & 0xFF)
+
+	c.functions |> each(fn(ft) {
+		off := ft.offset
+		result <- result <<
+			char(off & 0xFF) <<
+			char((off >> 8) & 0xFF) <<
+			char((off >> 16) & 0xFF) <<
+			char((off >> 24) & 0xFF)
+		ar := ft.arity
+		result <- result <<
+			char(ar & 0xFF) <<
+			char((ar >> 8) & 0xFF)
+		lc := ft.localCount
+		result <- result <<
+			char(lc & 0xFF) <<
+			char((lc >> 8) & 0xFF)
+		result <- result << char(if ft.hasRestArg { true -> 1, _ -> 0 })
+	})
+
+	result
+}
+
+// disassemble produces a human-readable listing of the bytecode (for debugging)
+fn disassemble(c) {
+	lines := []
+	bc := c.bytecode
+	fn sub(i) if i < len(bc) {
+		true -> {
+			op := bc.(i)
+			name := if op < len(OpcodeName) {
+				true -> OpcodeName.(op)
+				_ -> '???'
+			}
+			line := format('{{0}}: {{1}}', i, name)
+			advance := 1
+			if {
+				op = OP_CONST_INT -> {
+					v := bc.(i+1) | (bc.(i+2) << 8) | (bc.(i+3) << 16) | (bc.(i+4) << 24)
+					line <- line << ' ' << string(v)
+					advance <- 5
+				}
+				op = OP_CONST_FLOAT | op = OP_CONST_STRING | op = OP_CONST_ATOM -> {
+					v := bc.(i+1) | (bc.(i+2) << 8)
+					line <- line << ' #' << string(v)
+					advance <- 3
+				}
+				op = OP_LOAD_LOCAL | op = OP_STORE_LOCAL -> {
+					v := bc.(i+1) | (bc.(i+2) << 8)
+					line <- line << ' @' << string(v)
+					advance <- 3
+				}
+				op = OP_LOAD_UPVAL | op = OP_STORE_UPVAL -> {
+					d := bc.(i+1) | (bc.(i+2) << 8)
+					v := bc.(i+3) | (bc.(i+4) << 8)
+					line <- line << ' ^' << string(d) << ' @' << string(v)
+					advance <- 5
+				}
+				op = OP_JUMP | op = OP_JUMP_FALSE | op = OP_MATCH_JUMP -> {
+					v := bc.(i+1) | (bc.(i+2) << 8) | (bc.(i+3) << 16) | (bc.(i+4) << 24)
+					line <- line << ' ->' << string(v)
+					advance <- 5
+				}
+				op = OP_CLOSURE -> {
+					v := bc.(i+1) | (bc.(i+2) << 8)
+					line <- line << ' fn#' << string(v)
+					advance <- 3
+				}
+				op = OP_CALL | op = OP_TAIL_CALL -> {
+					v := bc.(i+1)
+					line <- line << ' (' << string(v) << ' args)'
+					advance <- 2
+				}
+				op = OP_MAKE_LIST | op = OP_MAKE_OBJECT -> {
+					v := bc.(i+1) | (bc.(i+2) << 8)
+					line <- line << ' [' << string(v) << ']'
+					advance <- 3
+				}
+				op = OP_BUILTIN -> {
+					bi := bc.(i+1) | (bc.(i+2) << 8)
+					ar := bc.(i+3)
+					bname := if bi < len(BuiltinName) {
+						true -> BuiltinName.(bi)
+						_ -> '?'
+					}
+					line <- line << ' ' << bname << '(' << string(ar) << ')'
+					advance <- 4
+				}
+			}
+			lines <- lines |> append([line])
+			sub(i + advance)
+		}
+	}
+	sub(0)
+	lines |> join('\n')
+}
+
+{
+	// Opcodes
+	OP_HALT: OP_HALT
+	OP_NOP: OP_NOP
+	OP_CONST_NULL: OP_CONST_NULL
+	OP_CONST_EMPTY: OP_CONST_EMPTY
+	OP_CONST_TRUE: OP_CONST_TRUE
+	OP_CONST_FALSE: OP_CONST_FALSE
+	OP_CONST_INT: OP_CONST_INT
+	OP_CONST_FLOAT: OP_CONST_FLOAT
+	OP_CONST_STRING: OP_CONST_STRING
+	OP_CONST_ATOM: OP_CONST_ATOM
+	OP_POP: OP_POP
+	OP_DUP: OP_DUP
+	OP_LOAD_LOCAL: OP_LOAD_LOCAL
+	OP_STORE_LOCAL: OP_STORE_LOCAL
+	OP_LOAD_UPVAL: OP_LOAD_UPVAL
+	OP_STORE_UPVAL: OP_STORE_UPVAL
+	OP_ADD: OP_ADD
+	OP_SUB: OP_SUB
+	OP_MUL: OP_MUL
+	OP_DIV: OP_DIV
+	OP_MOD: OP_MOD
+	OP_POW: OP_POW
+	OP_NEG: OP_NEG
+	OP_BAND: OP_BAND
+	OP_BOR: OP_BOR
+	OP_BXOR: OP_BXOR
+	OP_BRSHIFT: OP_BRSHIFT
+	OP_EQ: OP_EQ
+	OP_NEQ: OP_NEQ
+	OP_GT: OP_GT
+	OP_LT: OP_LT
+	OP_GEQ: OP_GEQ
+	OP_LEQ: OP_LEQ
+	OP_NOT: OP_NOT
+	OP_CONCAT: OP_CONCAT
+	OP_MAKE_LIST: OP_MAKE_LIST
+	OP_MAKE_OBJECT: OP_MAKE_OBJECT
+	OP_GET_PROP: OP_GET_PROP
+	OP_SET_PROP: OP_SET_PROP
+	OP_JUMP: OP_JUMP
+	OP_JUMP_FALSE: OP_JUMP_FALSE
+	OP_CLOSURE: OP_CLOSURE
+	OP_CALL: OP_CALL
+	OP_RETURN: OP_RETURN
+	OP_TAIL_CALL: OP_TAIL_CALL
+	OP_BUILTIN: OP_BUILTIN
+	OP_IMPORT: OP_IMPORT
+	OP_DEEP_EQ: OP_DEEP_EQ
+	OP_SWAP: OP_SWAP
+	OP_MATCH_JUMP: OP_MATCH_JUMP
+	OP_SCOPE_PUSH: OP_SCOPE_PUSH
+	OP_SCOPE_POP: OP_SCOPE_POP
+	NUM_OPCODES: NUM_OPCODES
+
+	// Built-in indices
+	BUILTIN_PRINT: BUILTIN_PRINT
+	BUILTIN_LEN: BUILTIN_LEN
+	BUILTIN_TYPE: BUILTIN_TYPE
+	BUILTIN_STRING: BUILTIN_STRING
+	BUILTIN_INT: BUILTIN_INT
+	BUILTIN_FLOAT: BUILTIN_FLOAT
+	BUILTIN_CODEPOINT: BUILTIN_CODEPOINT
+	BUILTIN_CHAR: BUILTIN_CHAR
+	BUILTIN_KEYS: BUILTIN_KEYS
+	BUILTIN_VALUES: BUILTIN_VALUES
+	BUILTIN_SLICE: BUILTIN_SLICE
+	BUILTIN_APPEND: BUILTIN_APPEND
+	BUILTIN_WAIT: BUILTIN_WAIT
+	BUILTIN_EXIT: BUILTIN_EXIT
+
+	// Type tags
+	TAG_NULL: TAG_NULL
+	TAG_EMPTY: TAG_EMPTY
+	TAG_INT: TAG_INT
+	TAG_FLOAT: TAG_FLOAT
+	TAG_BOOL: TAG_BOOL
+	TAG_STRING: TAG_STRING
+	TAG_ATOM: TAG_ATOM
+	TAG_LIST: TAG_LIST
+	TAG_OBJECT: TAG_OBJECT
+	TAG_FUNCTION: TAG_FUNCTION
+
+	// Compiler API
+	createCompiler: createCompiler
+	compileProgram: compileProgram
+	compileNode: compileNode
+
+	// Serialization
+	serializeBytecodeToString: serializeBytecodeToString
+	serializeConstantPool: serializeConstantPool
+	serializeFunctionTable: serializeFunctionTable
+	disassemble: disassemble
+}

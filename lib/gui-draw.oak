@@ -192,6 +192,57 @@ fn drawText(window, x, y, text, color, defaultColor) if window.type {
 	_ -> window
 }
 
+fn textWidth(window, text) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdcValue := if window.frameHdc > 0 {
+				true -> window.frameHdc
+				_ -> {
+					hdc := windows.getDC(window.hwnd)
+					if windows.callOk?(hdc) & hdc.r1 > 0 {
+						true -> hdc.r1
+						_ -> 0
+					}
+				}
+			}
+			if hdcValue > 0 {
+				true -> {
+					fontHandle := _ensureWindowsFont(window)
+					prevFont := if fontHandle > 0 {
+						true -> windows.selectObject(hdcValue, fontHandle)
+						_ -> ?
+					}
+					res := windows.getTextExtentPoint32(hdcValue, text)
+					if prevFont {
+						? -> 0
+						_ -> if windows.callOk?(prevFont) & prevFont.r1 > 0 {
+							true -> windows.selectObject(hdcValue, prevFont.r1)
+						}
+					}
+					if window.frameHdc = 0 {
+						true -> windows.releaseDC(window.hwnd, hdcValue)
+					}
+					if res.type {
+						:ok -> res.cx
+						_ -> _estimateTextWidth(window, text)
+					}
+				}
+				_ -> _estimateTextWidth(window, text)
+			}
+		}
+		_ -> _estimateTextWidth(window, text)
+	}
+	_ -> _estimateTextWidth(?, text)
+}
+
+fn _estimateTextWidth(window, text) {
+	fontSize := if window {
+		? -> 16
+		_ -> int(_default(if window.textFont { ? -> ?, _ -> window.textFont.size }, 16))
+	}
+	int(len(text) * fontSize * 6 / 10)
+}
+
 fn fillRect(window, x, y, width, height, color, defaultColor) if window.type {
 	:ok -> {
 		useColor := _default(color, defaultColor)

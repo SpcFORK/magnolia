@@ -160,6 +160,23 @@ fn analyzeNode(node, web?) {
 			key: analyzeSubexpr(entry.key, ctx, false)
 			val: analyzeSubexpr(entry.val, ctx, false)
 		}
+		:class -> {
+			// Analyze constructor body with class args
+			clsCtx := clone(ctx)
+			clsCtx.decls := {}
+			clsCtx.args := {}
+			node.args |> with each() fn(arg) clsCtx.args.(arg) := true
+			node.body := analyzeSubexpr(node.body, clsCtx, true)
+			node.decls := clsCtx.decls |> keys() |> with filter() fn(decl) clsCtx.args.(decl) = ?
+
+			// Analyze static expressions and parents
+			node.staticExprs := node.staticExprs |> with map() fn(expr) analyzeSubexpr(expr, ctx, false)
+			node.parents := node.parents |> with map() fn(p) analyzeSubexpr(p, ctx, false)
+
+			// Declare class name in enclosing scope
+			ctx.decls.(node.name) := true
+			node
+		}
 		_ -> node
 	}
 	analyzeSubexpr(node, {
@@ -179,6 +196,9 @@ fn analyzeNode(node, web?) {
 
 			___runtime_lib: true, ___runtime_lib?: true, ___runtime_gc: true
 			___runtime_mem: true, ___runtime_proc: true
+
+			csof: true, go: true, name: true, pointer: true
+			memcopy: true, memwrite: true, syscalln: true
 		}
 		args: {}
 	}, false)

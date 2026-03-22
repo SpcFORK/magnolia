@@ -760,6 +760,16 @@ fn beginFrame(window) {
 	// started.  This prevents Vulkan/OpenGL ICD calls from blocking or
 	// deadlocking during window creation.
 	_ensureLayerInitForFrame(window)
+	// Safety net: release any stale DC from a previous frame that skipped
+	// endFrame (e.g. when beginFrame succeeded but the caller's draw branch
+	// did not call endFrame).  Without this, the leaked DC accumulates and
+	// eventually exhausts the per-process GDI handle limit, causing GetDC
+	// to fail permanently and halting all rendering.
+	if window.frameTargetHdc > 0 -> {
+		windows.releaseDC(window.hwnd, window.frameTargetHdc)
+		windows.gdi32('GdiFlush')
+		window.frameTargetHdc <- 0
+	}
 	target := windows.getDC(window.hwnd)
 	if windows.callOk?(target) & target.r1 > 0 {
 		true -> guiNativeWinFrame.prepareBeginFrameTarget(window, target.r1)

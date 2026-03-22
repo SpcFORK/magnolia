@@ -112,6 +112,13 @@ function __oak_xor(a, b) {
 }
 const __Oak_Empty = Symbol(\'__Oak_Empty\');
 
+// class identity support
+function __Oak_Class(name, ctor) {
+	ctor.__oak_class_name = name;
+	ctor.__oak_class_tag = true;
+	return ctor;
+}
+
 // mutable string type
 function __is_oak_string(x) {
 	if (x == null) return false;
@@ -296,6 +303,10 @@ function name(x) {
 		const n = x.name;
 		return Symbol.for(n ?? \'\');
 	}
+	if (typeof x === \'number\' && __Oak_PointerValues.has(x)) {
+		const nameVal = __Oak_NameRefs.get(x);
+		if (nameVal != null) return Symbol.for(nameVal);
+	}
 	if (typeof x === \'object\' && x !== null && typeof x.constructor === \'function\') {
 		return Symbol.for(x.constructor.name || \'\');
 	}
@@ -303,10 +314,23 @@ function name(x) {
 }
 function csof(x, cls) {
 	if (cls === undefined) {
-		// 1-arg: in JS there are no Oak class values, always false
-		return false;
+		// 1-arg: check if x is an Oak class (tagged by __Oak_Class)
+		return typeof x === \'function\' && x.__oak_class_tag === true;
 	}
 	if (x == null || cls == null) return false;
+	// class vs class: identity check
+	if (typeof x === \'function\' && x.__oak_class_tag && typeof cls === \'function\' && cls.__oak_class_tag) {
+		return x === cls;
+	}
+	// class vs atom: compare class name to atom name
+	if (typeof x === \'function\' && x.__oak_class_tag && typeof cls === \'symbol\') {
+		return x.__oak_class_name === Symbol.keyFor(cls);
+	}
+	// atom vs class: compare atom name to class name
+	if (typeof x === \'symbol\' && typeof cls === \'function\' && cls.__oak_class_tag) {
+		return Symbol.keyFor(x) === cls.__oak_class_name;
+	}
+	// JS-native fallbacks
 	if (typeof cls === \'function\') return x instanceof cls;
 	if (typeof cls === \'symbol\') {
 		const clsName = Symbol.keyFor(cls);
@@ -366,6 +390,8 @@ function exit(code) {
 
 let __Oak_NextPtr = 4096;
 const __Oak_MemoryRegions = new Map();
+const __Oak_NameRefs = new Map();
+const __Oak_NamePtrs = new Map();
 function __oak_bytes_from_string(s) {
 	s = __as_oak_string(s);
 	if (!__is_oak_string(s)) return [];
@@ -412,6 +438,7 @@ function bits(x) {
 function pointer(x) {
 	x = __as_oak_string(x);
 	if (typeof x === \'number\') {
+		if (__Oak_PointerValues.has(x)) return x;
 		if (x < 0) throw new Error(\'pointer() expects non-negative integer\');
 		__Oak_PointerValues.add(x);
 		return x;
@@ -420,7 +447,17 @@ function pointer(x) {
 		if (x.length === 0) return 0;
 		return __oak_alloc_region(__oak_bytes_from_string(x));
 	}
-	throw new Error(\'pointer() expects int or byte string\');
+	if (typeof x === \'symbol\' && x !== __Oak_Empty) {
+		const atomName = Symbol.keyFor(x);
+		if (!atomName) return 0;
+		if (__Oak_NamePtrs.has(atomName)) return __Oak_NamePtrs.get(atomName);
+		const bytes = __oak_bytes_from_string(__as_oak_string(atomName));
+		const ptr = __oak_alloc_region(bytes);
+		__Oak_NameRefs.set(ptr, atomName);
+		__Oak_NamePtrs.set(atomName, ptr);
+		return ptr;
+	}
+	throw new Error(\'pointer() expects int, atom, or byte string\');
 }
 function addr(x) {
 	x = __as_oak_string(x);
@@ -443,9 +480,48 @@ function memread(p, n) {
 	}
 	return __as_oak_string(out);
 }
+function __oak_memwrite_bytes(val) {
+	val = __as_oak_string(val);
+	if (__is_oak_string(val)) return __oak_bytes_from_string(val);
+	if (typeof val === \'symbol\' && val !== __Oak_Empty) {
+		const atomStr = Symbol.keyFor(val) || \'\';
+		return __oak_bytes_from_string(__as_oak_string(atomStr));
+	}
+	if (Array.isArray(val)) {
+		const buf = [];
+		for (const el of val) {
+			const n = int(el);
+			if (n == null || n < 0 || n > 255) throw new Error(\'memwrite list payload expects byte values 0-255\');
+			buf.push(n);
+		}
+		return buf;
+	}
+	throw new Error(\'memwrite payload must be byte string, atom, or byte list\');
+}
 function memwrite(p, data) {
+	p = __as_oak_string(p);
+	if (typeof p === \'symbol\' && p !== __Oak_Empty) {
+		const atomName = Symbol.keyFor(p) || \'\';
+		const bytes = __oak_memwrite_bytes(data);
+		if (bytes.length === 0) {
+			if (__Oak_NamePtrs.has(atomName)) {
+				const oldPtr = __Oak_NamePtrs.get(atomName);
+				__Oak_NameRefs.delete(oldPtr);
+				__Oak_NamePtrs.delete(atomName);
+			}
+			return 0;
+		}
+		const ptr = __oak_alloc_region(bytes);
+		if (__Oak_NamePtrs.has(atomName)) {
+			const oldPtr = __Oak_NamePtrs.get(atomName);
+			__Oak_NameRefs.delete(oldPtr);
+		}
+		__Oak_NameRefs.set(ptr, atomName);
+		__Oak_NamePtrs.set(atomName, ptr);
+		return bytes.length;
+	}
 	const addrValue = int(p);
-	const bytes = __oak_bytes_from_string(data);
+	const bytes = __oak_memwrite_bytes(data);
 	if (addrValue == null || addrValue < 0) throw new Error(\'memwrite address must be non-negative\');
 	if (bytes.length === 0) return 0;
 	const region = __oak_find_region(addrValue);
@@ -458,9 +534,11 @@ function memwrite(p, data) {
 }
 
 function go(fn, ...args) {
-	try {
-		__oak_resolve_trampoline(fn, ...args);
-	} catch (_) {}
+	setTimeout(() => {
+		try {
+			__oak_resolve_trampoline(fn, ...args);
+		} catch (_) {}
+	}, 0);
 	return null;
 }
 

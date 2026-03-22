@@ -5,6 +5,7 @@ Cross-platform drawing primitives used by the GUI facade: text, lines, rectangle
 Key exports
 
 - `drawText(window, x, y, text, color?)`
+- `textWidth(window, text)` — returns pixel width of text using window's current font (Windows: GDI measurement, other backends: estimation)
 - `fillRect(window, x, y, width, height, color?)`
 - `drawLine(window, x1, y1, x2, y2, color?)`
 - `releaseResources(window)`
