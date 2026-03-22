@@ -1,0 +1,419 @@
+// libWLAN provides local-network game discovery and announcement over TCP.
+//
+// Since Oak's networking primitives are TCP-based, this library implements LAN
+// discovery using lightweight TCP beacons. A game host runs a Beacon server
+// that responds to probe connections with game metadata. Clients scan the local
+// subnet for active Beacons to find joinable sessions.
+//
+// Typical flow:
+//   1. Game host calls Beacon() to advertise on a known port
+//   2. Clients call sweep() or Scanner() to find Beacons on the LAN
+//   3. Clients connect to the discovered game using the p2p library or directly
+//
+// Protocol: on connection the Beacon sends two lines:
+//   MAGNOLIA_WLAN\n
+//   <JSON game info>\n
+// then closes the connection.
+
+{
+	default: default
+	each: each
+	append: append
+	range: range
+} := import('std')
+{
+	split: split
+	trim: trim
+	startsWith?: startsWith?
+	contains?: contains?
+} := import('str')
+
+thread := import('thread')
+json := import('json')
+sock := import('socket')
+
+_MAGIC := 'MAGNOLIA_WLAN'
+_DEFAULT_PORT := 19800
+_DEFAULT_WORKERS := 32
+_SCAN_INTERVAL := 3
+
+fn _noop(_) ?
+
+// _detectPrefixWindows parses ipconfig output for a private IPv4 subnet prefix.
+fn _detectPrefixWindows {
+	result := exec('ipconfig', [], '')
+	if result.type {
+		:end -> {
+			lines := split(result.stdout, '\n')
+			fn find(i, best) if i >= len(lines) {
+				true -> best
+				_ -> {
+					line := trim(lines.(i))
+					if contains?(line, 'IPv4') {
+						true -> {
+							parts := split(line, ':')
+							if len(parts) >= 2 -> {
+								ip := trim(parts.(len(parts) - 1))
+								octets := split(ip, '.')
+								if len(octets) = 4 -> {
+									prefix := octets.0 + '.' + octets.1 + '.' + octets.2
+									if startsWith?(prefix, '192.168') |
+										startsWith?(prefix, '10.') |
+										startsWith?(prefix, '172.') {
+										true -> find(i + 1, prefix)
+										_ -> find(i + 1, if best { ? -> prefix, _ -> best })
+									}
+								}
+							}
+							find(i + 1, best)
+						}
+						_ -> find(i + 1, best)
+					}
+				}
+			}
+			find(0, ?)
+		}
+		_ -> ?
+	}
+}
+
+// _detectPrefixUnix parses ip addr / ifconfig output for a private IPv4 prefix.
+fn _detectPrefixUnix {
+	result := exec('ip', ['addr'], '')
+	stdout := if result.type {
+		:end -> result.stdout
+		_ -> {
+			fallback := exec('ifconfig', [], '')
+			if fallback.type {
+				:end -> fallback.stdout
+				_ -> ?
+			}
+		}
+	}
+	if stdout != ? -> {
+		lines := split(stdout, '\n')
+		fn find(i, best) if i >= len(lines) {
+			true -> best
+			_ -> {
+				line := trim(lines.(i))
+				if contains?(line, 'inet ') & !contains?(line, '127.0.0.1') {
+					true -> {
+						parts := split(line, ' ')
+						fn scanParts(j) if j >= len(parts) {
+							true -> find(i + 1, best)
+							_ -> if j > 0 & parts.(j - 1) = 'inet' {
+								true -> {
+									addr := split(parts.(j), '/').0
+									octets := split(addr, '.')
+									if len(octets) = 4 -> {
+										prefix := octets.0 + '.' + octets.1 + '.' + octets.2
+										find(i + 1, prefix)
+									}
+								}
+								_ -> scanParts(j + 1)
+							}
+						}
+						scanParts(1)
+					}
+					_ -> find(i + 1, best)
+				}
+			}
+		}
+		find(0, ?)
+	}
+}
+
+// localPrefix attempts to detect the local network subnet prefix
+// (e.g., "192.168.1"). Falls back to "192.168.1" if detection fails.
+//
+// Example:
+//   prefix := wlan.localPrefix()  // => "192.168.1"
+fn localPrefix {
+	result := _detectPrefixWindows()
+	if result {
+		? -> default(_detectPrefixUnix(), '192.168.1')
+		_ -> result
+	}
+}
+
+// _beaconPayload builds the two-line beacon response.
+fn _beaconPayload(info) _MAGIC + '\n' + json.serialize(info) + '\n'
+
+// Beacon starts a TCP listener that advertises a game session on the network.
+// Any incoming connection receives the game info and is disconnected.
+//
+// opts:
+//   port  - TCP port to listen on (default: 19800)
+//   name  - display name for the game/session
+//   meta  - metadata object (map, players, maxPlayers, gamePort, etc.)
+//
+// Returns a beacon controller with update() and close(), or an error object.
+//
+// Example:
+//   beacon := wlan.Beacon({
+//       port: 19800
+//       name: 'Arena Match'
+//       meta: { map: 'castle', players: 1, maxPlayers: 4, gamePort: 9411 }
+//   })
+//   beacon.update({ players: 3 })
+//   // ...
+//   beacon.close()
+fn Beacon(opts) {
+	opts := default(opts, {})
+	port := default(opts.port, _DEFAULT_PORT)
+	name := default(opts.name, 'Unknown Game')
+	meta := default(opts.meta, {})
+	address := '0.0.0.0:' + string(port)
+
+	state := {
+		open?: true
+		info: {
+			name: name
+			meta: meta
+		}
+	}
+	mutex := thread.Mutex()
+
+	closeServer := sock.listen(address, fn(evt) if evt.type {
+		:connect -> thread.spawn(fn(socketObj) {
+			mutex.lock()
+			payload := _beaconPayload(state.info)
+			mutex.unlock()
+
+			sock.send(socketObj, payload)
+			sock.close(socketObj)
+		}, evt.socket)
+	})
+
+	// If listen failed, closeServer is an error object
+	if type(closeServer) != :function -> closeServer
+
+	{
+		type: :beacon
+		port: port
+		address: address
+		info: fn {
+			mutex.lock()
+			snapshot := {
+				name: state.info.name
+				meta: state.info.meta
+			}
+			mutex.unlock()
+			snapshot
+		}
+		update: fn(patch) {
+			mutex.lock()
+			if patch.name != ? -> state.info.name <- patch.name
+			if patch.meta != ? -> state.info.meta <- patch.meta
+			mutex.unlock()
+		}
+		close: fn {
+			state.open? <- false
+			closeServer()
+		}
+	}
+}
+
+// probe checks a single host:port for a WLAN beacon. Returns game info on
+// success, or ? if no beacon is found.
+//
+// Example:
+//   game := wlan.probe('192.168.1.5', 19800)
+//   if game != ? -> println('Found: ' + game.name)
+fn probe(host, port) {
+	port := default(port, _DEFAULT_PORT)
+	address := host + ':' + string(port)
+	conn := sock.connect(address)
+	if conn.type {
+		:ok -> {
+			socketObj := conn.socket
+			line1 := sock.recvLine(socketObj)
+			if line1.type {
+				:data -> if line1.data = _MAGIC {
+					true -> {
+						line2 := sock.recvLine(socketObj)
+						sock.close(socketObj)
+						if line2.type {
+							:data -> {
+								parsed := json.parse(line2.data)
+								if type(parsed) = :object -> {
+									host: host
+									port: port
+									name: default(parsed.name, 'Unknown')
+									meta: default(parsed.meta, {})
+								}
+							}
+							_ -> ?
+						}
+					}
+					_ -> {
+						sock.close(socketObj)
+						?
+					}
+				}
+				_ -> {
+					sock.close(socketObj)
+					?
+				}
+			}
+		}
+		_ -> ?
+	}
+}
+
+// sweep performs a one-shot scan of a subnet for WLAN beacons.
+// Returns a list of discovered games.
+//
+// opts:
+//   port    - beacon port to probe (default: 19800)
+//   prefix  - subnet prefix, e.g., "192.168.1" (auto-detected if omitted)
+//   start   - first host octet to scan (default: 1)
+//   end     - last host octet to scan (default: 254)
+//   workers - parallel probe count (default: 32)
+//
+// Example:
+//   games := wlan.sweep({ port: 19800, prefix: '192.168.1' })
+//   games |> each(fn(g) println(g.name + ' at ' + g.host))
+fn sweep(opts) {
+	opts := default(opts, {})
+	port := default(opts.port, _DEFAULT_PORT)
+	prefix := default(opts.prefix, localPrefix())
+	startOctet := default(opts.start, 1)
+	endOctet := default(opts.end, 254)
+	numWorkers := default(opts.workers, _DEFAULT_WORKERS)
+
+	results := []
+	resultMutex := thread.Mutex()
+	wg := thread.WaitGroup()
+	pool := thread.Pool(numWorkers)
+
+	range(startOctet, endOctet + 1) |> each(fn(octet) {
+		wg.add(1)
+		host := prefix + '.' + string(octet)
+		pool.submit(fn {
+			game := probe(host, port)
+			if game != ? -> {
+				resultMutex.lock()
+				results <- append(results, game)
+				resultMutex.unlock()
+			}
+			wg.done()
+		})
+	})
+
+	wg.wait()
+	pool.close()
+	pool.wait()
+
+	results
+}
+
+// Scanner performs continuous background scanning and reports game sessions
+// as they appear or disappear on the network.
+//
+// opts:
+//   port      - beacon port (default: 19800)
+//   prefix    - subnet prefix (auto-detected if omitted)
+//   interval  - seconds between scan cycles (default: 3)
+//   start     - first host octet (default: 1)
+//   end       - last host octet (default: 254)
+//   workers   - parallel probe count (default: 32)
+//   onFound   - fn(game) called when a new game appears
+//   onLost    - fn(game) called when a game disappears
+//   onSweep   - fn(games) called after each sweep completes
+//
+// Example:
+//   scanner := wlan.Scanner({
+//       port: 19800
+//       onFound: fn(g) println('+ ' + g.name + ' at ' + g.host)
+//       onLost: fn(g) println('- ' + g.name)
+//   })
+//   // later...
+//   scanner.games()  // current list
+//   scanner.close()
+fn Scanner(opts) {
+	opts := default(opts, {})
+	port := default(opts.port, _DEFAULT_PORT)
+	prefix := default(opts.prefix, localPrefix())
+	interval := default(opts.interval, _SCAN_INTERVAL)
+	startOctet := default(opts.start, 1)
+	endOctet := default(opts.end, 254)
+	numWorkers := default(opts.workers, _DEFAULT_WORKERS)
+	onFound := default(opts.onFound, _noop)
+	onLost := default(opts.onLost, _noop)
+	onSweep := default(opts.onSweep, _noop)
+
+	state := {
+		running?: true
+		gameMap: {}
+	}
+	mutex := thread.Mutex()
+
+	thread.spawn(fn {
+		fn loop {
+			if !state.running? -> ?
+
+			current := sweep({
+				port: port
+				prefix: prefix
+				start: startOctet
+				end: endOctet
+				workers: numWorkers
+			})
+
+			// Build host -> game lookup from this sweep
+			currentMap := {}
+			current |> each(fn(game) currentMap.(game.host) := game)
+
+			mutex.lock()
+			prev := state.gameMap
+
+			// Notify newly found games
+			current |> each(fn(game) {
+				if prev.(game.host) = ? -> onFound(game)
+			})
+
+			// Notify lost games
+			keys(prev) |> each(fn(host) {
+				if currentMap.(host) = ? -> onLost(prev.(host))
+			})
+
+			state.gameMap <- currentMap
+			mutex.unlock()
+
+			onSweep(current)
+
+			if state.running? -> {
+				wait(interval)
+				loop()
+			}
+		}
+		loop()
+	})
+
+	{
+		type: :scanner
+		games: fn {
+			mutex.lock()
+			snapshot := []
+			keys(state.gameMap) |> each(fn(host) {
+				snapshot <- append(snapshot, state.gameMap.(host))
+			})
+			mutex.unlock()
+			snapshot
+		}
+		close: fn {
+			state.running? <- false
+		}
+	}
+}
+
+{
+	MAGIC: _MAGIC
+	DEFAULT_PORT: _DEFAULT_PORT
+	localPrefix: localPrefix
+	Beacon: Beacon
+	probe: probe
+	sweep: sweep
+	Scanner: Scanner
+}

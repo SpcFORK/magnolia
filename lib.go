@@ -361,6 +361,9 @@ var libvideo string
 //go:embed lib/async-event-bus.oak
 var libasynceventbus string
 
+//go:embed lib/WLAN.oak
+var libwlan string
+
 var stdlibs = map[string]string{
 	"std":                    libstd,
 	"str":                    libstr,
@@ -482,6 +485,7 @@ var stdlibs = map[string]string{
 	"audio-wav":              libaudiowav,
 	"video":                  libvideo,
 	"async/event-bus":        libasynceventbus,
+	"WLAN":                   libwlan,
 }
 
 var stdlibAutoLoadOrder = []string{

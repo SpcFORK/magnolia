@@ -1,7 +1,10 @@
 {
 	default: default
+
 	each: each
+	map: map
 	slice: slice
+	
 	println: println
 } := import('std')
 
@@ -9,12 +12,16 @@
 
 gui := import('GUI')
 
+
 // ---
 // @ Comps
 
 {
 	Backdrop: Backdrop
 } := import('comps/backdrop')
+
+ico := import('ico')
+icog := import('comps/ico-gen')
 
 // ---
 // @ Clocks
@@ -24,15 +31,29 @@ fn makeIntroElapsedClock(sm) sm.watchSceneDt(IntroMs)
 fn getIntroMs(sm) sm.clockMs(IntroMs)
 
 IntroAMs := :IntroAMs
-fn makeIntroAutoAdvanceClock(sm) sm.setClockMs(IntroAMs, 120000)
+fn makeIntroAutoAdvanceClock(sm) sm.setClockMs(IntroAMs, 50000)
 fn getIntroAMs(sm) sm.clockMs(IntroAMs)
 
 // ---
 // @ Scene
 
+fn writeIntroIcon(window, sm) with icog.save('mg.ico') {
+	size: 16,
+	bg: icog.rgba(0, 0, 0, 255)
+	draw: fn(pixels, size) {
+		// Draw stars
+		with map(pixels) fn(pixel, i) if {
+			(rand() * 1000) < 50 -> icog.rgba(255, 255, 255, 255)
+			_ -> pixel
+		}
+	}
+}
+
 fn setupScene(window, sm) {
 	makeIntroElapsedClock(sm)
 	makeIntroAutoAdvanceClock(sm)
+
+	gui.setTitle(window, '')
 
 	with gui.onKeyDown(window) fn(_vk) sm.changeScene(:menu)
 }
@@ -72,7 +93,7 @@ fn IntroSafeLine(sx, lx, ps, str) fn(window, sm, dt, x?, y?) sm.channels.writeDu
 	:intro
 	str, getIntroMs(sm) - sx, ps, lx
 
-	with int() default(x?, 0) + window.width / 2 - gui.textWidth(str, window) / 2 + 20
+	with int() default(x?, 0) + window.width / 2 - gui.textWidth(str, window) / 2.5 + 5
 	with int() default(y?, 0) + window.height / 2
 	window
 )
@@ -85,11 +106,9 @@ Line5 := with IntroSafeLine(12400, 3000, 20) 'of space'
 
 Line6 := with IntroSafeLine(20000, 2000, 20) 'you ask yourself'
 Line7 := with IntroSafeLine(22000, 2000, 20) 'if'
-Line8 := with IntroSafeLine(28000, 2300, 20) 'you you try really hard'
+Line8 := with IntroSafeLine(28000, 2300, 20) 'you  you try really hard'
 Line9 := with IntroSafeLine(30500, 2000, 20) 'you make a wish'
-Line10 := with IntroSafeLine(33000, 2000, 20) 'and hope it comes true'
-
-Line11 := with IntroSafeLine(40000, 3000, 20) 'but nothing happens'
+Line10 := with IntroSafeLine(33000, 6000, 20) 'and hope it comes true'
 
 // ---
 // @ Ext
@@ -103,6 +122,11 @@ fn introP1(window, sm, dt) {
 	bg.draw(window)
 	debug.draw(window, sm, dt)
 
+	if getIntroMs(sm) % 1000 <= 20 -> {
+		writeIntroIcon(window, sm)
+		gui.setIcon(window, 'mg.ico')
+	}
+
 	Line1(window, sm, dt)
 	Line2(window, sm, dt)
 	Line3(window, sm, dt)
@@ -113,7 +137,6 @@ fn introP1(window, sm, dt) {
 	Line8(window, sm, dt)
 	Line9(window, sm, dt)
 	Line10(window, sm, dt)
-	Line11(window, sm, dt)
-	
+
 	// with println() sm.channels.channel?(:intro)
 }
