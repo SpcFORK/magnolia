@@ -23,8 +23,19 @@ single import gives access to the full API.
 ## Import
 
 ```oak
+// Direct import (full shader API)
 sh := import('gui-shader')
+
+// Or access via GUI with shader-prefixed names
+gui := import('GUI')
+gui.shaderRender(window, shader, x, y, w, h)
+gui.Shader(myFragment, { resolution: 4 })
 ```
+
+`gui-shader` is imported by `GUI.oak` and all shader functions are re-exported
+with `shader` prefixes (e.g. `shaderRender`, `shaderElapsed`, `shaderHash`).
+The constructors `Shader` and `ShaderPass` are re-exported without prefix. You
+can also import `gui-shader` directly for the unprefixed API.
 
 ## Quick Start
 
