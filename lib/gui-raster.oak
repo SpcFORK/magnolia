@@ -59,8 +59,8 @@ fn _buildEdgeTable(p0, p1, p2) {
 }
 
 fn _drawScanline(deps, window, y, xa, xb, color) if xa < xb {
-	true -> deps.drawLine(window, int(xa), y, int(xb), y, color)
-	_ -> deps.drawLine(window, int(xb), y, int(xa), y, color)
+	true -> deps.drawLine(window, int(xa) - 1, y, int(xb) + 1, y, color)
+	_ -> deps.drawLine(window, int(xb) - 1, y, int(xa) + 1, y, color)
 }
 
 // Pre-compute inverse slopes for edge stepping to avoid per-scanline division
@@ -132,12 +132,19 @@ fn _sortTriByY(p0, p1, p2) {
 	[a, b, c]
 }
 
-fn drawTriangleFilled(deps, window, p0, p1, p2, color) {
+fn drawTriangleFilled(deps, window, p0, p1, p2, color, borderColor) {
 	sorted := _sortTriByY(p0, p1, p2)
 	a := sorted.0
 	b := sorted.1
 	c := sorted.2
 	_fillScan(deps, window, int(a.y), int(c.y), a, b, c, color)
+	if borderColor != ? {
+		true -> {
+			deps.drawLine(window, int(a.x), int(a.y), int(b.x), int(b.y), borderColor)
+			deps.drawLine(window, int(b.x), int(b.y), int(c.x), int(c.y), borderColor)
+			deps.drawLine(window, int(c.x), int(c.y), int(a.x), int(a.y), borderColor)
+		}
+	}
 }
 
 fn _slice(list, i, end, out) if i {
@@ -405,7 +412,7 @@ fn _drawTriangles(deps, window, tris, i, drawn) if i {
 	}
 }
 
-fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
+fn drawMeshSolid(deps, window, mesh, transform, camera, color, light, borderColor) {
 	verts := deps.transformVertices(mesh.vertices, transform, 0, [])
 	projected := projectVertices(deps, window, verts, camera)
 	faces := _default(mesh.faces, [])
@@ -436,9 +443,39 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light) {
 	tris := _sortDepth(_compactTris(trisRaw, 0, []))
 	drawn := _drawTriangles(deps, window, tris, 0, 0)
 
-	{
-		type: :ok
-		triangles: drawn
+	if borderColor != ? {
+		true -> {
+			edges := _default(mesh.edges, [])
+			fn _drawBorderEdges(i, edgesDrawn) if i {
+				len(edges) -> edgesDrawn
+				_ -> {
+					edge := edges.(i)
+					pa := projected.(edge.0)
+					pb := projected.(edge.1)
+					if [pa, pb] {
+						[?, _] -> _drawBorderEdges(i + 1, edgesDrawn)
+						[_, ?] -> _drawBorderEdges(i + 1, edgesDrawn)
+						_ -> if _lineVisible?(window, pa, pb) {
+							true -> {
+								deps.drawLine(window, pa.x, pa.y, pb.x, pb.y, borderColor)
+								_drawBorderEdges(i + 1, edgesDrawn + 1)
+							}
+							_ -> _drawBorderEdges(i + 1, edgesDrawn)
+						}
+					}
+				}
+			}
+			borderEdges := _drawBorderEdges(0, 0)
+			{
+				type: :ok
+				triangles: drawn
+				borderEdges: borderEdges
+			}
+		}
+		_ -> {
+			type: :ok
+			triangles: drawn
+		}
 	}
 }
 

@@ -14,6 +14,13 @@ Key exports
 - `ConeMesh(radius?, height?, segments?)` — cone with apex at top
 - `TorusMesh(majorRadius?, minorRadius?, majorSegments?, minorSegments?)` — torus (donut)
 - `PlaneMesh(width?, depth?, subdivisionsW?, subdivisionsD?)` — flat XZ plane
+- `HemisphereMesh(radius?, segments?, rings?)` — top half of a UV sphere
+- `WedgeMesh(width?, height?, depth?)` — triangular prism wedge
+- `TubeMesh(outerRadius?, innerRadius?, height?, segments?)` — hollow cylinder (pipe)
+- `ArrowMesh(shaftRadius?, shaftHeight?, headRadius?, headHeight?, segments?)` — 3D arrow
+- `PrismMesh(radius?, height?, sides?)` — regular n-sided prism
+- `StairsMesh(steps?, width?, stepHeight?, stepDepth?)` — stepped staircase
+- `IcosphereMesh(radius?)` — icosahedron (geodesic sphere)
 
 Notes
 

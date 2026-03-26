@@ -31,6 +31,13 @@ fn Renderer3D(deps, window, options) {
 	coneMeshCache := {}
 	torusMeshCache := {}
 	planeMeshCache := {}
+	hemisphereMeshCache := {}
+	wedgeMeshCache := {}
+	tubeMeshCache := {}
+	arrowMeshCache := {}
+	prismMeshCache := {}
+	stairsMeshCache := {}
+	icosphereMeshCache := {}
 	instanceCache := {}
 	instanceCacheOrder := []
 	renderQueue := []
@@ -247,6 +254,113 @@ fn Renderer3D(deps, window, options) {
 		}
 	}
 
+	fn hemisphereMesh(radius, segments, rings) {
+		r := _default(radius, 1)
+		s := _default(segments, 16)
+		rn := _default(rings, 8)
+		key := string(r) + '|' + string(s) + '|' + string(rn)
+		if cached := hemisphereMeshCache.(key) {
+			? -> {
+				created := deps.HemisphereMesh(r, s, rn)
+				hemisphereMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn wedgeMesh(width, height, depth) {
+		w := _default(width, 2)
+		h := _default(height, 2)
+		d := _default(depth, 2)
+		key := string(w) + '|' + string(h) + '|' + string(d)
+		if cached := wedgeMeshCache.(key) {
+			? -> {
+				created := deps.WedgeMesh(w, h, d)
+				wedgeMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn tubeMesh(outerR, innerR, height, segments) {
+		oR := _default(outerR, 1)
+		iR := _default(innerR, 0.7)
+		h := _default(height, 2)
+		s := _default(segments, 16)
+		key := string(oR) + '|' + string(iR) + '|' + string(h) + '|' + string(s)
+		if cached := tubeMeshCache.(key) {
+			? -> {
+				created := deps.TubeMesh(oR, iR, h, s)
+				tubeMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn arrowMesh(shaftR, shaftH, headR, headH, segments) {
+		sr := _default(shaftR, 0.15)
+		sh := _default(shaftH, 1.5)
+		hr := _default(headR, 0.4)
+		hh := _default(headH, 0.5)
+		s := _default(segments, 12)
+		key := string(sr) + '|' + string(sh) + '|' + string(hr) + '|' + string(hh) + '|' + string(s)
+		if cached := arrowMeshCache.(key) {
+			? -> {
+				created := deps.ArrowMesh(sr, sh, hr, hh, s)
+				arrowMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn prismMesh(radius, height, sides) {
+		r := _default(radius, 1)
+		h := _default(height, 2)
+		n := _default(sides, 6)
+		key := string(r) + '|' + string(h) + '|' + string(n)
+		if cached := prismMeshCache.(key) {
+			? -> {
+				created := deps.PrismMesh(r, h, n)
+				prismMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn stairsMesh(steps, width, stepH, stepD) {
+		n := _default(steps, 4)
+		w := _default(width, 2)
+		sh := _default(stepH, 0.5)
+		sd := _default(stepD, 0.5)
+		key := string(n) + '|' + string(w) + '|' + string(sh) + '|' + string(sd)
+		if cached := stairsMeshCache.(key) {
+			? -> {
+				created := deps.StairsMesh(n, w, sh, sd)
+				stairsMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
+	fn icosphereMesh(radius) {
+		r := _default(radius, 1)
+		key := string(r)
+		if cached := icosphereMeshCache.(key) {
+			? -> {
+				created := deps.IcosphereMesh(r)
+				icosphereMeshCache.(key) <- created
+				created
+			}
+			_ -> cached
+		}
+	}
+
 	{
 		window: window
 		camera: camera
@@ -263,12 +377,12 @@ fn Renderer3D(deps, window, options) {
 			backfaceCulling: _default(camera.backfaceCulling, true)
 		}
 		clear: fn() deps.fillRect(window, 0, 0, window.width, window.height, background)
-		renderMeshSolid: fn(mesh, transform, color) {
+		renderMeshSolid: fn(mesh, transform, color, borderColor) {
 			entryColor := _default(color, lineColor)
 			m := _getCachedTransformMarker(mesh, transform)
-			deps.drawMeshSolid(window, m.mesh, transform, camera, entryColor, light)
+			deps.drawMeshSolid(window, m.mesh, transform, camera, entryColor, light, borderColor)
 		}
-		renderCubeSolid: fn(size, transform, color) deps.drawMeshSolid(window, cubeMesh(size), transform, camera, _default(color, lineColor), light)
+		renderCubeSolid: fn(size, transform, color, borderColor) deps.drawMeshSolid(window, cubeMesh(size), transform, camera, _default(color, lineColor), light, borderColor)
 		renderMesh: fn(mesh, transform, color) deps.drawMeshWireframe(window, mesh, transform, camera, _default(color, lineColor))
 		renderCube: fn(size, transform, color) deps.drawMeshWireframe(window, cubeMesh(size), transform, camera, _default(color, lineColor))
 		renderGrid: fn(size, step, transform, color) deps.drawMeshWireframe(window, gridMesh(size, step), transform, camera, _default(color, lineColor))
@@ -281,17 +395,31 @@ fn Renderer3D(deps, window, options) {
 		renderVoxels: fn(voxels, voxelSize, transform, color) deps.drawMeshWireframe(window, deps.VoxelMesh(voxels, _default(voxelSize, 1)), transform, camera, _default(color, lineColor))
 		renderVoxelGrid: fn(grid, transform, color) deps.drawMeshWireframe(window, grid.toMesh(), transform, camera, _default(color, lineColor))
 		renderSphere: fn(radius, segments, rings, transform, color) deps.drawMeshWireframe(window, sphereMesh(radius, segments, rings), transform, camera, _default(color, lineColor))
-		renderSphereSolid: fn(radius, segments, rings, transform, color) deps.drawMeshSolid(window, sphereMesh(radius, segments, rings), transform, camera, _default(color, lineColor), light)
+		renderSphereSolid: fn(radius, segments, rings, transform, color, borderColor) deps.drawMeshSolid(window, sphereMesh(radius, segments, rings), transform, camera, _default(color, lineColor), light, borderColor)
 		renderPyramid: fn(base, height, transform, color) deps.drawMeshWireframe(window, pyramidMesh(base, height), transform, camera, _default(color, lineColor))
-		renderPyramidSolid: fn(base, height, transform, color) deps.drawMeshSolid(window, pyramidMesh(base, height), transform, camera, _default(color, lineColor), light)
+		renderPyramidSolid: fn(base, height, transform, color, borderColor) deps.drawMeshSolid(window, pyramidMesh(base, height), transform, camera, _default(color, lineColor), light, borderColor)
 		renderCylinder: fn(radius, height, segments, transform, color) deps.drawMeshWireframe(window, cylinderMesh(radius, height, segments), transform, camera, _default(color, lineColor))
-		renderCylinderSolid: fn(radius, height, segments, transform, color) deps.drawMeshSolid(window, cylinderMesh(radius, height, segments), transform, camera, _default(color, lineColor), light)
+		renderCylinderSolid: fn(radius, height, segments, transform, color, borderColor) deps.drawMeshSolid(window, cylinderMesh(radius, height, segments), transform, camera, _default(color, lineColor), light, borderColor)
 		renderCone: fn(radius, height, segments, transform, color) deps.drawMeshWireframe(window, coneMesh(radius, height, segments), transform, camera, _default(color, lineColor))
-		renderConeSolid: fn(radius, height, segments, transform, color) deps.drawMeshSolid(window, coneMesh(radius, height, segments), transform, camera, _default(color, lineColor), light)
+		renderConeSolid: fn(radius, height, segments, transform, color, borderColor) deps.drawMeshSolid(window, coneMesh(radius, height, segments), transform, camera, _default(color, lineColor), light, borderColor)
 		renderTorus: fn(majorR, minorR, majSegs, minSegs, transform, color) deps.drawMeshWireframe(window, torusMesh(majorR, minorR, majSegs, minSegs), transform, camera, _default(color, lineColor))
-		renderTorusSolid: fn(majorR, minorR, majSegs, minSegs, transform, color) deps.drawMeshSolid(window, torusMesh(majorR, minorR, majSegs, minSegs), transform, camera, _default(color, lineColor), light)
+		renderTorusSolid: fn(majorR, minorR, majSegs, minSegs, transform, color, borderColor) deps.drawMeshSolid(window, torusMesh(majorR, minorR, majSegs, minSegs), transform, camera, _default(color, lineColor), light, borderColor)
 		renderPlane: fn(width, depth, sw, sd, transform, color) deps.drawMeshWireframe(window, planeMesh(width, depth, sw, sd), transform, camera, _default(color, lineColor))
-		renderPlaneSolid: fn(width, depth, sw, sd, transform, color) deps.drawMeshSolid(window, planeMesh(width, depth, sw, sd), transform, camera, _default(color, lineColor), light)
+		renderPlaneSolid: fn(width, depth, sw, sd, transform, color, borderColor) deps.drawMeshSolid(window, planeMesh(width, depth, sw, sd), transform, camera, _default(color, lineColor), light, borderColor)
+		renderHemisphere: fn(radius, segments, rings, transform, color) deps.drawMeshWireframe(window, hemisphereMesh(radius, segments, rings), transform, camera, _default(color, lineColor))
+		renderHemisphereSolid: fn(radius, segments, rings, transform, color, borderColor) deps.drawMeshSolid(window, hemisphereMesh(radius, segments, rings), transform, camera, _default(color, lineColor), light, borderColor)
+		renderWedge: fn(width, height, depth, transform, color) deps.drawMeshWireframe(window, wedgeMesh(width, height, depth), transform, camera, _default(color, lineColor))
+		renderWedgeSolid: fn(width, height, depth, transform, color, borderColor) deps.drawMeshSolid(window, wedgeMesh(width, height, depth), transform, camera, _default(color, lineColor), light, borderColor)
+		renderTube: fn(outerR, innerR, height, segments, transform, color) deps.drawMeshWireframe(window, tubeMesh(outerR, innerR, height, segments), transform, camera, _default(color, lineColor))
+		renderTubeSolid: fn(outerR, innerR, height, segments, transform, color, borderColor) deps.drawMeshSolid(window, tubeMesh(outerR, innerR, height, segments), transform, camera, _default(color, lineColor), light, borderColor)
+		renderArrow: fn(shaftR, shaftH, headR, headH, segments, transform, color) deps.drawMeshWireframe(window, arrowMesh(shaftR, shaftH, headR, headH, segments), transform, camera, _default(color, lineColor))
+		renderArrowSolid: fn(shaftR, shaftH, headR, headH, segments, transform, color, borderColor) deps.drawMeshSolid(window, arrowMesh(shaftR, shaftH, headR, headH, segments), transform, camera, _default(color, lineColor), light, borderColor)
+		renderPrism: fn(radius, height, sides, transform, color) deps.drawMeshWireframe(window, prismMesh(radius, height, sides), transform, camera, _default(color, lineColor))
+		renderPrismSolid: fn(radius, height, sides, transform, color, borderColor) deps.drawMeshSolid(window, prismMesh(radius, height, sides), transform, camera, _default(color, lineColor), light, borderColor)
+		renderStairs: fn(steps, width, stepH, stepD, transform, color) deps.drawMeshWireframe(window, stairsMesh(steps, width, stepH, stepD), transform, camera, _default(color, lineColor))
+		renderStairsSolid: fn(steps, width, stepH, stepD, transform, color, borderColor) deps.drawMeshSolid(window, stairsMesh(steps, width, stepH, stepD), transform, camera, _default(color, lineColor), light, borderColor)
+		renderIcosphere: fn(radius, transform, color) deps.drawMeshWireframe(window, icosphereMesh(radius), transform, camera, _default(color, lineColor))
+		renderIcosphereSolid: fn(radius, transform, color, borderColor) deps.drawMeshSolid(window, icosphereMesh(radius), transform, camera, _default(color, lineColor), light, borderColor)
 		enqueueMeshSolid: fn(mesh, transform, color) _queuePush({ kind: 'solid', mesh: mesh, transform: transform, color: _default(color, lineColor) })
 		enqueueMeshWire: fn(mesh, transform, color) _queuePush({ kind: 'wire', mesh: mesh, transform: transform, color: _default(color, lineColor) })
 		flushQueue: fn() {

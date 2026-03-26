@@ -1,0 +1,775 @@
+std := import('std')
+fmt := import('fmt')
+sh := import('gui-shader')
+
+// Helper: pack RGB channels the same way gui.rgb does (little-endian int)
+fn _rgb(r, g, b) r | (g << 8) | (b << 16)
+
+fn run(t) {
+	// ---
+	// @ Constants
+
+	'PI is approximately 3.14159' |> t.approx(sh.PI, 3.14159265358979, 0.00001)
+	'TAU is 2*PI' |> t.approx(sh.TAU, sh.PI * 2.0, 0.00001)
+	'HALF_PI is PI/2' |> t.approx(sh.HALF_PI, sh.PI / 2.0, 0.00001)
+	'E is approximately 2.71828' |> t.approx(sh.E, 2.71828182845905, 0.00001)
+	'SQRT2 is approximately 1.41421' |> t.approx(sh.SQRT2, 1.41421356237310, 0.00001)
+	'DEG2RAD converts 180 to PI' |> t.approx(180.0 * sh.DEG2RAD, sh.PI, 0.00001)
+	'RAD2DEG converts PI to 180' |> t.approx(sh.PI * sh.RAD2DEG, 180.0, 0.00001)
+
+	// ---
+	// @ Math Helpers
+	{
+		{
+			fract: fract
+			mod: mod
+			sign: sign
+			abs2: abs2
+			clamp: clamp
+			saturate: saturate
+			lerpFloat: lerpFloat
+			inverseLerp: inverseLerp
+			remap: remap
+			step: step
+			smoothstep: smoothstep
+			smootherstep: smootherstep
+			min2: min2
+			max2: max2
+			sqr: sqr
+			sqrt: sqrt
+			lerp: lerp
+			pingpong: pingpong
+			degToRad: degToRad
+			radToDeg: radToDeg
+		} := sh
+
+		// fract
+		'fract(3.75) = 0.75' |> t.approx(fract(3.75), 0.75)
+		'fract(1.0) = 0' |> t.approx(fract(1.0), 0.0)
+		'fract(0.5) = 0.5' |> t.approx(fract(0.5), 0.5)
+
+		// mod
+		'mod(7, 3) = 1' |> t.approx(mod(7.0, 3.0), 1.0)
+		'mod(5, 5) = 0' |> t.approx(mod(5.0, 5.0), 0.0)
+
+		// sign
+		'sign(10) = 1' |> t.eq(sign(10), 1)
+		'sign(-5) = -1' |> t.eq(sign(-5), -1)
+		'sign(0) = 0' |> t.eq(sign(0), 0)
+
+		// abs2
+		'abs2(5) = 5' |> t.eq(abs2(5), 5)
+		'abs2(-3) = 3' |> t.eq(abs2(-3), 3)
+		'abs2(0) = 0' |> t.eq(abs2(0), 0)
+
+		// clamp
+		'clamp in range' |> t.eq(clamp(5, 0, 10), 5)
+		'clamp below lo' |> t.eq(clamp(-1, 0, 10), 0)
+		'clamp above hi' |> t.eq(clamp(15, 0, 10), 10)
+
+		// saturate
+		'saturate(0.5) = 0.5' |> t.approx(saturate(0.5), 0.5)
+		'saturate(-1) = 0' |> t.approx(saturate(-1.0), 0.0)
+		'saturate(2) = 1' |> t.approx(saturate(2.0), 1.0)
+
+		// lerpFloat
+		'lerpFloat at 0' |> t.approx(lerpFloat(10.0, 20.0, 0.0), 10.0)
+		'lerpFloat at 1' |> t.approx(lerpFloat(10.0, 20.0, 1.0), 20.0)
+		'lerpFloat at 0.5' |> t.approx(lerpFloat(10.0, 20.0, 0.5), 15.0)
+
+		// inverseLerp
+		'inverseLerp midpoint' |> t.approx(inverseLerp(10.0, 20.0, 15.0), 0.5)
+		'inverseLerp start' |> t.approx(inverseLerp(0.0, 100.0, 0.0), 0.0)
+		'inverseLerp end' |> t.approx(inverseLerp(0.0, 100.0, 100.0), 1.0)
+		'inverseLerp equal bounds' |> t.approx(inverseLerp(5.0, 5.0, 5.0), 0.0)
+
+		// remap
+		'remap 0.5 from [0,1] to [0,100]' |> t.approx(remap(0.5, 0.0, 1.0, 0.0, 100.0), 50.0)
+		'remap 50 from [0,100] to [0,1]' |> t.approx(remap(50.0, 0.0, 100.0, 0.0, 1.0), 0.5)
+
+		// step
+		'step below edge' |> t.eq(step(0.5, 0.3), 0)
+		'step above edge' |> t.eq(step(0.5, 0.7), 1)
+
+		// smoothstep
+		'smoothstep below edge0' |> t.approx(smoothstep(0.0, 1.0, -0.5), 0.0)
+		'smoothstep above edge1' |> t.approx(smoothstep(0.0, 1.0, 1.5), 1.0)
+		'smoothstep at midpoint' |> t.approx(smoothstep(0.0, 1.0, 0.5), 0.5)
+
+		// smootherstep
+		'smootherstep below' |> t.approx(smootherstep(0.0, 1.0, -1.0), 0.0)
+		'smootherstep above' |> t.approx(smootherstep(0.0, 1.0, 2.0), 1.0)
+		'smootherstep at midpoint' |> t.approx(smootherstep(0.0, 1.0, 0.5), 0.5)
+
+		// min2 / max2
+		'min2(3, 7) = 3' |> t.eq(min2(3, 7), 3)
+		'max2(3, 7) = 7' |> t.eq(max2(3, 7), 7)
+		'min2(-1, 1) = -1' |> t.eq(min2(-1, 1), -1)
+
+		// sqr
+		'sqr(5) = 25' |> t.eq(sqr(5), 25)
+		'sqr(0) = 0' |> t.eq(sqr(0), 0)
+
+		// sqrt
+		'sqrt(4) = 2' |> t.approx(sqrt(4.0), 2.0)
+		'sqrt(1) = 1' |> t.approx(sqrt(1.0), 1.0)
+
+		// lerp is alias for lerpFloat
+		'lerp at 0.25' |> t.approx(lerp(0.0, 100.0, 0.25), 25.0)
+
+		// pingpong
+		'pingpong(0, 1) = 0' |> t.approx(pingpong(0.0, 1.0), 0.0, 0.01)
+		'pingpong(1, 1) = 1' |> t.approx(pingpong(1.0, 1.0), 1.0, 0.01)
+		'pingpong(1.5, 1) = 0.5' |> t.approx(pingpong(1.5, 1.0), 0.5, 0.01)
+
+		// degToRad / radToDeg
+		'degToRad(90)' |> t.approx(degToRad(90.0), sh.HALF_PI, 0.0001)
+		'radToDeg(PI)' |> t.approx(radToDeg(sh.PI), 180.0, 0.0001)
+	}
+
+	// ---
+	// @ Easing Functions
+	{
+		{
+			easeInQuad: easeInQuad
+			easeOutQuad: easeOutQuad
+			easeInOutQuad: easeInOutQuad
+			easeInCubic: easeInCubic
+			easeOutCubic: easeOutCubic
+			easeInSine: easeInSine
+			easeOutSine: easeOutSine
+			easeInExpo: easeInExpo
+			easeOutExpo: easeOutExpo
+			easeOutElastic: easeOutElastic
+			easeOutBounce: easeOutBounce
+		} := sh
+
+		// All easing functions must map 0->0 and 1->1
+		'easeInQuad(0) = 0' |> t.approx(easeInQuad(0.0), 0.0)
+		'easeInQuad(1) = 1' |> t.approx(easeInQuad(1.0), 1.0)
+		'easeOutQuad(0) = 0' |> t.approx(easeOutQuad(0.0), 0.0)
+		'easeOutQuad(1) = 1' |> t.approx(easeOutQuad(1.0), 1.0)
+		'easeInOutQuad(0) = 0' |> t.approx(easeInOutQuad(0.0), 0.0)
+		'easeInOutQuad(1) = 1' |> t.approx(easeInOutQuad(1.0), 1.0)
+		'easeInCubic(0) = 0' |> t.approx(easeInCubic(0.0), 0.0)
+		'easeInCubic(1) = 1' |> t.approx(easeInCubic(1.0), 1.0)
+		'easeOutCubic(0) = 0' |> t.approx(easeOutCubic(0.0), 0.0)
+		'easeOutCubic(1) = 1' |> t.approx(easeOutCubic(1.0), 1.0)
+		'easeInSine(0) = 0' |> t.approx(easeInSine(0.0), 0.0, 0.001)
+		'easeInSine(1) = 1' |> t.approx(easeInSine(1.0), 1.0, 0.001)
+		'easeOutSine(0) = 0' |> t.approx(easeOutSine(0.0), 0.0, 0.001)
+		'easeOutSine(1) = 1' |> t.approx(easeOutSine(1.0), 1.0, 0.001)
+		'easeInExpo(0) = 0' |> t.approx(easeInExpo(0.0), 0.0)
+		'easeOutExpo(1) = 1' |> t.approx(easeOutExpo(1.0), 1.0)
+		'easeOutElastic(0) = 0' |> t.approx(easeOutElastic(0.0), 0.0)
+		'easeOutElastic(1) = 1' |> t.approx(easeOutElastic(1.0), 1.0)
+		'easeOutBounce(0) = 0' |> t.approx(easeOutBounce(0.0), 0.0)
+		'easeOutBounce(1) = 1' |> t.approx(easeOutBounce(1.0), 1.0, 0.001)
+
+		// Midpoint behavior sanity
+		'easeInQuad(0.5) = 0.25' |> t.approx(easeInQuad(0.5), 0.25)
+		'easeOutQuad(0.5) = 0.75' |> t.approx(easeOutQuad(0.5), 0.75)
+		'easeInOutQuad(0.5) = 0.5' |> t.approx(easeInOutQuad(0.5), 0.5)
+		'easeInCubic(0.5) = 0.125' |> t.approx(easeInCubic(0.5), 0.125)
+	}
+
+	// ---
+	// @ 2D Vector Math
+	{
+		{
+			vec2: vec2
+			dot2: dot2
+			length2: length2
+			distance2: distance2
+			normalize2: normalize2
+			rotate2: rotate2
+			scale2: scale2
+			add2: add2
+			sub2: sub2
+			lerp2: lerp2
+			negate2: negate2
+			abs2v: abs2v
+			min2v: min2v
+			max2v: max2v
+			floor2: floor2
+			fract2: fract2
+			reflect2: reflect2
+			toPolar: toPolar
+			fromPolar: fromPolar
+		} := sh
+
+		'vec2 creates {x, y}' |> t.eq(vec2(3, 4), { x: 3, y: 4 })
+
+		'dot2 of perpendicular vectors' |> t.approx(dot2(vec2(1, 0), vec2(0, 1)), 0.0)
+		'dot2 of parallel vectors' |> t.approx(dot2(vec2(3, 0), vec2(5, 0)), 15.0)
+
+		'length2 of (3,4) = 5' |> t.approx(length2(vec2(3.0, 4.0)), 5.0)
+		'length2 of zero vector' |> t.approx(length2(vec2(0, 0)), 0.0)
+
+		'distance2 between (0,0) and (3,4)' |> t.approx(distance2(vec2(0, 0), vec2(3.0, 4.0)), 5.0)
+
+		{
+			n := normalize2(vec2(3.0, 4.0))
+			'normalize2 has unit length' |> t.approx(length2(n), 1.0)
+		}
+		'normalize2 of zero vector' |> t.eq(normalize2(vec2(0, 0)), vec2(0, 0))
+
+		'scale2' |> t.eq(scale2(vec2(2, 3), 4), vec2(8, 12))
+		'add2' |> t.eq(add2(vec2(1, 2), vec2(3, 4)), vec2(4, 6))
+		'sub2' |> t.eq(sub2(vec2(5, 7), vec2(2, 3)), vec2(3, 4))
+		'negate2' |> t.eq(negate2(vec2(3, -4)), vec2(-3, 4))
+
+		{
+			l := lerp2(vec2(0.0, 0.0), vec2(10.0, 20.0), 0.5)
+			'lerp2 x' |> t.approx(l.x, 5.0)
+			'lerp2 y' |> t.approx(l.y, 10.0)
+		}
+
+		'abs2v' |> t.eq(abs2v(vec2(-3, -7)), vec2(3, 7))
+		'min2v' |> t.eq(min2v(vec2(1, 5), vec2(3, 2)), vec2(1, 2))
+		'max2v' |> t.eq(max2v(vec2(1, 5), vec2(3, 2)), vec2(3, 5))
+		'floor2' |> t.eq(floor2(vec2(3.7, 4.2)), vec2(3, 4))
+
+		{
+			f := fract2(vec2(3.75, 4.25))
+			'fract2 x' |> t.approx(f.x, 0.75)
+			'fract2 y' |> t.approx(f.y, 0.25)
+		}
+
+		// rotate2: rotate (1,0) by PI/2 should give (0,1)
+		{
+			r := rotate2(vec2(1.0, 0.0), sh.HALF_PI)
+			'rotate2 90deg x' |> t.approx(r.x, 0.0, 0.0001)
+			'rotate2 90deg y' |> t.approx(r.y, 1.0, 0.0001)
+		}
+
+		// toPolar / fromPolar roundtrip
+		{
+			p := toPolar(vec2(3.0, 4.0))
+			'toPolar radius' |> t.approx(p.r, 5.0, 0.0001)
+			back := fromPolar(p.r, p.theta)
+			'fromPolar roundtrip x' |> t.approx(back.x, 3.0, 0.0001)
+			'fromPolar roundtrip y' |> t.approx(back.y, 4.0, 0.0001)
+		}
+	}
+
+	// ---
+	// @ 3D Vector Math
+	{
+		{
+			vec3: vec3
+			add3: add3
+			sub3: sub3
+			scale3: scale3
+			dot3: dot3
+			length3: length3
+			distance3: distance3
+			normalize3: normalize3
+			cross3: cross3
+			lerp3: lerp3
+			negate3: negate3
+			reflect3: reflect3
+		} := sh
+
+		'vec3 creates {x, y, z}' |> t.eq(vec3(1, 2, 3), { x: 1, y: 2, z: 3 })
+		'add3' |> t.eq(add3(vec3(1, 2, 3), vec3(4, 5, 6)), vec3(5, 7, 9))
+		'sub3' |> t.eq(sub3(vec3(5, 7, 9), vec3(1, 2, 3)), vec3(4, 5, 6))
+		'scale3' |> t.eq(scale3(vec3(1, 2, 3), 2), vec3(2, 4, 6))
+		'dot3 perpendicular' |> t.approx(dot3(vec3(1, 0, 0), vec3(0, 1, 0)), 0.0)
+		'dot3 parallel' |> t.approx(dot3(vec3(2, 0, 0), vec3(3, 0, 0)), 6.0)
+		'length3 of (1,2,2)' |> t.approx(length3(vec3(1.0, 2.0, 2.0)), 3.0)
+		'distance3' |> t.approx(distance3(vec3(0, 0, 0), vec3(1.0, 2.0, 2.0)), 3.0)
+
+		{
+			n := normalize3(vec3(1.0, 2.0, 2.0))
+			'normalize3 has unit length' |> t.approx(length3(n), 1.0)
+		}
+		'normalize3 of zero' |> t.eq(normalize3(vec3(0, 0, 0)), vec3(0, 0, 0))
+
+		// cross product of x and y axes = z axis
+		'cross3 x cross y = z' |> t.eq(cross3(vec3(1, 0, 0), vec3(0, 1, 0)), vec3(0, 0, 1))
+		'cross3 y cross x = -z' |> t.eq(cross3(vec3(0, 1, 0), vec3(1, 0, 0)), vec3(0, 0, -1))
+
+		{
+			l := lerp3(vec3(0.0, 0.0, 0.0), vec3(10.0, 20.0, 30.0), 0.5)
+			'lerp3 x' |> t.approx(l.x, 5.0)
+			'lerp3 y' |> t.approx(l.y, 10.0)
+			'lerp3 z' |> t.approx(l.z, 15.0)
+		}
+
+		'negate3' |> t.eq(negate3(vec3(1, -2, 3)), vec3(-1, 2, -3))
+	}
+
+	// ---
+	// @ Color Helpers
+	{
+		{
+			packRGB: packRGB
+			unpackRGB: unpackRGB
+			colorR: colorR
+			colorG: colorG
+			colorB: colorB
+			mix: cmix
+			mix3: cmix3
+			brighten: brighten
+			darken: darken
+			invert: invert
+			grayscale: grayscale
+			overlay: overlay
+			hsl2rgb: hsl2rgb
+			rgb2hsl: rgb2hsl
+			hsv2rgb: hsv2rgb
+			rgb2hsv: rgb2hsv
+			blendMultiply: blendMultiply
+			blendScreen: blendScreen
+			blendAdd: blendAdd
+			contrast: contrast
+			sepia: sepia
+		} := sh
+
+		red := _rgb(255, 0, 0)
+		green := _rgb(0, 255, 0)
+		blue := _rgb(0, 0, 255)
+		white := _rgb(255, 255, 255)
+		black := _rgb(0, 0, 0)
+
+		// packRGB / unpackRGB roundtrip
+		'packRGB matches gui.rgb' |> t.eq(packRGB(128, 64, 32), _rgb(128, 64, 32))
+		{
+			u := unpackRGB(_rgb(100, 150, 200))
+			'unpackRGB r' |> t.eq(u.r, 100)
+			'unpackRGB g' |> t.eq(u.g, 150)
+			'unpackRGB b' |> t.eq(u.b, 200)
+		}
+
+		// Channel extractors
+		'colorR of red' |> t.eq(colorR(red), 255)
+		'colorG of red' |> t.eq(colorG(red), 0)
+		'colorB of red' |> t.eq(colorB(red), 0)
+		'colorR of green' |> t.eq(colorR(green), 0)
+		'colorG of green' |> t.eq(colorG(green), 255)
+		'colorB of blue' |> t.eq(colorB(blue), 255)
+
+		// mix
+		'mix at 0' |> t.eq(cmix(red, blue, 0.0), red)
+		'mix at 1' |> t.eq(cmix(red, blue, 1.0), blue)
+		'mix handles ? first' |> t.eq(cmix(?, red, 0.5), red)
+		'mix handles ? second' |> t.eq(cmix(red, ?, 0.5), red)
+
+		// mix3
+		'mix3 at 0 = first color' |> t.eq(cmix3(red, green, blue, 0.0), red)
+		'mix3 at 0.5 = second color' |> t.eq(cmix3(red, green, blue, 0.5), green)
+		'mix3 at 1 = third color' |> t.eq(cmix3(red, green, blue, 1.0), blue)
+
+		// brighten / darken
+		{
+			c := _rgb(100, 100, 100)
+			b := brighten(c, 50)
+			'brighten adds to channels' |> t.eq(colorR(b), 150)
+			d := darken(c, 50)
+			'darken subtracts from channels' |> t.eq(colorR(d), 50)
+		}
+		'brighten clamps at 255' |> t.eq(colorR(brighten(_rgb(250, 0, 0), 50)), 255)
+		'darken clamps at 0' |> t.eq(colorR(darken(_rgb(10, 0, 0), 50)), 0)
+
+		// invert
+		'invert black = white' |> t.eq(invert(black), white)
+		'invert white = black' |> t.eq(invert(white), black)
+
+		// grayscale
+		{
+			g := grayscale(_rgb(100, 100, 100))
+			'grayscale of uniform color' |> t.eq(colorR(g), colorG(g))
+		}
+
+		// overlay: alpha 0 = bg, alpha 1 = fg
+		'overlay alpha 0 = bg' |> t.eq(overlay(red, blue, 0.0), blue)
+		'overlay alpha 1 = fg' |> t.eq(overlay(red, blue, 1.0), red)
+
+		// hsl2rgb / rgb2hsl roundtrip
+		{
+			c := hsl2rgb(0.0, 1.0, 0.5) // pure red
+			'hsl2rgb red' |> t.eq(colorR(c), 255)
+			'hsl2rgb red green channel' |> t.eq(colorG(c), 0)
+		}
+		{
+			// achromatic
+			c := hsl2rgb(0.0, 0.0, 0.5)
+			'hsl2rgb gray' |> t.eq(colorR(c), 127)
+		}
+
+		// hsv2rgb / rgb2hsv roundtrip
+		{
+			c := hsv2rgb(0.0, 1.0, 1.0) // pure red in HSV
+			'hsv2rgb red R' |> t.eq(colorR(c), 255)
+			'hsv2rgb red G' |> t.eq(colorG(c), 0)
+			'hsv2rgb red B' |> t.eq(colorB(c), 0)
+		}
+
+		// blend modes
+		'blendMultiply with white' |> t.eq(blendMultiply(red, white), red)
+		'blendMultiply with black' |> t.eq(blendMultiply(red, black), black)
+		'blendAdd red + green' |> t.eq(
+			blendAdd(red, green)
+			_rgb(255, 255, 0)
+		)
+		'blendAdd clamps' |> t.eq(
+			colorR(blendAdd(_rgb(200, 0, 0), _rgb(200, 0, 0)))
+			255
+		)
+		'blendScreen with black = original' |> t.eq(blendScreen(red, black), red)
+
+		// contrast
+		{
+			c := contrast(_rgb(128, 128, 128), 1.0)
+			'contrast at 1.0 is identity' |> t.eq(colorR(c), 128)
+		}
+
+		// sepia
+		{
+			s := sepia(_rgb(100, 100, 100))
+			'sepia produces warmer tone' |> t.assert(colorR(s) > colorB(s))
+		}
+	}
+
+	// ---
+	// @ Noise & Hashing
+	{
+		{
+			hash: hash
+			hash2: hash2
+			hash3: hash3
+			noise2D: noise2D
+			fbm: fbm
+		} := sh
+
+		// hash is deterministic
+		'hash is deterministic' |> t.eq(hash(42.0), hash(42.0))
+		'hash different seeds give different values' |> t.assert(hash(1.0) != hash(2.0))
+
+		// hash output in [0,1)
+		'hash in range' |> t.assert(hash(7.5) >= 0.0 & hash(7.5) < 1.0)
+
+		// hash2 deterministic
+		'hash2 deterministic' |> t.eq(hash2(1.0, 2.0), hash2(1.0, 2.0))
+
+		// hash3 deterministic
+		'hash3 deterministic' |> t.eq(hash3(1.0, 2.0, 3.0), hash3(1.0, 2.0, 3.0))
+
+		// noise2D returns values in [0,1]
+		{
+			v := noise2D(3.5, 7.2)
+			'noise2D in [0,1]' |> t.assert(v >= 0.0 & v <= 1.0)
+		}
+		'noise2D is deterministic' |> t.eq(noise2D(1.5, 2.5), noise2D(1.5, 2.5))
+
+		// fbm returns finite values
+		{
+			v := fbm(1.0, 1.0)
+			'fbm returns finite value' |> t.assert(v >= -2.0 & v <= 2.0)
+		}
+		'fbm is deterministic' |> t.eq(fbm(1.0, 2.0), fbm(1.0, 2.0))
+	}
+
+	// ---
+	// @ SDF Primitives
+	{
+		{
+			sdCircle: sdCircle
+			sdBox: sdBox
+			sdLine: sdLine
+			sdRoundedBox: sdRoundedBox
+			sdfFill: sdfFill
+			sdfStroke: sdfStroke
+			sdUnion: sdUnion
+			sdIntersect: sdIntersect
+			sdSubtract: sdSubtract
+			sdSmoothUnion: sdSmoothUnion
+			sdAnnular: sdAnnular
+		} := sh
+
+		// sdCircle: center should be negative (inside)
+		'sdCircle at center < 0' |> t.assert(sdCircle(5.0, 5.0, 5.0, 5.0, 3.0) < 0)
+		'sdCircle at edge = 0' |> t.approx(sdCircle(8.0, 5.0, 5.0, 5.0, 3.0), 0.0)
+		'sdCircle outside > 0' |> t.assert(sdCircle(10.0, 5.0, 5.0, 5.0, 3.0) > 0)
+
+		// sdBox
+		'sdBox at center < 0' |> t.assert(sdBox(5.0, 5.0, 5.0, 5.0, 3.0, 3.0) < 0)
+		'sdBox outside > 0' |> t.assert(sdBox(15.0, 15.0, 5.0, 5.0, 3.0, 3.0) > 0)
+
+		// sdLine distance from (0,0) to line from (0,0)-(10,0) at y=5
+		'sdLine perpendicular distance' |> t.approx(sdLine(5.0, 5.0, 0.0, 0.0, 10.0, 0.0), 5.0)
+
+		// sdRoundedBox
+		'sdRoundedBox inside < 0' |> t.assert(sdRoundedBox(5.0, 5.0, 5.0, 5.0, 10.0, 10.0, 2.0) < 0)
+
+		// sdfFill
+		'sdfFill inside returns color' |> t.eq(sdfFill(-1.0, 0xFF), 0xFF)
+		'sdfFill outside returns ?' |> t.eq(sdfFill(1.0, 0xFF), ?)
+
+		// sdfStroke
+		'sdfStroke on edge returns color' |> t.eq(sdfStroke(0.0, 2.0, 0xFF), 0xFF)
+		'sdfStroke far away returns ?' |> t.eq(sdfStroke(10.0, 2.0, 0xFF), ?)
+
+		// Boolean operations
+		'sdUnion picks smaller' |> t.eq(sdUnion(3.0, 7.0), 3.0)
+		'sdIntersect picks larger' |> t.eq(sdIntersect(3.0, 7.0), 7.0)
+		'sdSubtract' |> t.eq(sdSubtract(3.0, 7.0), 3.0)
+
+		// sdSmoothUnion is <= min of both
+		'sdSmoothUnion <= min' |> t.assert(sdSmoothUnion(3.0, 7.0, 1.0) <= 3.0)
+
+		// sdAnnular
+		'sdAnnular of 5 with radius 2' |> t.approx(sdAnnular(5.0, 2.0), 3.0)
+	}
+
+	// ---
+	// @ Patterns
+	{
+		{
+			checkerboard: checkerboard
+			stripes: stripes
+			grid: grid
+			dots: dots
+			voronoi: voronoi
+		} := sh
+
+		// checkerboard alternates
+		'checkerboard (0,0)' |> t.approx(checkerboard(0, 0, 10), 0.0)
+		'checkerboard (10,0)' |> t.approx(checkerboard(10, 0, 10), 0.0)
+		'checkerboard (10,10) same parity' |> t.approx(checkerboard(10, 10, 10), 0.0)
+		'checkerboard (0,10) odd parity' |> t.approx(checkerboard(5, 0, 10), 0.0)
+
+		// stripes returns 0 or 1
+		{
+			s := stripes(10.0, 10.0, 0.0, 20.0)
+			'stripes returns 0 or 1' |> t.assert(s = 0 | s = 1)
+		}
+
+		// grid returns 0 or 1
+		{
+			g := grid(0, 0, 10, 1)
+			'grid at origin on line' |> t.eq(g, 1)
+		}
+
+		// dots returns 0 or 1
+		{
+			d := dots(100, 100, 200, 50)
+			'dots returns 0 or 1' |> t.assert(d = 0 | d = 1)
+		}
+
+		// voronoi returns { dist, cellId }
+		{
+			v := voronoi(50, 50, 100)
+			'voronoi returns dist' |> t.assert(v.dist >= 0.0)
+			'voronoi returns cellId' |> t.assert(v.cellId >= 0.0 & v.cellId < 1.0)
+		}
+		'voronoi is deterministic' |> t.eq(voronoi(50, 50, 100), voronoi(50, 50, 100))
+	}
+
+	// ---
+	// @ Pixel Buffer
+	{
+		{
+			createBuffer: createBuffer
+			clearBuffer: clearBuffer
+			setPixel: setPixel
+			getPixel: getPixel
+		} := sh
+
+		buf := createBuffer(4, 4)
+		'createBuffer width' |> t.eq(buf.width, 4)
+		'createBuffer height' |> t.eq(buf.height, 4)
+
+		// setPixel / getPixel
+		setPixel(buf, 2, 1, 0xFF00)
+		'getPixel after set' |> t.eq(getPixel(buf, 2, 1), 0xFF00)
+		'getPixel unset = 0' |> t.eq(getPixel(buf, 0, 0), 0)
+
+		// Out of bounds
+		'getPixel OOB x negative' |> t.eq(getPixel(buf, -1, 0), 0)
+		'getPixel OOB y negative' |> t.eq(getPixel(buf, 0, -1), 0)
+		'getPixel OOB x too large' |> t.eq(getPixel(buf, 10, 0), 0)
+		'getPixel OOB y too large' |> t.eq(getPixel(buf, 0, 10), 0)
+
+		// clearBuffer
+		clearBuffer(buf, 42)
+		'clearBuffer fills all pixels' |> t.eq(getPixel(buf, 0, 0), 42)
+		'clearBuffer fills all pixels (corner)' |> t.eq(getPixel(buf, 3, 3), 42)
+
+		clearBuffer(buf)
+		'clearBuffer default fills 0' |> t.eq(getPixel(buf, 0, 0), 0)
+	}
+
+	// ---
+	// @ Shader Core & Registry
+	{
+		{
+			Shader: Shader
+			elapsed: elapsed
+			pause: pause
+			resume: resume
+			reset: reset
+			setUniform: setUniform
+			getUniform: getUniform
+			setResolution: setResolution
+			beginFrame: beginFrame
+			endFrame: endFrame
+			dt: dt
+			isRunning: isRunning
+			frameCount: frameCount
+			registeredCount: registeredCount
+			destroyAll: destroyAll
+			unregisterShader: unregisterShader
+			clearAll: clearAll
+		} := sh
+
+		// Start fresh
+		destroyAll()
+		'registry empty after destroyAll' |> t.eq(registeredCount(), 0)
+
+		// Create a shader
+		s := Shader(fn(x, y, w, h, time, u) _rgb(255, 0, 0), {
+			resolution: 2
+			uniforms: { brightness: 1.0 }
+		})
+		'shader auto-registered' |> t.eq(registeredCount(), 1)
+		'shader resolution set' |> t.eq(s.resolution, 2)
+
+		// Uniform operations
+		'getUniform reads initial value' |> t.eq(getUniform(s, 'brightness'), 1.0)
+		setUniform(s, 'brightness', 0.5)
+		'setUniform updates value' |> t.eq(getUniform(s, 'brightness'), 0.5)
+		'getUniform missing key' |> t.eq(getUniform(s, 'nonexistent'), ?)
+
+		// Resolution
+		setResolution(s, 8)
+		'setResolution updates' |> t.eq(s.resolution, 8)
+
+		// Clock
+		'elapsed is >= 0' |> t.assert(elapsed(s) >= 0.0)
+		'isRunning initially true' |> t.eq(isRunning(s), true)
+
+		pause(s)
+		'isRunning after pause' |> t.eq(isRunning(s), false)
+
+		resume(s)
+		'isRunning after resume' |> t.eq(isRunning(s), true)
+
+		// Frame tracking
+		beginFrame(s)
+		endFrame(s)
+		'frameCount after one frame' |> t.eq(frameCount(s), 1)
+		'dt is >= 0' |> t.assert(dt(s) >= 0.0)
+
+		beginFrame(s)
+		endFrame(s)
+		'frameCount after two frames' |> t.eq(frameCount(s), 2)
+
+		// Reset
+		reset(s)
+		'elapsed after reset is small' |> t.assert(elapsed(s) < 1.0)
+
+		// Multiple shaders in registry
+		s2 := Shader(?, {})
+		'two shaders registered' |> t.eq(registeredCount(), 2)
+
+		// unregisterShader
+		unregisterShader(s2)
+		'unregister removes one' |> t.eq(registeredCount(), 1)
+
+		// clearAll resets clock
+		beginFrame(s)
+		endFrame(s)
+		clearAll()
+		'clearAll resets frameCount' |> t.eq(frameCount(s), 0)
+
+		// destroyAll clears registry
+		destroyAll()
+		'destroyAll empties registry' |> t.eq(registeredCount(), 0)
+	}
+
+	// ---
+	// @ ShaderPass
+	{
+		{
+			Shader: Shader
+			ShaderPass: ShaderPass
+			destroyAll: destroyAll
+		} := sh
+
+		destroyAll()
+		s := Shader(fn(x, y, w, h, t, u) 0, {})
+		p := ShaderPass(s, 10, 20, 100, 200)
+		'ShaderPass x' |> t.eq(p.x, 10)
+		'ShaderPass y' |> t.eq(p.y, 20)
+		'ShaderPass w' |> t.eq(p.w, 100)
+		'ShaderPass h' |> t.eq(p.h, 200)
+		'ShaderPass shader ref' |> t.eq(p.shader, s)
+		destroyAll()
+	}
+
+	// ---
+	// @ GLSL Codegen
+	{
+		{
+			glslVersion: glslVersion
+			glslPrecision: glslPrecision
+			glslStdUniforms: glslStdUniforms
+			glslUniform: glslUniform
+			glslUniforms: glslUniforms
+			assembleGLSL: assembleGLSL
+		} := sh
+
+		'glslVersion returns #version string' |> t.assert(
+			type(glslVersion()) = :string
+		)
+		'glslPrecision returns precision string' |> t.assert(
+			type(glslPrecision()) = :string
+		)
+		'glslStdUniforms returns string' |> t.assert(
+			type(glslStdUniforms()) = :string
+		)
+		'glslUniform creates uniform declaration' |> t.assert(
+			type(glslUniform('float', 'uTime')) = :string
+		)
+		'glslUniforms creates multiple' |> t.assert(
+			type(glslUniforms([['float', 'a'], ['vec2', 'b']])) = :string
+		)
+
+		// assembleGLSL produces a full shader string
+		{
+			src := assembleGLSL('void main() { fragColor = vec4(1.0); }')
+			'assembleGLSL returns string' |> t.assert(type(src) = :string)
+			'assembleGLSL contains version' |> t.assert(
+				type(src) = :string
+			)
+		}
+	}
+
+	// ---
+	// @ HLSL Codegen
+	{
+		{
+			hlslStdCBuffer: hlslStdCBuffer
+			hlslQuadVertex: hlslQuadVertex
+			hlslFragmentWrap: hlslFragmentWrap
+			assembleHLSL: assembleHLSL
+		} := sh
+
+		'hlslStdCBuffer returns string' |> t.assert(
+			type(hlslStdCBuffer()) = :string
+		)
+		'hlslQuadVertex returns string' |> t.assert(
+			type(hlslQuadVertex()) = :string
+		)
+		'hlslFragmentWrap returns string' |> t.assert(
+			type(hlslFragmentWrap('return float4(1,0,0,1);')) = :string
+		)
+
+		{
+			src := assembleHLSL('return float4(1,0,0,1);')
+			'assembleHLSL returns string' |> t.assert(type(src) = :string)
+		}
+	}
+}

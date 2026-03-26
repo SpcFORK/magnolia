@@ -6,7 +6,7 @@ Key exports
 
 - `drawText(window, x, y, text, color?)`
 - `textWidth(window, text)` — returns pixel width of text using window's current font (Windows: GDI measurement, other backends: estimation)
-- `fillRect(window, x, y, width, height, color?)`
+- `fillRect(window, x, y, width, height, color?, defaultColor?, borderColor?)` — when `borderColor` is provided, draws an outline around the filled rectangle
 - `drawLine(window, x1, y1, x2, y2, color?)`
 - `releaseResources(window)`
 

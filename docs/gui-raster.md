@@ -4,7 +4,8 @@ Rasterization primitives: triangle fill (scanline), backface culling, clipping, 
 
 Key exports
 
-- `drawTriangleFilled(window, p0, p1, p2, color?)` — scanline triangle fill
+- `drawTriangleFilled(window, p0, p1, p2, color?, borderColor?)` — scanline triangle fill; when `borderColor` is provided, triangle edges are drawn on top of the fill
+- `drawMeshSolid(window, mesh, transform?, camera?, color?, light?, borderColor?)` — solid mesh rendering with optional wireframe edge overlay
 - clipping helpers and viewport/codes utilities
 - simple shading/lighting helpers consumed by `gui-render` for solid rendering
 

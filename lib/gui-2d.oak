@@ -176,12 +176,15 @@ fn drawRect2D(deps, window, x, y, width, height, color, filled, borderColor) {
 				], borderColor, true)
 			}
 		}
-		_ -> drawPolyline2D(deps, window, [
-			Vec2(x, y)
-			Vec2(x + width, y)
-			Vec2(x + width, y + height)
-			Vec2(x, y + height)
-		], color, true)
+		_ -> {
+			outlineColor := if borderColor != ? { true -> borderColor, _ -> color }
+			drawPolyline2D(deps, window, [
+				Vec2(x, y)
+				Vec2(x + width, y)
+				Vec2(x + width, y + height)
+				Vec2(x, y + height)
+			], outlineColor, true)
+		}
 	}
 }
 
@@ -199,9 +202,9 @@ fn _drawCircleFilledSub(deps, window, cx, cy, r, y, color) if y > r {
 	true -> { type: :ok }
 	_ -> {
 		x := pow(r * r - y * y, 0.5)
-		deps.drawLine(window, int(cx - x), int(cy + y), int(cx + x), int(cy + y), color)
+		deps.drawLine(window, int(cx - x) - 1, int(cy + y), int(cx + x) + 1, int(cy + y), color)
 		if y > 0 {
-			true -> deps.drawLine(window, int(cx - x), int(cy - y), int(cx + x), int(cy - y), color)
+			true -> deps.drawLine(window, int(cx - x) - 1, int(cy - y), int(cx + x) + 1, int(cy - y), color)
 		}
 		_drawCircleFilledSub(deps, window, cx, cy, r, y + 1, color)
 	}
@@ -223,9 +226,10 @@ fn drawCircle2D(deps, window, cx, cy, radius, color, filled, borderColor) {
 				}
 			}
 			_ -> {
+				outlineColor := if borderColor != ? { true -> borderColor, _ -> color }
 				segs := int(_clamp(r * 1.1, 12, 96))
 				step := _degToRad(360 / segs)
-				_drawCircleOutlineSub(deps, window, cx, cy, r, 0, cos(step), sin(step), segs, 0, color)
+				_drawCircleOutlineSub(deps, window, cx, cy, r, 0, cos(step), sin(step), segs, 0, outlineColor)
 			}
 		}
 	}
@@ -262,7 +266,10 @@ fn drawPolygon2D(deps, window, points, color, filled, borderColor) {
 					true -> drawPolyline2D(deps, window, pts, borderColor, true)
 				}
 			}
-			_ -> drawPolyline2D(deps, window, pts, color, true)
+			_ -> {
+				outlineColor := if borderColor != ? { true -> borderColor, _ -> color }
+				drawPolyline2D(deps, window, pts, outlineColor, true)
+			}
 		}
 	}
 }
@@ -343,9 +350,9 @@ fn _drawEllipseFilledSub(deps, window, cx, cy, rx, ry, y, color) if y > ry {
 	_ -> {
 		// x^2/rx^2 + y^2/ry^2 = 1 => x = rx * sqrt(1 - y^2/ry^2)
 		x := rx * pow(1 - (y * y) / (ry * ry), 0.5)
-		deps.drawLine(window, int(cx - x), int(cy + y), int(cx + x), int(cy + y), color)
+		deps.drawLine(window, int(cx - x) - 1, int(cy + y), int(cx + x) + 1, int(cy + y), color)
 		if y > 0 {
-			true -> deps.drawLine(window, int(cx - x), int(cy - y), int(cx + x), int(cy - y), color)
+			true -> deps.drawLine(window, int(cx - x) - 1, int(cy - y), int(cx + x) + 1, int(cy - y), color)
 		}
 		_drawEllipseFilledSub(deps, window, cx, cy, rx, ry, y + 1, color)
 	}
@@ -368,10 +375,10 @@ fn drawEllipse2D(deps, window, cx, cy, rx, ry, color, filled, borderColor) {
 				}
 			}
 			_ -> {
+				outlineColor := if borderColor != ? { true -> borderColor, _ -> color }
 				segs := int(_clamp((radiusX + radiusY) * 0.55, 12, 96))
 				step := _degToRad(360 / segs)
-				// Start on unit circle, scale by rx/ry when drawing
-				_drawEllipseOutlineSub(deps, window, cx, cy, 1, 0, cos(step), sin(step), segs, 0, radiusX, radiusY, color)
+				_drawEllipseOutlineSub(deps, window, cx, cy, 1, 0, cos(step), sin(step), segs, 0, radiusX, radiusY, outlineColor)
 			}
 		}
 	}
@@ -453,7 +460,7 @@ fn _drawRoundedRectFilledRows(deps, window, x, y, width, height, r, row, color) 
 				_ -> 0
 			}
 		}
-		deps.drawLine(window, int(x + inset), int(y + row), int(x + width - inset), int(y + row), color)
+		deps.drawLine(window, int(x + inset) - 1, int(y + row), int(x + width - inset) + 1, int(y + row), color)
 		_drawRoundedRectFilledRows(deps, window, x, y, width, height, r, row + 1, color)
 	}
 }
@@ -477,19 +484,20 @@ fn drawRoundedRect2D(deps, window, x, y, width, height, radius, color, filled, b
 			}
 		}
 		_ -> {
+			outlineColor := if borderColor != ? { true -> borderColor, _ -> color }
 			// Top edge
-			deps.drawLine(window, int(x + r), int(y), int(x + width - r), int(y), color)
+			deps.drawLine(window, int(x + r), int(y), int(x + width - r), int(y), outlineColor)
 			// Bottom edge
-			deps.drawLine(window, int(x + r), int(y + height), int(x + width - r), int(y + height), color)
+			deps.drawLine(window, int(x + r), int(y + height), int(x + width - r), int(y + height), outlineColor)
 			// Left edge
-			deps.drawLine(window, int(x), int(y + r), int(x), int(y + height - r), color)
+			deps.drawLine(window, int(x), int(y + r), int(x), int(y + height - r), outlineColor)
 			// Right edge
-			deps.drawLine(window, int(x + width), int(y + r), int(x + width), int(y + height - r), color)
+			deps.drawLine(window, int(x + width), int(y + r), int(x + width), int(y + height - r), outlineColor)
 			// Corner arcs: top-left, top-right, bottom-right, bottom-left
-			_drawRoundedRectCorner(deps, window, x + r, y + r, r, 180, 270, color)
-			_drawRoundedRectCorner(deps, window, x + width - r, y + r, r, 270, 360, color)
-			_drawRoundedRectCorner(deps, window, x + width - r, y + height - r, r, 0, 90, color)
-			_drawRoundedRectCorner(deps, window, x + r, y + height - r, r, 90, 180, color)
+			_drawRoundedRectCorner(deps, window, x + r, y + r, r, 180, 270, outlineColor)
+			_drawRoundedRectCorner(deps, window, x + width - r, y + r, r, 270, 360, outlineColor)
+			_drawRoundedRectCorner(deps, window, x + width - r, y + height - r, r, 0, 90, outlineColor)
+			_drawRoundedRectCorner(deps, window, x + r, y + height - r, r, 90, 180, outlineColor)
 		}
 	}
 }
@@ -575,19 +583,19 @@ fn _drawRingRow(deps, window, cx, cy, outerR, innerR, y, color) if y > outerR {
 			true -> {
 				ix := pow(innerR * innerR - y * y, 0.5)
 				// Draw two horizontal spans per half: left band and right band
-				deps.drawLine(window, int(cx - ox), int(cy + y), int(cx - ix), int(cy + y), color)
-				deps.drawLine(window, int(cx + ix), int(cy + y), int(cx + ox), int(cy + y), color)
+				deps.drawLine(window, int(cx - ox) - 1, int(cy + y), int(cx - ix) + 1, int(cy + y), color)
+				deps.drawLine(window, int(cx + ix) - 1, int(cy + y), int(cx + ox) + 1, int(cy + y), color)
 				if y > 0 {
 					true -> {
-						deps.drawLine(window, int(cx - ox), int(cy - y), int(cx - ix), int(cy - y), color)
-						deps.drawLine(window, int(cx + ix), int(cy - y), int(cx + ox), int(cy - y), color)
+						deps.drawLine(window, int(cx - ox) - 1, int(cy - y), int(cx - ix) + 1, int(cy - y), color)
+						deps.drawLine(window, int(cx + ix) - 1, int(cy - y), int(cx + ox) + 1, int(cy - y), color)
 					}
 				}
 			}
 			_ -> {
-				deps.drawLine(window, int(cx - ox), int(cy + y), int(cx + ox), int(cy + y), color)
+				deps.drawLine(window, int(cx - ox) - 1, int(cy + y), int(cx + ox) + 1, int(cy + y), color)
 				if y > 0 {
-					true -> deps.drawLine(window, int(cx - ox), int(cy - y), int(cx + ox), int(cy - y), color)
+					true -> deps.drawLine(window, int(cx - ox) - 1, int(cy - y), int(cx + ox) + 1, int(cy - y), color)
 				}
 			}
 		}

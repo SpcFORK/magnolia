@@ -1,0 +1,173 @@
+// gui-shader-sdf.oak — SDF primitives and patterns for the shader engine
+//
+// Signed distance fields, boolean operations, fill/stroke helpers,
+// and procedural patterns (checkerboard, stripes, grid, dots, voronoi).
+
+m := import('gui-shader-math')
+col := import('gui-shader-color')
+noise := import('gui-shader-noise')
+
+{
+	abs2: abs2
+	clamp: clamp
+	saturate: saturate
+	smoothstep: smoothstep
+	lerpFloat: lerpFloat
+	min2: min2
+	max2: max2
+	fract: fract
+	mod: mod
+	step: step
+	vec2: vec2
+	length2: length2
+	distance2: distance2
+	sub2: sub2
+	scale2: scale2
+	dot2: dot2
+} := m
+
+{
+	colorR: colorR
+	colorG: colorG
+	colorB: colorB
+	mix: mix
+} := col
+
+// ---
+// @ SDF Primitives
+
+fn sdCircle(px, py, cx, cy, r) {
+	distance2(vec2(px, py), vec2(cx, cy)) - r
+}
+
+fn sdBox(px, py, cx, cy, hw, hh) {
+	dx := abs2(px - cx) - hw
+	dy := abs2(py - cy) - hh
+	outside := length2(vec2(if dx > 0 { true -> dx, _ -> 0.0 }, if dy > 0 { true -> dy, _ -> 0.0 }))
+	inside := if dx > dy { true -> dx, _ -> dy }
+	if inside < 0 { true -> inside, _ -> outside }
+}
+
+fn sdLine(px, py, ax, ay, bx, by) {
+	pa := vec2(px - ax, py - ay)
+	ba := vec2(bx - ax, by - ay)
+	h := saturate(dot2(pa, ba) / dot2(ba, ba))
+	length2(sub2(pa, scale2(ba, h)))
+}
+
+fn sdRoundedBox(px, py, cx, cy, hw, hh, r) {
+	sdBox(px, py, cx, cy, hw - r, hh - r) - r
+}
+
+// Fill/stroke helpers
+
+fn sdfFill(d, color) if d <= 0 { true -> color, _ -> ? }
+
+fn sdfSmoothFill(d, color, bg, edge) {
+	t := smoothstep(0 - edge, edge, d)
+	mix(color, bg, t)
+}
+
+fn sdfStroke(d, thickness, color) if abs2(d) <= thickness / 2.0 {
+	true -> color
+	_ -> ?
+}
+
+fn sdfGlow(d, color, intensity, radius) {
+	glow := saturate(intensity / (1.0 + d * d / (radius * radius)))
+	if glow > 0.01 {
+		true -> col.packRGB(
+			int(float(colorR(color)) * glow)
+			int(float(colorG(color)) * glow)
+			int(float(colorB(color)) * glow)
+		)
+		_ -> ?
+	}
+}
+
+// Boolean operations
+fn sdUnion(d1, d2) min2(d1, d2)
+fn sdIntersect(d1, d2) max2(d1, d2)
+fn sdSubtract(d1, d2) max2(d1, 0 - d2)
+
+fn sdSmoothUnion(d1, d2, k) {
+	h := saturate(0.5 + 0.5 * (d2 - d1) / k)
+	lerpFloat(d2, d1, h) - k * h * (1.0 - h)
+}
+
+fn sdSmoothIntersect(d1, d2, k) {
+	h := saturate(0.5 - 0.5 * (d2 - d1) / k)
+	lerpFloat(d2, d1, h) + k * h * (1.0 - h)
+}
+
+fn sdSmoothSubtract(d1, d2, k) {
+	h := saturate(0.5 - 0.5 * (d2 + d1) / k)
+	lerpFloat(d2, 0 - d1, h) + k * h * (1.0 - h)
+}
+
+fn sdAnnular(d, r) abs2(d) - r
+
+fn sdRepeat2(px, py, cx, cy) vec2(
+	mod(px + cx * 0.5, cx) - cx * 0.5
+	mod(py + cy * 0.5, cy) - cy * 0.5
+)
+
+// ---
+// @ Patterns
+
+fn checkerboard(x, y, size) {
+	ix := int(int(x) / int(size))
+	iy := int(int(y) / int(size))
+	mod(float(ix + iy), 2.0)
+}
+
+fn stripes(x, y, angle, width) {
+	d := float(x) * cos(angle) + float(y) * sin(angle)
+	step(0.5, fract(d / float(width)))
+}
+
+fn grid(x, y, size, thickness) {
+	fx := fract(float(x) / float(size))
+	fy := fract(float(y) / float(size))
+	t := float(thickness) / float(size)
+	if fx < t { true -> 1, _ -> if fy < t { true -> 1, _ -> 0 } }
+}
+
+fn dots(x, y, spacing, radius) {
+	fx := fract(float(x) / float(spacing)) - 0.5
+	fy := fract(float(y) / float(spacing)) - 0.5
+	d := pow(fx * fx + fy * fy, 0.5)
+	if d < float(radius) / float(spacing) { true -> 1, _ -> 0 }
+}
+
+fn voronoi(x, y, scale_) {
+	sx := float(x) / float(scale_)
+	sy := float(y) / float(scale_)
+	ix := int(sx)
+	iy := int(sy)
+	fx := fract(sx)
+	fy := fract(sy)
+	bestD := 8.0
+	bestId := 0.0
+	fn _scan(dx, dy) {
+		cx := noise.hash2(float(ix + dx), float(iy + dy))
+		cy := noise.hash2(float(ix + dx) + 51.7, float(iy + dy) + 31.3)
+		rx := float(dx) + cx - fx
+		ry := float(dy) + cy - fy
+		d := rx * rx + ry * ry
+		if d < bestD -> {
+			bestD <- d
+			bestId <- noise.hash2(float(ix + dx) * 7.13, float(iy + dy) * 3.71)
+		}
+	}
+	_scan(-1, -1)
+	_scan(0, -1)
+	_scan(1, -1)
+	_scan(-1, 0)
+	_scan(0, 0)
+	_scan(1, 0)
+	_scan(-1, 1)
+	_scan(0, 1)
+	_scan(1, 1)
+	{ dist: pow(bestD, 0.5), cellId: bestId }
+}

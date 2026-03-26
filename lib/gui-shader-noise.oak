@@ -1,0 +1,52 @@
+// gui-shader-noise.oak — Noise & hashing for the shader engine
+//
+// Pseudo-random hashing and value noise (noise2D, fbm).
+
+m := import('gui-shader-math')
+
+{
+	fract: fract
+	lerpFloat: lerpFloat
+} := m
+
+// hash returns a pseudo-random float in [0,1) from a seed.
+fn hash(seed) fract(sin(seed * 127.1) * 43758.5453)
+
+// hash2 returns a pseudo-random float from two inputs.
+fn hash2(a, b) hash(a * 12.9898 + b * 78.233)
+
+// hash3 returns a pseudo-random float from three inputs.
+fn hash3(a, b, c) hash(a * 12.9898 + b * 78.233 + c * 45.164)
+
+// noise2D returns smooth value noise in [0,1] at position (x,y).
+fn noise2D(x, y) {
+	ix := int(int(x))
+	iy := int(int(y))
+	fx := fract(x)
+	fy := fract(y)
+
+	ux := fx * fx * (3.0 - 2.0 * fx)
+	uy := fy * fy * (3.0 - 2.0 * fy)
+
+	n00 := hash2(float(ix), float(iy))
+	n10 := hash2(float(ix + 1), float(iy))
+	n01 := hash2(float(ix), float(iy + 1))
+	n11 := hash2(float(ix + 1), float(iy + 1))
+
+	nx0 := lerpFloat(n00, n10, ux)
+	nx1 := lerpFloat(n01, n11, ux)
+	lerpFloat(nx0, nx1, uy)
+}
+
+// fbm (fractal Brownian motion) layers noise at multiple frequencies.
+fn fbm(x, y, octaves?) {
+	oct := if octaves? { ? -> 4, _ -> octaves? }
+	fn _layer(i, total, amp, freq) if i >= oct {
+		true -> total
+		_ -> {
+			total2 := total + amp * noise2D(x * freq, y * freq)
+			_layer(i + 1, total2, amp * 0.5, freq * 2.0)
+		}
+	}
+	_layer(0, 0.0, 0.5, 1.0)
+}

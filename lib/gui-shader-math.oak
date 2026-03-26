@@ -1,0 +1,162 @@
+// gui-shader-math.oak — Math primitives for the shader engine
+//
+// Constants, math helpers, easing functions, 2D and 3D vector math.
+// No external imports — purely arithmetic.
+
+// ---
+// @ Constants
+
+PI := 3.14159265358979
+TAU := 6.28318530717959
+HALF_PI := 1.57079632679490
+E := 2.71828182845905
+DEG2RAD := PI / 180.0
+RAD2DEG := 180.0 / PI
+SQRT2 := 1.41421356237310
+
+// ---
+// @ Math Helpers
+
+fn fract(x) x - int(x)
+fn mod(x, y) x - y * int(x / y)
+fn sign(x) if { x < 0 -> -1, x > 0 -> 1, _ -> 0 }
+fn abs2(x) if x < 0 { true -> 0 - x, _ -> x }
+fn clamp(x, lo, hi) if x < lo { true -> lo, _ -> if x > hi { true -> hi, _ -> x } }
+fn saturate(x) clamp(x, 0.0, 1.0)
+fn lerpFloat(a, b, t) a + (b - a) * t
+fn inverseLerp(a, b, x) if a = b { true -> 0.0, _ -> (x - a) / (b - a) }
+fn remap(x, inLo, inHi, outLo, outHi) lerpFloat(outLo, outHi, inverseLerp(inLo, inHi, x))
+fn step(edge, x) if x < edge { true -> 0, _ -> 1 }
+
+fn smoothstep(edge0, edge1, x) {
+	t := saturate(inverseLerp(edge0, edge1, x))
+	t * t * (3.0 - 2.0 * t)
+}
+
+fn smootherstep(edge0, edge1, x) {
+	t := saturate(inverseLerp(edge0, edge1, x))
+	t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+fn min2(a, b) if a < b { true -> a, _ -> b }
+fn max2(a, b) if a > b { true -> a, _ -> b }
+fn sqr(x) x * x
+fn sqrt(x) pow(x, 0.5)
+fn lerp(a, b, t) lerpFloat(a, b, t)
+
+fn atan2(y, x) if {
+	x > 0 -> atan(y / x)
+	x < 0 -> if y >= 0 { true -> atan(y / x) + PI, _ -> atan(y / x) - PI }
+	_ -> if { y > 0 -> HALF_PI, y < 0 -> 0 - HALF_PI, _ -> 0.0 }
+}
+
+fn pingpong(t, length) length - abs2(mod(t, length * 2.0) - length)
+fn degToRad(d) d * DEG2RAD
+fn radToDeg(r) r * RAD2DEG
+
+// ---
+// @ Easing Functions
+
+fn easeInQuad(t) t * t
+fn easeOutQuad(t) t * (2.0 - t)
+fn easeInOutQuad(t) if t < 0.5 { true -> 2.0 * t * t, _ -> 0 - 1.0 + (4.0 - 2.0 * t) * t }
+
+fn easeInCubic(t) t * t * t
+fn easeOutCubic(t) {
+	t1 := t - 1.0
+	t1 * t1 * t1 + 1.0
+}
+fn easeInOutCubic(t) if t < 0.5 {
+	true -> 4.0 * t * t * t
+	_ -> (t - 1.0) * (2.0 * t - 2.0) * (2.0 * t - 2.0) + 1.0
+}
+
+fn easeInSine(t) 1.0 - cos(t * HALF_PI)
+fn easeOutSine(t) sin(t * HALF_PI)
+fn easeInOutSine(t) 0 - 0.5 * (cos(PI * t) - 1.0)
+
+fn easeInExpo(t) if t = 0 { true -> 0.0, _ -> pow(2.0, 10.0 * (t - 1.0)) }
+fn easeOutExpo(t) if t = 1 { true -> 1.0, _ -> 1.0 - pow(2.0, -10.0 * t) }
+
+fn easeOutElastic(t) if {
+	t = 0 -> 0.0
+	t = 1 -> 1.0
+	_ -> pow(2.0, -10.0 * t) * sin((t - 0.1) * TAU / 0.4) + 1.0
+}
+
+fn easeOutBounce(t) if {
+	t < 1.0 / 2.75 -> 7.5625 * t * t
+	t < 2.0 / 2.75 -> {
+		t2 := t - 1.5 / 2.75
+		7.5625 * t2 * t2 + 0.75
+	}
+	t < 2.5 / 2.75 -> {
+		t2 := t - 2.25 / 2.75
+		7.5625 * t2 * t2 + 0.9375
+	}
+	_ -> {
+		t2 := t - 2.625 / 2.75
+		7.5625 * t2 * t2 + 0.984375
+	}
+}
+
+// ---
+// @ 2D Vector Math
+// Vectors are { x, y } dicts.
+
+fn vec2(x, y) { x: x, y: y }
+fn dot2(a, b) a.x * b.x + a.y * b.y
+fn length2(v) pow(v.x * v.x + v.y * v.y, 0.5)
+fn distance2(a, b) length2(vec2(a.x - b.x, a.y - b.y))
+
+fn normalize2(v) {
+	l := length2(v)
+	if l = 0 { true -> vec2(0, 0), _ -> vec2(v.x / l, v.y / l) }
+}
+
+fn rotate2(v, angle) {
+	c := cos(angle)
+	s := sin(angle)
+	vec2(v.x * c - v.y * s, v.x * s + v.y * c)
+}
+
+fn scale2(v, s) vec2(v.x * s, v.y * s)
+fn add2(a, b) vec2(a.x + b.x, a.y + b.y)
+fn sub2(a, b) vec2(a.x - b.x, a.y - b.y)
+fn lerp2(a, b, t) vec2(lerpFloat(a.x, b.x, t), lerpFloat(a.y, b.y, t))
+fn negate2(v) vec2(0 - v.x, 0 - v.y)
+fn abs2v(v) vec2(abs2(v.x), abs2(v.y))
+fn min2v(a, b) vec2(min2(a.x, b.x), min2(a.y, b.y))
+fn max2v(a, b) vec2(max2(a.x, b.x), max2(a.y, b.y))
+fn floor2(v) vec2(int(v.x), int(v.y))
+fn fract2(v) vec2(fract(v.x), fract(v.y))
+fn reflect2(v, n) sub2(v, scale2(n, 2.0 * dot2(v, n)))
+fn toPolar(v) { r: length2(v), theta: atan2(v.y, v.x) }
+fn fromPolar(r, theta) vec2(r * cos(theta), r * sin(theta))
+
+// ---
+// @ 3D Vector Math
+// Vectors are { x, y, z } dicts.
+
+fn vec3(x, y, z) { x: x, y: y, z: z }
+fn add3(a, b) vec3(a.x + b.x, a.y + b.y, a.z + b.z)
+fn sub3(a, b) vec3(a.x - b.x, a.y - b.y, a.z - b.z)
+fn scale3(v, s) vec3(v.x * s, v.y * s, v.z * s)
+fn dot3(a, b) a.x * b.x + a.y * b.y + a.z * b.z
+fn length3(v) pow(dot3(v, v), 0.5)
+fn distance3(a, b) length3(sub3(a, b))
+
+fn normalize3(v) {
+	l := length3(v)
+	if l = 0 { true -> vec3(0, 0, 0), _ -> scale3(v, 1.0 / l) }
+}
+
+fn cross3(a, b) vec3(
+	a.y * b.z - a.z * b.y
+	a.z * b.x - a.x * b.z
+	a.x * b.y - a.y * b.x
+)
+
+fn lerp3(a, b, t) vec3(lerpFloat(a.x, b.x, t), lerpFloat(a.y, b.y, t), lerpFloat(a.z, b.z, t))
+fn negate3(v) vec3(0 - v.x, 0 - v.y, 0 - v.z)
+fn reflect3(v, n) sub3(v, scale3(n, 2.0 * dot3(v, n)))

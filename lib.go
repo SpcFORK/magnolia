@@ -319,6 +319,24 @@ var libguinativewinprobe string
 //go:embed lib/gui-native-linux.oak
 var libguinativelinux string
 
+//go:embed lib/gui-shader.oak
+var libguishader string
+
+//go:embed lib/gui-shader-math.oak
+var libguishadermath string
+
+//go:embed lib/gui-shader-color.oak
+var libguishadercolor string
+
+//go:embed lib/gui-shader-noise.oak
+var libguishadernoise string
+
+//go:embed lib/gui-shader-sdf.oak
+var libguishadersdf string
+
+//go:embed lib/gui-shader-codegen.oak
+var libguishadercodegen string
+
 //go:embed lib/gui-draw.oak
 var libguidraw string
 
@@ -490,6 +508,12 @@ var stdlibs = map[string]string{
 	"video":                  libvideo,
 	"async/event-bus":        libasynceventbus,
 	"WLAN":                   libwlan,
+	"gui-shader":             libguishader,
+	"gui-shader-math":        libguishadermath,
+	"gui-shader-color":       libguishadercolor,
+	"gui-shader-noise":       libguishadernoise,
+	"gui-shader-sdf":         libguishadersdf,
+	"gui-shader-codegen":     libguishadercodegen,
 }
 
 var stdlibAutoLoadOrder = []string{

@@ -1,0 +1,218 @@
+// gui-shader-color.oak — Color helpers for the shader engine
+//
+// Packed RGB manipulation, channel extraction, blending, HSL/HSV conversion,
+// cosine palettes, contrast, sepia.
+//
+// Uses gui-color.rgb directly instead of the heavy GUI facade.
+
+guiColor := import('gui-color')
+m := import('gui-shader-math')
+
+{
+	clamp: clamp
+	saturate: saturate
+	lerpFloat: lerpFloat
+	min2: min2
+	max2: max2
+	mod: mod
+} := m
+
+// packRGB packs r, g, b [0-255] into a single int.
+fn packRGB(r, g, b) guiColor.rgb(r, g, b)
+
+// unpackRGB returns { r, g, b } from a packed color.
+fn unpackRGB(c) {
+	{ r: c & 255, g: (c >> 8) & 255, b: (c >> 16) & 255 }
+}
+
+// Channel extractors
+fn colorR(c) c & 255
+fn colorG(c) (c >> 8) & 255
+fn colorB(c) (c >> 16) & 255
+
+// mix linearly interpolates between two packed colors.
+fn mix(a, b, t) if {
+	a = ? -> b
+	b = ? -> a
+	_ -> {
+		t1 := saturate(t)
+		inv := 1.0 - t1
+		ar := a & 255
+		ag := (a >> 8) & 255
+		ab := (a >> 16) & 255
+		br := b & 255
+		bg := (b >> 8) & 255
+		bb := (b >> 16) & 255
+		guiColor.rgb(
+			int(float(ar) * inv + float(br) * t1)
+			int(float(ag) * inv + float(bg) * t1)
+			int(float(ab) * inv + float(bb) * t1)
+		)
+	}
+}
+
+// mix3 interpolates across three colors: a->b->c as t goes 0->0.5->1.
+fn mix3(a, b, c, t) if t < 0.5 {
+	true -> mix(a, b, t * 2.0)
+	_ -> mix(b, c, (t - 0.5) * 2.0)
+}
+
+// brighten adds amount [0-255] to each channel (clamped).
+fn brighten(c, amount) {
+	r := clamp(colorR(c) + amount, 0, 255)
+	g := clamp(colorG(c) + amount, 0, 255)
+	b := clamp(colorB(c) + amount, 0, 255)
+	guiColor.rgb(int(r), int(g), int(b))
+}
+
+// darken subtracts amount from each channel.
+fn darken(c, amount) brighten(c, 0 - amount)
+
+// invert returns the complement color.
+fn invert(c) guiColor.rgb(255 - colorR(c), 255 - colorG(c), 255 - colorB(c))
+
+// grayscale converts to grayscale using luminance weights.
+fn grayscale(c) {
+	lum := int(float(colorR(c)) * 0.299 + float(colorG(c)) * 0.587 + float(colorB(c)) * 0.114)
+	guiColor.rgb(lum, lum, lum)
+}
+
+// overlay blends foreground over background with alpha [0,1].
+fn overlay(fg, bg, alpha) mix(bg, fg, alpha)
+
+// hsl2rgb converts HSL (h,s,l all [0,1]) to packed RGB.
+fn hsl2rgb(h, s, l) {
+	fn _hue(p, q, t_) {
+		t := if { t_ < 0 -> t_ + 1.0, t_ > 1 -> t_ - 1.0, _ -> t_ }
+		if {
+			t < 1.0 / 6.0 -> p + (q - p) * 6.0 * t
+			t < 0.5 -> q
+			t < 2.0 / 3.0 -> p + (q - p) * (2.0 / 3.0 - t) * 6.0
+			_ -> p
+		}
+	}
+	if s = 0 -> {
+		v := int(l * 255.0)
+		guiColor.rgb(v, v, v)
+	}
+	if s != 0 -> {
+		q := if l < 0.5 { true -> l * (1.0 + s), _ -> l + s - l * s }
+		p := 2.0 * l - q
+		r := _hue(p, q, h + 1.0 / 3.0)
+		g := _hue(p, q, h)
+		b := _hue(p, q, h - 1.0 / 3.0)
+		guiColor.rgb(int(r * 255.0), int(g * 255.0), int(b * 255.0))
+	}
+}
+
+// rgb2hsl returns { h, s, l } (all [0,1]) from packed RGB.
+fn rgb2hsl(c) {
+	r := float(colorR(c)) / 255.0
+	g := float(colorG(c)) / 255.0
+	b := float(colorB(c)) / 255.0
+	mx := max2(r, max2(g, b))
+	mn := min2(r, min2(g, b))
+	l := (mx + mn) / 2.0
+	if mx = mn -> { h: 0.0, s: 0.0, l: l }
+	if mx != mn -> {
+		d := mx - mn
+		s := if l > 0.5 { true -> d / (2.0 - mx - mn), _ -> d / (mx + mn) }
+		h := if {
+			mx = r -> (g - b) / d + if g < b { true -> 6.0, _ -> 0.0 }
+			mx = g -> (b - r) / d + 2.0
+			_ -> (r - g) / d + 4.0
+		}
+		{ h: h / 6.0, s: s, l: l }
+	}
+}
+
+// hsv2rgb converts HSV (h,s,v all [0,1]) to packed RGB.
+fn hsv2rgb(h, s, v) {
+	i := int(h * 6.0)
+	f := h * 6.0 - float(i)
+	p := v * (1.0 - s)
+	q := v * (1.0 - f * s)
+	t_ := v * (1.0 - (1.0 - f) * s)
+	sector := int(mod(float(i), 6.0))
+	r := if { sector = 0 -> v, sector = 1 -> q, sector = 2 -> p, sector = 3 -> p, sector = 4 -> t_, _ -> v }
+	g := if { sector = 0 -> t_, sector = 1 -> v, sector = 2 -> v, sector = 3 -> q, sector = 4 -> p, _ -> p }
+	b := if { sector = 0 -> p, sector = 1 -> p, sector = 2 -> t_, sector = 3 -> v, sector = 4 -> v, _ -> q }
+	guiColor.rgb(int(r * 255.0), int(g * 255.0), int(b * 255.0))
+}
+
+// rgb2hsv returns { h, s, v } (all [0,1]) from packed RGB.
+fn rgb2hsv(c) {
+	r := float(colorR(c)) / 255.0
+	g := float(colorG(c)) / 255.0
+	b := float(colorB(c)) / 255.0
+	mx := max2(r, max2(g, b))
+	mn := min2(r, min2(g, b))
+	d := mx - mn
+	v := mx
+	s := if mx = 0 { true -> 0.0, _ -> d / mx }
+	h := if d = 0 {
+		true -> 0.0
+		_ -> {
+			raw := if {
+				mx = r -> mod((g - b) / d, 6.0)
+				mx = g -> (b - r) / d + 2.0
+				_ -> (r - g) / d + 4.0
+			}
+			raw / 6.0
+		}
+	}
+	{ h: h, s: s, v: v }
+}
+
+// cosinePalette generates a color from iq's cosine palette technique.
+fn cosinePalette(t, a, b, c, d) {
+	r := a.x + b.x * cos(m.TAU * (c.x * t + d.x))
+	g := a.y + b.y * cos(m.TAU * (c.y * t + d.y))
+	b_ := a.z + b.z * cos(m.TAU * (c.z * t + d.z))
+	guiColor.rgb(int(saturate(r) * 255.0), int(saturate(g) * 255.0), int(saturate(b_) * 255.0))
+}
+
+// contrast adjusts contrast around the midpoint.
+fn contrast(c, amount) {
+	r := (float(colorR(c)) / 255.0 - 0.5) * amount + 0.5
+	g := (float(colorG(c)) / 255.0 - 0.5) * amount + 0.5
+	b := (float(colorB(c)) / 255.0 - 0.5) * amount + 0.5
+	guiColor.rgb(int(saturate(r) * 255.0), int(saturate(g) * 255.0), int(saturate(b) * 255.0))
+}
+
+// sepia applies a sepia tone filter.
+fn sepia(c) {
+	r := float(colorR(c))
+	g := float(colorG(c))
+	b := float(colorB(c))
+	guiColor.rgb(
+		clamp(int(r * 0.393 + g * 0.769 + b * 0.189), 0, 255)
+		clamp(int(r * 0.349 + g * 0.686 + b * 0.168), 0, 255)
+		clamp(int(r * 0.272 + g * 0.534 + b * 0.131), 0, 255)
+	)
+}
+
+// Blend modes
+fn blendMultiply(a, b) {
+	guiColor.rgb(
+		int(float(colorR(a)) * float(colorR(b)) / 255.0)
+		int(float(colorG(a)) * float(colorG(b)) / 255.0)
+		int(float(colorB(a)) * float(colorB(b)) / 255.0)
+	)
+}
+
+fn blendScreen(a, b) {
+	guiColor.rgb(
+		255 - int(float(255 - colorR(a)) * float(255 - colorR(b)) / 255.0)
+		255 - int(float(255 - colorG(a)) * float(255 - colorG(b)) / 255.0)
+		255 - int(float(255 - colorB(a)) * float(255 - colorB(b)) / 255.0)
+	)
+}
+
+fn blendAdd(a, b) {
+	guiColor.rgb(
+		clamp(colorR(a) + colorR(b), 0, 255)
+		clamp(colorG(a) + colorG(b), 0, 255)
+		clamp(colorB(a) + colorB(b), 0, 255)
+	)
+}

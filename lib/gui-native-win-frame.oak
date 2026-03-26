@@ -32,43 +32,46 @@ fn _ensureBackbuffer(window, targetHdc) {
 	if window.frameHdc = 0 {
 		true -> {
 			memdc := windows.gdi32('CreateCompatibleDC', targetHdc)
-			if windows.callOk?(memdc) & memdc.r1 > 0 {
+			if memdc.r1 > 0 {
 				true -> window.frameHdc <- memdc.r1
-				_ -> _err('CreateCompatibleDC failed', memdc)
 			}
 		}
-		_ -> ?
 	}
 
-	needsResize := (window.frameBitmap = 0) | (window.frameWidth != window.width) | (window.frameHeight != window.height)
-	if needsResize {
-		true -> {
-			if window.frameBitmap > 0 {
+	if window.frameHdc = 0 {
+		true -> _err('CreateCompatibleDC failed – no valid memory DC', ?)
+		_ -> {
+			needsResize := (window.frameBitmap = 0) | (window.frameWidth != window.width) | (window.frameHeight != window.height)
+			if needsResize {
 				true -> {
-					if window.framePrevBitmap > 0 {
-						true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+					if window.frameBitmap > 0 {
+						true -> {
+							if window.framePrevBitmap > 0 {
+								true -> windows.selectObject(window.frameHdc, window.framePrevBitmap)
+							}
+							windows.deleteObject(window.frameBitmap)
+							window.frameBitmap <- 0
+						}
 					}
-					windows.deleteObject(window.frameBitmap)
-					window.frameBitmap <- 0
-				}
-			}
 
-			bmp := windows.gdi32('CreateCompatibleBitmap', targetHdc, window.width, window.height)
-			if windows.callOk?(bmp) & bmp.r1 > 0 {
-				true -> {
-					window.frameBitmap <- bmp.r1
-					prev := windows.selectObject(window.frameHdc, window.frameBitmap)
-					if windows.callOk?(prev) {
-						true -> window.framePrevBitmap <- prev.r1
+					bmp := windows.gdi32('CreateCompatibleBitmap', targetHdc, window.width, window.height)
+					if bmp.r1 > 0 {
+						true -> {
+							window.frameBitmap <- bmp.r1
+							prev := windows.selectObject(window.frameHdc, window.frameBitmap)
+							if windows.callOk?(prev) {
+								true -> window.framePrevBitmap <- prev.r1
+							}
+							window.frameWidth <- window.width
+							window.frameHeight <- window.height
+							{ type: :ok }
+						}
+						_ -> _err('CreateCompatibleBitmap failed', bmp)
 					}
-					window.frameWidth <- window.width
-					window.frameHeight <- window.height
-					{ type: :ok }
 				}
-				_ -> _err('CreateCompatibleBitmap failed', bmp)
+				_ -> { type: :ok }
 			}
 		}
-		_ -> { type: :ok }
 	}
 }
 

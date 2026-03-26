@@ -16,6 +16,15 @@ Key exports
 - `drawStar2D(deps, window, cx, cy, outerR, innerR, points, color, filled?, borderColor?)` — regular star polygon
 - `drawBezier2D(deps, window, points, color, steps?)` — quadratic (3 pts) or cubic (4 pts) bezier curve
 - `drawRing2D(deps, window, cx, cy, outerR, innerR, color)` — filled annulus (ring)
+- `drawCross2D(deps, window, cx, cy, size, thickness, color, filled?)` — plus/cross shape
+- `drawDiamond2D(deps, window, cx, cy, width, height, color, filled?)` — rotated square
+- `drawArrow2D(deps, window, x1, y1, x2, y2, color, headSize?)` — line with arrowhead
+- `drawCapsule2D(deps, window, cx, cy, width, height, color, filled?)` — stadium/pill shape
+- `drawSector2D(deps, window, cx, cy, radius, startAngle, endAngle, color, filled?)` — pie wedge
+- `drawRegularPolygon2D(deps, window, cx, cy, radius, sides, color, filled?)` — regular n-gon
+- `drawSpiral2D(deps, window, cx, cy, startRadius, growth, turns, color)` — Archimedean spiral
+- `drawThickLine2D(deps, window, x1, y1, x2, y2, thickness, color)` — line with width
+- `drawDashedLine2D(deps, window, x1, y1, x2, y2, color, dashLen?, gapLen?)` — dashed line
 
 ## Border Color
 

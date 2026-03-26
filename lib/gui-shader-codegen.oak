@@ -1,0 +1,344 @@
+// gui-shader-codegen.oak — GPU shader codegen for the shader engine
+//
+// GLSL/HLSL source generation, WebGL submission, offline compilation.
+
+{
+	default: default
+	reduce: reduce
+	join: join
+} := import('std')
+
+// ---
+// @ GLSL Helpers
+
+fn glslVersion(ver?) '#version ' + if ver? { ? -> '300 es', _ -> ver? }
+
+fn glslPrecision(prec?, type?) {
+	p := if prec? { ? -> 'mediump', _ -> prec? }
+	t := if type? { ? -> 'float', _ -> type? }
+	'precision ' + p + ' ' + t + ';'
+}
+
+fn glslStdUniforms() {
+	'uniform float iTime;' + char(10) +
+	'uniform vec2 iResolution;' + char(10) +
+	'uniform vec2 iMouse;' + char(10) +
+	'uniform int iFrame;'
+}
+
+fn glslUniform(type, name) 'uniform ' + type + ' ' + name + ';'
+
+fn glslUniforms(uniforms) {
+	with reduce(uniforms, '') fn(acc, u) {
+		acc + glslUniform(u.type, u.name) + char(10)
+	}
+}
+
+fn glslIn(type, name) 'in ' + type + ' ' + name + ';'
+fn glslOut(type, name) 'out ' + type + ' ' + name + ';'
+
+fn glslQuadVertex() {
+	glslVersion() + char(10) +
+	'const vec2 pos[3] = vec2[3](' + char(10) +
+	'  vec2(-1.0, -1.0),' + char(10) +
+	'  vec2( 3.0, -1.0),' + char(10) +
+	'  vec2(-1.0,  3.0)' + char(10) +
+	');' + char(10) +
+	'out vec2 vUV;' + char(10) +
+	'void main() {' + char(10) +
+	'  gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0);' + char(10) +
+	'  vUV = pos[gl_VertexID] * 0.5 + 0.5;' + char(10) +
+	'}'
+}
+
+fn glslQuadVertexCompat() {
+	'attribute vec2 aPos;' + char(10) +
+	'varying vec2 vUV;' + char(10) +
+	'void main() {' + char(10) +
+	'  gl_Position = vec4(aPos, 0.0, 1.0);' + char(10) +
+	'  vUV = aPos * 0.5 + 0.5;' + char(10) +
+	'}'
+}
+
+fn glslFragmentWrap(body, version?) {
+	ver := if version? { ? -> '300 es', _ -> version? }
+	is300 := ver = '300 es' | ver = '330'
+	glslVersion(ver) + char(10) +
+	glslPrecision() + char(10) +
+	glslStdUniforms() + char(10) +
+	if is300 {
+		true -> 'in vec2 vUV;' + char(10) + 'out vec4 fragColor;' + char(10)
+		_ -> 'varying vec2 vUV;' + char(10)
+	} +
+	'void mainImage(out vec4 fragColor, in vec2 fragCoord) {' + char(10) +
+	body + char(10) +
+	'}' + char(10) +
+	'void main() {' + char(10) +
+	'  vec2 fragCoord = vUV * iResolution;' + char(10) +
+	if is300 {
+		true -> '  mainImage(fragColor, fragCoord);' + char(10)
+		_ -> '  vec4 _col; mainImage(_col, fragCoord); gl_FragColor = _col;' + char(10)
+	} +
+	'}'
+}
+
+fn glslMathLib() {
+	'float hash(float seed) { return fract(sin(seed * 127.1) * 43758.5453); }' + char(10) +
+	'float hash2(float a, float b) { return hash(a * 12.9898 + b * 78.233); }' + char(10) +
+	'float hash3(float a, float b, float c) { return hash(a * 12.9898 + b * 78.233 + c * 45.164); }' + char(10) +
+	'float noise2D(vec2 p) {' + char(10) +
+	'  vec2 i = floor(p); vec2 f = fract(p);' + char(10) +
+	'  vec2 u = f * f * (3.0 - 2.0 * f);' + char(10) +
+	'  float n00 = hash2(i.x, i.y);' + char(10) +
+	'  float n10 = hash2(i.x+1.0, i.y);' + char(10) +
+	'  float n01 = hash2(i.x, i.y+1.0);' + char(10) +
+	'  float n11 = hash2(i.x+1.0, i.y+1.0);' + char(10) +
+	'  return mix(mix(n00,n10,u.x), mix(n01,n11,u.x), u.y);' + char(10) +
+	'}' + char(10) +
+	'float fbm(vec2 p, int octaves) {' + char(10) +
+	'  float total = 0.0, amp = 0.5, freq = 1.0;' + char(10) +
+	'  for (int i = 0; i < octaves; i++) {' + char(10) +
+	'    total += amp * noise2D(p * freq);' + char(10) +
+	'    amp *= 0.5; freq *= 2.0;' + char(10) +
+	'  }' + char(10) +
+	'  return total;' + char(10) +
+	'}' + char(10) +
+	'float sdCircle(vec2 p, vec2 c, float r) { return distance(p, c) - r; }' + char(10) +
+	'float sdBox(vec2 p, vec2 c, vec2 h) {' + char(10) +
+	'  vec2 d = abs(p - c) - h;' + char(10) +
+	'  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);' + char(10) +
+	'}' + char(10) +
+	'float pingpong(float t, float len) { return len - abs(mod(t, len*2.0) - len); }'
+}
+
+// ---
+// @ HLSL Helpers
+
+fn hlslStdCBuffer() {
+	'cbuffer ShaderUniforms : register(b0) {' + char(10) +
+	'  float iTime;' + char(10) +
+	'  float2 iResolution;' + char(10) +
+	'  float2 iMouse;' + char(10) +
+	'  int iFrame;' + char(10) +
+	'};'
+}
+
+fn hlslCBuffer(name, uniforms) {
+	header := 'cbuffer ' + name + ' : register(b0) {' + char(10)
+	body := with reduce(uniforms, '') fn(acc, u) {
+		acc + '  ' + u.type + ' ' + u.name + ';' + char(10)
+	}
+	header + body + '};'
+}
+
+fn hlslQuadVertex() {
+	'struct VSOutput {' + char(10) +
+	'  float4 pos : SV_POSITION;' + char(10) +
+	'  float2 uv  : TEXCOORD0;' + char(10) +
+	'};' + char(10) +
+	'static const float2 positions[3] = {' + char(10) +
+	'  float2(-1.0, -1.0),' + char(10) +
+	'  float2( 3.0, -1.0),' + char(10) +
+	'  float2(-1.0,  3.0)' + char(10) +
+	'};' + char(10) +
+	'VSOutput VS(uint id : SV_VertexID) {' + char(10) +
+	'  VSOutput o;' + char(10) +
+	'  o.pos = float4(positions[id], 0.0, 1.0);' + char(10) +
+	'  o.uv = positions[id] * 0.5 + 0.5;' + char(10) +
+	'  return o;' + char(10) +
+	'}'
+}
+
+fn hlslFragmentWrap(body) {
+	hlslStdCBuffer() + char(10) + char(10) +
+	'struct PSInput {' + char(10) +
+	'  float4 pos : SV_POSITION;' + char(10) +
+	'  float2 uv  : TEXCOORD0;' + char(10) +
+	'};' + char(10) + char(10) +
+	'float4 mainImage(float2 fragCoord) {' + char(10) +
+	body + char(10) +
+	'}' + char(10) + char(10) +
+	'float4 PS(PSInput input) : SV_TARGET {' + char(10) +
+	'  float2 fragCoord = input.uv * iResolution;' + char(10) +
+	'  return mainImage(fragCoord);' + char(10) +
+	'}'
+}
+
+fn hlslMathLib() {
+	'float hash(float seed) { return frac(sin(seed * 127.1) * 43758.5453); }' + char(10) +
+	'float hash2(float a, float b) { return hash(a * 12.9898 + b * 78.233); }' + char(10) +
+	'float hash3(float a, float b, float c) { return hash(a * 12.9898 + b * 78.233 + c * 45.164); }' + char(10) +
+	'float noise2D(float2 p) {' + char(10) +
+	'  float2 i = floor(p); float2 f = frac(p);' + char(10) +
+	'  float2 u = f * f * (3.0 - 2.0 * f);' + char(10) +
+	'  float n00 = hash2(i.x, i.y);' + char(10) +
+	'  float n10 = hash2(i.x+1.0, i.y);' + char(10) +
+	'  float n01 = hash2(i.x, i.y+1.0);' + char(10) +
+	'  float n11 = hash2(i.x+1.0, i.y+1.0);' + char(10) +
+	'  return lerp(lerp(n00,n10,u.x), lerp(n01,n11,u.x), u.y);' + char(10) +
+	'}' + char(10) +
+	'float fbm(float2 p, int octaves) {' + char(10) +
+	'  float total = 0.0, amp = 0.5, freq = 1.0;' + char(10) +
+	'  for (int i = 0; i < octaves; i++) {' + char(10) +
+	'    total += amp * noise2D(p * freq);' + char(10) +
+	'    amp *= 0.5; freq *= 2.0;' + char(10) +
+	'  }' + char(10) +
+	'  return total;' + char(10) +
+	'}' + char(10) +
+	'float sdCircle(float2 p, float2 c, float r) { return distance(p, c) - r; }' + char(10) +
+	'float sdBox(float2 p, float2 c, float2 h) {' + char(10) +
+	'  float2 d = abs(p - c) - h;' + char(10) +
+	'  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);' + char(10) +
+	'}' + char(10) +
+	'float pingpong(float t, float len) { return len - abs(fmod(t, len*2.0) - len); }'
+}
+
+// ---
+// @ WebGL Submission
+
+fn submitWebGL(window, fragSource, vertSource?) {
+	gui := import('GUI')
+	vert := gui.webglCreateShader(
+		window
+		:vertex
+		if vertSource? { ? -> glslQuadVertexCompat(), _ -> vertSource? }
+	)
+	frag := gui.webglCreateShader(window, :fragment, fragSource)
+	prog := gui.webglCreateProgram(window, vert.shader, frag.shader)
+	gui.webglUseProgram(window, prog.program)
+	{
+		vertex: vert.shader
+		fragment: frag.shader
+		program: prog.program
+	}
+}
+
+fn drawWebGL(window, clearR?, clearG?, clearB?) {
+	gui := import('GUI')
+	r := if clearR? { ? -> 0.0, _ -> clearR? }
+	g := if clearG? { ? -> 0.0, _ -> clearG? }
+	b := if clearB? { ? -> 0.0, _ -> clearB? }
+	gui.webglClearColor(window, r, g, b, 1.0)
+	gui.webglClear(window)
+	gui.webglDrawArrays(window, gui.GL_TRIANGLES, 0, 3)
+}
+
+fn renderWebGL(window, fragSource) {
+	gui := import('GUI')
+	submitWebGL(window, fragSource)
+	drawWebGL(window)
+	gui.webglFlush(window)
+}
+
+// ---
+// @ Offline Shader Compilation
+
+fn compileGLSL(source, stage?, outputPath?) {
+	st := if stage? { ? -> 'frag', _ -> stage? }
+	out := if outputPath? { ? -> 'out.spv', _ -> outputPath? }
+	exec('glslc', ['-fshader-stage=' + st, '-o', out, '-'], source)
+}
+
+fn compileHLSL(source, profile?, entry?, outputPath?) {
+	prof := if profile? { ? -> 'ps_5_0', _ -> profile? }
+	ent := if entry? { ? -> 'PS', _ -> entry? }
+	out := if outputPath? { ? -> 'out.fxo', _ -> outputPath? }
+	exec('fxc', ['/T', prof, '/E', ent, '/Fo', out, '/stdin'], source)
+}
+
+fn compileDXC(source, profile?, entry?, outputPath?, spirv?) {
+	prof := if profile? { ? -> 'ps_6_0', _ -> profile? }
+	ent := if entry? { ? -> 'PS', _ -> entry? }
+	out := if outputPath? { ? -> 'out.dxil', _ -> outputPath? }
+	args := ['-T', prof, '-E', ent, '-Fo', out]
+	if spirv? = true -> args <- join(args, ['-spirv'])
+	exec('dxc', join(args, ['-']), source)
+}
+
+// ---
+// @ Shader Source Assembly
+
+fn assembleGLSL(opts) {
+	ver := opts.version |> default('300 es')
+	is300 := ver = '300 es' | ver = '330'
+	parts := [glslVersion(ver)]
+
+	prec := opts.precision |> default('mediump')
+	parts <- join(parts, [glslPrecision(prec)])
+
+	if opts.stdUniforms != false -> {
+		parts <- join(parts, [glslStdUniforms()])
+	}
+
+	if opts.uniforms != ? -> {
+		parts <- join(parts, [glslUniforms(opts.uniforms)])
+	}
+
+	if is300 -> parts <- join(parts, ['in vec2 vUV;', 'out vec4 fragColor;'])
+	if is300 = false -> parts <- join(parts, ['varying vec2 vUV;'])
+
+	if opts.mathLib = true -> parts <- join(parts, [glslMathLib()])
+
+	parts <- join(parts, [
+		'void mainImage(out vec4 fragColor, in vec2 fragCoord) {'
+		opts.body
+		'}'
+		'void main() {'
+		'  vec2 fragCoord = vUV * iResolution;'
+	])
+
+	if is300 -> parts <- join(parts, ['  mainImage(fragColor, fragCoord);'])
+	if is300 = false -> parts <- join(parts, ['  vec4 _col; mainImage(_col, fragCoord); gl_FragColor = _col;'])
+
+	parts <- join(parts, ['}'])
+
+	with reduce(parts, '') fn(acc, line) {
+		if acc = '' { true -> line, _ -> acc + char(10) + line }
+	}
+}
+
+fn assembleHLSL(opts) {
+	parts := []
+
+	if opts.stdUniforms != false -> {
+		cbName := opts.cbufferName |> default('ShaderUniforms')
+		stdFields := [
+			{ type: 'float', name: 'iTime' }
+			{ type: 'float2', name: 'iResolution' }
+			{ type: 'float2', name: 'iMouse' }
+			{ type: 'int', name: 'iFrame' }
+		]
+		allFields := if opts.uniforms != ? {
+			true -> join(stdFields, opts.uniforms)
+			_ -> stdFields
+		}
+		parts <- join(parts, [hlslCBuffer(cbName, allFields)])
+	}
+	if opts.stdUniforms = false -> if opts.uniforms != ? -> {
+		cbName := opts.cbufferName |> default('ShaderUniforms')
+		parts <- join(parts, [hlslCBuffer(cbName, opts.uniforms)])
+	}
+
+	parts <- join(parts, [
+		'struct PSInput {'
+		'  float4 pos : SV_POSITION;'
+		'  float2 uv  : TEXCOORD0;'
+		'};'
+	])
+
+	if opts.mathLib = true -> parts <- join(parts, [hlslMathLib()])
+
+	parts <- join(parts, [
+		'float4 mainImage(float2 fragCoord) {'
+		opts.body
+		'}'
+		'float4 PS(PSInput input) : SV_TARGET {'
+		'  float2 fragCoord = input.uv * iResolution;'
+		'  return mainImage(fragCoord);'
+		'}'
+	])
+
+	with reduce(parts, '') fn(acc, line) {
+		if acc = '' { true -> line, _ -> acc + char(10) + line }
+	}
+}

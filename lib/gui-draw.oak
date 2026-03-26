@@ -243,10 +243,10 @@ fn _estimateTextWidth(window, text) {
 	int(len(text) * fontSize * 6 / 10)
 }
 
-fn fillRect(window, x, y, width, height, color, defaultColor) if window.type {
+fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if window.type {
 	:ok -> {
 		useColor := _default(color, defaultColor)
-		if window.backend {
+		result := if window.backend {
 			:windows -> {
 				hdcValue := if window.frameHdc > 0 {
 					true -> window.frameHdc
@@ -264,7 +264,18 @@ fn fillRect(window, x, y, width, height, color, defaultColor) if window.type {
 						if windows.callOk?(brush) & brush.r1 > 0 {
 							true -> {
 								prevBrush := windows.selectObject(hdcValue, brush.r1)
-								windows.rectangle(hdcValue, x, y, x + width, y + height)
+								// Select NULL_PEN (stock object 8) to suppress default black outline
+								nullPen := windows.gdi32('GetStockObject', 8)
+								prevPen := if windows.callOk?(nullPen) & nullPen.r1 > 0 {
+									true -> windows.selectObject(hdcValue, nullPen.r1)
+									_ -> ?
+								}
+								windows.rectangle(hdcValue, x - 1, y - 1, x + width + 1, y + height + 1)
+								if prevPen != ? {
+									true -> if windows.callOk?(prevPen) & prevPen.r1 > 0 {
+										true -> windows.selectObject(hdcValue, prevPen.r1)
+									}
+								}
 								if windows.callOk?(prevBrush) & prevBrush.r1 > 0 {
 									true -> windows.selectObject(hdcValue, prevBrush.r1)
 								}
@@ -303,7 +314,7 @@ fn fillRect(window, x, y, width, height, color, defaultColor) if window.type {
 				if gcHandle > 0 {
 					true -> {
 						linux.setForeground(window.display, gcHandle, useColor)
-						linux.fillRectangle(window.display, window.window, gcHandle, x, y, width, height)
+						linux.fillRectangle(window.display, window.window, gcHandle, x - 1, y - 1, width + 2, height + 2)
 						{ type: :ok }
 					}
 					_ -> _err('XCreateGC failed', ?)
@@ -312,16 +323,26 @@ fn fillRect(window, x, y, width, height, color, defaultColor) if window.type {
 			:web -> {
 				window.messages <- window.messages << {
 					type: :rect
-					x: x
-					y: y
-					width: width
-					height: height
+					x: x - 1
+					y: y - 1
+					width: width + 2
+					height: height + 2
 					color: useColor
+					borderColor: borderColor
 				}
 				{ type: :ok }
 			}
 			_ -> _err('Unknown window backend', window)
 		}
+		if borderColor != ? {
+			true -> {
+				drawLine(window, x, y, x + width, y, borderColor)
+				drawLine(window, x, y + height, x + width, y + height, borderColor)
+				drawLine(window, x, y, x, y + height, borderColor)
+				drawLine(window, x + width, y, x + width, y + height, borderColor)
+			}
+		}
+		result
 	}
 	_ -> window
 }
@@ -352,8 +373,9 @@ fn _getCachedPen(window, hdcValue, useColor) {
 	}
 }
 
-// pushMask sets a rectangular clip region; only pixels inside are drawn.
-// Nests correctly when paired with popMask.
+// pushMask sets a rectangular clip region and translates the coordinate origin
+// so that (0,0) maps to the top-left of the masked area.  Only pixels inside
+// the rectangle are drawn.  Nests correctly when paired with popMask.
 fn pushMask(window, x, y, w, h) if window.type {
 	:ok -> if window.backend {
 		:windows -> {
@@ -365,15 +387,23 @@ fn pushMask(window, x, y, w, h) if window.type {
 				true -> {
 					windows.gdi32('SaveDC', hdcValue)
 					windows.gdi32('IntersectClipRect', hdcValue, int(x), int(y), int(x + w), int(y + h))
+					windows.gdi32('OffsetViewportOrgEx', hdcValue, int(x), int(y), 0)
 					{ type: :ok }
 				}
 				_ -> _err('pushMask requires active frame (call beginFrame first)', ?)
 			}
 		}
 		:linux -> {
-			// Software mask stored on window; draw primitives check it.
 			if window._maskStack = ? -> window._maskStack <- []
-			window._maskStack <- window._maskStack << { x: int(x), y: int(y), w: int(w), h: int(h) }
+			if window._maskOffsetX = ? -> window._maskOffsetX <- 0
+			if window._maskOffsetY = ? -> window._maskOffsetY <- 0
+			window._maskStack <- window._maskStack << {
+				x: int(x), y: int(y), w: int(w), h: int(h)
+				prevOffsetX: window._maskOffsetX
+				prevOffsetY: window._maskOffsetY
+			}
+			window._maskOffsetX <- window._maskOffsetX + int(x)
+			window._maskOffsetY <- window._maskOffsetY + int(y)
 			{ type: :ok }
 		}
 		:web -> {
@@ -383,6 +413,8 @@ fn pushMask(window, x, y, w, h) if window.type {
 				y: y
 				width: w
 				height: h
+				translateX: x
+				translateY: y
 			}
 			{ type: :ok }
 		}
@@ -409,7 +441,12 @@ fn popMask(window) if window.type {
 		}
 		:linux -> {
 			if window._maskStack != ? & len(window._maskStack) > 0 {
-				true -> window._maskStack <- window._maskStack |> slice(0, len(window._maskStack) - 1)
+				true -> {
+					top := window._maskStack.(len(window._maskStack) - 1)
+					window._maskOffsetX <- _default(top.prevOffsetX, 0)
+					window._maskOffsetY <- _default(top.prevOffsetY, 0)
+					window._maskStack <- window._maskStack |> slice(0, len(window._maskStack) - 1)
+				}
 			}
 			{ type: :ok }
 		}
