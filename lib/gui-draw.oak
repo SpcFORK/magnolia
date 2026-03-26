@@ -352,6 +352,76 @@ fn _getCachedPen(window, hdcValue, useColor) {
 	}
 }
 
+// pushMask sets a rectangular clip region; only pixels inside are drawn.
+// Nests correctly when paired with popMask.
+fn pushMask(window, x, y, w, h) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdcValue := if window.frameHdc > 0 {
+				true -> window.frameHdc
+				_ -> 0
+			}
+			if hdcValue > 0 {
+				true -> {
+					windows.gdi32('SaveDC', hdcValue)
+					windows.gdi32('IntersectClipRect', hdcValue, int(x), int(y), int(x + w), int(y + h))
+					{ type: :ok }
+				}
+				_ -> _err('pushMask requires active frame (call beginFrame first)', ?)
+			}
+		}
+		:linux -> {
+			// Software mask stored on window; draw primitives check it.
+			if window._maskStack = ? -> window._maskStack <- []
+			window._maskStack <- window._maskStack << { x: int(x), y: int(y), w: int(w), h: int(h) }
+			{ type: :ok }
+		}
+		:web -> {
+			window.messages <- window.messages << {
+				type: :pushClip
+				x: x
+				y: y
+				width: w
+				height: h
+			}
+			{ type: :ok }
+		}
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
+// popMask restores the clip region saved by the most recent pushMask.
+fn popMask(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdcValue := if window.frameHdc > 0 {
+				true -> window.frameHdc
+				_ -> 0
+			}
+			if hdcValue > 0 {
+				true -> {
+					windows.gdi32('RestoreDC', hdcValue, -1)
+					{ type: :ok }
+				}
+				_ -> _err('popMask requires active frame', ?)
+			}
+		}
+		:linux -> {
+			if window._maskStack != ? & len(window._maskStack) > 0 {
+				true -> window._maskStack <- window._maskStack |> slice(0, len(window._maskStack) - 1)
+			}
+			{ type: :ok }
+		}
+		:web -> {
+			window.messages <- window.messages << { type: :popClip }
+			{ type: :ok }
+		}
+		_ -> _err('Unknown window backend', window)
+	}
+	_ -> window
+}
+
 fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
 	:ok -> {
 		useColor := _default(color, defaultColor)

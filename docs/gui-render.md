@@ -9,6 +9,17 @@ Key exports
 - `drawMeshSolid(window, mesh, transform?, camera?, color?)`
 - Camera and transform fields documented in `docs/gui.md` (camera/options section)
 
+Renderer3D methods for new mesh shapes
+
+- `renderSphere(radius?, segments?, rings?, transform?, color?)` / `renderSphereSolid(...)`
+- `renderPyramid(base?, height?, transform?, color?)` / `renderPyramidSolid(...)`
+- `renderCylinder(radius?, height?, segments?, transform?, color?)` / `renderCylinderSolid(...)`
+- `renderCone(radius?, height?, segments?, transform?, color?)` / `renderConeSolid(...)`
+- `renderTorus(majorR?, minorR?, majSegs?, minSegs?, transform?, color?)` / `renderTorusSolid(...)`
+- `renderPlane(width?, depth?, sw?, sd?, transform?, color?)` / `renderPlaneSolid(...)`
+
+All new mesh render methods support both wireframe and solid modes and cache meshes by parameters.
+
 Usage
 
 ```oak

@@ -193,6 +193,393 @@ fn _voxelMeshSub(voxels, voxelSize, i, vertices, indexByKey, edges, edgeSet) if 
 
 fn VoxelMesh(voxels, voxelSize) _voxelMeshSub(_default(voxels, []), _default(voxelSize, 1), 0, [], {}, [], {})
 
+// PlaneMesh creates a flat rectangular plane on the XZ plane.
+fn PlaneMesh(width, depth, subdivisionsW, subdivisionsD) {
+	w := _default(width, 4)
+	d := _default(depth, 4)
+	sw := _default(subdivisionsW, 1)
+	sd := _default(subdivisionsD, 1)
+	hw := w / 2
+	hd := d / 2
+	stepW := w / sw
+	stepD := d / sd
+
+	fn buildVerts(ix, iz, verts) if iz > sd {
+		true -> verts
+		_ -> if ix > sw {
+			true -> buildVerts(0, iz + 1, verts)
+			_ -> buildVerts(ix + 1, iz, verts << Vec3(0 - hw + ix * stepW, 0, 0 - hd + iz * stepD))
+		}
+	}
+
+	vertices := buildVerts(0, 0, [])
+	cols := sw + 1
+
+	fn buildEdges(ix, iz, edges) if iz > sd {
+		true -> edges
+		_ -> if ix > sw {
+			true -> buildEdges(0, iz + 1, edges)
+			_ -> {
+				idx := iz * cols + ix
+				e := edges
+				if ix < sw {
+					true -> e <- e << [idx, idx + 1]
+				}
+				if iz < sd {
+					true -> e <- e << [idx, idx + cols]
+				}
+				buildEdges(ix + 1, iz, e)
+			}
+		}
+	}
+
+	fn buildFaces(ix, iz, faces) if iz >= sd {
+		true -> faces
+		_ -> if ix >= sw {
+			true -> buildFaces(0, iz + 1, faces)
+			_ -> {
+				a := iz * cols + ix
+				b := a + 1
+				c := a + cols + 1
+				d := a + cols
+				buildFaces(ix + 1, iz, faces << [a, b, c, d])
+			}
+		}
+	}
+
+	{
+		vertices: vertices
+		edges: buildEdges(0, 0, [])
+		faces: buildFaces(0, 0, [])
+	}
+}
+
+// PyramidMesh creates a four-sided pyramid.
+fn PyramidMesh(base, height) {
+	b := _default(base, 2)
+	h := _default(height, 2)
+	hb := b / 2
+	{
+		vertices: [
+			Vec3(0 - hb, 0, 0 - hb)
+			Vec3(hb, 0, 0 - hb)
+			Vec3(hb, 0, hb)
+			Vec3(0 - hb, 0, hb)
+			Vec3(0, h, 0)
+		]
+		edges: [
+			[0, 1]
+			[1, 2]
+			[2, 3]
+			[3, 0]
+			[0, 4]
+			[1, 4]
+			[2, 4]
+			[3, 4]
+		]
+		faces: [
+			[0, 1, 2, 3]
+			[0, 1, 4]
+			[1, 2, 4]
+			[2, 3, 4]
+			[3, 0, 4]
+		]
+	}
+}
+
+// CylinderMesh creates a cylinder along the Y axis.
+fn _cylinderRingVerts(cx, cy, cz, radius, segments, i, out) if i {
+	segments -> out
+	_ -> {
+		angle := i * 2 * 3.141592653589793 / segments
+		_cylinderRingVerts(cx, cy, cz, radius, segments, i + 1, out << Vec3(cx + radius * cos(angle), cy, cz + radius * sin(angle)))
+	}
+}
+
+fn CylinderMesh(radius, height, segments) {
+	r := _default(radius, 1)
+	h := _default(height, 2)
+	segs := _default(segments, 16)
+	hh := h / 2
+
+	topVerts := _cylinderRingVerts(0, hh, 0, r, segs, 0, [])
+	botVerts := _cylinderRingVerts(0, 0 - hh, 0, r, segs, 0, [])
+
+	// vertices: [top ring..., bottom ring...]
+	vertices := fn merge(i, out) if i {
+		segs -> fn merge2(j, out2) if j {
+			segs -> out2
+			_ -> merge2(j + 1, out2 << botVerts.(j))
+		}
+		merge2(0, out)
+		_ -> merge(i + 1, out << topVerts.(i))
+	}
+	allVerts := merge(0, [])
+
+	// edges: ring edges + vertical edges
+	fn buildEdges(i, edges) if i {
+		segs -> edges
+		_ -> {
+			next := (i + 1) % segs
+			// top ring
+			e := edges << [i, next]
+			// bottom ring
+			e <- e << [i + segs, next + segs]
+			// vertical
+			e <- e << [i, i + segs]
+			buildEdges(i + 1, e)
+		}
+	}
+
+	// faces: side quads + top/bottom fan
+	fn buildSideFaces(i, faces) if i {
+		segs -> faces
+		_ -> {
+			next := (i + 1) % segs
+			buildSideFaces(i + 1, faces << [i, next, next + segs, i + segs])
+		}
+	}
+
+	fn buildCapFace(i, out) if i {
+		segs -> out
+		_ -> buildCapFace(i + 1, out << i)
+	}
+
+	fn buildBotCapFace(i, out) if i {
+		segs -> out
+		_ -> buildBotCapFace(i + 1, out << (i + segs))
+	}
+
+	sideFaces := buildSideFaces(0, [])
+	topFace := buildCapFace(0, [])
+	botFace := buildBotCapFace(0, [])
+
+	{
+		vertices: allVerts
+		edges: buildEdges(0, [])
+		faces: sideFaces << topFace << botFace
+	}
+}
+
+// ConeMesh creates a cone with apex at (0, height, 0) and base on XZ plane.
+fn ConeMesh(radius, height, segments) {
+	r := _default(radius, 1)
+	h := _default(height, 2)
+	segs := _default(segments, 16)
+
+	baseVerts := _cylinderRingVerts(0, 0, 0, r, segs, 0, [])
+	apexIdx := segs
+
+	fn buildVerts(i, out) if i {
+		segs -> out << Vec3(0, h, 0)
+		_ -> buildVerts(i + 1, out << baseVerts.(i))
+	}
+
+	allVerts := buildVerts(0, [])
+
+	fn buildEdges(i, edges) if i {
+		segs -> edges
+		_ -> {
+			next := (i + 1) % segs
+			e := edges << [i, next]
+			e <- e << [i, apexIdx]
+			buildEdges(i + 1, e)
+		}
+	}
+
+	fn buildSideFaces(i, faces) if i {
+		segs -> faces
+		_ -> {
+			next := (i + 1) % segs
+			buildSideFaces(i + 1, faces << [i, next, apexIdx])
+		}
+	}
+
+	fn buildBaseFace(i, out) if i {
+		segs -> out
+		_ -> buildBaseFace(i + 1, out << i)
+	}
+
+	sideFaces := buildSideFaces(0, [])
+	baseFace := buildBaseFace(0, [])
+
+	{
+		vertices: allVerts
+		edges: buildEdges(0, [])
+		faces: sideFaces << baseFace
+	}
+}
+
+// SphereMesh creates a UV sphere.
+fn SphereMesh(radius, segments, rings) {
+	r := _default(radius, 1)
+	segs := _default(segments, 16)
+	rngs := _default(rings, 8)
+	PI := 3.141592653589793
+
+	// Build vertices: top pole, ring vertices, bottom pole
+	topIdx := 0
+	fn buildRingVerts(ring, out) if ring > rngs - 1 {
+		true -> out
+		_ -> {
+			phi := PI * ring / rngs
+			fn buildSegVerts(seg, rowOut) if seg {
+				segs -> buildRingVerts(ring + 1, rowOut)
+				_ -> {
+					theta := 2 * PI * seg / segs
+					buildSegVerts(
+						seg + 1
+						rowOut << Vec3(
+							r * sin(phi) * cos(theta)
+							r * cos(phi)
+							r * sin(phi) * sin(theta)
+						)
+					)
+				}
+			}
+			buildSegVerts(0, out)
+		}
+	}
+
+	ringVerts := buildRingVerts(1, [Vec3(0, r, 0)])
+	botIdx := len(ringVerts)
+	allVerts := ringVerts << Vec3(0, 0 - r, 0)
+
+	// Edges and faces
+	fn ringBaseIdx(ring) 1 + (ring - 1) * segs
+
+	fn buildTopEdges(seg, edges) if seg {
+		segs -> edges
+		_ -> {
+			next := (seg + 1) % segs
+			e := edges << [topIdx, 1 + seg]
+			e <- e << [1 + seg, 1 + next]
+			buildTopEdges(seg + 1, e)
+		}
+	}
+
+	fn buildMidEdges(ring, edges) if ring > rngs - 2 {
+		true -> edges
+		_ -> {
+			base := ringBaseIdx(ring)
+			nextBase := ringBaseIdx(ring + 1)
+			fn buildSegEdges(seg, e) if seg {
+				segs -> buildMidEdges(ring + 1, e)
+				_ -> {
+					next := (seg + 1) % segs
+					e2 := e << [base + seg, nextBase + seg]
+					e2 <- e2 << [nextBase + seg, nextBase + next]
+					buildSegEdges(seg + 1, e2)
+				}
+			}
+			buildSegEdges(0, edges)
+		}
+	}
+
+	fn buildBotEdges(seg, edges) if seg {
+		segs -> edges
+		_ -> {
+			lastBase := ringBaseIdx(rngs - 1)
+			buildBotEdges(seg + 1, edges << [lastBase + seg, botIdx])
+		}
+	}
+
+	allEdges := buildBotEdges(0, buildMidEdges(1, buildTopEdges(0, [])))
+
+	fn buildTopFaces(seg, faces) if seg {
+		segs -> faces
+		_ -> {
+			next := (seg + 1) % segs
+			buildTopFaces(seg + 1, faces << [topIdx, 1 + seg, 1 + next])
+		}
+	}
+
+	fn buildMidFaces(ring, faces) if ring > rngs - 2 {
+		true -> faces
+		_ -> {
+			base := ringBaseIdx(ring)
+			nextBase := ringBaseIdx(ring + 1)
+			fn buildSegFaces(seg, f) if seg {
+				segs -> buildMidFaces(ring + 1, f)
+				_ -> {
+					next := (seg + 1) % segs
+					buildSegFaces(seg + 1, f << [base + seg, base + next, nextBase + next, nextBase + seg])
+				}
+			}
+			buildSegFaces(0, faces)
+		}
+	}
+
+	fn buildBotFaces(seg, faces) if seg {
+		segs -> faces
+		_ -> {
+			next := (seg + 1) % segs
+			lastBase := ringBaseIdx(rngs - 1)
+			buildBotFaces(seg + 1, faces << [lastBase + seg, lastBase + next, botIdx])
+		}
+	}
+
+	{
+		vertices: allVerts
+		edges: allEdges
+		faces: buildBotFaces(0, buildMidFaces(1, buildTopFaces(0, [])))
+	}
+}
+
+// TorusMesh creates a torus (donut shape).
+fn TorusMesh(majorRadius, minorRadius, majorSegments, minorSegments) {
+	R := _default(majorRadius, 1.5)
+	rr := _default(minorRadius, 0.5)
+	majSegs := _default(majorSegments, 16)
+	minSegs := _default(minorSegments, 12)
+	PI := 3.141592653589793
+
+	fn buildVerts(i, j, out) if i {
+		majSegs -> out
+		_ -> if j {
+			minSegs -> buildVerts(i + 1, 0, out)
+			_ -> {
+				theta := 2 * PI * i / majSegs
+				phi := 2 * PI * j / minSegs
+				x := (R + rr * cos(phi)) * cos(theta)
+				y := rr * sin(phi)
+				z := (R + rr * cos(phi)) * sin(theta)
+				buildVerts(i, j + 1, out << Vec3(x, y, z))
+			}
+		}
+	}
+
+	allVerts := buildVerts(0, 0, [])
+
+	fn vertIdx(i, j) (i % majSegs) * minSegs + (j % minSegs)
+
+	fn buildEdgesAndFaces(i, j, edges, faces) if i {
+		majSegs -> { edges: edges, faces: faces }
+		_ -> if j {
+			minSegs -> buildEdgesAndFaces(i + 1, 0, edges, faces)
+			_ -> {
+				ni := (i + 1) % majSegs
+				nj := (j + 1) % minSegs
+				a := vertIdx(i, j)
+				b := vertIdx(ni, j)
+				c := vertIdx(ni, nj)
+				d := vertIdx(i, nj)
+				e := edges << [a, b] << [a, d]
+				f := faces << [a, b, c, d]
+				buildEdgesAndFaces(i, j + 1, e, f)
+			}
+		}
+	}
+
+	result := buildEdgesAndFaces(0, 0, [], [])
+
+	{
+		vertices: allVerts
+		edges: result.edges
+		faces: result.faces
+	}
+}
+
 fn VoxelGrid(options) {
 	opts := _default(options, {})
 	voxelSize := _default(opts.voxelSize, 1)

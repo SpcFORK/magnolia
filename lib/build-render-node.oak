@@ -1,0 +1,142 @@
+// build-render-node -- standalone Oak AST & value renderers
+//
+// Extracted from build-render so Oak AST nodes and runtime values
+// can be rendered to Oak source text outside the full build pipeline.
+//
+//   brn := import('build-render-node')
+//   brn.createRenderer(formatIdent, abort)
+//   brn.makeRenderOakNode()
+//   brn.renderOakNode(node)
+//   brn.renderOakVal(value)
+
+std := import('std')
+map := std.map
+append := std.append
+keys := std.keys
+len := std.len
+
+str := import('str')
+join := str.join
+replace := str.replace
+
+sort := import('sort')
+sort! := sort.sort!
+
+fmt := import('fmt')
+format := fmt.format
+
+// createRenderer returns a renderNode function bound to the given
+// formatIdent and abort callbacks, matching the Oak bundle renderer.
+fn createRenderer(formatIdent, abort) {
+	fn renderNode(node) if node.type {
+		:null -> '?'
+		:empty -> '_'
+		:string -> '\'' << node.val |> replace('\\', '\\\\') |> replace('\'', '\\\'') << '\''
+		:int, :float -> node.tok.val
+		:bool -> string(node.val)
+		:identifier -> formatIdent(node.val)
+		:atom -> ':' << node.val
+		:list -> '[' << node.elems |> map(renderNode) |> join(',') << ']'
+		:object -> '{' << node.entries |> map(fn(entry) {
+			renderNode(entry.key) << ':' << renderNode(entry.val)
+		}) |> join(',') << '}'
+		:unary -> if node.op {
+			:minus -> '-' << renderNode(node.right)
+			:exclam -> '!' << renderNode(node.right)
+		}
+		:binary -> renderNode(node.left) << if node.op {
+			:plus -> '+'
+			:minus -> '-'
+			:times -> '*'
+			:divide -> '/'
+			:modulus -> '%'
+			:and -> '&'
+			:xor -> '^'
+			:or -> '|'
+			:rshift -> '>>'
+			:eq -> '='
+			:neq -> ' !='
+			:greater -> '>'
+			:less -> '<'
+			:geq -> '>='
+			:leq -> '<='
+			:pushArrow -> '<<'
+		} << renderNode(node.right)
+		:assignment -> renderNode(node.left) << if node.local? {
+			true -> ':='
+			_ -> '<-'
+		} << renderNode(node.right)
+		:propertyAccess -> renderNode(node.left) << '.' << renderNode(node.right)
+		:ifExpr -> 'if ' << renderNode(node.cond) << '{' << node.branches |> map(fn(br) {
+			renderNode(br.target) << '->' << renderNode(br.body)
+		}) |> join(',') << '}'
+		:block -> '(' << if len(node.exprs) {
+			0 -> '?'
+			_ -> node.exprs |> map(renderNode) |> join(',')
+		} << ')'
+		:function -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(formatIdent) |> join(',')
+				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
+			} << ')'
+			if node.name {
+				'' -> 'fn' << args << renderNode(node.body)
+				_ -> 'fn ' << formatIdent(node.name) << args << renderNode(node.body)
+			}
+		}
+		:fnCall -> '{{0}}({{1}})' |> format(
+			renderNode(node.function)
+			if node.restArg {
+				? -> node.args |> map(renderNode) |> join(',')
+				_ -> node.args |> map(renderNode) |> append([renderNode(node.restArg) << '...']) |> join(',')
+			}
+		)
+		:class -> {
+			args := '(' << if node.restArg {
+				'' -> node.args |> map(formatIdent) |> join(',')
+				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
+			} << ')'
+			head := 'cs ' << formatIdent(node.name) << args
+			if len(node.parents) = 0 & len(node.staticExprs) = 0 {
+				true -> head << ' ' << renderNode(node.body)
+				_ -> {
+					staticParts := node.staticExprs |> map(renderNode)
+					parentsPart := '(' << node.parents |> map(renderNode) |> join(',') << ')->' << renderNode(node.body)
+					head << '{' << append(staticParts, [parentsPart]) |> join(',') << '}'
+				}
+			}
+		}
+		_ -> abort('[oak build] Unexpected AST node type ' << string(node.type))
+	}
+	renderNode
+}
+
+// renderOakNode is a convenience wrapper with a default identity
+// formatIdent (no renaming) and an abort that returns an error string.
+fn makeRenderOakNode() createRenderer(
+	fn(name) name
+	fn(msg) msg
+)
+
+fn renderOakNode(node) {
+	renderNode := makeRenderOakNode()
+	renderNode(node)
+}
+
+// renderOakVal renders a runtime Oak value to Oak source text.
+// Handles all primitive types, lists, and objects with proper escaping.
+fn renderOakVal(v) if type(v) {
+	:null, :empty, :function -> '?'
+	:string -> '\'' + (v |> replace('\\', '\\\\') |> replace('\'', '\\\'')) + '\''
+	:atom -> ':' + string(v)
+	:int, :float, :bool -> string(v)
+	:list -> '[' + (v |> map(renderOakVal) |> join(', ')) + ']'
+	:object -> '{' + (keys(v) |> map(fn(k) k + ': ' + renderOakVal(v.(k))) |> join(', ')) + '}'
+}
+
+{
+	createRenderer: createRenderer
+	makeRenderOakNode: makeRenderOakNode
+	renderOakNode: renderOakNode
+	renderOakVal: renderOakVal
+}

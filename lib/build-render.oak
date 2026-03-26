@@ -14,95 +14,33 @@ sort! := sort.sort!
 fmt := import('fmt')
 format := fmt.format
 
-fn renderOakBundle(bundleNode, vfsFiles, encodeJSON, oakNativeRuntime, formatIdent, abort) {
-	fn renderNode(node) if node.type {
-		:null -> '?'
-		:empty -> '_'
-		:string -> '\'' << node.val |> replace('\\', '\\\\') |> replace('\'', '\\\'') << '\''
-		:int, :float -> node.tok.val
-		:bool -> string(node.val)
-		:identifier -> formatIdent(node.val)
-		:atom -> ':' << node.val
-		:list -> '[' << node.elems |> map(renderNode) |> join(',') << ']'
-		:object -> '{' << node.entries |> map(fn(entry) {
-			renderNode(entry.key) << ':' << renderNode(entry.val)
-		}) |> join(',') << '}'
-		:unary -> if node.op {
-			:minus -> '-' << renderNode(node.right)
-			:exclam -> '!' << renderNode(node.right)
-		}
-		:binary -> renderNode(node.left) << if node.op {
-			:plus -> '+'
-			:minus -> '-'
-			:times -> '*'
-			:divide -> '/'
-			:modulus -> '%'
-			:and -> '&'
-			:xor -> '^'
-			:or -> '|'
-			:rshift -> '>>'
-			:eq -> '='
-			:neq -> ' !='
-			:greater -> '>'
-			:less -> '<'
-			:geq -> '>='
-			:leq -> '<='
-			:pushArrow -> '<<'
-		} << renderNode(node.right)
-		:assignment -> renderNode(node.left) << if node.local? {
-			true -> ':='
-			_ -> '<-'
-		} << renderNode(node.right)
-		:propertyAccess -> renderNode(node.left) << '.' << renderNode(node.right)
-		:ifExpr -> 'if ' << renderNode(node.cond) << '{' << node.branches |> map(fn(br) {
-			renderNode(br.target) << '->' << renderNode(br.body)
-		}) |> join(',') << '}'
-		:block -> '(' << if len(node.exprs) {
-			0 -> '?'
-			_ -> node.exprs |> map(renderNode) |> join(',')
-		} << ')'
-		:function -> {
-			args := '(' << if node.restArg {
-				'' -> node.args |> map(formatIdent) |> join(',')
-				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
-			} << ')'
-			if node.name {
-				'' -> 'fn' << args << renderNode(node.body)
-				_ -> 'fn ' << formatIdent(node.name) << args << renderNode(node.body)
-			}
-		}
-		:fnCall -> '{{0}}({{1}})' |> format(
-			renderNode(node.function)
-			if node.restArg {
-				? -> node.args |> map(renderNode) |> join(',')
-				_ -> node.args |> map(renderNode) |> append([renderNode(node.restArg) << '...']) |> join(',')
-			}
-		)
-		:class -> {
-			args := '(' << if node.restArg {
-				'' -> node.args |> map(formatIdent) |> join(',')
-				_ -> node.args |> map(formatIdent) |> append([node.restArg + '...']) |> join(',')
-			} << ')'
-			head := 'cs ' << formatIdent(node.name) << args
-			if len(node.parents) = 0 & len(node.staticExprs) = 0 {
-				true -> head << ' ' << renderNode(node.body)
-				_ -> {
-					staticParts := node.staticExprs |> map(renderNode)
-					parentsPart := '(' << node.parents |> map(renderNode) |> join(',') << ')->' << renderNode(node.body)
-					head << '{' << append(staticParts, [parentsPart]) |> join(',') << '}'
-				}
-			}
-		}
-		_ -> abort('[oak build] Unexpected AST node type ' << string(node.type))
-	}
+buildRenderNode := import('build-render-node')
 
-	vfsInit := if len(vfsFiles |> keys()) {
-		0 -> ''
-		_ -> '
+fn renderVfsOak(vfsFiles) '
 // Embedded Virtual FS
 Virtual := import(\'Virtual\')
 __Oak_VFS := Virtual.createVirtualFS(' << encodeJSON(vfsFiles) << ')
 '
+
+fn renderVfsJs(vfsFiles) '
+// Embedded Virtual FS
+const __Oak_VFS_Data = ' << encodeJSON(vfsFiles) << ';
+let __Oak_VFS = null;
+function __oak_get_vfs() {
+	if (!__Oak_VFS) {
+		const Virtual = __oak_module_import(\'Virtual\');
+		__Oak_VFS = Virtual.createVirtualFS(__Oak_VFS_Data);
+	}
+	return __Oak_VFS;
+}
+'
+
+fn renderOakBundle(bundleNode, vfsFiles, encodeJSON, oakNativeRuntime, formatIdent, abort) {
+	renderNode := buildRenderNode.createRenderer(formatIdent, abort)
+
+	vfsInit := if len(vfsFiles |> keys()) {
+		0 -> ''
+		_ -> renderVfsOak(vfsFiles)
 	}
 
 	'// oak build' << oakNativeRuntime << vfsInit << renderNode(bundleNode)
@@ -305,18 +243,7 @@ fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, c
 
 	vfsInit := if len(vfsFiles |> keys()) {
 		0 -> ''
-		_ -> '
-// Embedded Virtual FS
-const __Oak_VFS_Data = ' << encodeJSON(vfsFiles) << ';
-let __Oak_VFS = null;
-function __oak_get_vfs() {
-	if (!__Oak_VFS) {
-		const Virtual = __oak_module_import(\'Virtual\');
-		__Oak_VFS = Virtual.createVirtualFS(__Oak_VFS_Data);
-	}
-	return __Oak_VFS;
-}
-'
+		_ -> renderVfsJs(vfsFiles)
 	}
 
 	'/* oak build --web */' << oakJSRuntime << vfsInit << renderNode(bundleNode)

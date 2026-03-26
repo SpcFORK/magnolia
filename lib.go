@@ -175,6 +175,9 @@ var libbuildanalyze string
 //go:embed lib/build-render.oak
 var libbuildrender string
 
+//go:embed lib/build-render-node.oak
+var libbuildrendernode string
+
 //go:embed lib/build-config.oak
 var libbuildconfig string
 
@@ -426,6 +429,7 @@ var stdlibs = map[string]string{
 	"build-ast":              libbuildast,
 	"build-analyze":          libbuildanalyze,
 	"build-render":           libbuildrender,
+	"build-render-node":      libbuildrendernode,
 	"build-config":           libbuildconfig,
 	"build-imports":          libbuildimports,
 	"runtime-native":         libruntimenative,

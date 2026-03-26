@@ -13,6 +13,28 @@ fn Vec2(x, y) {
 	}
 }
 
+// Vec4 represents a rectangle as (x, y, width, height).
+// Accepts either four scalars or an array [x, y, w, h].
+fn Vec4(x, y, w, h) if type(x) {
+	:list -> {
+		arr := x
+		{
+			x: _default(arr.0, 0)
+			y: _default(arr.1, 0)
+			w: _default(arr.2, 0)
+			h: _default(arr.3, 0)
+		}
+	}
+	_ -> {
+		{
+			x: _default(x, 0)
+			y: _default(y, 0)
+			w: _default(w, 0)
+			h: _default(h, 0)
+		}
+	}
+}
+
 fn Rect2(x, y, width, height) {
 	{
 		x: _default(x, 0)
@@ -141,9 +163,19 @@ fn drawPolyline2D(deps, window, points, color, closed) {
 	}
 }
 
-fn drawRect2D(deps, window, x, y, width, height, color, filled) {
+fn drawRect2D(deps, window, x, y, width, height, color, filled, borderColor) {
 	if _default(filled, true) {
-		true -> deps.fillRect(window, int(x), int(y), int(width), int(height), color)
+		true -> {
+			deps.fillRect(window, int(x), int(y), int(width), int(height), color)
+			if borderColor != ? {
+				true -> drawPolyline2D(deps, window, [
+					Vec2(x, y)
+					Vec2(x + width, y)
+					Vec2(x + width, y + height)
+					Vec2(x, y + height)
+				], borderColor, true)
+			}
+		}
 		_ -> drawPolyline2D(deps, window, [
 			Vec2(x, y)
 			Vec2(x + width, y)
@@ -175,12 +207,21 @@ fn _drawCircleFilledSub(deps, window, cx, cy, r, y, color) if y > r {
 	}
 }
 
-fn drawCircle2D(deps, window, cx, cy, radius, color, filled) {
+fn drawCircle2D(deps, window, cx, cy, radius, color, filled, borderColor) {
 	r := _default(radius, 0)
 	if r <= 0 {
 		true -> { type: :ok }
 		_ -> if _default(filled, false) {
-			true -> _drawCircleFilledSub(deps, window, cx, cy, r, 0, color)
+			true -> {
+				_drawCircleFilledSub(deps, window, cx, cy, r, 0, color)
+				if borderColor != ? {
+					true -> {
+						segs := int(_clamp(r * 1.1, 12, 96))
+						step := _degToRad(360 / segs)
+						_drawCircleOutlineSub(deps, window, cx, cy, r, 0, cos(step), sin(step), segs, 0, borderColor)
+					}
+				}
+			}
 			_ -> {
 				segs := int(_clamp(r * 1.1, 12, 96))
 				step := _degToRad(360 / segs)
@@ -190,7 +231,7 @@ fn drawCircle2D(deps, window, cx, cy, radius, color, filled) {
 	}
 }
 
-fn drawPolygon2D(deps, window, points, color, filled) {
+fn drawPolygon2D(deps, window, points, color, filled, borderColor) {
 	pts := _default(points, [])
 	if len(pts) < 3 {
 		true -> { type: :ok }
@@ -217,8 +258,40 @@ fn drawPolygon2D(deps, window, points, color, filled) {
 					}
 				}
 				fan(0)
+				if borderColor != ? {
+					true -> drawPolyline2D(deps, window, pts, borderColor, true)
+				}
 			}
 			_ -> drawPolyline2D(deps, window, pts, color, true)
+		}
+	}
+}
+
+// Element is a masked drawing region. Only pixels within bounds are rendered.
+// bounds is a Vec4 {x, y, w, h} or an array [x, y, w, h].
+// Usage:
+//   el := Element(Vec4(100, 100, 200, 150))
+//   el.begin(window)      // push clip mask
+//   ... draw calls ...    // clipped to element bounds
+//   el.end(window)        // pop clip mask
+// Or use the convenience wrapper:
+//   el.draw(window) fn { ... draw calls ... }
+fn Element(deps, bounds) {
+	b := if type(bounds) {
+		:list -> Vec4(bounds)
+		_ -> Vec4(_default(bounds.x, 0), _default(bounds.y, 0), _default(bounds.w, _default(bounds.width, 0)), _default(bounds.h, _default(bounds.height, 0)))
+	}
+	{
+		bounds: b
+		begin: fn(window) deps.pushMask(window, b.x, b.y, b.w, b.h)
+		end: fn(window) deps.popMask(window)
+		draw: fn(window, callback) {
+			deps.pushMask(window, b.x, b.y, b.w, b.h)
+			callback(window)
+			deps.popMask(window)
+		}
+		contains: fn(px, py) {
+			(px >= b.x) & (py >= b.y) & (px < b.x + b.w) & (py < b.y + b.h)
 		}
 	}
 }
@@ -251,5 +324,532 @@ fn drawGrid2D(deps, window, spacing, color, originX, originY) {
 			drawV(startX)
 			drawH(startY)
 		}
+	}
+}
+
+// drawEllipse2D draws an ellipse centered at (cx, cy) with radii rx, ry.
+fn _drawEllipseOutlineSub(deps, window, cx, cy, px, py, cr, sr, segs, i, rx, ry, color) if i {
+	segs -> { type: :ok }
+	_ -> {
+		nx := px * cr - py * sr
+		ny := px * sr + py * cr
+		deps.drawLine(window, int(cx + px * rx), int(cy + py * ry), int(cx + nx * rx), int(cy + ny * ry), color)
+		_drawEllipseOutlineSub(deps, window, cx, cy, nx, ny, cr, sr, segs, i + 1, rx, ry, color)
+	}
+}
+
+fn _drawEllipseFilledSub(deps, window, cx, cy, rx, ry, y, color) if y > ry {
+	true -> { type: :ok }
+	_ -> {
+		// x^2/rx^2 + y^2/ry^2 = 1 => x = rx * sqrt(1 - y^2/ry^2)
+		x := rx * pow(1 - (y * y) / (ry * ry), 0.5)
+		deps.drawLine(window, int(cx - x), int(cy + y), int(cx + x), int(cy + y), color)
+		if y > 0 {
+			true -> deps.drawLine(window, int(cx - x), int(cy - y), int(cx + x), int(cy - y), color)
+		}
+		_drawEllipseFilledSub(deps, window, cx, cy, rx, ry, y + 1, color)
+	}
+}
+
+fn drawEllipse2D(deps, window, cx, cy, rx, ry, color, filled, borderColor) {
+	radiusX := _default(rx, 0)
+	radiusY := _default(ry, 0)
+	if radiusX <= 0 | radiusY <= 0 {
+		true -> { type: :ok }
+		_ -> if _default(filled, false) {
+			true -> {
+				_drawEllipseFilledSub(deps, window, cx, cy, radiusX, radiusY, 0, color)
+				if borderColor != ? {
+					true -> {
+						segs := int(_clamp((radiusX + radiusY) * 0.55, 12, 96))
+						step := _degToRad(360 / segs)
+						_drawEllipseOutlineSub(deps, window, cx, cy, 1, 0, cos(step), sin(step), segs, 0, radiusX, radiusY, borderColor)
+					}
+				}
+			}
+			_ -> {
+				segs := int(_clamp((radiusX + radiusY) * 0.55, 12, 96))
+				step := _degToRad(360 / segs)
+				// Start on unit circle, scale by rx/ry when drawing
+				_drawEllipseOutlineSub(deps, window, cx, cy, 1, 0, cos(step), sin(step), segs, 0, radiusX, radiusY, color)
+			}
+		}
+	}
+}
+
+// drawArc2D draws an arc (portion of a circle) from startAngle to endAngle (degrees).
+fn _drawArcSub(deps, window, cx, cy, radius, curAngle, endAngle, stepAngle, color) if curAngle >= endAngle {
+	true -> { type: :ok }
+	_ -> {
+		nextAngle := if curAngle + stepAngle > endAngle {
+			true -> endAngle
+			_ -> curAngle + stepAngle
+		}
+		r1 := _degToRad(curAngle)
+		r2 := _degToRad(nextAngle)
+		deps.drawLine(
+			window
+			int(cx + radius * cos(r1))
+			int(cy + radius * sin(r1))
+			int(cx + radius * cos(r2))
+			int(cy + radius * sin(r2))
+			color
+		)
+		_drawArcSub(deps, window, cx, cy, radius, nextAngle, endAngle, stepAngle, color)
+	}
+}
+
+fn drawArc2D(deps, window, cx, cy, radius, startAngle, endAngle, color) {
+	r := _default(radius, 0)
+	if r <= 0 {
+		true -> { type: :ok }
+		_ -> {
+			sa := _default(startAngle, 0)
+			ea := _default(endAngle, 360)
+			segs := int(_clamp(r * 1.1, 12, 96))
+			stepAngle := (ea - sa) / segs
+			_drawArcSub(deps, window, cx, cy, r, sa, ea, stepAngle, color)
+		}
+	}
+}
+
+// drawTriangle2D draws a triangle from three points.
+fn drawTriangle2D(deps, window, x1, y1, x2, y2, x3, y3, color, filled, borderColor) {
+	drawPolygon2D(deps, window, [Vec2(x1, y1), Vec2(x2, y2), Vec2(x3, y3)], color, _default(filled, false), borderColor)
+}
+
+// drawRoundedRect2D draws a rectangle with rounded corners.
+fn _drawRoundedRectCorner(deps, window, cx, cy, r, startDeg, endDeg, color) {
+	segs := int(_clamp(r * 0.5, 4, 24))
+	stepDeg := (endDeg - startDeg) / segs
+	fn sub(i, angle) if i {
+		segs -> { type: :ok }
+		_ -> {
+			next := angle + stepDeg
+			r1 := _degToRad(angle)
+			r2 := _degToRad(next)
+			deps.drawLine(
+				window
+				int(cx + r * cos(r1))
+				int(cy + r * sin(r1))
+				int(cx + r * cos(r2))
+				int(cy + r * sin(r2))
+				color
+			)
+			sub(i + 1, next)
+		}
+	}
+	sub(0, startDeg)
+}
+
+fn _drawRoundedRectFilledRows(deps, window, x, y, width, height, r, row, color) if row > height {
+	true -> { type: :ok }
+	_ -> {
+		// Compute horizontal inset for the current row
+		inset := if row < r {
+			true -> r - pow(r * r - (r - row) * (r - row), 0.5)
+			_ -> if row > height - r {
+				true -> r - pow(r * r - (row - (height - r)) * (row - (height - r)), 0.5)
+				_ -> 0
+			}
+		}
+		deps.drawLine(window, int(x + inset), int(y + row), int(x + width - inset), int(y + row), color)
+		_drawRoundedRectFilledRows(deps, window, x, y, width, height, r, row + 1, color)
+	}
+}
+
+fn drawRoundedRect2D(deps, window, x, y, width, height, radius, color, filled, borderColor) {
+	r := _clamp(_default(radius, 4), 0, if width < height { true -> width, _ -> height } / 2)
+	if _default(filled, false) {
+		true -> {
+			_drawRoundedRectFilledRows(deps, window, x, y, width, height, r, 0, color)
+			if borderColor != ? {
+				true -> {
+					deps.drawLine(window, int(x + r), int(y), int(x + width - r), int(y), borderColor)
+					deps.drawLine(window, int(x + r), int(y + height), int(x + width - r), int(y + height), borderColor)
+					deps.drawLine(window, int(x), int(y + r), int(x), int(y + height - r), borderColor)
+					deps.drawLine(window, int(x + width), int(y + r), int(x + width), int(y + height - r), borderColor)
+					_drawRoundedRectCorner(deps, window, x + r, y + r, r, 180, 270, borderColor)
+					_drawRoundedRectCorner(deps, window, x + width - r, y + r, r, 270, 360, borderColor)
+					_drawRoundedRectCorner(deps, window, x + width - r, y + height - r, r, 0, 90, borderColor)
+					_drawRoundedRectCorner(deps, window, x + r, y + height - r, r, 90, 180, borderColor)
+				}
+			}
+		}
+		_ -> {
+			// Top edge
+			deps.drawLine(window, int(x + r), int(y), int(x + width - r), int(y), color)
+			// Bottom edge
+			deps.drawLine(window, int(x + r), int(y + height), int(x + width - r), int(y + height), color)
+			// Left edge
+			deps.drawLine(window, int(x), int(y + r), int(x), int(y + height - r), color)
+			// Right edge
+			deps.drawLine(window, int(x + width), int(y + r), int(x + width), int(y + height - r), color)
+			// Corner arcs: top-left, top-right, bottom-right, bottom-left
+			_drawRoundedRectCorner(deps, window, x + r, y + r, r, 180, 270, color)
+			_drawRoundedRectCorner(deps, window, x + width - r, y + r, r, 270, 360, color)
+			_drawRoundedRectCorner(deps, window, x + width - r, y + height - r, r, 0, 90, color)
+			_drawRoundedRectCorner(deps, window, x + r, y + height - r, r, 90, 180, color)
+		}
+	}
+}
+
+// drawStar2D draws a star with the given number of points.
+fn _starVertices(cx, cy, outerR, innerR, points, i, out) if i {
+	points * 2 -> out
+	_ -> {
+		angle := _degToRad(i * 360 / (points * 2) - 90)
+		r := if i % 2 { 0 -> outerR, _ -> innerR }
+		_starVertices(cx, cy, outerR, innerR, points, i + 1, out << Vec2(cx + r * cos(angle), cy + r * sin(angle)))
+	}
+}
+
+fn drawStar2D(deps, window, cx, cy, outerR, innerR, points, color, filled, borderColor) {
+	n := int(_clamp(_default(points, 5), 3, 64))
+	oR := _default(outerR, 20)
+	iR := _default(innerR, oR * 0.4)
+	verts := _starVertices(cx, cy, oR, iR, n, 0, [])
+	drawPolygon2D(deps, window, verts, color, _default(filled, false), borderColor)
+}
+
+// drawBezier2D draws a quadratic or cubic bezier curve.
+fn _bezierLerp(a, b, t) a + (b - a) * t
+
+fn _bezierQuadPoint(p0, p1, p2, t) {
+	ax := _bezierLerp(p0.x, p1.x, t)
+	ay := _bezierLerp(p0.y, p1.y, t)
+	bx := _bezierLerp(p1.x, p2.x, t)
+	by := _bezierLerp(p1.y, p2.y, t)
+	Vec2(_bezierLerp(ax, bx, t), _bezierLerp(ay, by, t))
+}
+
+fn _bezierCubicPoint(p0, p1, p2, p3, t) {
+	ax := _bezierLerp(p0.x, p1.x, t)
+	ay := _bezierLerp(p0.y, p1.y, t)
+	bx := _bezierLerp(p1.x, p2.x, t)
+	by := _bezierLerp(p1.y, p2.y, t)
+	cx := _bezierLerp(p2.x, p3.x, t)
+	cy := _bezierLerp(p2.y, p3.y, t)
+	dx := _bezierLerp(ax, bx, t)
+	dy := _bezierLerp(ay, by, t)
+	ex := _bezierLerp(bx, cx, t)
+	ey := _bezierLerp(by, cy, t)
+	Vec2(_bezierLerp(dx, ex, t), _bezierLerp(dy, ey, t))
+}
+
+fn _drawBezierSub(deps, window, evalFn, prev, i, steps, color) if i > steps {
+	true -> { type: :ok }
+	_ -> {
+		t := i / steps
+		cur := evalFn(t)
+		deps.drawLine(window, int(prev.x), int(prev.y), int(cur.x), int(cur.y), color)
+		_drawBezierSub(deps, window, evalFn, cur, i + 1, steps, color)
+	}
+}
+
+fn drawBezier2D(deps, window, points, color, steps) {
+	pts := _default(points, [])
+	n := _default(steps, 32)
+	if len(pts) = 3 {
+		true -> {
+			evalFn := fn(t) _bezierQuadPoint(pts.0, pts.1, pts.2, t)
+			_drawBezierSub(deps, window, evalFn, pts.0, 1, n, color)
+		}
+		_ -> if len(pts) >= 4 {
+			true -> {
+				evalFn := fn(t) _bezierCubicPoint(pts.0, pts.1, pts.2, pts.3, t)
+				_drawBezierSub(deps, window, evalFn, pts.0, 1, n, color)
+			}
+			_ -> { type: :ok }
+		}
+	}
+}
+
+// drawRing2D draws an annulus (ring) — a circle with a hole.
+fn _drawRingRow(deps, window, cx, cy, outerR, innerR, y, color) if y > outerR {
+	true -> { type: :ok }
+	_ -> {
+		ox := pow(outerR * outerR - y * y, 0.5)
+		hasInner := y * y < innerR * innerR
+		if hasInner {
+			true -> {
+				ix := pow(innerR * innerR - y * y, 0.5)
+				// Draw two horizontal spans per half: left band and right band
+				deps.drawLine(window, int(cx - ox), int(cy + y), int(cx - ix), int(cy + y), color)
+				deps.drawLine(window, int(cx + ix), int(cy + y), int(cx + ox), int(cy + y), color)
+				if y > 0 {
+					true -> {
+						deps.drawLine(window, int(cx - ox), int(cy - y), int(cx - ix), int(cy - y), color)
+						deps.drawLine(window, int(cx + ix), int(cy - y), int(cx + ox), int(cy - y), color)
+					}
+				}
+			}
+			_ -> {
+				deps.drawLine(window, int(cx - ox), int(cy + y), int(cx + ox), int(cy + y), color)
+				if y > 0 {
+					true -> deps.drawLine(window, int(cx - ox), int(cy - y), int(cx + ox), int(cy - y), color)
+				}
+			}
+		}
+		_drawRingRow(deps, window, cx, cy, outerR, innerR, y + 1, color)
+	}
+}
+
+fn drawRing2D(deps, window, cx, cy, outerR, innerR, color) {
+	oR := _default(outerR, 20)
+	iR := _clamp(_default(innerR, oR * 0.5), 0, oR)
+	if oR <= 0 {
+		true -> { type: :ok }
+		_ -> _drawRingRow(deps, window, cx, cy, oR, iR, 0, color)
+	}
+}
+
+// drawCross2D draws a plus/cross shape centered at (cx, cy).
+fn drawCross2D(deps, window, cx, cy, size, thickness, color, filled) {
+	s := _default(size, 20)
+	t := _default(thickness, s / 3)
+	hs := s / 2
+	ht := t / 2
+	if _default(filled, true) {
+		true -> {
+			// Horizontal bar
+			deps.fillRect(window, int(cx - hs), int(cy - ht), int(s), int(t), color)
+			// Vertical bar
+			deps.fillRect(window, int(cx - ht), int(cy - hs), int(t), int(s), color)
+		}
+		_ -> {
+			// Outline cross as a 12-point polygon
+			drawPolyline2D(deps, window, [
+				Vec2(cx - ht, cy - hs)
+				Vec2(cx + ht, cy - hs)
+				Vec2(cx + ht, cy - ht)
+				Vec2(cx + hs, cy - ht)
+				Vec2(cx + hs, cy + ht)
+				Vec2(cx + ht, cy + ht)
+				Vec2(cx + ht, cy + hs)
+				Vec2(cx - ht, cy + hs)
+				Vec2(cx - ht, cy + ht)
+				Vec2(cx - hs, cy + ht)
+				Vec2(cx - hs, cy - ht)
+				Vec2(cx - ht, cy - ht)
+			], color, true)
+		}
+	}
+}
+
+// drawDiamond2D draws a diamond (rotated square) centered at (cx, cy).
+fn drawDiamond2D(deps, window, cx, cy, width, height, color, filled) {
+	hw := _default(width, 20) / 2
+	hh := _default(height, 20) / 2
+	drawPolygon2D(deps, window, [
+		Vec2(cx, cy - hh)
+		Vec2(cx + hw, cy)
+		Vec2(cx, cy + hh)
+		Vec2(cx - hw, cy)
+	], color, _default(filled, false))
+}
+
+// drawArrow2D draws a line from (x1,y1) to (x2,y2) with an arrowhead at the end.
+fn drawArrow2D(deps, window, x1, y1, x2, y2, color, headSize) {
+	hs := _default(headSize, 10)
+	// Draw the shaft
+	deps.drawLine(window, int(x1), int(y1), int(x2), int(y2), color)
+	// Compute direction vector
+	dx := x2 - x1
+	dy := y2 - y1
+	len := pow(dx * dx + dy * dy, 0.5)
+	if len > 0.001 {
+		true -> {
+			ux := dx / len
+			uy := dy / len
+			// Perpendicular
+			px := 0 - uy
+			py := ux
+			// Two points of the arrowhead
+			bx := x2 - ux * hs
+			by := y2 - uy * hs
+			deps.drawLine(window, int(x2), int(y2), int(bx + px * hs * 0.4), int(by + py * hs * 0.4), color)
+			deps.drawLine(window, int(x2), int(y2), int(bx - px * hs * 0.4), int(by - py * hs * 0.4), color)
+			{ type: :ok }
+		}
+		_ -> { type: :ok }
+	}
+}
+
+// drawCapsule2D draws a stadium/capsule (rectangle with semicircle ends).
+fn drawCapsule2D(deps, window, cx, cy, width, height, color, filled) {
+	w := _default(width, 40)
+	h := _default(height, 20)
+	// Ensure width >= height for horizontal capsule
+	if w < h {
+		true -> drawCapsule2D(deps, window, cx, cy, h, w, color, filled)
+		_ -> {
+			r := h / 2
+			bodyW := w - h
+			hbw := bodyW / 2
+			if _default(filled, false) {
+				true -> {
+					// Fill the rectangular body
+					deps.fillRect(window, int(cx - hbw), int(cy - r), int(bodyW), int(h), color)
+					// Fill the two semicircle caps
+					drawCircle2D(deps, window, cx - hbw, cy, r, color, true)
+					drawCircle2D(deps, window, cx + hbw, cy, r, color, true)
+				}
+				_ -> {
+					// Top and bottom straight edges
+					deps.drawLine(window, int(cx - hbw), int(cy - r), int(cx + hbw), int(cy - r), color)
+					deps.drawLine(window, int(cx - hbw), int(cy + r), int(cx + hbw), int(cy + r), color)
+					// Left semicircle (180..360 degrees)
+					drawArc2D(deps, window, cx - hbw, cy, r, 90, 270, color)
+					// Right semicircle (0..180 degrees)
+					drawArc2D(deps, window, cx + hbw, cy, r, 270, 450, color)
+				}
+			}
+		}
+	}
+}
+
+// drawSector2D draws a pie/sector wedge of a circle.
+fn drawSector2D(deps, window, cx, cy, radius, startAngle, endAngle, color, filled) {
+	r := _default(radius, 20)
+	sa := _default(startAngle, 0)
+	ea := _default(endAngle, 90)
+	if r <= 0 {
+		true -> { type: :ok }
+		_ -> if _default(filled, false) {
+			true -> {
+				// Fill sector using triangle fan from center
+				segs := int(_clamp(r * 0.8, 8, 64))
+				stepDeg := (ea - sa) / segs
+				fn fillFan(i, prevAngle) if i > segs {
+					true -> { type: :ok }
+					_ -> {
+						curAngle := prevAngle + stepDeg
+						r1 := _degToRad(prevAngle)
+						r2 := _degToRad(curAngle)
+						px1 := cx + r * cos(r1)
+						py1 := cy + r * sin(r1)
+						px2 := cx + r * cos(r2)
+						py2 := cy + r * sin(r2)
+						// Draw lines from center to arc and along the arc
+						deps.drawLine(window, int(cx), int(cy), int(px1), int(py1), color)
+						deps.drawLine(window, int(px1), int(py1), int(px2), int(py2), color)
+						fillFan(i + 1, curAngle)
+					}
+				}
+				r2 := _degToRad(ea)
+				fillFan(0, sa)
+				// Close: line from center to end angle
+				deps.drawLine(window, int(cx), int(cy), int(cx + r * cos(r2)), int(cy + r * sin(r2)), color)
+			}
+			_ -> {
+				// Outline: two radial lines + arc
+				r1 := _degToRad(sa)
+				r2 := _degToRad(ea)
+				deps.drawLine(window, int(cx), int(cy), int(cx + r * cos(r1)), int(cy + r * sin(r1)), color)
+				deps.drawLine(window, int(cx), int(cy), int(cx + r * cos(r2)), int(cy + r * sin(r2)), color)
+				drawArc2D(deps, window, cx, cy, r, sa, ea, color)
+			}
+		}
+	}
+}
+
+// drawRegularPolygon2D draws a regular n-gon inscribed in a circle of given radius.
+fn _regularPolyVerts(cx, cy, radius, sides, i, out) if i {
+	sides -> out
+	_ -> {
+		angle := _degToRad(i * 360 / sides - 90)
+		_regularPolyVerts(cx, cy, radius, sides, i + 1, out << Vec2(cx + radius * cos(angle), cy + radius * sin(angle)))
+	}
+}
+
+fn drawRegularPolygon2D(deps, window, cx, cy, radius, sides, color, filled) {
+	n := int(_clamp(_default(sides, 6), 3, 128))
+	r := _default(radius, 20)
+	verts := _regularPolyVerts(cx, cy, r, n, 0, [])
+	drawPolygon2D(deps, window, verts, color, _default(filled, false))
+}
+
+// drawSpiral2D draws an Archimedean spiral.
+fn _drawSpiralSub(deps, window, cx, cy, r, growth, angle, endAngle, step, prevX, prevY, color) if angle > endAngle {
+	true -> { type: :ok }
+	_ -> {
+		curR := r + growth * angle / (2 * PI)
+		rad := _degToRad(angle)
+		curX := cx + curR * cos(rad)
+		curY := cy + curR * sin(rad)
+		deps.drawLine(window, int(prevX), int(prevY), int(curX), int(curY), color)
+		_drawSpiralSub(deps, window, cx, cy, r, growth, angle + step, endAngle, step, curX, curY, color)
+	}
+}
+
+fn drawSpiral2D(deps, window, cx, cy, startRadius, growth, turns, color) {
+	r := _default(startRadius, 5)
+	g := _default(growth, 8)
+	t := _default(turns, 3)
+	endAngle := t * 360
+	step := 5
+	startX := cx + r
+	startY := cy
+	_drawSpiralSub(deps, window, cx, cy, r, g, step, endAngle, step, startX, startY, color)
+}
+
+// drawThickLine2D draws a line with a given thickness (as a filled rectangle along the line).
+fn drawThickLine2D(deps, window, x1, y1, x2, y2, thickness, color) {
+	t := _default(thickness, 3)
+	ht := t / 2
+	dx := x2 - x1
+	dy := y2 - y1
+	len := pow(dx * dx + dy * dy, 0.5)
+	if len > 0.001 {
+		true -> {
+			// Unit perpendicular
+			px := (0 - dy) / len * ht
+			py := dx / len * ht
+			// Four corners of the thick line rectangle
+			drawPolygon2D(deps, window, [
+				Vec2(x1 + px, y1 + py)
+				Vec2(x2 + px, y2 + py)
+				Vec2(x2 - px, y2 - py)
+				Vec2(x1 - px, y1 - py)
+			], color, true)
+		}
+		_ -> { type: :ok }
+	}
+}
+
+// drawDashedLine2D draws a dashed line from (x1,y1) to (x2,y2).
+fn _drawDashedLineSub(deps, window, x1, y1, ux, uy, totalLen, pos, dashLen, gapLen, color) if pos >= totalLen {
+	true -> { type: :ok }
+	_ -> {
+		endPos := pos + dashLen
+		if endPos > totalLen {
+			true -> endPos <- totalLen
+		}
+		deps.drawLine(
+			window
+			int(x1 + ux * pos)
+			int(y1 + uy * pos)
+			int(x1 + ux * endPos)
+			int(y1 + uy * endPos)
+			color
+		)
+		_drawDashedLineSub(deps, window, x1, y1, ux, uy, totalLen, endPos + gapLen, dashLen, gapLen, color)
+	}
+}
+
+fn drawDashedLine2D(deps, window, x1, y1, x2, y2, color, dashLen, gapLen) {
+	dx := x2 - x1
+	dy := y2 - y1
+	totalLen := pow(dx * dx + dy * dy, 0.5)
+	if totalLen > 0.001 {
+		true -> {
+			ux := dx / totalLen
+			uy := dy / totalLen
+			dl := _default(dashLen, 6)
+			gl := _default(gapLen, 4)
+			_drawDashedLineSub(deps, window, x1, y1, ux, uy, totalLen, 0, dl, gl, color)
+		}
+		_ -> { type: :ok }
 	}
 }
