@@ -1,10 +1,11 @@
 // gui-draw contains cross-platform drawing primitives for GUI facade.
 
-{ each: each } := import('std')
+{ each: each, range: range, map: map } := import('std')
 windows := import('windows')
 linux := import('linux')
 { _default: _default, _err: _err } := import('gui-common')
 guiFonts := import('gui-fonts')
+{ writeU32: writeU32 } := import('writes')
 
 fn _asBool(value) if value {
 	true -> true
@@ -407,6 +408,30 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 }
 
 // Pen cache: reuse GDI pen handles by color to avoid CreatePen/DeleteObject per draw.
+_maxCacheSize := 128
+
+fn _evictPenCache(window) {
+	{ each: each } := import('std')
+	keys(window._penCache) |> each(fn(k) {
+		h := window._penCache.(k)
+		if type(h) = :int & h > 0 -> windows.deleteObject(h)
+	})
+	window._penCache <- {}
+	window._penCacheCount <- 0
+	window._curPen <- ?
+}
+
+fn _evictBrushCache(window) {
+	{ each: each } := import('std')
+	keys(window._brushCache) |> each(fn(k) {
+		h := window._brushCache.(k)
+		if type(h) = :int & h > 0 -> windows.deleteObject(h)
+	})
+	window._brushCache <- {}
+	window._brushCacheCount <- 0
+	window._curBrush <- ?
+}
+
 fn _getCachedPen(window, hdcValue, useColor) {
 	if window._penCache = ? {
 		true -> window._penCache <- {}
@@ -414,6 +439,7 @@ fn _getCachedPen(window, hdcValue, useColor) {
 	cached := window._penCache.(useColor)
 	if cached {
 		? -> {
+			if _default(window._penCacheCount, 0) >= _maxCacheSize -> _evictPenCache(window)
 			pen := windows.gdi32('CreatePen', 0, 1, useColor)
 			if windows.callOk?(pen) & pen.r1 > 0 {
 				true -> {
@@ -439,6 +465,7 @@ fn _getCachedBrush(window, useColor) {
 	cached := window._brushCache.(useColor)
 	if cached {
 		? -> {
+			if _default(window._brushCacheCount, 0) >= _maxCacheSize -> _evictBrushCache(window)
 			brush := windows.createSolidBrush(useColor)
 			if windows.callOk?(brush) & brush.r1 > 0 {
 				true -> {
@@ -638,4 +665,175 @@ fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
 		}
 	}
 	_ -> window
+}
+
+// _selectBrushAndPen sets up brush (fill color) and pen (border or null) for
+// a filled GDI shape call.  Returns true if setup succeeded, false otherwise.
+fn _setupFillGDI(window, hdcValue, fillColor, borderColor) {
+	brushHandle := _getCachedBrush(window, fillColor)
+	if brushHandle > 0 {
+		true -> {
+			if window._curBrush != brushHandle -> {
+				windows.selectObject(hdcValue, brushHandle)
+				window._curBrush <- brushHandle
+			}
+			if borderColor {
+				? -> {
+					npHandle := _getNullPen()
+					if npHandle > 0 & window._curNullPen != true -> {
+						windows.selectObject(hdcValue, npHandle)
+						window._curNullPen <- true
+					}
+				}
+				_ -> {
+					penHandle := _getCachedPen(window, hdcValue, borderColor)
+					if penHandle > 0 & window._curPen != penHandle -> {
+						windows.selectObject(hdcValue, penHandle)
+						window._curPen <- penHandle
+						window._curNullPen <- false
+					}
+				}
+			}
+			true
+		}
+		_ -> false
+	}
+}
+
+// fillEllipse draws a filled ellipse using native GDI Ellipse on Windows.
+// Returns { type: :ok } on success, ? if the backend doesn't support native
+// ellipse (caller should fall back to scanline).
+fn fillEllipse(window, cx, cy, rx, ry, fillColor, borderColor) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdcValue := if window.frameHdc > 0 { true -> window.frameHdc, _ -> 0 }
+			if hdcValue > 0 {
+				true -> if _setupFillGDI(window, hdcValue, fillColor, borderColor) {
+					true -> {
+						windows.ellipse(hdcValue, int(cx - rx) - 1, int(cy - ry) - 1, int(cx + rx) + 1, int(cy + ry) + 1)
+						{ type: :ok }
+					}
+					_ -> _err('brush setup failed', ?)
+				}
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+	_ -> ?
+}
+
+// fillRoundedRect draws a filled rounded rectangle using native GDI RoundRect.
+// Returns { type: :ok } on success, ? if fallback needed.
+fn fillRoundedRect(window, x, y, width, height, radius, fillColor, borderColor) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			hdcValue := if window.frameHdc > 0 { true -> window.frameHdc, _ -> 0 }
+			if hdcValue > 0 {
+				true -> if _setupFillGDI(window, hdcValue, fillColor, borderColor) {
+					true -> {
+						cornerDiam := int(radius * 2)
+						windows.gdi32('RoundRect', hdcValue, int(x), int(y), int(x + width), int(y + height), cornerDiam, cornerDiam)
+						{ type: :ok }
+					}
+					_ -> _err('brush setup failed', ?)
+				}
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+	_ -> ?
+}
+
+// _writeI32 writes a signed 32-bit integer to memory in little-endian format.
+fn _writeI32(address, value) {
+	v := if value < 0 { true -> value + 4294967296, _ -> value }
+	writeU32(address, v)
+}
+
+// fillPolygon draws a filled polygon using native GDI Polygon.
+// pts is an array of {x, y} objects. Returns { type: :ok } on success, ? if fallback needed.
+// _ensurePointBuf returns a reusable POINT buffer on the window, growing if needed.
+fn _ensurePointBuf(window, n) {
+	needed := n * 8
+	if window._pointBuf = ? | window._pointBufSize < needed {
+		true -> {
+			// Allocate with 50% overhead to reduce re-allocations
+			alloc := int(needed * 1.5)
+			window._pointBuf <- bits(range(alloc) |> map(fn 0))
+			window._pointBufSize <- alloc
+		}
+	}
+	addr(window._pointBuf)
+}
+
+fn fillPolygon(window, pts, fillColor, borderColor) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			n := len(pts)
+			hdcValue := if window.frameHdc > 0 { true -> window.frameHdc, _ -> 0 }
+			if hdcValue > 0 & n >= 3 {
+				true -> if _setupFillGDI(window, hdcValue, fillColor, borderColor) {
+					true -> {
+						base := _ensurePointBuf(window, n)
+						fn packPt(i) if i < n {
+							true -> {
+								_writeI32(base + i * 8, int(pts.(i).x))
+								_writeI32(base + i * 8 + 4, int(pts.(i).y))
+								packPt(i + 1)
+							}
+						}
+						packPt(0)
+						windows.gdi32('Polygon', hdcValue, base, n)
+						{ type: :ok }
+					}
+					_ -> _err('brush setup failed', ?)
+				}
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+	_ -> ?
+}
+
+// drawPolylineNative draws a connected line sequence using native GDI Polyline.
+// pts is an array of {x, y} objects. Returns { type: :ok } on success, ? if fallback needed.
+fn drawPolylineNative(window, pts, color) if window.type {
+	:ok -> if window.backend {
+		:windows -> {
+			n := len(pts)
+			hdcValue := if window.frameHdc > 0 { true -> window.frameHdc, _ -> 0 }
+			if hdcValue > 0 & n >= 2 {
+				true -> {
+					penHandle := _getCachedPen(window, hdcValue, color)
+					if penHandle > 0 {
+						true -> {
+							if window._curPen != penHandle -> {
+								windows.selectObject(hdcValue, penHandle)
+								window._curPen <- penHandle
+								window._curNullPen <- false
+							}
+							base := _ensurePointBuf(window, n)
+							fn packPt(i) if i < n {
+								true -> {
+									_writeI32(base + i * 8, int(pts.(i).x))
+									_writeI32(base + i * 8 + 4, int(pts.(i).y))
+									packPt(i + 1)
+								}
+							}
+							packPt(0)
+							windows.gdi32('Polyline', hdcValue, base, n)
+							{ type: :ok }
+						}
+						_ -> ?
+					}
+				}
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+	_ -> ?
 }

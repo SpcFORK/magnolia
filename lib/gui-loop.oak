@@ -27,7 +27,10 @@ fn frameMaxDtNt(window) if window._frameMaxDtNtC {
 fn markUrgentFrameIfResizeDispatch(window, step) {
 	if window.backend = :windows & step.type = :dispatch {
 		true -> if guiEvents.isResizeDispatch?(window, step) {
-			true -> window._forceNextFrame <- true
+			true -> {
+				window._forceNextFrame <- true
+				window._clientSizeStale <- true
+			}
 		}
 	}
 }
@@ -67,14 +70,14 @@ fn maybeRunFrame(window, onFrame, force, publish) {
 						timeNs: now
 					})
 					interval := frameIntervalNt(window)
-					now2 := nanotime()
+					// Reuse nanotime from frame start to avoid redundant syscall
 					scheduledBase := if forceNow {
-						true -> now2
+						true -> now
 						_ -> next
 					}
 					scheduled := scheduledBase + interval
-					if scheduled < now2 - interval {
-						true -> window._nextFrameNt <- now2 + interval
+					if scheduled < now - interval {
+						true -> window._nextFrameNt <- now + interval
 						_ -> window._nextFrameNt <- scheduled
 					}
 				}

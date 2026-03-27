@@ -54,7 +54,7 @@ fn _readBlock(socket, tag) {
 				entries << entry
 				if startsWith?(line, tag + ' ') {
 					true -> {
-						status := upper(line |> split(' ').1)
+						status := upper(split(line, ' ').1)
 						{
 							tag: tag
 							status: status
@@ -189,14 +189,19 @@ fn _serve(socket, handlers, options) {
 						}
 						loop()
 					}
-					'STARTTLS' & default(default(options, {}).startTLS?, false) & !state.tls? -> {
-						sock.sendLine(socket, _tagLine(tag, 'OK', 'Begin TLS negotiation'))
-						sock.startTLS(socket, {
-							server: true
-							certFile: default(default(options, {}).certFile, '')
-							keyFile: default(default(options, {}).keyFile, '')
-						})
-						state.tls? <- true
+					'STARTTLS' -> {
+						if default(default(options, {}).startTLS?, false) & !state.tls? {
+							true -> {
+								sock.sendLine(socket, _tagLine(tag, 'OK', 'Begin TLS negotiation'))
+								sock.startTLS(socket, {
+									server: true
+									certFile: default(default(options, {}).certFile, '')
+									keyFile: default(default(options, {}).keyFile, '')
+								})
+								state.tls? <- true
+							}
+							_ -> sock.sendLine(socket, _tagLine(tag, 'BAD', 'STARTTLS not available'))
+						}
 						loop()
 					}
 					'LIST' -> {

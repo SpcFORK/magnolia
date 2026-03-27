@@ -827,28 +827,32 @@ fn beginFrame(window) {
 
 fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 	true -> {
-		presentedViaOpenGL := guiNativeWinPresent.presentFrameViaOpenGL(window)
-		presentedViaDdraw := guiNativeWinDdraw.presentFrameViaDdraw(window)
-
-		// Vulkan swapchain present
-		presentedViaVulkan := false
-		if window.presenterBackend = :vulkan & _default(window._vkSwapchainReady, false) {
-			true -> {
-				vkResult := guiNativeWinVulkan.presentFrameVulkan(window)
-				presentedViaVulkan <- _default(vkResult.presented, false)
+		// Direct dispatch to active presenter backend (avoids calling all 3 every frame)
+		if window.presenterBackend {
+			:opengl -> {
+				result := guiNativeWinPresent.presentFrameViaOpenGL(window)
+				if !result.presented -> guiNativeWinPresent.presentFrameViaGdi(window)
 			}
-		}
-
-		if !presentedViaOpenGL.presented & !presentedViaDdraw.presented & !presentedViaVulkan {
-			true -> if window.presenterBackend = :vulkan & type(window.openglContext) = :int & window.openglContext > 0 {
+			:ddraw -> {
+				result := guiNativeWinDdraw.presentFrameViaDdraw(window)
+				if !result.presented -> guiNativeWinPresent.presentFrameViaGdi(window)
+			}
+			:vulkan -> if _default(window._vkSwapchainReady, false) {
 				true -> {
-					glFallback := guiNativeWinOpenGL.presentFrameOpenGL(window)
-					if !glFallback.presented {
-						true -> guiNativeWinPresent.presentFrameViaGdi(window)
+					vkResult := guiNativeWinVulkan.presentFrameVulkan(window)
+					if !_default(vkResult.presented, false) {
+						true -> if type(window.openglContext) = :int & window.openglContext > 0 {
+							true -> {
+								glFallback := guiNativeWinOpenGL.presentFrameOpenGL(window)
+								if !glFallback.presented -> guiNativeWinPresent.presentFrameViaGdi(window)
+							}
+							_ -> guiNativeWinPresent.presentFrameViaGdi(window)
+						}
 					}
 				}
 				_ -> guiNativeWinPresent.presentFrameViaGdi(window)
 			}
+			_ -> guiNativeWinPresent.presentFrameViaGdi(window)
 		}
 		windows.gdi32('GdiFlush')
 		windows.releaseDC(window.hwnd, window.frameTargetHdc)

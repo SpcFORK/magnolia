@@ -107,11 +107,24 @@ FORM_VK_ESCAPE := 27
 
 // ─── Win32 message buffer readers ───────────────────────────────────────────
 
-fn formMsgType(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
-fn formMsgWParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
-fn formMsgLParam(window) windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+fn formMsgType(window) _default(window._cachedMsgType, windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE))
+fn formMsgWParam(window) _default(window._cachedMsgWP, windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM))
+fn formMsgLParam(window) _default(window._cachedMsgLP, windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM))
 fn formLoWord(v) v & 65535
 fn formHiWord(v)(v >> 16) & 65535
+
+// Cache msgBuf fields once per dispatch to avoid redundant readU32 calls
+fn _cacheDispatchContext(window) {
+	window._cachedMsgType <- windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+	window._cachedMsgWP <- windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
+	window._cachedMsgLP <- windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+}
+
+fn _clearDispatchContext(window) {
+	window._cachedMsgType <- ?
+	window._cachedMsgWP <- ?
+	window._cachedMsgLP <- ?
+}
 
 fn formEventContext(window) {
 	lp := formMsgLParam(window)

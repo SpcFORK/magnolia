@@ -304,13 +304,18 @@ fn getTextExtent(hdc, text) if isWindows?() {
 _fontCacheMap := {}
 
 fn _fontCacheKey(spec) {
-	family  := if spec.family  { ? -> 'Segoe UI', _ -> spec.family }
-	size    := int(if spec.size    { ? -> 16, _ -> spec.size })
-	weight  := int(if spec.weight  { ? -> FW_NORMAL, _ -> spec.weight })
-	italic  := if spec.italic    { true -> '1', _ -> '0' }
-	under   := if spec.underline { true -> '1', _ -> '0' }
-	strike  := if spec.strikeOut { true -> '1', _ -> '0' }
-	family + '|' + string(size) + '|' + string(weight) + '|' + italic + '|' + under + '|' + strike
+	// Cache the computed key on the spec object to avoid per-call string allocation
+	if spec._cachedFontKey != ? { true -> spec._cachedFontKey, _ -> {
+		family  := if spec.family  { ? -> 'Segoe UI', _ -> spec.family }
+		size    := int(if spec.size    { ? -> 16, _ -> spec.size })
+		weight  := int(if spec.weight  { ? -> FW_NORMAL, _ -> spec.weight })
+		italic  := if spec.italic    { true -> '1', _ -> '0' }
+		under   := if spec.underline { true -> '1', _ -> '0' }
+		strike  := if spec.strikeOut { true -> '1', _ -> '0' }
+		key := family + '|' + string(size) + '|' + string(weight) + '|' + italic + '|' + under + '|' + strike
+		spec._cachedFontKey <- key
+		key
+	}}
 }
 
 // cachedFont returns a cached GDI font handle for the given spec, creating

@@ -216,12 +216,21 @@ fn drawCircle2D(deps, window, cx, cy, radius, color, filled, borderColor) {
 		true -> { type: :ok }
 		_ -> if _default(filled, false) {
 			true -> {
-				_drawCircleFilledSub(deps, window, cx, cy, r, 0, color)
-				if borderColor != ? {
-					true -> {
-						segs := int(_clamp(r * 1.1, 12, 96))
-						step := _degToRad(360 / segs)
-						_drawCircleOutlineSub(deps, window, cx, cy, r, 0, cos(step), sin(step), segs, 0, borderColor)
+				// Try native GDI Ellipse first (1 syscall vs ~r scanline drawLine calls)
+				nativeResult := if deps.fillEllipse != ? {
+					true -> deps.fillEllipse(window, cx, cy, r, r, color, borderColor)
+					_ -> ?
+				}
+				if nativeResult {
+					? -> {
+						_drawCircleFilledSub(deps, window, cx, cy, r, 0, color)
+						if borderColor != ? {
+							true -> {
+								segs := int(_clamp(r * 1.1, 12, 96))
+								step := _degToRad(360 / segs)
+								_drawCircleOutlineSub(deps, window, cx, cy, r, 0, cos(step), sin(step), segs, 0, borderColor)
+							}
+						}
 					}
 				}
 			}
@@ -241,6 +250,13 @@ fn drawPolygon2D(deps, window, points, color, filled, borderColor) {
 		true -> { type: :ok }
 		_ -> if _default(filled, false) {
 			true -> {
+				// Try native GDI Polygon first (1 syscall vs ~height scanline drawLine calls)
+				nativeResult := if deps.fillPolygon != ? {
+					true -> deps.fillPolygon(window, pts, color, borderColor)
+					_ -> ?
+				}
+				if nativeResult {
+					? -> {
 				// scanline fill algorithm
 				minY := fn findMin(i, acc) if i {
 					len(pts) -> int(acc)
@@ -311,6 +327,8 @@ fn drawPolygon2D(deps, window, points, color, filled, borderColor) {
 				scanRow(yMin)
 				if borderColor != ? {
 					true -> drawPolyline2D(deps, window, pts, borderColor, true)
+				}
+					}
 				}
 			}
 			_ -> {
@@ -412,12 +430,21 @@ fn drawEllipse2D(deps, window, cx, cy, rx, ry, color, filled, borderColor) {
 		true -> { type: :ok }
 		_ -> if _default(filled, false) {
 			true -> {
-				_drawEllipseFilledSub(deps, window, cx, cy, radiusX, radiusY, 0, color)
-				if borderColor != ? {
-					true -> {
-						segs := int(_clamp((radiusX + radiusY) * 0.55, 12, 96))
-						step := _degToRad(360 / segs)
-						_drawEllipseOutlineSub(deps, window, cx, cy, 1, 0, cos(step), sin(step), segs, 0, radiusX, radiusY, borderColor)
+				// Try native GDI Ellipse first
+				nativeResult := if deps.fillEllipse != ? {
+					true -> deps.fillEllipse(window, cx, cy, radiusX, radiusY, color, borderColor)
+					_ -> ?
+				}
+				if nativeResult {
+					? -> {
+						_drawEllipseFilledSub(deps, window, cx, cy, radiusX, radiusY, 0, color)
+						if borderColor != ? {
+							true -> {
+								segs := int(_clamp((radiusX + radiusY) * 0.55, 12, 96))
+								step := _degToRad(360 / segs)
+								_drawEllipseOutlineSub(deps, window, cx, cy, 1, 0, cos(step), sin(step), segs, 0, radiusX, radiusY, borderColor)
+							}
+						}
 					}
 				}
 			}
@@ -516,17 +543,26 @@ fn drawRoundedRect2D(deps, window, x, y, width, height, radius, color, filled, b
 	r := _clamp(_default(radius, 4), 0, if width < height { true -> width, _ -> height } / 2)
 	if _default(filled, false) {
 		true -> {
-			_drawRoundedRectFilledRows(deps, window, x, y, width, height, r, 0, color)
-			if borderColor != ? {
-				true -> {
-					deps.drawLine(window, int(x + r), int(y), int(x + width - r), int(y), borderColor)
-					deps.drawLine(window, int(x + r), int(y + height), int(x + width - r), int(y + height), borderColor)
-					deps.drawLine(window, int(x), int(y + r), int(x), int(y + height - r), borderColor)
-					deps.drawLine(window, int(x + width), int(y + r), int(x + width), int(y + height - r), borderColor)
-					_drawRoundedRectCorner(deps, window, x + r, y + r, r, 180, 270, borderColor)
-					_drawRoundedRectCorner(deps, window, x + width - r, y + r, r, 270, 360, borderColor)
-					_drawRoundedRectCorner(deps, window, x + width - r, y + height - r, r, 0, 90, borderColor)
-					_drawRoundedRectCorner(deps, window, x + r, y + height - r, r, 90, 180, borderColor)
+			// Try native GDI RoundRect first (1 syscall vs ~height scanline drawLine calls)
+			nativeResult := if deps.fillRoundedRect != ? {
+				true -> deps.fillRoundedRect(window, x, y, width, height, r, color, borderColor)
+				_ -> ?
+			}
+			if nativeResult {
+				? -> {
+					_drawRoundedRectFilledRows(deps, window, x, y, width, height, r, 0, color)
+					if borderColor != ? {
+						true -> {
+							deps.drawLine(window, int(x + r), int(y), int(x + width - r), int(y), borderColor)
+							deps.drawLine(window, int(x + r), int(y + height), int(x + width - r), int(y + height), borderColor)
+							deps.drawLine(window, int(x), int(y + r), int(x), int(y + height - r), borderColor)
+							deps.drawLine(window, int(x + width), int(y + r), int(x + width), int(y + height - r), borderColor)
+							_drawRoundedRectCorner(deps, window, x + r, y + r, r, 180, 270, borderColor)
+							_drawRoundedRectCorner(deps, window, x + width - r, y + r, r, 270, 360, borderColor)
+							_drawRoundedRectCorner(deps, window, x + width - r, y + height - r, r, 0, 90, borderColor)
+							_drawRoundedRectCorner(deps, window, x + r, y + height - r, r, 90, 180, borderColor)
+						}
+					}
 				}
 			}
 		}

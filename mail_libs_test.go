@@ -201,16 +201,19 @@ func TestPOPLibSTLSRetrieve(t *testing.T) {
 			insecureSkipVerify: true
 			serverName: 'localhost'
 		})
-		if stls.type = :error -> {
-			closeServer()
-			stls.error
-		} else {
-			client.login('demo', 'secret')
-			msg := client.retr(1)
-			client.quit()
-			wait(0.05)
-			closeServer()
-			join(msg.lines, '\n')
+		if stls.type {
+			:error -> {
+				closeServer()
+				stls.error
+			}
+			_ -> {
+				client.login('demo', 'secret')
+				msg := client.retr(1)
+				client.quit()
+				wait(0.05)
+				closeServer()
+				join(msg.lines, '\n')
+			}
 		}
 	`, address, certPath, keyPath, address)
 
@@ -282,17 +285,20 @@ func TestIMAPLibStartTLSFetchBody(t *testing.T) {
 			insecureSkipVerify: true
 			serverName: 'localhost'
 		})
-		if tlsResult.type = :error -> {
-			closeServer()
-			tlsResult.error
-		} else {
-			client.login('demo', 'secret')
-			client.select('INBOX')
-			fetched := client.fetch(1, 'BODY[]')
-			client.logout()
-			wait(0.05)
-			closeServer()
-			fetched.entries.0.literal
+		if tlsResult.type {
+			:error -> {
+				closeServer()
+				tlsResult.error
+			}
+			_ -> {
+				client.login('demo', 'secret')
+				client.select('INBOX')
+				fetched := client.fetch(1, 'BODY[]')
+				client.logout()
+				wait(0.05)
+				closeServer()
+				fetched.entries.0.literal
+			}
 		}
 	`, address, certPath, keyPath, address)
 

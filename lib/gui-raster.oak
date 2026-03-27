@@ -287,22 +287,44 @@ fn _vecNormalize(deps, v) {
 	}
 }
 
+_projParamsCache := ?
+_projCacheW := ?
+_projCacheH := ?
+_projCacheFov := ?
+_projCacheZ := ?
+_projCacheMode := ?
+_projCacheOrtho := ?
+
 fn _projectionParams(window, camera) {
 	cam := _default(camera, {})
 	mode := _default(cam.mode, 'perspective')
-	halfW := window.width / 2
-	halfH := window.height / 2
 	camZ := _default(cam.z, 5)
 	orthoScale := _default(cam.orthoScale, 4)
 	fov := _default(cam.fov, 90)
-	focal := halfW / tan((fov / 2) * 3.141592653589793 / 180)
-	{
-		mode: mode
-		halfW: halfW
-		halfH: halfH
-		camZ: camZ
-		orthoScale: orthoScale
-		focal: focal
+	// Return cached params if inputs unchanged (avoids tan() every frame)
+	if _projParamsCache != ? & window.width = _projCacheW & window.height = _projCacheH & fov = _projCacheFov & camZ = _projCacheZ & mode = _projCacheMode & orthoScale = _projCacheOrtho {
+		true -> _projParamsCache
+		_ -> {
+			halfW := window.width / 2
+			halfH := window.height / 2
+			focal := halfW / tan((fov / 2) * 3.141592653589793 / 180)
+			params := {
+				mode: mode
+				halfW: halfW
+				halfH: halfH
+				camZ: camZ
+				orthoScale: orthoScale
+				focal: focal
+			}
+			_projParamsCache <- params
+			_projCacheW <- window.width
+			_projCacheH <- window.height
+			_projCacheFov <- fov
+			_projCacheZ <- camZ
+			_projCacheMode <- mode
+			_projCacheOrtho <- orthoScale
+			params
+		}
 	}
 }
 
