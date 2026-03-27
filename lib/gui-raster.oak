@@ -463,22 +463,36 @@ fn _sphereInFrustum?(bounds, params, farPlane) {
 
 fn computeLightParams(deps, light) {
 	lightCfg := _default(light, {})
-	ld := _vecNormalize(deps, deps.Vec3(_default(lightCfg.x, 0.35), _default(lightCfg.y, 0.75), _default(lightCfg.z, -1)))
-	amb := _clamp(_default(lightCfg.ambient, 0.22), 0, 1)
-	diff := _clamp(_default(lightCfg.diffuse, 0.78), 0, 1)
-	{
-		ld: ld
-		amb: amb
-		diff: diff
+	// Cache the computed params on the light config to avoid recomputing
+	// Vec3 + normalize every mesh draw call.
+	if lightCfg._cachedLp != ? {
+		true -> lightCfg._cachedLp
+		_ -> {
+			ld := _vecNormalize(deps, deps.Vec3(_default(lightCfg.x, 0.35), _default(lightCfg.y, 0.75), _default(lightCfg.z, -1)))
+			amb := _clamp(_default(lightCfg.ambient, 0.22), 0, 1)
+			diff := _clamp(_default(lightCfg.diffuse, 0.78), 0, 1)
+			lp := {
+				ld: ld
+				amb: amb
+				diff: diff
+			}
+			lightCfg._cachedLp <- lp
+			lp
+		}
 	}
 }
 
+// Inline edge vectors as scalars to avoid 2 per-face object allocations.
 fn faceShadeGeneric(deps, lp, pa3, pb3, pc3) {
-	eb := { x: pb3.x - pa3.x, y: pb3.y - pa3.y, z: pb3.z - pa3.z }
-	ec := { x: pc3.x - pa3.x, y: pc3.y - pa3.y, z: pc3.z - pa3.z }
-	cx := eb.y * ec.z - eb.z * ec.y
-	cy := eb.z * ec.x - eb.x * ec.z
-	cz := eb.x * ec.y - eb.y * ec.x
+	ebx := pb3.x - pa3.x
+	eby := pb3.y - pa3.y
+	ebz := pb3.z - pa3.z
+	ecx := pc3.x - pa3.x
+	ecy := pc3.y - pa3.y
+	ecz := pc3.z - pa3.z
+	cx := eby * ecz - ebz * ecy
+	cy := ebz * ecx - ebx * ecz
+	cz := ebx * ecy - eby * ecx
 	len := pow(cx * cx + cy * cy + cz * cz, 0.5)
 	if len <= 0.000001 {
 		true -> lp.amb
@@ -599,8 +613,13 @@ fn _drawTriangles(deps, window, tris, i, drawn) if i {
 	len(tris) -> drawn
 	_ -> {
 		t := tris.(i)
-		drawTriangleFilled(deps, window, t.a, t.b, t.c, t.color)
-		_drawTriangles(deps, window, tris, i + 1, drawn + 1)
+		if t {
+			? -> _drawTriangles(deps, window, tris, i + 1, drawn)
+			_ -> {
+				drawTriangleFilled(deps, window, t.a, t.b, t.c, t.color)
+				_drawTriangles(deps, window, tris, i + 1, drawn + 1)
+			}
+		}
 	}
 }
 

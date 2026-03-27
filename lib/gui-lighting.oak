@@ -165,114 +165,160 @@ fn faceCenter(pa, pb, pc) {
 	}
 }
 
-// ---------- Per-light shading (Blinn-Phong) ----------
+// ---------- Per-light shading (Blinn-Phong) — accumulator style ----------
+// Each _shade* mutates acc {r,g,b} in place, eliminating per-light object
+// allocations.  Constant light directions are cached on the light object.
+// Half-direction normalization is inlined to avoid _norm3 array allocs.
 
-fn _shadeDirectional(light, mat, n, vd) {
-	ld := _norm3(0 - light.x, 0 - light.y, 0 - light.z)
-	ndotl := _dot(n.0, n.1, n.2, ld.0, ld.1, ld.2)
+fn _shadeDirectional(light, mat, n0, n1, n2, vdx, vdy, vdz, acc) {
+	// Cache normalized light direction on the light object.
+	if light._ldx = ? -> {
+		lx := 0 - light.x
+		ly := 0 - light.y
+		lz := 0 - light.z
+		ll := _len3(lx, ly, lz)
+		if ll > 0.000001 {
+			true -> {
+				light._ldx <- lx / ll
+				light._ldy <- ly / ll
+				light._ldz <- lz / ll
+			}
+			_ -> {
+				light._ldx <- 0
+				light._ldy <- 0
+				light._ldz <- 1
+			}
+		}
+	}
+	ldx := light._ldx
+	ldy := light._ldy
+	ldz := light._ldz
+	ndotl := n0 * ldx + n1 * ldy + n2 * ldz
 	diff := _clamp(ndotl, 0, 1) * mat.diffuse
-	hd := _norm3(ld.0 + vd.0, ld.1 + vd.1, ld.2 + vd.2)
-	ndoth := _dot(n.0, n.1, n.2, hd.0, hd.1, hd.2)
+	hdx := ldx + vdx
+	hdy := ldy + vdy
+	hdz := ldz + vdz
+	hdl := _len3(hdx, hdy, hdz)
+	ndoth := if hdl > 0.000001 {
+		true -> (n0 * hdx + n1 * hdy + n2 * hdz) / hdl
+		_ -> 0
+	}
 	spec := if ndotl > 0 {
 		true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular
 		_ -> 0
 	}
 	total := (diff + spec) * light.intensity
-	{
-		r: total * light.colorR / 255
-		g: total * light.colorG / 255
-		b: total * light.colorB / 255
+	acc.r <- acc.r + total * light.colorR / 255
+	acc.g <- acc.g + total * light.colorG / 255
+	acc.b <- acc.b + total * light.colorB / 255
+}
+
+fn _shadePoint(light, mat, n0, n1, n2, cx, cy, cz, vdx, vdy, vdz, acc) {
+	dx := light.px - cx
+	dy := light.py - cy
+	dz := light.pz - cz
+	dist := _len3(dx, dy, dz)
+	if dist > 0.000001 -> {
+		ldx := dx / dist
+		ldy := dy / dist
+		ldz := dz / dist
+		atten := _clamp(1 - (dist * dist) / (light.radius * light.radius), 0, 1)
+		ndotl := n0 * ldx + n1 * ldy + n2 * ldz
+		diff := _clamp(ndotl, 0, 1) * mat.diffuse * atten
+		hdx := ldx + vdx
+		hdy := ldy + vdy
+		hdz := ldz + vdz
+		hdl := _len3(hdx, hdy, hdz)
+		ndoth := if hdl > 0.000001 {
+			true -> (n0 * hdx + n1 * hdy + n2 * hdz) / hdl
+			_ -> 0
+		}
+		spec := if ndotl > 0 {
+			true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular * atten
+			_ -> 0
+		}
+		total := (diff + spec) * light.intensity
+		acc.r <- acc.r + total * light.colorR / 255
+		acc.g <- acc.g + total * light.colorG / 255
+		acc.b <- acc.b + total * light.colorB / 255
 	}
 }
 
-fn _shadePoint(light, mat, n, center, vd) {
-	dx := light.px - center.x
-	dy := light.py - center.y
-	dz := light.pz - center.z
+fn _shadeSpot(light, mat, n0, n1, n2, cx, cy, cz, vdx, vdy, vdz, acc) {
+	dx := light.px - cx
+	dy := light.py - cy
+	dz := light.pz - cz
 	dist := _len3(dx, dy, dz)
-	if dist <= 0.000001 {
-		true -> { r: 0, g: 0, b: 0 }
-		_ -> {
-			ld := _norm3(dx, dy, dz)
-			atten := _clamp(1 - (dist * dist) / (light.radius * light.radius), 0, 1)
-			ndotl := _dot(n.0, n.1, n.2, ld.0, ld.1, ld.2)
+	if dist > 0.000001 -> {
+		ldx := dx / dist
+		ldy := dy / dist
+		ldz := dz / dist
+		// Cache normalized spot direction and cos thresholds on light.
+		if light._sdx = ? -> {
+			sx := light.x
+			sy := light.y
+			sz := light.z
+			sl := _len3(sx, sy, sz)
+			if sl > 0.000001 {
+				true -> {
+					light._sdx <- sx / sl
+					light._sdy <- sy / sl
+					light._sdz <- sz / sl
+				}
+				_ -> {
+					light._sdx <- 0
+					light._sdy <- 0
+					light._sdz <- 1
+				}
+			}
+			light._cosOuter <- cos(light.angle * PI / 180)
+			light._cosInner <- cos((light.angle - light.penumbra) * PI / 180)
+		}
+		cosAngle := (0 - ldx) * light._sdx + (0 - ldy) * light._sdy + (0 - ldz) * light._sdz
+		spotFactor := _clamp((cosAngle - light._cosOuter) / (light._cosInner - light._cosOuter + 0.00001), 0, 1)
+		if spotFactor > 0 -> {
+			atten := _clamp(1 - (dist * dist) / (light.radius * light.radius), 0, 1) * spotFactor
+			ndotl := n0 * ldx + n1 * ldy + n2 * ldz
 			diff := _clamp(ndotl, 0, 1) * mat.diffuse * atten
-			hd := _norm3(ld.0 + vd.0, ld.1 + vd.1, ld.2 + vd.2)
-			ndoth := _dot(n.0, n.1, n.2, hd.0, hd.1, hd.2)
+			hdx := ldx + vdx
+			hdy := ldy + vdy
+			hdz := ldz + vdz
+			hdl := _len3(hdx, hdy, hdz)
+			ndoth := if hdl > 0.000001 {
+				true -> (n0 * hdx + n1 * hdy + n2 * hdz) / hdl
+				_ -> 0
+			}
 			spec := if ndotl > 0 {
 				true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular * atten
 				_ -> 0
 			}
 			total := (diff + spec) * light.intensity
-			{
-				r: total * light.colorR / 255
-				g: total * light.colorG / 255
-				b: total * light.colorB / 255
-			}
+			acc.r <- acc.r + total * light.colorR / 255
+			acc.g <- acc.g + total * light.colorG / 255
+			acc.b <- acc.b + total * light.colorB / 255
 		}
 	}
 }
 
-fn _shadeSpot(light, mat, n, center, vd) {
-	dx := light.px - center.x
-	dy := light.py - center.y
-	dz := light.pz - center.z
-	dist := _len3(dx, dy, dz)
-	if dist <= 0.000001 {
-		true -> { r: 0, g: 0, b: 0 }
-		_ -> {
-			ld := _norm3(dx, dy, dz)
-			sd := _norm3(light.x, light.y, light.z)
-			cosAngle := _dot(0 - ld.0, 0 - ld.1, 0 - ld.2, sd.0, sd.1, sd.2)
-			cosOuter := cos(light.angle * PI / 180)
-			cosInner := cos((light.angle - light.penumbra) * PI / 180)
-			spotFactor := _clamp((cosAngle - cosOuter) / (cosInner - cosOuter + 0.00001), 0, 1)
-			if spotFactor <= 0 {
-				true -> { r: 0, g: 0, b: 0 }
-				_ -> {
-					atten := _clamp(1 - (dist * dist) / (light.radius * light.radius), 0, 1) * spotFactor
-					ndotl := _dot(n.0, n.1, n.2, ld.0, ld.1, ld.2)
-					diff := _clamp(ndotl, 0, 1) * mat.diffuse * atten
-					hd := _norm3(ld.0 + vd.0, ld.1 + vd.1, ld.2 + vd.2)
-					ndoth := _dot(n.0, n.1, n.2, hd.0, hd.1, hd.2)
-					spec := if ndotl > 0 {
-						true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular * atten
-						_ -> 0
-					}
-					total := (diff + spec) * light.intensity
-					{
-						r: total * light.colorR / 255
-						g: total * light.colorG / 255
-						b: total * light.colorB / 255
-					}
-				}
-			}
-		}
-	}
-}
-
-fn _shadeAmbient(light, mat) {
-	{
-		r: mat.ambient * light.intensity * light.colorR / 255
-		g: mat.ambient * light.intensity * light.colorG / 255
-		b: mat.ambient * light.intensity * light.colorB / 255
-	}
+fn _shadeAmbient(light, mat, acc) {
+	acc.r <- acc.r + mat.ambient * light.intensity * light.colorR / 255
+	acc.g <- acc.g + mat.ambient * light.intensity * light.colorG / 255
+	acc.b <- acc.b + mat.ambient * light.intensity * light.colorB / 255
 }
 
 // ---------- Accumulate contributions ----------
 
-fn _accumulate(lights, mat, n, center, vd, i, ar, ag, ab) if i {
-	len(lights) -> { r: ar, g: ag, b: ab }
+fn _accumulate(lights, mat, n0, n1, n2, cx, cy, cz, vdx, vdy, vdz, i, acc) if i {
+	len(lights) -> acc
 	_ -> {
 		light := lights.(i)
-		c := if light.type {
-			:directional -> _shadeDirectional(light, mat, n, vd)
-			:point -> _shadePoint(light, mat, n, center, vd)
-			:spot -> _shadeSpot(light, mat, n, center, vd)
-			:ambient -> _shadeAmbient(light, mat)
-			_ -> { r: 0, g: 0, b: 0 }
+		if light.type {
+			:directional -> _shadeDirectional(light, mat, n0, n1, n2, vdx, vdy, vdz, acc)
+			:point -> _shadePoint(light, mat, n0, n1, n2, cx, cy, cz, vdx, vdy, vdz, acc)
+			:spot -> _shadeSpot(light, mat, n0, n1, n2, cx, cy, cz, vdx, vdy, vdz, acc)
+			:ambient -> _shadeAmbient(light, mat, acc)
 		}
-		_accumulate(lights, mat, n, center, vd, i + 1, ar + c.r, ag + c.g, ab + c.b)
+		_accumulate(lights, mat, n0, n1, n2, cx, cy, cz, vdx, vdy, vdz, i + 1, acc)
 	}
 }
 
@@ -280,31 +326,28 @@ fn _accumulate(lights, mat, n, center, vd, i, ar, ag, ab) if i {
 
 // shadeFaceColor applies every light in a scene to a triangle face and
 // returns a packed RGB color (via deps.rgb).
-//
-//   deps      — { rgb: fn(r,g,b) }
-//   baseColor — packed RGB of the unshadowed surface
-//   scene     — LightScene
-//   material  — Material (or ? for defaults)
-//   pa3,pb3,pc3 — world-space triangle vertices
-//   camPos    — { x, y, z } camera position for specular
 fn shadeFaceColor(deps, baseColor, scene, material, pa3, pb3, pc3, camPos) {
 	mat := _default(material, Material({}))
 	scn := _default(scene, LightScene({}))
 	n := faceNormal(pa3, pb3, pc3)
-	center := faceCenter(pa3, pb3, pc3)
+	// Inline faceCenter to avoid per-face object allocation.
+	cx := (pa3.x + pb3.x + pc3.x) / 3
+	cy := (pa3.y + pb3.y + pc3.y) / 3
+	cz := (pa3.z + pb3.z + pc3.z) / 3
 	cam := _default(camPos, { x: 0, y: 0, z: -5 })
-	vd := _norm3(cam.x - center.x, cam.y - center.y, cam.z - center.z)
+	vd := _norm3(cam.x - cx, cam.y - cy, cam.z - cz)
 
-	lc := _accumulate(scn.lights, mat, n, center, vd, 0, 0, 0, 0)
+	acc := { r: 0, g: 0, b: 0 }
+	_accumulate(scn.lights, mat, n.0, n.1, n.2, cx, cy, cz, vd.0, vd.1, vd.2, 0, acc)
 
 	cr := baseColor & 255
 	cg := (baseColor >> 8) & 255
 	cb := (baseColor >> 16) & 255
 
 	ga := scn.globalAmbient * mat.ambient
-	fr := _clamp(int(mat.emissiveR + cr * (ga + lc.r)), 0, 255)
-	fg := _clamp(int(mat.emissiveG + cg * (ga + lc.g)), 0, 255)
-	fb := _clamp(int(mat.emissiveB + cb * (ga + lc.b)), 0, 255)
+	fr := _clamp(int(mat.emissiveR + cr * (ga + acc.r)), 0, 255)
+	fg := _clamp(int(mat.emissiveG + cg * (ga + acc.g)), 0, 255)
+	fb := _clamp(int(mat.emissiveB + cb * (ga + acc.b)), 0, 255)
 	deps.rgb(fr, fg, fb)
 }
 
@@ -314,13 +357,16 @@ fn shadeFaceIntensity(scene, material, pa3, pb3, pc3, camPos) {
 	mat := _default(material, Material({}))
 	scn := _default(scene, LightScene({}))
 	n := faceNormal(pa3, pb3, pc3)
-	center := faceCenter(pa3, pb3, pc3)
+	cx := (pa3.x + pb3.x + pc3.x) / 3
+	cy := (pa3.y + pb3.y + pc3.y) / 3
+	cz := (pa3.z + pb3.z + pc3.z) / 3
 	cam := _default(camPos, { x: 0, y: 0, z: -5 })
-	vd := _norm3(cam.x - center.x, cam.y - center.y, cam.z - center.z)
+	vd := _norm3(cam.x - cx, cam.y - cy, cam.z - cz)
 
-	lc := _accumulate(scn.lights, mat, n, center, vd, 0, 0, 0, 0)
+	acc := { r: 0, g: 0, b: 0 }
+	_accumulate(scn.lights, mat, n.0, n.1, n.2, cx, cy, cz, vd.0, vd.1, vd.2, 0, acc)
 	ga := scn.globalAmbient * mat.ambient
-	_clamp(ga + (lc.r + lc.g + lc.b) / 3, 0, 1)
+	_clamp(ga + (acc.r + acc.g + acc.b) / 3, 0, 1)
 }
 
 // ── Fast-path shading (optimized for batch rendering) ───────────────────
