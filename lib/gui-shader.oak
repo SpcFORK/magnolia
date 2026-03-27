@@ -244,6 +244,7 @@ fn registeredCount() len(_registry)
 cs Shader(fragment?, opts?) {
 	fragment := fragment?
 	draw := opts?.draw
+	glslSource := opts?.glslSource
 	resolution := opts?.resolution |> default(4)
 	uniforms := opts?.uniforms |> default({})
 	_startNano := nanotime()
@@ -252,6 +253,7 @@ cs Shader(fragment?, opts?) {
 	_frameStart := 0
 	_dt := 0
 	_frameCount := 0
+	_glslSubmitted := false
 	_registered := _registerShader(Self)
 }
 
@@ -304,8 +306,22 @@ fn frameCount(shader) shader._frameCount
 
 fn render(window, shader, x, y, w, h) {
 	t := elapsed(shader)
-	if shader.draw != ? -> shader.draw(window, x, y, w, h, t, shader.uniforms)
-	if shader.draw = ? -> renderShaderLines(window, shader, x, y, w, h)
+
+	// GPU path: if shader has a glslSource field and window is web backend,
+	// use WebGL rendering and skip all CPU work (initRain, gradient bands, etc.)
+	if shader.glslSource != ? & window.backend = :web -> {
+		if shader._glslSubmitted != true -> {
+			codegen.submitWebGL(window, shader.glslSource)
+			shader._glslSubmitted <- true
+		}
+		codegen.drawWebGL(window)
+	}
+
+	// CPU path: custom draw callback or generic shader renderer
+	if shader.glslSource = ? | window.backend != :web -> {
+		if shader.draw != ? -> shader.draw(window, x, y, w, h, t, shader.uniforms)
+		if shader.draw = ? -> renderShaderLines(window, shader, x, y, w, h)
+	}
 }
 
 // =========================================================================
@@ -373,17 +389,23 @@ fn renderGradientBands(window, gradientFn, x, y, w, h, time, bands?) {
 	n := if bands? { ? -> 16, _ -> bands? }
 	bandH := int(h / n)
 	if bandH < 1 -> bandH <- 1
-	fn _band(i) if i >= n {
-		true -> ?
+	// Merge adjacent bands with same color into single fillRect calls
+	fn _band(i, mergeY, mergeH, mergeC) if i >= n {
+		true -> if mergeC != ? -> _draw.fillRect(window, x, y + mergeY, w, mergeH, mergeC)
 		_ -> {
 			by := i * bandH
 			bh := if i = n - 1 { true -> h - by, _ -> bandH }
 			c := gradientFn(by + int(bh / 2), h, time)
-			if c != ? -> _draw.fillRect(window, x, y + by, w, bh, c)
-			_band(i + 1)
+			if c = mergeC {
+				true -> _band(i + 1, mergeY, mergeH + bh, mergeC)
+				_ -> {
+					if mergeC != ? -> _draw.fillRect(window, x, y + mergeY, w, mergeH, mergeC)
+					_band(i + 1, by, bh, c)
+				}
+			}
 		}
 	}
-	_band(0)
+	_band(0, 0, 0, ?)
 }
 
 fn renderGradient(window, gradientFn, x, y, w, h, time) renderGradientBands(window, gradientFn, x, y, w, h, time, 16)
@@ -421,8 +443,9 @@ fn renderColumns(window, columns, ox, oy, h) {
 fn updateColumns(columns, h, t, rate?) {
 	fh := float(h)
 	r := if rate? { ? -> 40.0, _ -> rate? }
+	invH := r / fh
 	with each(columns) fn(col_) {
-		col_.headY <- int(fract(col_.phase + t * col_.speed / fh * r) * fh)
+		col_.headY <- int(fract(col_.phase + t * col_.speed * invH) * fh)
 	}
 }
 

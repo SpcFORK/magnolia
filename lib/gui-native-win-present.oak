@@ -1,34 +1,16 @@
 // gui-native-win-present contains Win32 frame present helpers for gui-native-win.
 
 windows := import('windows')
+guiNativeWinOpenGL := import('gui-native-win-opengl')
 
 SRCCOPY := 13369376
 
 fn presentFrameViaOpenGL(window) {
 	if window.presenterBackend = :opengl & window.openglContext > 0 {
 		true -> {
-			// Rendering is GDI-based (drawn into frameHdc backbuffer).
-			// Use a plain BitBlt to present; wglMakeCurrent + GDI BitBlt mixing
-			// causes GPU stalls and is undefined by the OpenGL spec.
-			blt := windows.gdi32(
-				'BitBlt'
-				window.frameTargetHdc
-				0
-				0
-				window.width
-				window.height
-				window.frameHdc
-				0
-				0
-				SRCCOPY
-			)
-			if windows.callOk?(blt) & blt.r1 > 0 {
-				true -> {
-					{
-						presented: true
-						detail: blt
-					}
-				}
+			result := guiNativeWinOpenGL.presentFrameOpenGL(window)
+			if result.presented {
+				true -> result
 				_ -> {
 					window.presenterBackend <- :gdi
 					window.layers.twoD.selected <- :gdi
@@ -36,11 +18,11 @@ fn presentFrameViaOpenGL(window) {
 						from: :opengl
 						to: :gdi
 						reason: 'OpenGL present failed at runtime'
-						detail: blt
+						detail: result
 					}
 					{
 						presented: false
-						detail: blt
+						detail: result
 					}
 				}
 			}

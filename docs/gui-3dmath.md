@@ -5,9 +5,12 @@
 Key exports
 
 - `Vec3(x,y,z)` — 3D vector
+- `Vec3Add`, `Vec3Sub`, `Vec3Scale`, `Vec3Dot`, `Vec3Cross`, `Vec3Length`, `Vec3Normalize`, `Vec3Distance`, `Vec3Lerp`, `Vec3Negate`, `Vec3Reflect` — vector operations
 - `degToRad(deg)` — degrees to radians
 - rotation helpers: `_rotateX`, `_rotateY`, `_rotateZ`
 - projection helpers for perspective/orthographic mapping
+- `Mat4Identity`, `Mat4Translate`, `Mat4Scale`, `Mat4RotateX/Y/Z`, `Mat4Multiply`, `Mat4TransformPoint` — 4x4 matrix transforms
+- `Quat`, `QuatFromAxisAngle`, `QuatMultiply`, `QuatNormalize`, `QuatRotateVector`, `QuatToMat4`, `QuatSlerp` — quaternion rotation
 
 Usage
 

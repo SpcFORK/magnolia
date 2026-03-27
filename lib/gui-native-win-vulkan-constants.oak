@@ -1,0 +1,118 @@
+// gui-native-win-vulkan-constants contains shared Vulkan constants and low-level helpers.
+
+windows := import('windows')
+
+// Structure types
+VK_STRUCTURE_TYPE_APPLICATION_INFO := 0
+VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO := 1
+VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR := 1000009000
+VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO := 2
+VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO := 3
+VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR := 1000001000
+VK_STRUCTURE_TYPE_PRESENT_INFO_KHR := 1000001001
+VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO := 39
+VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO := 40
+VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO := 42
+VK_STRUCTURE_TYPE_SUBMIT_INFO := 4
+VK_STRUCTURE_TYPE_FENCE_CREATE_INFO := 8
+VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO := 9
+VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER := 45
+VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO := 12
+VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO := 5
+VK_SUCCESS := 0
+VK_API_VERSION_1_0 := 4194304
+VK_QUEUE_GRAPHICS_BIT := 1
+VK_KHR_SURFACE_EXTENSION_NAME := 'VK_KHR_surface'
+VK_KHR_WIN32_SURFACE_EXTENSION_NAME := 'VK_KHR_win32_surface'
+VK_KHR_SWAPCHAIN_EXTENSION_NAME := 'VK_KHR_swapchain'
+
+// Image layout constants
+VK_IMAGE_LAYOUT_UNDEFINED := 0
+VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL := 7
+VK_IMAGE_LAYOUT_PRESENT_SRC_KHR := 1000001002
+
+// Pipeline stage / access flags
+VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT := 1
+VK_PIPELINE_STAGE_TRANSFER_BIT := 4096
+VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT := 8192
+VK_ACCESS_TRANSFER_WRITE_BIT := 2048
+
+// Command pool / buffer flags
+VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT := 2
+VK_COMMAND_BUFFER_LEVEL_PRIMARY := 0
+VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT := 1
+
+// Buffer / memory flags
+VK_BUFFER_USAGE_TRANSFER_SRC_BIT := 1
+VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT := 2
+VK_MEMORY_PROPERTY_HOST_COHERENT_BIT := 4
+
+// Present mode
+VK_PRESENT_MODE_FIFO_KHR := 2
+VK_PRESENT_MODE_MAILBOX_KHR := 1
+VK_PRESENT_MODE_IMMEDIATE_KHR := 0
+
+// Composite alpha
+VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR := 1
+
+// Image usage
+VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT := 16
+VK_IMAGE_USAGE_TRANSFER_DST_BIT := 8
+
+// Sharing mode
+VK_SHARING_MODE_EXCLUSIVE := 0
+
+// Surface transform
+VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR := 1
+
+// Fence
+VK_FENCE_CREATE_SIGNALED_BIT := 1
+
+// Subresource
+VK_IMAGE_ASPECT_COLOR_BIT := 1
+
+// Queue family ignored
+VK_QUEUE_FAMILY_IGNORED := 4294967295
+
+// Format constants (B8G8R8A8_UNORM is 44, commonly available)
+VK_FORMAT_B8G8R8A8_UNORM := 44
+VK_FORMAT_B8G8R8A8_SRGB := 50
+
+// Color space
+VK_COLOR_SPACE_SRGB_NONLINEAR_KHR := 0
+
+// DIB constants for reading GDI backbuffer
+DIB_RGB_COLORS := 0
+BI_RGB := 0
+
+// --- Shared utility functions ---
+
+fn _vkZeros(n) {
+	fn z(n, acc) if n {
+		0 -> acc
+		_ -> z(n - 1, acc << 0)
+	}
+	z(n, [])
+}
+
+fn _vkWritePtr(address, value) if windows.ptrSize() {
+	8 -> windows.writeU64(address, value)
+	_ -> windows.writeU32(address, value)
+}
+
+fn _default(v, d) if v { ? -> d, _ -> v }
+
+// --- Vulkan proc resolution ---
+
+fn _vkGetProc(instance, name) {
+	cname := windows.cstr(name)
+	res := windows.vulkan1('vkGetInstanceProcAddr', instance, addr(cname))
+	if windows.callOk?(res) & res.r1 > 0 {
+		true -> { type: :ok, proc: res.r1 }
+		_ -> { type: :error, error: 'vkGetInstanceProcAddr failed for ' + name }
+	}
+}
+
+fn _vkCall(proc, args...) windows.call(proc, args...)
+
+fn _vkCallOk?(r) windows.callOk?(r) & r.r1 = VK_SUCCESS

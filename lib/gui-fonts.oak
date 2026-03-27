@@ -1,0 +1,271 @@
+// gui-fonts provides a cross-platform font abstraction layer.
+//
+// It dispatches to windows-fonts or linux-fonts depending on the current
+// platform (detected at runtime) and provides a unified API for font
+// creation, caching, measurement, and lifecycle management.
+//
+// Font spec object:
+//   { family: 'Segoe UI'    // or X11 font name on Linux
+//     size: 16              // point size (Windows) or pixel size
+//     weight: 400           // 100-900, 400=normal, 700=bold
+//     italic: false
+//     underline: false
+//     strikeOut: false }
+//
+// Web font spec additionally supports:
+//   { css: '14px monospace' }  // raw CSS font string
+
+{ _default: _default, _err: _err } := import('gui-common')
+
+fn _asBool(v) if v { true -> true, _ -> false }
+
+fn _platformId() ___runtime_sys_info().os
+
+fn isWindows? _platformId() = 'windows'
+fn isLinux?   _platformId() = 'linux'
+
+// ---------------------------------------------------------------------------
+// Platform module – lazy-loaded so the unused platform module never resolves
+// ---------------------------------------------------------------------------
+_winMod   := ?
+_linuxMod := ?
+
+fn _win() {
+	if _winMod {
+		? -> {
+			_winMod <- import('windows-fonts')
+			_winMod
+		}
+		_ -> _winMod
+	}
+}
+
+fn _lnx() {
+	if _linuxMod {
+		? -> {
+			_linuxMod <- import('linux-fonts')
+			_linuxMod
+		}
+		_ -> _linuxMod
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Font weight aliases (re-exported from windows-fonts for convenience)
+// ---------------------------------------------------------------------------
+FW_THIN       := 100
+FW_EXTRALIGHT := 200
+FW_LIGHT      := 300
+FW_NORMAL     := 400
+FW_MEDIUM     := 500
+FW_SEMIBOLD   := 600
+FW_BOLD       := 700
+FW_EXTRABOLD  := 800
+FW_HEAVY      := 900
+
+// ---------------------------------------------------------------------------
+// defaultFontSpec  – returns a spec with sensible per-platform defaults
+// ---------------------------------------------------------------------------
+fn defaultFontSpec() if isWindows?() {
+	true -> { family: 'Segoe UI', size: 16, weight: FW_NORMAL, italic: false, underline: false, strikeOut: false }
+	_ -> if isLinux?() {
+		true -> { family: '-*-helvetica-medium-r-normal--14-*-*-*-*-*-iso8859-1', size: 14, weight: FW_NORMAL, italic: false, underline: false, strikeOut: false }
+		_ -> { family: 'sans-serif', size: 16, weight: FW_NORMAL, italic: false, underline: false, strikeOut: false }
+	}
+}
+
+// ---------------------------------------------------------------------------
+// createFont  – creates a platform font from a spec
+//
+// On Windows: returns { type: :ok, handle, family, size, weight }
+// On Linux:   returns { type: :ok, fontStruct, fontId, ... }
+// On Web:     returns { type: :ok, css: '...' }
+// ---------------------------------------------------------------------------
+fn createFont(spec) {
+	merged := {
+		family:    _default(spec.family, defaultFontSpec().family)
+		size:      _default(spec.size, 16)
+		weight:    _default(spec.weight, FW_NORMAL)
+		italic:    _asBool(_default(spec.italic, false))
+		underline: _asBool(_default(spec.underline, false))
+		strikeOut: _asBool(_default(spec.strikeOut, false))
+	}
+	if isWindows?() {
+		true -> _win().createFontEx(merged)
+		_ -> if isLinux?() {
+			true -> {
+				// On Linux, spec.family should be an XLFD string or alias
+				fontName := _default(spec.family, 'fixed')
+				_lnx().loadQueryFont(spec._display, fontName)
+			}
+			_ -> {
+				// Web / other – return a CSS font descriptor
+				css := _webFontString(merged)
+				{ type: :ok, css: css, family: merged.family, size: merged.size }
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// deleteFont  – releases a font created by createFont
+// ---------------------------------------------------------------------------
+fn deleteFont(fontResult) {
+	if isWindows?() {
+		true -> if fontResult.handle {
+			? -> 0
+			_ -> _win().deleteFont(fontResult.handle)
+		}
+		_ -> if isLinux?() {
+			true -> if fontResult.fontStruct {
+				? -> 0
+				_ -> if fontResult._display {
+					? -> 0
+					_ -> _lnx().freeFont(fontResult._display, fontResult.fontStruct)
+				}
+			}
+			_ -> 0
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Web font string generation (for :web backend)
+// ---------------------------------------------------------------------------
+fn _webFontString(spec) {
+	if spec {
+		? -> ?
+		_ -> {
+			if spec.css {
+				? -> {
+					style := if _asBool(_default(spec.italic, false)) { true -> 'italic ', _ -> '' }
+					weight := string(int(_default(spec.weight, 400))) + ' '
+					size := string(int(_default(spec.size, 16))) + 'px '
+					family := _default(spec.family, 'sans-serif')
+					style + weight + size + family
+				}
+				_ -> spec.css
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Font key generation  – canonical key for caching
+// ---------------------------------------------------------------------------
+fn fontKey(spec) {
+	if spec {
+		? -> ?
+		_ -> {
+			family := _default(spec.family, 'Segoe UI')
+			size := int(_default(spec.size, 16))
+			weight := int(_default(spec.weight, 400))
+			italic := _asBool(_default(spec.italic, false))
+			underline := _asBool(_default(spec.underline, false))
+			strikeOut := _asBool(_default(spec.strikeOut, false))
+			family + '|' + string(size) + '|' + string(weight) + '|' + string(italic) + '|' + string(underline) + '|' + string(strikeOut)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cached font access  – delegates to platform cache
+// ---------------------------------------------------------------------------
+fn cachedFont(windowOrDisplay, spec) {
+	if isWindows?() {
+		true -> _win().cachedFont(spec)
+		_ -> if isLinux?() {
+			true -> _lnx().cachedFont(windowOrDisplay, _default(spec.family, 'fixed'))
+			_ -> {
+				// Web – no native caching needed; return CSS
+				css := _webFontString(spec)
+				{ type: :ok, css: css }
+			}
+		}
+	}
+}
+
+fn releaseCachedFonts(windowOrDisplay) {
+	if isWindows?() {
+		true -> _win().releaseCachedFonts()
+		_ -> if isLinux?() {
+			true -> _lnx().releaseCachedFonts(windowOrDisplay)
+			_ -> 0
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// measureText  – cross-platform text measurement
+//
+// On Windows: pass hwnd (or ?) and a spec.
+// On Linux:   pass display and a spec (spec.family = X11 font name).
+// Returns { type: :ok, width, height } or error.
+// ---------------------------------------------------------------------------
+fn measureText(windowOrDisplay, spec, text) {
+	if isWindows?() {
+		true -> _win().measureText(windowOrDisplay, spec, text)
+		_ -> if isLinux?() {
+			true -> {
+				fontName := _default(spec.family, 'fixed')
+				_lnx().measureText(windowOrDisplay, fontName, text)
+			}
+			_ -> _err('measureText not supported on this platform', ?)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// selectFont  – selects a font into a drawing context
+//
+// On Windows: hdc + font handle
+// On Linux:   display + gc + fontId
+// ---------------------------------------------------------------------------
+fn selectFont(args) {
+	if isWindows?() {
+		true -> _win().selectFont(args.hdc, args.handle)
+		_ -> if isLinux?() {
+			true -> _lnx().setFont(args.display, args.gc, args.fontId)
+			_ -> 0
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getTextMetrics  – returns font metrics for the selected font
+//
+// Windows only for now.
+// ---------------------------------------------------------------------------
+fn getTextMetrics(hdc) if isWindows?() {
+	true -> _win().getTextMetrics(hdc)
+	_ -> _err('getTextMetrics requires a Windows HDC', ?)
+}
+
+// ---------------------------------------------------------------------------
+// fontLineHeight  – line height for the selected font
+// ---------------------------------------------------------------------------
+fn fontLineHeight(hdcOrFontStruct) {
+	if isWindows?() {
+		true -> _win().fontLineHeight(hdcOrFontStruct)
+		_ -> if isLinux?() {
+			true -> {
+				h := _lnx().fontStructHeight(hdcOrFontStruct)
+				{ type: :ok, lineHeight: h }
+			}
+			_ -> _err('fontLineHeight not supported on this platform', ?)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Convenience: buildXLFD  – construct an X11 font name from parts
+// ---------------------------------------------------------------------------
+fn buildXLFD(spec) if isLinux?() {
+	true -> _lnx().buildXLFD(spec)
+	_ -> _err('buildXLFD is only available on Linux', ?)
+}
+
+// ---------------------------------------------------------------------------
+// webFontString  – public wrapper for CSS font string generation
+// ---------------------------------------------------------------------------
+fn webFontString(spec) _webFontString(spec)

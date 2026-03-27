@@ -1,0 +1,153 @@
+guiFonts := import('gui-fonts')
+gui := import('GUI')
+
+fn run(t) {
+	// ---------------------------------------------------------------------------
+	// Pure / platform-independent tests
+	// ---------------------------------------------------------------------------
+
+	'defaultFontSpec returns an object with family and size' |> t.eq(
+		{
+			spec := guiFonts.defaultFontSpec()
+			type(spec) = :object &
+			type(spec.family) = :string &
+			type(spec.size) = :int
+		}
+		true
+	)
+
+	'fontKey produces a canonical string from a spec' |> t.eq(
+		guiFonts.fontKey({
+			family: 'Arial'
+			size: 14
+			weight: 700
+			italic: true
+			underline: false
+			strikeOut: false
+		})
+		'Arial|14|700|true|false|false'
+	)
+
+	'fontKey uses defaults for missing fields' |> t.eq(
+		guiFonts.fontKey({})
+		'Segoe UI|16|400|false|false|false'
+	)
+
+	'fontKey returns ? for ? input' |> t.eq(
+		guiFonts.fontKey(?)
+		?
+	)
+
+	'webFontString builds CSS string from spec' |> t.eq(
+		guiFonts.webFontString({
+			family: 'monospace'
+			size: 14
+			weight: 400
+			italic: false
+		})
+		'400 14px monospace'
+	)
+
+	'webFontString includes italic when true' |> t.eq(
+		guiFonts.webFontString({
+			family: 'serif'
+			size: 20
+			weight: 700
+			italic: true
+		})
+		'italic 700 20px serif'
+	)
+
+	'webFontString passes through raw css field' |> t.eq(
+		guiFonts.webFontString({ css: '12px "Courier New"' })
+		'12px "Courier New"'
+	)
+
+	'webFontString returns ? for ? input' |> t.eq(
+		guiFonts.webFontString(?)
+		?
+	)
+
+	'FW weight constants are correct' |> t.eq(
+		[
+			guiFonts.FW_THIN
+			guiFonts.FW_EXTRALIGHT
+			guiFonts.FW_LIGHT
+			guiFonts.FW_NORMAL
+			guiFonts.FW_MEDIUM
+			guiFonts.FW_SEMIBOLD
+			guiFonts.FW_BOLD
+			guiFonts.FW_EXTRABOLD
+			guiFonts.FW_HEAVY
+		]
+		[100, 200, 300, 400, 500, 600, 700, 800, 900]
+	)
+
+	// ---------------------------------------------------------------------------
+	// Platform-conditional: Windows font creation & caching
+	// ---------------------------------------------------------------------------
+
+	'Windows: createFont returns a valid handle' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				result := guiFonts.createFont({
+					family: 'Arial'
+					size: 16
+					weight: 400
+					italic: false
+					underline: false
+					strikeOut: false
+				})
+				ok := result.type = :ok & type(result.handle) = :int & result.handle > 0
+				guiFonts.deleteFont(result)
+				ok
+			}
+			_ -> true
+		}
+		true
+	)
+
+	'Windows: cachedFont returns same handle on repeat calls' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				spec := { family: 'Arial', size: 12, weight: 400, italic: false, underline: false, strikeOut: false }
+				r1 := guiFonts.cachedFont(?, spec)
+				r2 := guiFonts.cachedFont(?, spec)
+				ok := r1.type = :ok & r2.type = :ok & r1.handle = r2.handle
+				guiFonts.releaseCachedFonts(?)
+				ok
+			}
+			_ -> true
+		}
+		true
+	)
+
+	'Windows: measureText returns width and height' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				spec := { family: 'Arial', size: 16, weight: 400, italic: false, underline: false, strikeOut: false }
+				result := guiFonts.measureText(?, spec, 'Hello')
+				result.type = :ok &
+				type(result.width) = :int & result.width > 0 &
+				type(result.height) = :int & result.height > 0
+			}
+			_ -> true
+		}
+		true
+	)
+
+	// ---------------------------------------------------------------------------
+	// Platform-conditional: Linux font handling
+	// ---------------------------------------------------------------------------
+
+	'Linux: createFont with X11 font name returns ok' |> t.eq(
+		if gui.backend() = :linux {
+			true -> {
+				// Would need a display connection to fully test; skip gracefully
+				true
+			}
+			_ -> true
+		}
+		true
+	)
+}

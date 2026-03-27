@@ -241,27 +241,74 @@ fn drawPolygon2D(deps, window, points, color, filled, borderColor) {
 		true -> { type: :ok }
 		_ -> if _default(filled, false) {
 			true -> {
-				cx := fn sumX(i, acc) if i {
-					len(pts) -> acc / len(pts)
-					_ -> sumX(i + 1, acc + pts.(i).x)
+				// scanline fill algorithm
+				minY := fn findMin(i, acc) if i {
+					len(pts) -> int(acc)
+					_ -> findMin(i + 1, if pts.(i).y < acc { true -> pts.(i).y, _ -> acc })
 				}
-				cy := fn sumY(i, acc) if i {
-					len(pts) -> acc / len(pts)
-					_ -> sumY(i + 1, acc + pts.(i).y)
+				maxY := fn findMax(i, acc) if i {
+					len(pts) -> int(acc)
+					_ -> findMax(i + 1, if pts.(i).y > acc { true -> pts.(i).y, _ -> acc })
 				}
-				center := Vec2(cx(0, 0), cy(0, 0))
-				fn fan(i) if i {
-					len(pts) -> { type: :ok }
+				yMin := minY(1, pts.0.y)
+				yMax := maxY(1, pts.0.y)
+				n := len(pts)
+				fn scanRow(y) if y > yMax {
+					true -> ?
 					_ -> {
-						a := pts.(i)
-						b := pts.((i + 1) % len(pts))
-						deps.drawLine(window, int(center.x), int(center.y), int(a.x), int(a.y), color)
-						deps.drawLine(window, int(a.x), int(a.y), int(b.x), int(b.y), color)
-						deps.drawLine(window, int(b.x), int(b.y), int(center.x), int(center.y), color)
-						fan(i + 1)
+						// collect x-intersections for this scanline
+						fn collectEdges(i, xs) if i {
+							n -> xs
+							_ -> {
+								ay := pts.(i).y
+								by := pts.((i + 1) % n).y
+								xs2 := if (ay <= y & by > y) | (by <= y & ay > y) {
+									true -> {
+										ax := pts.(i).x
+										bx := pts.((i + 1) % n).x
+										t := (y - ay) / (by - ay)
+										xs << (ax + t * (bx - ax))
+									}
+									_ -> xs
+								}
+								collectEdges(i + 1, xs2)
+							}
+						}
+						xs := collectEdges(0, [])
+						// insertion sort intersections
+						fn sortXs(arr) {
+							fn outer(i) if i < len(arr) {
+								true -> {
+									key := arr.(i)
+									fn inner(j) if j >= 0 & arr.(j) > key {
+										true -> {
+											arr.(j + 1) <- arr.(j)
+											inner(j - 1)
+										}
+										_ -> {
+											arr.(j + 1) <- key
+											outer(i + 1)
+										}
+									}
+									inner(i - 1)
+								}
+							}
+							outer(1)
+							arr
+						}
+						sorted := sortXs(xs)
+						// fill between pairs
+						fn fillPairs(j) if j + 1 < len(sorted) {
+							true -> {
+								deps.drawLine(window, int(sorted.(j)), y, int(sorted.(j + 1)), y, color)
+								fillPairs(j + 2)
+							}
+						}
+						fillPairs(0)
+						scanRow(y + 1)
 					}
 				}
-				fan(0)
+				scanRow(yMin)
 				if borderColor != ? {
 					true -> drawPolyline2D(deps, window, pts, borderColor, true)
 				}

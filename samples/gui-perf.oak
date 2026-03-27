@@ -35,7 +35,9 @@ fn main() {
 					z: 8
 					fov: 90
 					mode: 'perspective'
+					backfaceCulling: true
 				}
+				drawDistance: 80
 				light: {
 					x: 0.35
 					y: 0.75
@@ -54,7 +56,9 @@ fn main() {
 					mode: 'perspective'
 					parallelFaces: true
 					parallelFaceThreshold: 4
+					backfaceCulling: true
 				}
+				drawDistance: 80
 				light: {
 					x: 0.35
 					y: 0.75
@@ -88,6 +92,14 @@ fn main() {
 			gridRotY := 0.4
 			circlePhase := 0.0
 
+			// Pre-allocate reusable transforms and colors
+			xfCube := { rx: 0, ry: 0, tz: 0 }
+			xfGrid := { rx: 0.3, ry: 0.4, ty: -3 }
+			xfAxes := { tz: 0 }
+			colCube := gui.rgb(220, 100, 100)
+			colGrid := gui.rgb(64, 128, 200)
+			colAxes := gui.rgb(180, 220, 255)
+
 			// Main loop
 			gui.run(window, ?, fn(w, dt) {
 				frameCount <- frameCount + 1
@@ -107,17 +119,23 @@ fn main() {
 					// Clear and render frame
 					rendererStable.clear()
 
+					// Update reusable transforms in-place
+					xfCube.rx <- cubeRotX
+					xfCube.ry <- cubeRotY
+					xfGrid.rx <- gridRotX
+					xfGrid.ry <- gridRotY
+
 					// Render 3D elements (A/B mode every 3 seconds)
 					if mode = 0 {
 						true -> {
-							rendererStable.renderCubeSolid(2.0, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
-							rendererStable.renderGrid(10, 1, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
-							rendererStable.renderAxes(3, { tz: 0 })
+							rendererStable.renderCubeSolid(2.0, xfCube, colCube)
+							rendererStable.renderGrid(10, 1, xfGrid, colGrid)
+							rendererStable.renderAxes(3, xfAxes)
 						}
 						_ -> {
-							rendererExp.enqueueMeshSolid(cubeMesh, { rx: cubeRotX, ry: cubeRotY, tz: 0 }, gui.rgb(220, 100, 100))
-							rendererExp.enqueueMeshWire(gridMesh, { rx: gridRotX, ry: gridRotY, ty: -3 }, gui.rgb(64, 128, 200))
-							rendererExp.enqueueMeshWire(axesMesh, { tz: 0 }, gui.rgb(180, 220, 255))
+							rendererExp.enqueueMeshSolid(cubeMesh, xfCube, colCube)
+							rendererExp.enqueueMeshWire(gridMesh, xfGrid, colGrid)
+							rendererExp.enqueueMeshWire(axesMesh, xfAxes, colAxes)
 							rendererExp.flushQueue()
 						}
 					}

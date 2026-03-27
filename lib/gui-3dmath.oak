@@ -54,19 +54,27 @@ fn transformPoint(v, transform) {
 	ry := degToRad(_default(ts.ry, 0))
 	rz := degToRad(_default(ts.rz, 0))
 
-	p0 := {
-		x: v.x * scale
-		y: v.y * scale
-		z: v.z * scale
-	}
-	p1 := _rotateX(p0, rx)
-	p2 := _rotateY(p1, ry)
-	p3 := _rotateZ(p2, rz)
+	cxr := cos(rx), sxr := sin(rx)
+	cyr := cos(ry), syr := sin(ry)
+	czr := cos(rz), szr := sin(rz)
+
+	x0 := v.x * scale
+	y0 := v.y * scale
+	z0 := v.z * scale
+
+	y1 := y0 * cxr - z0 * sxr
+	z1 := y0 * sxr + z0 * cxr
+
+	x2 := x0 * cyr + z1 * syr
+	z2 := 0 - x0 * syr + z1 * cyr
+
+	x3 := x2 * czr - y1 * szr
+	y3 := x2 * szr + y1 * czr
 
 	{
-		x: p3.x + tx
-		y: p3.y + ty
-		z: p3.z + tz
+		x: x3 + tx
+		y: y3 + ty
+		z: z2 + tz
 	}
 }
 
@@ -206,6 +214,71 @@ fn transformVerticesBatch(meshes, transforms, i, out) if i {
 	}
 }
 
+// Combined transform + project in a single pass.
+// Returns { world: [...], screen: [...] } — world-space vertices and
+// projected screen-space vertices, built in one loop to eliminate the
+// intermediate allocation that separate transform→project would incur.
+fn transformAndProjectVertices(vertices, transform, projParams) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	rx := degToRad(_default(ts.rx, 0))
+	ry := degToRad(_default(ts.ry, 0))
+	rz := degToRad(_default(ts.rz, 0))
+
+	cxr := cos(rx), sxr := sin(rx)
+	cyr := cos(ry), syr := sin(ry)
+	czr := cos(rz), szr := sin(rz)
+
+	isOrtho := projParams.mode = 'orthographic'
+	pHalfW := projParams.halfW
+	pHalfH := projParams.halfH
+	pCamZ := projParams.camZ
+	pFocal := projParams.focal
+	pOrthoScale := projParams.orthoScale
+	orthoS := if isOrtho { true -> pHalfW / pOrthoScale, _ -> 0 }
+
+	fn sub(j, wAcc, sAcc) if j {
+		len(vertices) -> { world: wAcc, screen: sAcc }
+		_ -> {
+			v := vertices.(j)
+			x0 := v.x * scale
+			y0 := v.y * scale
+			z0 := v.z * scale
+			y1 := y0 * cxr - z0 * sxr
+			z1 := y0 * sxr + z0 * cxr
+			x2 := x0 * cyr + z1 * syr
+			z2 := 0 - x0 * syr + z1 * cyr
+			x3 := x2 * czr - y1 * szr
+			y3 := x2 * szr + y1 * czr
+			wx := x3 + tx
+			wy := y3 + ty
+			wz := z2 + tz
+			wv := { x: wx, y: wy, z: wz }
+			sz := wz + pCamZ
+			sp := if isOrtho {
+				true -> {
+					x: int(pHalfW + wx * orthoS)
+					y: int(pHalfH - wy * orthoS)
+					z: sz
+				}
+				_ -> if sz <= 0.05 {
+					true -> ?
+					_ -> {
+						x: int(pHalfW + (wx * pFocal) / sz)
+						y: int(pHalfH - (wy * pFocal) / sz)
+						z: sz
+					}
+				}
+			}
+			sub(j + 1, wAcc << wv, sAcc << sp)
+		}
+	}
+	sub(0, [], [])
+}
+
 // Matrix4: 4x4 transformation matrices for advanced 3D transforms
 fn Mat4Identity() [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
@@ -232,18 +305,21 @@ fn Mat4RotateZ(radians) {
 }
 
 fn Mat4Multiply(a, b) {
-	fn dot(row) {
-		fn col(c, sum, i) if i {
+	fn elem(r, c) {
+		fn dot(i, sum) if i {
 			4 -> sum
-			_ -> col(c, sum + a.(row * 4 + i) * b.(i * 4 + c), i + 1)
+			_ -> dot(i + 1, sum + a.(r * 4 + i) * b.(i * 4 + c))
 		}
-		col(0, 0, 0)
+		dot(0, 0)
 	}
-	fn buildRow(r, acc) if r {
-		4 -> acc
-		_ -> buildRow(r + 1, acc << dot(r))
+	fn buildCol(r, c, acc) if c {
+		4 -> if r + 1 {
+			4 -> acc
+			_ -> buildCol(r + 1, 0, acc)
+		}
+		_ -> buildCol(r, c + 1, acc << elem(r, c))
 	}
-	buildRow(0, [])
+	buildCol(0, 0, [])
 }
 
 fn Mat4TransformPoint(m, v) {
@@ -283,5 +359,71 @@ fn QuatRotateVector(q, v) {
 	c1x := qy * vz - qz * vy, c1y := qz * vx - qx * vz, c1z := qx * vy - qy * vx
 	c2x := qy * c1z - qz * c1y, c2y := qz * c1x - qx * c1z, c2z := qx * c1y - qy * c1x
 	Vec3(vx + 2 * (qw * c1x + c2x), vy + 2 * (qw * c1y + c2y), vz + 2 * (qw * c1z + c2z))
+}
+
+fn QuatToMat4(q) {
+	x := q.x, y := q.y, z := q.z, w := q.w
+	xx := x * x, xy := x * y, xz := x * z, xw := x * w
+	yy := y * y, yz := y * z, yw := y * w
+	zz := z * z, zw := z * w
+	[
+		1 - 2 * (yy + zz), 2 * (xy - zw),     2 * (xz + yw),     0
+		2 * (xy + zw),     1 - 2 * (xx + zz), 2 * (yz - xw),     0
+		2 * (xz - yw),     2 * (yz + xw),     1 - 2 * (xx + yy), 0
+		0,                 0,                 0,                 1
+	]
+}
+
+fn QuatSlerp(a, b, t) {
+	dot := a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+	// Ensure shortest path
+	bx := b.x, by := b.y, bz := b.z, bw := b.w
+	if dot < 0 -> {
+		dot <- 0 - dot
+		bx <- 0 - bx
+		by <- 0 - by
+		bz <- 0 - bz
+		bw <- 0 - bw
+	}
+	if dot > 0.9995 {
+		true -> QuatNormalize(Quat(
+			a.x + t * (bx - a.x)
+			a.y + t * (by - a.y)
+			a.z + t * (bz - a.z)
+			a.w + t * (bw - a.w)
+		))
+		_ -> {
+			theta := acos(dot)
+			sTheta := sin(theta)
+			wa := sin((1 - t) * theta) / sTheta
+			wb := sin(t * theta) / sTheta
+			Quat(
+				a.x * wa + bx * wb
+				a.y * wa + by * wb
+				a.z * wa + bz * wb
+				a.w * wa + bw * wb
+			)
+		}
+	}
+}
+
+// --- Vec3 Utility Operations --------------------------------------------------
+
+fn Vec3Add(a, b) Vec3(a.x + b.x, a.y + b.y, a.z + b.z)
+fn Vec3Sub(a, b) Vec3(a.x - b.x, a.y - b.y, a.z - b.z)
+fn Vec3Scale(v, s) Vec3(v.x * s, v.y * s, v.z * s)
+fn Vec3Dot(a, b) a.x * b.x + a.y * b.y + a.z * b.z
+fn Vec3Cross(a, b) Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+fn Vec3Length(v) pow(v.x * v.x + v.y * v.y + v.z * v.z, 0.5)
+fn Vec3Normalize(v) {
+	l := Vec3Length(v)
+	if l <= 0.000001 { true -> Vec3(0, 0, 0), _ -> Vec3(v.x / l, v.y / l, v.z / l) }
+}
+fn Vec3Distance(a, b) Vec3Length(Vec3Sub(a, b))
+fn Vec3Lerp(a, b, t) Vec3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t)
+fn Vec3Negate(v) Vec3(0 - v.x, 0 - v.y, 0 - v.z)
+fn Vec3Reflect(v, n) {
+	d := 2 * Vec3Dot(v, n)
+	Vec3Sub(v, Vec3Scale(n, d))
 }
 

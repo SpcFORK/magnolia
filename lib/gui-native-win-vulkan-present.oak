@@ -1,0 +1,234 @@
+// gui-native-win-vulkan-present contains per-frame Vulkan presentation logic.
+
+windows := import('windows')
+{
+	VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+	VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER: VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+	VK_STRUCTURE_TYPE_SUBMIT_INFO: VK_STRUCTURE_TYPE_SUBMIT_INFO
+	VK_STRUCTURE_TYPE_PRESENT_INFO_KHR: VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
+	VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+	VK_ACCESS_TRANSFER_WRITE_BIT: VK_ACCESS_TRANSFER_WRITE_BIT
+	VK_IMAGE_LAYOUT_UNDEFINED: VK_IMAGE_LAYOUT_UNDEFINED
+	VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+	VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+	VK_QUEUE_FAMILY_IGNORED: VK_QUEUE_FAMILY_IGNORED
+	VK_IMAGE_ASPECT_COLOR_BIT: VK_IMAGE_ASPECT_COLOR_BIT
+	VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+	VK_PIPELINE_STAGE_TRANSFER_BIT: VK_PIPELINE_STAGE_TRANSFER_BIT
+	VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+	DIB_RGB_COLORS: DIB_RGB_COLORS
+	BI_RGB: BI_RGB
+	_vkZeros: _vkZeros
+	_vkWritePtr: _vkWritePtr
+	_vkGetProc: _vkGetProc
+	_vkCall: _vkCall
+	_vkCallOk?: _vkCallOk?
+	_default: _default
+} := import('gui-native-win-vulkan-constants')
+
+fn presentFrameVulkan(window) if _default(window._vkSwapchainReady, false) {
+	_ -> { presented: false, error: 'swapchain not ready' }
+	true -> {
+		dev := window.vulkanDevice
+		queue := window.vulkanQueue
+		inst := window.vulkanInstance
+		is64 := windows.ptrSize() = 8
+		ps := windows.ptrSize()
+
+		// Wait for previous frame's fence
+		fenceBuf := bits(_vkZeros(ps))
+		_vkWritePtr(addr(fenceBuf), window._vkFence)
+		windows.vulkan1('vkWaitForFences', dev, 1, addr(fenceBuf), 1, 4294967295)
+		windows.vulkan1('vkResetFences', dev, 1, addr(fenceBuf))
+
+		// Acquire next image
+		acquireNext := _vkGetProc(inst, 'vkAcquireNextImageKHR')
+		if acquireNext.type != :ok {
+			true -> { presented: false, error: 'cannot resolve vkAcquireNextImageKHR' }
+			_ -> {
+				imgIdxBuf := bits([0, 0, 0, 0])
+				acqRes := _vkCall(acquireNext.proc, dev, window._vkSwapchain, 4294967295, window._vkSemImageAvail, 0, addr(imgIdxBuf))
+				if _vkCallOk?(acqRes) {
+					_ -> { presented: false, error: 'vkAcquireNextImageKHR failed', detail: acqRes }
+					true -> {
+						imgIdx := windows.readU32(addr(imgIdxBuf))
+						swapImage := window._vkSwapImages.(imgIdx)
+
+						// Copy GDI backbuffer pixels into staging buffer via GetDIBits
+						w := window._vkSwapExtent.width
+						h := window._vkSwapExtent.height
+						bmiPtr := window._vkBmiPtr
+						windows.writeU32(bmiPtr + 0, 40)
+						windows.writeU32(bmiPtr + 4, w)
+						windows.writeU32(bmiPtr + 8, h)
+						windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
+						windows.writeU32(bmiPtr + 16, BI_RGB)
+						windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, window._vkStagingMapped, bmiPtr, DIB_RGB_COLORS)
+
+						// Record command buffer
+						cmdBuf := window._vkCmdBuf
+						windows.vulkan1('vkResetCommandBuffer', cmdBuf, 0)
+
+						beginSize := if is64 { true -> 32, _ -> 16 }
+						beginInfo := bits(_vkZeros(beginSize))
+						windows.writeU32(addr(beginInfo), VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+						if is64 {
+							true -> windows.writeU32(addr(beginInfo) + 16, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+							_ -> windows.writeU32(addr(beginInfo) + 8, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+						}
+						windows.vulkan1('vkBeginCommandBuffer', cmdBuf, addr(beginInfo))
+
+						// Barrier: undefined -> transfer_dst
+						barrierSize := if is64 { true -> 72, _ -> 48 }
+						barrier := bits(_vkZeros(barrierSize))
+						barP := addr(barrier)
+						windows.writeU32(barP, VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+						if is64 {
+							true -> {
+								windows.writeU32(barP + 16, 0)
+								windows.writeU32(barP + 20, VK_ACCESS_TRANSFER_WRITE_BIT)
+								windows.writeU32(barP + 24, VK_IMAGE_LAYOUT_UNDEFINED)
+								windows.writeU32(barP + 28, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+								windows.writeU32(barP + 32, VK_QUEUE_FAMILY_IGNORED)
+								windows.writeU32(barP + 36, VK_QUEUE_FAMILY_IGNORED)
+								_vkWritePtr(barP + 40, swapImage)
+								windows.writeU32(barP + 48, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(barP + 52, 0)
+								windows.writeU32(barP + 56, 1)
+								windows.writeU32(barP + 60, 0)
+								windows.writeU32(barP + 64, 1)
+							}
+							_ -> {
+								windows.writeU32(barP + 8, 0)
+								windows.writeU32(barP + 12, VK_ACCESS_TRANSFER_WRITE_BIT)
+								windows.writeU32(barP + 16, VK_IMAGE_LAYOUT_UNDEFINED)
+								windows.writeU32(barP + 20, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+								windows.writeU32(barP + 24, VK_QUEUE_FAMILY_IGNORED)
+								windows.writeU32(barP + 28, VK_QUEUE_FAMILY_IGNORED)
+								_vkWritePtr(barP + 32, swapImage)
+								windows.writeU32(barP + 36, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(barP + 40, 0)
+								windows.writeU32(barP + 44, 1)
+								windows.writeU32(barP + 48, 0)
+								windows.writeU32(barP + 52, 1)
+							}
+						}
+						windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+							VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+							0, 0, 0, 0, 0, 1, barP)
+
+						// vkCmdCopyBufferToImage
+						copyRegion := bits(_vkZeros(56))
+						crp := addr(copyRegion)
+						windows.writeU64(crp + 0, 0)
+						windows.writeU32(crp + 8, 0)
+						windows.writeU32(crp + 12, 0)
+						windows.writeU32(crp + 16, VK_IMAGE_ASPECT_COLOR_BIT)
+						windows.writeU32(crp + 20, 0)
+						windows.writeU32(crp + 24, 0)
+						windows.writeU32(crp + 28, 1)
+						windows.writeU32(crp + 44, w)
+						windows.writeU32(crp + 48, h)
+						windows.writeU32(crp + 52, 1)
+
+						windows.vulkan1('vkCmdCopyBufferToImage', cmdBuf, window._vkStagingBuf, swapImage,
+							VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, crp)
+
+						// Barrier: transfer_dst -> present_src
+						windows.writeU32(barP + if is64 { true -> 16, _ -> 8 }, VK_ACCESS_TRANSFER_WRITE_BIT)
+						windows.writeU32(barP + if is64 { true -> 20, _ -> 12 }, 0)
+						windows.writeU32(barP + if is64 { true -> 24, _ -> 16 }, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+						windows.writeU32(barP + if is64 { true -> 28, _ -> 20 }, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+						windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+							VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+							0, 0, 0, 0, 0, 1, barP)
+
+						windows.vulkan1('vkEndCommandBuffer', cmdBuf)
+
+						// Submit
+						submitSize := if is64 { true -> 72, _ -> 36 }
+						submit := bits(_vkZeros(submitSize))
+						subP := addr(submit)
+						windows.writeU32(subP, VK_STRUCTURE_TYPE_SUBMIT_INFO)
+
+						waitSemBuf := bits(_vkZeros(ps))
+						_vkWritePtr(addr(waitSemBuf), window._vkSemImageAvail)
+						waitStageBuf := bits([0, 16, 0, 0])
+
+						cmdBufBuf := bits(_vkZeros(ps))
+						_vkWritePtr(addr(cmdBufBuf), cmdBuf)
+
+						sigSemBuf := bits(_vkZeros(ps))
+						_vkWritePtr(addr(sigSemBuf), window._vkSemRenderDone)
+
+						if is64 {
+							true -> {
+								windows.writeU32(subP + 16, 1)
+								_vkWritePtr(subP + 24, addr(waitSemBuf))
+								_vkWritePtr(subP + 32, addr(waitStageBuf))
+								windows.writeU32(subP + 40, 1)
+								_vkWritePtr(subP + 48, addr(cmdBufBuf))
+								windows.writeU32(subP + 56, 1)
+								_vkWritePtr(subP + 64, addr(sigSemBuf))
+							}
+							_ -> {
+								windows.writeU32(subP + 8, 1)
+								_vkWritePtr(subP + 12, addr(waitSemBuf))
+								_vkWritePtr(subP + 16, addr(waitStageBuf))
+								windows.writeU32(subP + 20, 1)
+								_vkWritePtr(subP + 24, addr(cmdBufBuf))
+								windows.writeU32(subP + 28, 1)
+								_vkWritePtr(subP + 32, addr(sigSemBuf))
+							}
+						}
+
+						queueSubmit := windows.vulkan1('vkQueueSubmit', queue, 1, subP, window._vkFence)
+						if _vkCallOk?(queueSubmit) {
+							_ -> { presented: false, error: 'vkQueueSubmit failed', detail: queueSubmit }
+							true -> {
+								// Present
+								queuePresent := _vkGetProc(inst, 'vkQueuePresentKHR')
+								if queuePresent.type != :ok {
+									true -> { presented: false, error: 'cannot resolve vkQueuePresentKHR' }
+									_ -> {
+										presentSize := if is64 { true -> 64, _ -> 32 }
+										presentInfo := bits(_vkZeros(presentSize))
+										pip := addr(presentInfo)
+										windows.writeU32(pip, VK_STRUCTURE_TYPE_PRESENT_INFO_KHR)
+
+										scBuf := bits(_vkZeros(ps))
+										_vkWritePtr(addr(scBuf), window._vkSwapchain)
+										idxBuf := bits([imgIdx & 255, (imgIdx >> 8) & 255, (imgIdx >> 16) & 255, (imgIdx >> 24) & 255])
+
+										if is64 {
+											true -> {
+												windows.writeU32(pip + 16, 1)
+												_vkWritePtr(pip + 24, addr(sigSemBuf))
+												windows.writeU32(pip + 32, 1)
+												_vkWritePtr(pip + 40, addr(scBuf))
+												_vkWritePtr(pip + 48, addr(idxBuf))
+											}
+											_ -> {
+												windows.writeU32(pip + 8, 1)
+												_vkWritePtr(pip + 12, addr(sigSemBuf))
+												windows.writeU32(pip + 16, 1)
+												_vkWritePtr(pip + 20, addr(scBuf))
+												_vkWritePtr(pip + 24, addr(idxBuf))
+											}
+										}
+
+										presRes := _vkCall(queuePresent.proc, queue, pip)
+										if _vkCallOk?(presRes) {
+											_ -> { presented: false, error: 'vkQueuePresentKHR failed', detail: presRes }
+											true -> { presented: true }
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

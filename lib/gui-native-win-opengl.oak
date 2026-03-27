@@ -6,6 +6,16 @@ PFD_DRAW_TO_WINDOW := 4
 PFD_SUPPORT_OPENGL := 32
 PFD_DOUBLEBUFFER := 1
 
+// OpenGL constants
+GL_COLOR_BUFFER_BIT := 16384
+GL_BGRA_EXT := 32993
+GL_UNSIGNED_BYTE := 5121
+GL_UNPACK_ALIGNMENT := 3317
+
+// DIB constants
+DIB_RGB_COLORS := 0
+BI_RGB := 0
+
 fn _initOpenGLWithContext(window, hdcHandle, chosen) {
 	ctx := windows.opengl32('wglCreateContext', hdcHandle)
 	if windows.callOk?(ctx) & ctx.r1 > 0 {
@@ -97,6 +107,105 @@ fn initOpenGL2DLayer(window) {
 				error: 'GetDC failed during OpenGL initialization'
 				detail: hdc
 			}
+		}
+	}
+}
+
+// --- OpenGL present (pixel transfer path) ---
+// Reads the GDI backbuffer via GetDIBits into a VirtualAlloc'd buffer,
+// then uploads to the OpenGL context via glDrawPixels and calls SwapBuffers.
+
+fn _ensureGlPixelBuffer(window) {
+	w := window.width
+	h := window.height
+	needed := w * h * 4
+	if type(window._glPixelBuf) = :int & window._glPixelBuf > 0 & window._glPixelBufSize = needed {
+		true -> window._glPixelBuf
+		_ -> {
+			if type(window._glPixelBuf) = :int & window._glPixelBuf > 0 {
+				true -> windows.virtualFree(window._glPixelBuf, 0, windows.MEM_RELEASE)
+			}
+			alloc := windows.virtualAlloc(0, needed, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_READWRITE)
+			if windows.callOk?(alloc) & alloc.r1 > 0 {
+				true -> {
+					window._glPixelBuf <- alloc.r1
+					window._glPixelBufSize <- needed
+					alloc.r1
+				}
+				_ -> {
+					window._glPixelBuf <- 0
+					window._glPixelBufSize <- 0
+					0
+				}
+			}
+		}
+	}
+}
+
+fn _ensureGlBmiHeader(window) {
+	if type(window._glBmiPtr) = :int & window._glBmiPtr > 0 {
+		true -> window._glBmiPtr
+		_ -> {
+			fn zeros(n, acc) if n {
+				0 -> acc
+				_ -> zeros(n - 1, acc << 0)
+			}
+			bmi := bits({zeros(40, [])})
+			window._glBmi <- bmi
+			window._glBmiPtr <- addr(bmi)
+			window._glBmiPtr
+		}
+	}
+}
+
+fn presentFrameOpenGL(window) {
+	hdc := window.frameTargetHdc
+	ctx := window.openglContext
+	w := window.width
+	h := window.height
+
+	if !(ctx > 0 & hdc > 0) -> {
+		{ presented: false, error: 'no GL context or DC' }
+	}
+
+	mk := windows.opengl32('wglMakeCurrent', hdc, ctx)
+	if !(windows.callOk?(mk) & mk.r1 > 0) -> {
+		{ presented: false, error: 'wglMakeCurrent failed', detail: mk }
+	}
+
+	pixelBuf := _ensureGlPixelBuffer(window)
+	if pixelBuf = 0 -> {
+		windows.opengl32('wglMakeCurrent', 0, 0)
+		{ presented: false, error: 'pixel buffer allocation failed' }
+	}
+
+	bmiPtr := _ensureGlBmiHeader(window)
+	windows.writeU32(bmiPtr + 0, 40)
+	windows.writeU32(bmiPtr + 4, w)
+	windows.writeU32(bmiPtr + 8, h)
+	windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
+	windows.writeU32(bmiPtr + 16, BI_RGB)
+
+	windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, pixelBuf, bmiPtr, DIB_RGB_COLORS)
+
+	windows.opengl32('glViewport', 0, 0, w, h)
+	windows.opengl32('glPixelStorei', GL_UNPACK_ALIGNMENT, 4)
+	windows.opengl32('glClear', GL_COLOR_BUFFER_BIT)
+	windows.opengl32('glRasterPos2i', -1, -1)
+	windows.opengl32('glDrawPixels', w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixelBuf)
+
+	windows.gdi32('SwapBuffers', hdc)
+	windows.opengl32('wglMakeCurrent', 0, 0)
+
+	{ presented: true }
+}
+
+fn releaseGlPixelBuffer(window) {
+	if type(window._glPixelBuf) = :int & window._glPixelBuf > 0 {
+		true -> {
+			windows.virtualFree(window._glPixelBuf, 0, windows.MEM_RELEASE)
+			window._glPixelBuf <- 0
+			window._glPixelBufSize <- 0
 		}
 	}
 }

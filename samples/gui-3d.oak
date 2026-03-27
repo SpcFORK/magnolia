@@ -22,7 +22,9 @@ if window.type {
 			camera: {
 				z: 6
 				fov: 88
+				backfaceCulling: true
 			}
+			drawDistance: 50
 			light: {
 				x: 0.4
 				y: 0.8
@@ -52,6 +54,19 @@ if window.type {
 			ortho: false
 			mode: 'perspective'
 		}
+
+		// Pre-allocate reusable transform objects (mutated each frame)
+		xfGrid := { ty: -2 }
+		xfAxes := { ty: -1.2 }
+		xfSolid := { rx: 0, ry: 0, rz: 0, tx: 0, ty: 0.2, tz: 0.6, scale: 1 }
+		xfWire := { rx: 0, ry: 0, rz: 0, tx: 1.8, tz: 0, scale: 1.25 }
+		xfVox := { ry: 0, tx: -1.8, ty: -0.4, tz: 0 }
+		lightObj := { x: 0, y: 0.65, z: -1, ambient: 0.2, diffuse: 0.8 }
+
+		// Pre-allocate colors
+		colGrid := gui.rgb(40, 70, 110)
+		colVox := gui.rgb(120, 190, 255)
+
 		gui.onDispatch(window, fn(_) {
 			if state.angle > 240 {
 				true -> state.ortho <- true
@@ -88,38 +103,23 @@ if window.type {
 				diffuse: 0.8
 			})
 
+			// Update reusable transforms in-place
+			xfSolid.rx <- state.angle * 0.4
+			xfSolid.ry <- state.angle * 0.6
+			xfSolid.rz <- state.angle * 0.25
+			xfWire.rx <- state.angle * 0.8
+			xfWire.ry <- state.angle
+			xfWire.rz <- state.angle * 0.45
+			xfVox.ry <- state.angle * 0.65
+
 			frame := gui.beginFrame(win)
 			if frame.type = :ok -> {
 				renderer.clear()
-				renderer.renderMesh(gridMesh, {
-					ty: -2
-				}, gui.rgb(40, 70, 110))
-				renderer.renderMesh(axesMesh, {
-					ty: -1.2
-				})
-				renderer.renderMeshSolid(solidCube, {
-					rx: state.angle * 0.4
-					ry: state.angle * 0.6
-					rz: state.angle * 0.25
-					tx: 0
-					ty: 0.2
-					tz: 0.6
-					scale: 1
-				})
-				renderer.renderMesh(cube, {
-					rx: state.angle * 0.8
-					ry: state.angle
-					rz: state.angle * 0.45
-					tx: 1.8
-					tz: 0
-					scale: 1.25
-				})
-				renderer.renderMesh(voxMesh, {
-					ry: state.angle * 0.65
-					tx: -1.8
-					ty: -0.4
-					tz: 0
-				}, gui.rgb(120, 190, 255))
+				renderer.renderMesh(gridMesh, xfGrid, colGrid)
+				renderer.renderMesh(axesMesh, xfAxes)
+				renderer.renderMeshSolid(solidCube, xfSolid)
+				renderer.renderMesh(cube, xfWire)
+				renderer.renderMesh(voxMesh, xfVox, colVox)
 				gui.drawText(win, 16, 28, 'Magnolia GUI 3D Renderer')
 				gui.drawText(win, 16, 50, 'angle: ' + string(state.angle))
 				gui.drawText(win, 16, 72, 'features: solid + wireframe + voxels + grid + axes')

@@ -1,0 +1,182 @@
+// gui-fonts sample – demonstrates cross-platform font creation, caching,
+// measurement, and rendering using the gui-fonts library through the GUI facade.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+guiFonts := import('gui-fonts')
+
+// ---------------------------------------------------------------------------
+// Font specs used in this sample
+// ---------------------------------------------------------------------------
+
+fontTitle := {
+	family: if gui.backend() {
+		:windows -> 'Segoe UI'
+		:linux -> '-*-helvetica-bold-r-normal--18-*-*-*-*-*-iso8859-1'
+		_ -> 'sans-serif'
+	}
+	size: 24
+	weight: guiFonts.FW_BOLD
+	italic: false
+	underline: false
+	strikeOut: false
+}
+
+fontBody := {
+	family: if gui.backend() {
+		:windows -> 'Consolas'
+		:linux -> '-*-courier-medium-r-normal--14-*-*-*-*-*-iso8859-1'
+		_ -> 'monospace'
+	}
+	size: 14
+	weight: guiFonts.FW_NORMAL
+	italic: false
+	underline: false
+	strikeOut: false
+}
+
+fontItalic := {
+	family: if gui.backend() {
+		:windows -> 'Georgia'
+		:linux -> '-*-times-medium-i-normal--14-*-*-*-*-*-iso8859-1'
+		_ -> 'serif'
+	}
+	size: 16
+	weight: guiFonts.FW_NORMAL
+	italic: true
+	underline: false
+	strikeOut: false
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+fn drawScene(window, state) {
+	frame := gui.beginFrame(window)
+	if frame.type = :ok -> {
+		bg := gui.rgb(20, 22, 30)
+		white := gui.rgb(240, 240, 240)
+		accent := gui.rgb(80, 180, 255)
+		dim := gui.rgb(140, 140, 160)
+
+		gui.fillRect(window, 0, 0, window.width, window.height, bg)
+
+		// Title
+		gui.setFont(window, fontTitle)
+		gui.drawText(window, 24, 36, 'gui-fonts Sample', accent)
+
+		// Body text
+		gui.setFont(window, fontBody)
+		gui.drawText(window, 24, 80, 'Font: ' + fontBody.family + ' @ ' + string(fontBody.size) + 'px', white)
+		gui.drawText(window, 24, 100, 'Weight: ' + string(fontBody.weight) + '  Italic: ' + string(fontBody.italic), white)
+
+		// Show key from fontKey
+		gui.drawText(window, 24, 130, 'fontKey(body): ' + guiFonts.fontKey(fontBody), dim)
+		gui.drawText(window, 24, 150, 'fontKey(title): ' + guiFonts.fontKey(fontTitle), dim)
+
+		// Measurement info
+		if state.measured {
+			? -> ?
+			_ -> {
+				gui.setFont(window, fontBody)
+				gui.drawText(window, 24, 190, 'measureText("Hello, Magnolia!"):', accent)
+				gui.drawText(window, 40, 210, 'width  = ' + string(state.measured.width), white)
+				gui.drawText(window, 40, 230, 'height = ' + string(state.measured.height), white)
+			}
+		}
+
+		// Italic sample
+		gui.setFont(window, fontItalic)
+		gui.drawText(window, 24, 270, 'The quick brown fox jumps over the lazy dog.', white)
+
+		// CSS string (for web reference)
+		gui.setFont(window, fontBody)
+		gui.drawText(window, 24, 310, 'webFontString(body): ' + string(guiFonts.webFontString(fontBody)), dim)
+		gui.drawText(window, 24, 330, 'webFontString(title): ' + string(guiFonts.webFontString(fontTitle)), dim)
+
+		// Default spec info
+		defSpec := guiFonts.defaultFontSpec()
+		gui.drawText(window, 24, 370, 'defaultFontSpec().family: ' + defSpec.family, dim)
+
+		// Frame counter
+		gui.drawText(window, 24, 410, 'frame: ' + string(state.ticks), dim)
+
+		gui.endFrame(window)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Native entry
+// ---------------------------------------------------------------------------
+
+fn runNative(window) {
+	// Measure a sample string
+	measured := guiFonts.measureText(
+		if gui.backend() = :windows { true -> ?, _ -> ? }
+		fontBody
+		'Hello, Magnolia!'
+	)
+
+	state := {
+		ticks: 0
+		measured: if measured.type = :ok { true -> measured, _ -> ? }
+	}
+
+	gui.show(window)
+	gui.setTitle(window, 'Magnolia gui-fonts Sample')
+	drawScene(window, state)
+
+	loopResult := gui.run(window, ?, fn(win, _dt) {
+		state.ticks <- state.ticks + 1
+		drawScene(win, state)
+	})
+	printf('Loop ended: {{ 0 }}', string(loopResult))
+	gui.close(window)
+}
+
+// ---------------------------------------------------------------------------
+// Web entry
+// ---------------------------------------------------------------------------
+
+fn runWeb(window) {
+	gui.createCanvas(window, 'magnolia-fonts-canvas', {
+		width: 800
+		height: 460
+		dpr: 1
+	})
+
+	println('gui-fonts web sample')
+	println('defaultFontSpec: ' + string(guiFonts.defaultFontSpec()))
+	println('fontKey(body): ' + guiFonts.fontKey(fontBody))
+	println('webFontString(body): ' + guiFonts.webFontString(fontBody))
+	println('webFontString(title): ' + guiFonts.webFontString(fontTitle))
+	println('webFontString(italic): ' + guiFonts.webFontString(fontItalic))
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+window := gui.createWindow('gui-fonts Sample', 800, 460, {
+	layer2D: 'auto'
+	layer3D: 'auto'
+})
+
+if window.type {
+	:ok -> if window.backend {
+		:windows -> runNative(window)
+		:linux -> runNative(window)
+		_ -> runWeb(window)
+	}
+	_ -> {
+		println('Failed to create window: ' + string(window.error))
+	}
+}

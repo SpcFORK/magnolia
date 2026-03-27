@@ -46,6 +46,26 @@ Usage
 
 ```oak
 gr := import('gui-render')
-renderer := gr.Renderer3D(deps, window, { camera: { z: 5, fov: 90 } })
+renderer := gr.Renderer3D(deps, window, { camera: { z: 5, fov: 90 }, drawDistance: 100 })
 renderer.renderMesh(mesh)
 ```
+
+## Draw Distance / Far-Plane Culling
+
+Set `drawDistance` in options (or call `renderer.setDrawDistance(dist)`) to cull meshes whose bounding sphere is entirely beyond that distance from the camera. A value of `0` (default) disables the far-plane limit.
+
+```oak
+renderer := gr.Renderer3D(deps, window, { drawDistance: 50 })
+// or at runtime:
+renderer.setDrawDistance(100)
+```
+
+## Rendering Optimizations
+
+The 3D pipeline includes several automatic optimizations:
+
+- **Frustum culling** — each `drawMesh*` call computes a bounding sphere and skips the mesh entirely if it falls outside the view frustum (behind near plane, beyond far plane, or off-screen)
+- **Sub-pixel rejection** — triangles that project to less than 1 pixel of screen area are skipped
+- **Adaptive depth sort** — painter sort uses in-place insertion sort for small face batches (≤16 triangles), reducing allocation overhead
+- **Backface culling** — enabled by default (`camera.backfaceCulling`), skips triangles facing away from the camera
+- **Mesh caching** — all primitive meshes are cached by parameters to avoid repeated geometry construction

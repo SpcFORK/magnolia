@@ -1,0 +1,344 @@
+// Tests for gui-lighting.oak — light constructors, materials, scenes, shading
+
+std := import('std')
+lit := import('gui-lighting')
+
+fn _rgb(r, g, b) r | (g << 8) | (b << 16)
+
+fn run(t) {
+	fn p3(x, y, z) { x: x, y: y, z: z }
+
+	// ── Light constructors ─────────────────────────────────────────────────
+
+	// DirectionalLight defaults
+	{
+		d := lit.DirectionalLight(?)
+		'DirectionalLight type' |> t.eq(d.type, :directional)
+		'DirectionalLight default x' |> t.eq(d.x, 0)
+		'DirectionalLight default y' |> t.eq(d.y, -1)
+		'DirectionalLight default z' |> t.eq(d.z, 0)
+		'DirectionalLight default intensity' |> t.eq(d.intensity, 1)
+		'DirectionalLight default colorR' |> t.eq(d.colorR, 255)
+		'DirectionalLight default colorG' |> t.eq(d.colorG, 255)
+		'DirectionalLight default colorB' |> t.eq(d.colorB, 255)
+	}
+
+	// DirectionalLight custom
+	{
+		d := lit.DirectionalLight({ x: 0.5, y: -0.8, z: -0.3, intensity: 0.7, colorR: 128, colorG: 64, colorB: 200 })
+		'DirectionalLight custom x' |> t.approx(d.x, 0.5)
+		'DirectionalLight custom y' |> t.approx(d.y, -0.8)
+		'DirectionalLight custom z' |> t.approx(d.z, -0.3)
+		'DirectionalLight custom intensity' |> t.approx(d.intensity, 0.7)
+		'DirectionalLight custom colorR' |> t.eq(d.colorR, 128)
+		'DirectionalLight custom colorG' |> t.eq(d.colorG, 64)
+		'DirectionalLight custom colorB' |> t.eq(d.colorB, 200)
+	}
+
+	// PointLight defaults
+	{
+		p := lit.PointLight(?)
+		'PointLight type' |> t.eq(p.type, :point)
+		'PointLight default px' |> t.eq(p.px, 0)
+		'PointLight default py' |> t.eq(p.py, 2)
+		'PointLight default pz' |> t.eq(p.pz, 0)
+		'PointLight default intensity' |> t.eq(p.intensity, 1)
+		'PointLight default radius' |> t.eq(p.radius, 10)
+	}
+
+	// PointLight custom
+	{
+		p := lit.PointLight({ px: 3, py: 5, pz: -2, intensity: 2.5, radius: 20 })
+		'PointLight custom px' |> t.eq(p.px, 3)
+		'PointLight custom py' |> t.eq(p.py, 5)
+		'PointLight custom pz' |> t.eq(p.pz, -2)
+		'PointLight custom intensity' |> t.approx(p.intensity, 2.5)
+		'PointLight custom radius' |> t.eq(p.radius, 20)
+	}
+
+	// SpotLight defaults
+	{
+		s := lit.SpotLight(?)
+		'SpotLight type' |> t.eq(s.type, :spot)
+		'SpotLight default px' |> t.eq(s.px, 0)
+		'SpotLight default py' |> t.eq(s.py, 3)
+		'SpotLight default angle' |> t.eq(s.angle, 30)
+		'SpotLight default penumbra' |> t.eq(s.penumbra, 5)
+	}
+
+	// SpotLight custom
+	{
+		s := lit.SpotLight({ px: 1, py: 4, pz: 2, x: 0, y: -1, z: 0, angle: 45, penumbra: 10, radius: 15 })
+		'SpotLight custom angle' |> t.eq(s.angle, 45)
+		'SpotLight custom penumbra' |> t.eq(s.penumbra, 10)
+		'SpotLight custom radius' |> t.eq(s.radius, 15)
+	}
+
+	// AmbientLight defaults
+	{
+		a := lit.AmbientLight(?)
+		'AmbientLight type' |> t.eq(a.type, :ambient)
+		'AmbientLight default intensity' |> t.approx(a.intensity, 0.2)
+		'AmbientLight default colorR' |> t.eq(a.colorR, 255)
+	}
+
+	// AmbientLight custom
+	{
+		a := lit.AmbientLight({ intensity: 0.5, colorR: 100, colorG: 100, colorB: 200 })
+		'AmbientLight custom intensity' |> t.approx(a.intensity, 0.5)
+		'AmbientLight custom colorR' |> t.eq(a.colorR, 100)
+		'AmbientLight custom colorB' |> t.eq(a.colorB, 200)
+	}
+
+	// Intensity clamping
+	{
+		d := lit.DirectionalLight({ intensity: 50 })
+		'DirectionalLight intensity clamped to 10' |> t.eq(d.intensity, 10)
+		d2 := lit.DirectionalLight({ intensity: -5 })
+		'DirectionalLight intensity clamped to 0' |> t.eq(d2.intensity, 0)
+		a := lit.AmbientLight({ intensity: 5 })
+		'AmbientLight intensity clamped to 1' |> t.eq(a.intensity, 1)
+	}
+
+	// Color channel clamping
+	{
+		d := lit.DirectionalLight({ colorR: 300, colorG: -10, colorB: 128 })
+		'DirectionalLight colorR clamped to 255' |> t.eq(d.colorR, 255)
+		'DirectionalLight colorG clamped to 0' |> t.eq(d.colorG, 0)
+		'DirectionalLight colorB passes through' |> t.eq(d.colorB, 128)
+	}
+
+	// ── Material ──────────────────────────────────────────────────────────
+
+	// Material defaults
+	{
+		m := lit.Material(?)
+		'Material default ambient' |> t.approx(m.ambient, 0.2)
+		'Material default diffuse' |> t.approx(m.diffuse, 0.8)
+		'Material default specular' |> t.approx(m.specular, 0.3)
+		'Material default shininess' |> t.eq(m.shininess, 32)
+		'Material default emissiveR' |> t.eq(m.emissiveR, 0)
+		'Material default emissiveG' |> t.eq(m.emissiveG, 0)
+		'Material default emissiveB' |> t.eq(m.emissiveB, 0)
+	}
+
+	// Material custom
+	{
+		m := lit.Material({ ambient: 0.1, diffuse: 0.9, specular: 0.6, shininess: 128, emissiveR: 30 })
+		'Material custom ambient' |> t.approx(m.ambient, 0.1)
+		'Material custom diffuse' |> t.approx(m.diffuse, 0.9)
+		'Material custom specular' |> t.approx(m.specular, 0.6)
+		'Material custom shininess' |> t.eq(m.shininess, 128)
+		'Material custom emissiveR' |> t.eq(m.emissiveR, 30)
+	}
+
+	// Material clamping
+	{
+		m := lit.Material({ ambient: 5, diffuse: -1, shininess: 0 })
+		'Material ambient clamped to 1' |> t.eq(m.ambient, 1)
+		'Material diffuse clamped to 0' |> t.eq(m.diffuse, 0)
+		'Material shininess clamped to 1' |> t.eq(m.shininess, 1)
+	}
+
+	// ── LightScene management ──────────────────────────────────────────────
+
+	// LightScene defaults
+	{
+		s := lit.LightScene(?)
+		'LightScene default lights empty' |> t.eq(len(s.lights), 0)
+		'LightScene default globalAmbient' |> t.approx(s.globalAmbient, 0.1)
+	}
+
+	// addLight / lightCount
+	{
+		s := lit.LightScene({})
+		d := lit.DirectionalLight({})
+		lit.addLight(s, d)
+		'addLight increases count to 1' |> t.eq(lit.lightCount(s), 1)
+		p := lit.PointLight({})
+		lit.addLight(s, p)
+		'addLight increases count to 2' |> t.eq(lit.lightCount(s), 2)
+		'first light is directional' |> t.eq(s.lights.0.type, :directional)
+		'second light is point' |> t.eq(s.lights.1.type, :point)
+	}
+
+	// removeLight
+	{
+		s := lit.LightScene({})
+		lit.addLight(s, lit.AmbientLight({}))
+		lit.addLight(s, lit.DirectionalLight({}))
+		lit.addLight(s, lit.PointLight({}))
+		'before removeLight count 3' |> t.eq(lit.lightCount(s), 3)
+		lit.removeLight(s, 1)
+		'after removeLight count 2' |> t.eq(lit.lightCount(s), 2)
+		'first light remains ambient' |> t.eq(s.lights.0.type, :ambient)
+		'second light is now point' |> t.eq(s.lights.1.type, :point)
+	}
+
+	// clearLights
+	{
+		s := lit.LightScene({})
+		lit.addLight(s, lit.DirectionalLight({}))
+		lit.addLight(s, lit.PointLight({}))
+		lit.clearLights(s)
+		'clearLights empties scene' |> t.eq(lit.lightCount(s), 0)
+	}
+
+	// ── faceNormal ──────────────────────────────────────────────────────────
+
+	// XY plane triangle: normal should point +Z
+	{
+		n := lit.faceNormal(p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0))
+		'faceNormal XY plane x' |> t.approx(n.0, 0, 0.001)
+		'faceNormal XY plane y' |> t.approx(n.1, 0, 0.001)
+		'faceNormal XY plane z' |> t.approx(n.2, 1, 0.001)
+	}
+
+	// XZ plane triangle: normal should point -Y (cross product of +X and +Z)
+	{
+		n := lit.faceNormal(p3(0, 0, 0), p3(1, 0, 0), p3(0, 0, 1))
+		'faceNormal XZ plane x' |> t.approx(n.0, 0, 0.001)
+		'faceNormal XZ plane y' |> t.approx(n.1, -1, 0.001)
+		'faceNormal XZ plane z' |> t.approx(n.2, 0, 0.001)
+	}
+
+	// ── faceCenter ──────────────────────────────────────────────────────────
+
+	{
+		c := lit.faceCenter(p3(0, 0, 0), p3(3, 0, 0), p3(0, 3, 0))
+		'faceCenter x' |> t.approx(c.x, 1)
+		'faceCenter y' |> t.approx(c.y, 1)
+		'faceCenter z' |> t.approx(c.z, 0)
+	}
+
+	{
+		c := lit.faceCenter(p3(1, 2, 3), p3(4, 5, 6), p3(7, 8, 9))
+		'faceCenter non-origin x' |> t.approx(c.x, 4)
+		'faceCenter non-origin y' |> t.approx(c.y, 5)
+		'faceCenter non-origin z' |> t.approx(c.z, 6)
+	}
+
+	// ── shadeFaceIntensity ──────────────────────────────────────────────────
+
+	// Empty scene → only globalAmbient * material.ambient
+	{
+		scene := lit.LightScene({ globalAmbient: 0.5 })
+		mat := lit.Material({ ambient: 1.0 })
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceIntensity empty scene equals globalAmbient * ambient' |> t.approx(i, 0.5, 0.01)
+	}
+
+	// Directional light facing normal → near full brightness
+	{
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		lit.addLight(scene, lit.DirectionalLight({ x: 0, y: 0, z: -1, intensity: 1 }))
+		mat := lit.Material({ ambient: 0, diffuse: 1, specular: 0 })
+		// Normal is +Z, light dir is -Z → light direction is (0,0,+1) → dot=1
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceIntensity directional facing normal > 0.8' |> t.eq(i > 0.8, true)
+	}
+
+	// Directional light behind face → near zero
+	{
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		lit.addLight(scene, lit.DirectionalLight({ x: 0, y: 0, z: 1, intensity: 1 }))
+		mat := lit.Material({ ambient: 0, diffuse: 1, specular: 0 })
+		// Normal is +Z, light dir is +Z → negated = (0,0,-1) → dot = -1 → clamped to 0
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceIntensity directional behind face near 0' |> t.approx(i, 0.0, 0.01)
+	}
+
+	// Ambient-only scene gives constant brightness
+	{
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		lit.addLight(scene, lit.AmbientLight({ intensity: 0.4 }))
+		mat := lit.Material({ ambient: 0.5, diffuse: 0, specular: 0 })
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceIntensity ambient only' |> t.approx(i, 0.2, 0.01)
+	}
+
+	// ── shadeFaceColor ──────────────────────────────────────────────────────
+
+	{
+		deps := { rgb: _rgb }
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		mat := lit.Material({ ambient: 0, diffuse: 0, specular: 0 })
+		// No lights, no ambient → should return base color emissive or black
+		baseColor := _rgb(100, 200, 50)
+		c := lit.shadeFaceColor(deps, baseColor, scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceColor no lights/ambient gives black' |> t.eq(c, _rgb(0, 0, 0))
+	}
+
+	// shadeFaceColor with emissive material
+	{
+		deps := { rgb: _rgb }
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		mat := lit.Material({ ambient: 0, diffuse: 0, specular: 0, emissiveR: 80, emissiveG: 40, emissiveB: 20 })
+		baseColor := _rgb(255, 255, 255)
+		c := lit.shadeFaceColor(deps, baseColor, scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceColor emissive only R' |> t.eq(c & 255, 80)
+		'shadeFaceColor emissive only G' |> t.eq((c >> 8) & 255, 40)
+		'shadeFaceColor emissive only B' |> t.eq((c >> 16) & 255, 20)
+	}
+
+	// shadeFaceColor with globalAmbient
+	{
+		deps := { rgb: _rgb }
+		scene := lit.LightScene({ globalAmbient: 1.0 })
+		mat := lit.Material({ ambient: 1.0, diffuse: 0, specular: 0 })
+		baseColor := _rgb(200, 100, 50)
+		c := lit.shadeFaceColor(deps, baseColor, scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceColor globalAmbient=1 R' |> t.eq(c & 255, 200)
+		'shadeFaceColor globalAmbient=1 G' |> t.eq((c >> 8) & 255, 100)
+		'shadeFaceColor globalAmbient=1 B' |> t.eq((c >> 16) & 255, 50)
+	}
+
+	// Point light at distance → attenuation
+	{
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		lit.addLight(scene, lit.PointLight({ px: 0, py: 100, pz: 0, intensity: 1, radius: 5 }))
+		mat := lit.Material({ ambient: 0, diffuse: 1, specular: 0 })
+		// Point light far beyond radius → attenuated to 0
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceIntensity point beyond radius' |> t.approx(i, 0.0, 0.01)
+	}
+
+	// Point light close → non-zero
+	{
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		// Light directly above the face at y=1
+		lit.addLight(scene, lit.PointLight({ px: 0, py: 1, pz: 0, intensity: 1, radius: 10 }))
+		mat := lit.Material({ ambient: 0, diffuse: 1, specular: 0 })
+		// Triangle in XZ plane at y=0, normal points +Y (winding: swap b/c for upward normal)
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(0, 0, 1), p3(1, 0, 0), p3(0, 0, -5))
+		'shadeFaceIntensity point close is positive' |> t.eq(i > 0, true)
+	}
+
+	// Multiple lights combine
+	{
+		scene := lit.LightScene({ globalAmbient: 0.0 })
+		lit.addLight(scene, lit.AmbientLight({ intensity: 0.3 }))
+		lit.addLight(scene, lit.DirectionalLight({ x: 0, y: 0, z: -1, intensity: 1 }))
+		mat := lit.Material({ ambient: 1.0, diffuse: 1.0, specular: 0 })
+		i := lit.shadeFaceIntensity(scene, mat, p3(0, 0, 0), p3(1, 0, 0), p3(0, 1, 0), p3(0, 0, -5))
+		'shadeFaceIntensity multi-light > ambient alone' |> t.eq(i > 0.3, true)
+	}
+
+	// ── Internal vector helpers ─────────────────────────────────────────────
+
+	'_len3 unit x' |> t.approx(lit._len3(1, 0, 0), 1.0, 0.0001)
+	'_len3 3-4-5 triangle' |> t.approx(lit._len3(3, 4, 0), 5.0, 0.0001)
+	'_dot orthogonal' |> t.approx(lit._dot(1, 0, 0, 0, 1, 0), 0.0, 0.0001)
+	'_dot parallel' |> t.approx(lit._dot(1, 0, 0, 1, 0, 0), 1.0, 0.0001)
+
+	{
+		n := lit._norm3(3, 0, 0)
+		'_norm3 x normalized' |> t.approx(n.0, 1.0, 0.0001)
+		'_norm3 y zero' |> t.approx(n.1, 0.0, 0.0001)
+		'_norm3 z zero' |> t.approx(n.2, 0.0, 0.0001)
+	}
+	{
+		n := lit._norm3(0, 0, 0)
+		'_norm3 zero vector fallback z=1' |> t.approx(n.2, 1.0, 0.0001)
+	}
+}

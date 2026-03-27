@@ -197,6 +197,30 @@ fn _handleVulkan2DInit(state) {
 				requested: :vulkan
 				active: true
 			}
+
+			// Create logical device + swapchain for Vulkan present
+			scInit := guiNativeWinVulkan.initVulkanSwapchain(state)
+			if scInit.type = :ok {
+				true -> {
+					state.layers.twoD.vulkanSwapchainInit <- scInit
+				}
+				_ -> {
+					// Swapchain creation failed; bootstrap OpenGL as fallback presenter
+					state.layers.twoD.vulkanSwapchainInit <- scInit
+					if state.openglContext = 0 & _default(state.layers.twoD.opengl.available, false) {
+						true -> {
+							glInit := guiNativeWinOpenGL.initOpenGL2DLayer(state)
+							if glInit.type = :ok {
+								true -> {
+									state.openglContext <- _default(glInit.context, 0)
+									state.openglPixelFormat <- _default(glInit.pixelFormat, 0)
+									state.layers.twoD.openglInit <- glInit
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 		_ -> {
 			fallbackTo := _fallbackPresenterAfterVulkanFailure(state)
@@ -466,6 +490,9 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							vulkanSurface: 0
 							vulkanPhysicalDevice: 0
 							vulkanQueueFamily: -1
+							vulkanDevice: 0
+							vulkanQueue: 0
+							_vkSwapchainReady: false
 							ddraw: ddraw
 							d3d9: d3d9
 							vulkan: vulkan
@@ -771,6 +798,14 @@ fn beginFrame(window) {
 	// started.  This prevents Vulkan/OpenGL ICD calls from blocking or
 	// deadlocking during window creation.
 	_ensureLayerInitForFrame(window)
+	// Reset per-frame GDI object tracking so draw calls re-select pens/brushes
+	// into the fresh DC.  Without this, stale _curPen/_curBrush values from a
+	// previous frame (or a hot-run restart) skip SelectObject and the DC draws
+	// with whatever default object it has — causing incorrect colors or missing
+	// strokes.
+	window._curPen <- ?
+	window._curBrush <- ?
+	window._curNullPen <- ?
 	// Safety net: release any stale DC from a previous frame that skipped
 	// endFrame (e.g. when beginFrame succeeded but the caller's draw branch
 	// did not call endFrame).  Without this, the leaked DC accumulates and
@@ -792,11 +827,26 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 	true -> {
 		presentedViaOpenGL := guiNativeWinPresent.presentFrameViaOpenGL(window)
 		presentedViaDdraw := guiNativeWinDdraw.presentFrameViaDdraw(window)
+
+		// Vulkan swapchain present
 		presentedViaVulkan := false
-		// Vulkan present: swapchain-based present is not yet wired.
-		// window.vulkanInstance is kept alive for future draw calls and swapchain setup.
+		if window.presenterBackend = :vulkan & _default(window._vkSwapchainReady, false) {
+			true -> {
+				vkResult := guiNativeWinVulkan.presentFrameVulkan(window)
+				presentedViaVulkan <- _default(vkResult.presented, false)
+			}
+		}
+
 		if !presentedViaOpenGL.presented & !presentedViaDdraw.presented & !presentedViaVulkan {
-			true -> guiNativeWinPresent.presentFrameViaGdi(window)
+			true -> if window.presenterBackend = :vulkan & type(window.openglContext) = :int & window.openglContext > 0 {
+				true -> {
+					glFallback := guiNativeWinOpenGL.presentFrameOpenGL(window)
+					if !glFallback.presented {
+						true -> guiNativeWinPresent.presentFrameViaGdi(window)
+					}
+				}
+				_ -> guiNativeWinPresent.presentFrameViaGdi(window)
+			}
 		}
 		windows.gdi32('GdiFlush')
 		windows.releaseDC(window.hwnd, window.frameTargetHdc)
@@ -828,6 +878,8 @@ fn close(window) {
 			endFrame(window)
 			guiNativeWinClose.cleanupFrameBuffers(window)
 			guiNativeWinDdraw.releasePrimarySurface(window)
+			guiNativeWinOpenGL.releaseGlPixelBuffer(window)
+			guiNativeWinVulkan.destroyVulkanSwapchain(window)
 			guiNativeWinClose.cleanupOpenGL(window)
 			guiNativeWinClose.cleanupVulkan(window)
 			if windows.windowAlive?(window.hwnd) {

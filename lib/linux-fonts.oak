@@ -1,0 +1,280 @@
+// linux-fonts provides X11 core font loading, querying, and text measurement
+// helpers for Linux.  Uses Xlib's built-in font functions (XLoadQueryFont,
+// XSetFont, XTextWidth, XTextExtents, XFreeFontInfo, etc.).
+
+sys := import('sys')
+{
+	readU32: readU32
+} := import('writes')
+
+{
+	isLinux?: isLinux?
+	cstr: cstr
+	_readCString: _readCString
+	_platformError: _platformError
+} := import('linux-core')
+
+{
+	x11: x11
+} := import('linux-loader')
+
+// ---------------------------------------------------------------------------
+// X11 font functions – thin wrappers over Xlib
+// ---------------------------------------------------------------------------
+
+// loadQueryFont opens and queries an X11 core font by XLFD name or alias.
+//   display – X Display pointer
+//   name    – font name, e.g. '-*-courier-bold-r-*-*-14-*-*-*-*-*-*-*'
+//             or a short alias like 'fixed', '9x15', '10x20'
+// Returns { type: :ok, fontStruct: <ptr> } or error.
+fn loadQueryFont(display, name) if isLinux?() {
+	true -> {
+		res := x11('XLoadQueryFont', display, cstr(name))
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> { type: :ok, fontStruct: res.r1 }
+			_ -> { type: :error, error: 'XLoadQueryFont failed for: ' + name, detail: res }
+		}
+	}
+	_ -> _platformError('loadQueryFont')
+}
+
+// loadFont loads an X11 core font and returns its Font (XID).
+fn loadFont(display, name) if isLinux?() {
+	true -> {
+		res := x11('XLoadFont', display, cstr(name))
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> { type: :ok, fontId: res.r1 }
+			_ -> { type: :error, error: 'XLoadFont failed for: ' + name, detail: res }
+		}
+	}
+	_ -> _platformError('loadFont')
+}
+
+// setFont sets the font used by the given GC.
+fn setFont(display, gc, fontId) if isLinux?() {
+	true -> x11('XSetFont', display, gc, fontId)
+	_ -> _platformError('setFont')
+}
+
+// freeFont releases resources associated with an XFontStruct.
+fn freeFont(display, fontStruct) if isLinux?() {
+	true -> x11('XFreeFont', display, fontStruct)
+	_ -> _platformError('freeFont')
+}
+
+// unloadFont unloads a font loaded via loadFont (by Font ID).
+fn unloadFont(display, fontId) if isLinux?() {
+	true -> x11('XUnloadFont', display, fontId)
+	_ -> _platformError('unloadFont')
+}
+
+// ---------------------------------------------------------------------------
+// Text measurement
+// ---------------------------------------------------------------------------
+
+// textWidth measures the pixel width of a string using a loaded XFontStruct.
+fn textWidth(fontStruct, text) if isLinux?() {
+	true -> {
+		res := x11('XTextWidth', fontStruct, cstr(text), len(text))
+		if sys.ok?(res) {
+			true -> { type: :ok, width: res.r1 }
+			_ -> { type: :error, error: 'XTextWidth failed', detail: res }
+		}
+	}
+	_ -> _platformError('textWidth')
+}
+
+// ---------------------------------------------------------------------------
+// Font struct field accessors
+//
+// XFontStruct layout (64-bit):
+//   offset  0: XExtData *ext_data         (8 bytes)
+//   offset  8: Font fid                   (8 bytes, XID = unsigned long)
+//   offset 16: unsigned direction          (4 bytes)
+//   offset 20: unsigned min_char_or_byte2  (4 bytes)
+//   offset 24: unsigned max_char_or_byte2  (4 bytes)
+//   offset 28: unsigned min_byte1          (4 bytes)
+//   offset 32: unsigned max_byte1          (4 bytes)
+//   offset 36: Bool all_chars_exist        (4 bytes)
+//   offset 40: unsigned default_char       (4 bytes)
+//   offset 44: int n_properties            (4 bytes)
+//   offset 48: XFontProp *properties       (8 bytes)
+//   offset 56: XCharStruct min_bounds      (12 bytes)
+//   offset 68: XCharStruct max_bounds      (12 bytes)
+//   offset 80: XCharStruct *per_char       (8 bytes)
+//   offset 88: int ascent                  (4 bytes)
+//   offset 92: int descent                 (4 bytes)
+// ---------------------------------------------------------------------------
+
+// XCharStruct offsets within a 12-byte block:
+//   0: lbearing (2)  2: rbearing (2)  4: width (2)  6: ascent (2)  8: descent (2)  10: attributes (2)
+
+XFONTSTRUCT_FID_OFF        := 8
+XFONTSTRUCT_DIRECTION_OFF  := 16
+XFONTSTRUCT_ASCENT_OFF     := 88
+XFONTSTRUCT_DESCENT_OFF    := 92
+
+// fontStructAscent returns the ascent from an XFontStruct pointer.
+fn fontStructAscent(fontStruct) readU32(fontStruct + XFONTSTRUCT_ASCENT_OFF)
+
+// fontStructDescent returns the descent from an XFontStruct pointer.
+fn fontStructDescent(fontStruct) readU32(fontStruct + XFONTSTRUCT_DESCENT_OFF)
+
+// fontStructHeight returns ascent + descent (total height) from an XFontStruct.
+fn fontStructHeight(fontStruct) {
+	fontStructAscent(fontStruct) + fontStructDescent(fontStruct)
+}
+
+// fontStructFid returns the Font (XID) from an XFontStruct pointer.
+fn fontStructFid(fontStruct) readU32(fontStruct + XFONTSTRUCT_FID_OFF)
+
+// ---------------------------------------------------------------------------
+// Higher-level helpers
+// ---------------------------------------------------------------------------
+
+// fontMetrics loads a font, reads basic metrics, returns them.
+// Returns { type: :ok, fontStruct, fontId, ascent, descent, height }.
+fn fontMetrics(display, name) if isLinux?() {
+	true -> {
+		loaded := loadQueryFont(display, name)
+		if loaded.type = :ok {
+			true -> {
+				fs := loaded.fontStruct
+				{
+					type: :ok
+					fontStruct: fs
+					fontId: fontStructFid(fs)
+					ascent: fontStructAscent(fs)
+					descent: fontStructDescent(fs)
+					height: fontStructHeight(fs)
+				}
+			}
+			_ -> loaded
+		}
+	}
+	_ -> _platformError('fontMetrics')
+}
+
+// measureText loads a font, measures the text, and returns width + height.
+// The font is kept loaded (caller should freeFont when done).
+fn measureText(display, fontName, text) if isLinux?() {
+	true -> {
+		loaded := loadQueryFont(display, fontName)
+		if loaded.type = :ok {
+			true -> {
+				fs := loaded.fontStruct
+				w := textWidth(fs, text)
+				if w.type = :ok {
+					true -> {
+						{
+							type: :ok
+							fontStruct: fs
+							width: w.width
+							height: fontStructHeight(fs)
+							ascent: fontStructAscent(fs)
+							descent: fontStructDescent(fs)
+						}
+					}
+					_ -> w
+				}
+			}
+			_ -> loaded
+		}
+	}
+	_ -> _platformError('measureText')
+}
+
+// ---------------------------------------------------------------------------
+// Font cache  – per-display font caching by name
+// ---------------------------------------------------------------------------
+_fontCacheMap := {}
+
+fn _fontCacheKey(displayPtr, fontName) string(displayPtr) + ':' + fontName
+
+// cachedFont returns a cached XFontStruct pointer for the given display + name,
+// loading it if not already cached.
+fn cachedFont(display, fontName) {
+	key := _fontCacheKey(display, fontName)
+	existing := _fontCacheMap.(key)
+	if existing {
+		? -> {
+			loaded := loadQueryFont(display, fontName)
+			if loaded.type = :ok {
+				true -> {
+					_fontCacheMap.(key) <- loaded.fontStruct
+					loaded
+				}
+				_ -> loaded
+			}
+		}
+		_ -> { type: :ok, fontStruct: existing }
+	}
+}
+
+// releaseCachedFonts frees all cached fonts for a given display.
+fn releaseCachedFonts(display) {
+	{ each: each } := import('std')
+	prefix := string(display) + ':'
+	keys(_fontCacheMap) |> each(fn(k) {
+		if slice(k, 0, len(prefix)) = prefix {
+			true -> {
+				fs := _fontCacheMap.(k)
+				if type(fs) = :int & fs > 0 {
+					true -> freeFont(display, fs)
+				}
+				_fontCacheMap.(k) <- ?
+			}
+		}
+	})
+	0
+}
+
+// releaseAllCachedFonts frees every cached font entry globally.
+fn releaseAllCachedFonts() {
+	{ each: each } := import('std')
+	keys(_fontCacheMap) |> each(fn(k) {
+		_fontCacheMap.(k) <- ?
+	})
+	_fontCacheMap <- {}
+	0
+}
+
+// ---------------------------------------------------------------------------
+// Well-known X11 core font names (aliases & common XLFDs)
+// ---------------------------------------------------------------------------
+FONT_FIXED       := 'fixed'
+FONT_CURSOR      := 'cursor'
+FONT_6X13        := '6x13'
+FONT_7X13        := '7x13'
+FONT_8X13        := '8x13'
+FONT_9X15        := '9x15'
+FONT_10X20       := '10x20'
+FONT_COURIER_14  := '-*-courier-medium-r-normal--14-*-*-*-*-*-iso8859-1'
+FONT_COURIER_B14 := '-*-courier-bold-r-normal--14-*-*-*-*-*-iso8859-1'
+FONT_HELV_12     := '-*-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1'
+FONT_HELV_B14    := '-*-helvetica-bold-r-normal--14-*-*-*-*-*-iso8859-1'
+FONT_TIMES_14    := '-*-times-medium-r-normal--14-*-*-*-*-*-iso8859-1'
+FONT_TIMES_B14   := '-*-times-bold-r-normal--14-*-*-*-*-*-iso8859-1'
+
+// buildXLFD constructs an X Logical Font Description string from a spec.
+//   spec fields: foundry, family, weight, slant, setWidth, addStyle,
+//                pixelSize, pointSize, resX, resY, spacing, avgWidth,
+//                registry, encoding
+// Unspecified fields default to '*'.
+fn buildXLFD(spec) {
+	d := fn(v) if v { ? -> '*', _ -> string(v) }
+	'-' + d(spec.foundry) +
+	'-' + d(spec.family) +
+	'-' + d(spec.weight) +
+	'-' + d(spec.slant) +
+	'-' + d(spec.setWidth) +
+	'-' + d(spec.addStyle) +
+	'-' + d(spec.pixelSize) +
+	'-' + d(spec.pointSize) +
+	'-' + d(spec.resX) +
+	'-' + d(spec.resY) +
+	'-' + d(spec.spacing) +
+	'-' + d(spec.avgWidth) +
+	'-' + d(spec.registry) +
+	'-' + d(spec.encoding)
+}

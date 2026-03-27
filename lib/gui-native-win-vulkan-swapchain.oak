@@ -1,0 +1,618 @@
+// gui-native-win-vulkan-swapchain contains swapchain lifecycle, command resources, and staging buffer.
+
+windows := import('windows')
+{ _ptrRead: _ptrRead, _readOutPointer: _readOutPointer } := import('win-common')
+{
+	VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR: VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR
+	VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO: VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
+	VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO: VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
+	VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO: VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+	VK_STRUCTURE_TYPE_FENCE_CREATE_INFO: VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
+	VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO: VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO
+	VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+	VK_SUCCESS: VK_SUCCESS
+	VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT: VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+	VK_IMAGE_USAGE_TRANSFER_DST_BIT: VK_IMAGE_USAGE_TRANSFER_DST_BIT
+	VK_SHARING_MODE_EXCLUSIVE: VK_SHARING_MODE_EXCLUSIVE
+	VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR: VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+	VK_PRESENT_MODE_FIFO_KHR: VK_PRESENT_MODE_FIFO_KHR
+	VK_FORMAT_B8G8R8A8_UNORM: VK_FORMAT_B8G8R8A8_UNORM
+	VK_FORMAT_B8G8R8A8_SRGB: VK_FORMAT_B8G8R8A8_SRGB
+	VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+	VK_COMMAND_BUFFER_LEVEL_PRIMARY: VK_COMMAND_BUFFER_LEVEL_PRIMARY
+	VK_FENCE_CREATE_SIGNALED_BIT: VK_FENCE_CREATE_SIGNALED_BIT
+	VK_BUFFER_USAGE_TRANSFER_SRC_BIT: VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+	VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+	VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+	VK_KHR_SWAPCHAIN_EXTENSION_NAME: VK_KHR_SWAPCHAIN_EXTENSION_NAME
+	_vkZeros: _vkZeros
+	_vkWritePtr: _vkWritePtr
+	_vkGetProc: _vkGetProc
+	_vkCall: _vkCall
+	_vkCallOk?: _vkCallOk?
+} := import('gui-native-win-vulkan-constants')
+{
+	createVulkanDevice: createVulkanDevice
+} := import('gui-native-win-vulkan-init')
+
+// --- Surface capability / format queries ---
+
+fn _querySurfaceCaps(instance, physicalDevice, surface) {
+	getCaps := _vkGetProc(instance, 'vkGetPhysicalDeviceSurfaceCapabilitiesKHR')
+	if getCaps.type != :ok {
+		true -> getCaps
+		_ -> {
+			caps := bits(_vkZeros(52))
+			res := _vkCall(getCaps.proc, physicalDevice, surface, addr(caps))
+			if _vkCallOk?(res) {
+				_ -> { type: :error, error: 'vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed', detail: res }
+				true -> {
+					cp := addr(caps)
+					{
+						type: :ok
+						minImageCount: windows.readU32(cp + 0)
+						maxImageCount: windows.readU32(cp + 4)
+						currentWidth: windows.readU32(cp + 8)
+						currentHeight: windows.readU32(cp + 12)
+						minWidth: windows.readU32(cp + 16)
+						minHeight: windows.readU32(cp + 20)
+						maxWidth: windows.readU32(cp + 24)
+						maxHeight: windows.readU32(cp + 28)
+						maxImageArrayLayers: windows.readU32(cp + 32)
+						supportedTransforms: windows.readU32(cp + 36)
+						currentTransform: windows.readU32(cp + 40)
+						supportedCompositeAlpha: windows.readU32(cp + 44)
+						supportedUsageFlags: windows.readU32(cp + 48)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _querySurfaceFormat(instance, physicalDevice, surface) {
+	getFormats := _vkGetProc(instance, 'vkGetPhysicalDeviceSurfaceFormatsKHR')
+	if getFormats.type != :ok {
+		true -> getFormats
+		_ -> {
+			countBuf := bits([0, 0, 0, 0])
+			res := _vkCall(getFormats.proc, physicalDevice, surface, addr(countBuf), 0)
+			if _vkCallOk?(res) {
+				_ -> { type: :error, error: 'vkGetPhysicalDeviceSurfaceFormatsKHR count query failed' }
+				true -> {
+					count := windows.readU32(addr(countBuf))
+					if count = 0 {
+						true -> { type: :error, error: 'no surface formats available' }
+						_ -> {
+							fmts := bits(_vkZeros(count * 8))
+							res2 := _vkCall(getFormats.proc, physicalDevice, surface, addr(countBuf), addr(fmts))
+							if _vkCallOk?(res2) {
+								_ -> { type: :error, error: 'vkGetPhysicalDeviceSurfaceFormatsKHR query failed' }
+								true -> {
+									fn _findFormat(base, count, idx) if idx < count {
+										true -> {
+											fmt := windows.readU32(base + idx * 8)
+											cspace := windows.readU32(base + idx * 8 + 4)
+											if fmt = VK_FORMAT_B8G8R8A8_UNORM | fmt = VK_FORMAT_B8G8R8A8_SRGB {
+												true -> { format: fmt, colorSpace: cspace }
+												_ -> _findFormat(base, count, idx + 1)
+											}
+										}
+										_ -> { format: windows.readU32(base), colorSpace: windows.readU32(base + 4) }
+									}
+									chosen := _findFormat(addr(fmts), count, 0)
+									{
+										type: :ok
+										format: chosen.format
+										colorSpace: chosen.colorSpace
+										formatCount: count
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// --- Swapchain creation ---
+
+fn createSwapchain(window) {
+	inst := window.vulkanInstance
+	pd := window.vulkanPhysicalDevice
+	surf := window.vulkanSurface
+	dev := window.vulkanDevice
+	qf := window.vulkanQueueFamily
+	is64 := windows.ptrSize() = 8
+	ps := windows.ptrSize()
+
+	caps := _querySurfaceCaps(inst, pd, surf)
+	if caps.type != :ok {
+		true -> caps
+		_ -> {
+			fmt := _querySurfaceFormat(inst, pd, surf)
+			if fmt.type != :ok {
+				true -> fmt
+				_ -> {
+					imgCount := caps.minImageCount + 1
+					if caps.maxImageCount > 0 & imgCount > caps.maxImageCount {
+						true -> imgCount <- caps.maxImageCount
+					}
+
+					w := if caps.currentWidth = 4294967295 {
+						true -> window.width
+						_ -> caps.currentWidth
+					}
+					h := if caps.currentHeight = 4294967295 {
+						true -> window.height
+						_ -> caps.currentHeight
+					}
+
+					window._vkSwapExtent <- { width: w, height: h }
+					window._vkSurfaceFormat <- fmt.format
+					window._vkSurfaceColorSpace <- fmt.colorSpace
+
+					createSC := _vkGetProc(inst, 'vkCreateSwapchainKHR')
+					if createSC.type != :ok {
+						true -> createSC
+						_ -> {
+							sciSize := if is64 { true -> 104, _ -> 60 }
+							sci := bits(_vkZeros(sciSize))
+							sp := addr(sci)
+							windows.writeU32(sp, VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR)
+							if is64 {
+								true -> {
+									_vkWritePtr(sp + 24, surf)
+									windows.writeU32(sp + 32, imgCount)
+									windows.writeU32(sp + 36, fmt.format)
+									windows.writeU32(sp + 40, fmt.colorSpace)
+									windows.writeU32(sp + 44, w)
+									windows.writeU32(sp + 48, h)
+									windows.writeU32(sp + 52, 1)
+									windows.writeU32(sp + 56, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+									windows.writeU32(sp + 60, VK_SHARING_MODE_EXCLUSIVE)
+									windows.writeU32(sp + 64, 0)
+									windows.writeU32(sp + 80, caps.currentTransform)
+									windows.writeU32(sp + 84, VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+									windows.writeU32(sp + 88, VK_PRESENT_MODE_FIFO_KHR)
+									windows.writeU32(sp + 92, 1)
+								}
+								_ -> {
+									_vkWritePtr(sp + 8, surf)
+									windows.writeU32(sp + 12, imgCount)
+									windows.writeU32(sp + 16, fmt.format)
+									windows.writeU32(sp + 20, fmt.colorSpace)
+									windows.writeU32(sp + 24, w)
+									windows.writeU32(sp + 28, h)
+									windows.writeU32(sp + 32, 1)
+									windows.writeU32(sp + 36, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+									windows.writeU32(sp + 40, VK_SHARING_MODE_EXCLUSIVE)
+									windows.writeU32(sp + 44, 0)
+									windows.writeU32(sp + 52, caps.currentTransform)
+									windows.writeU32(sp + 56, VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+									windows.writeU32(sp + 60, VK_PRESENT_MODE_FIFO_KHR)
+									windows.writeU32(sp + 64, 1)
+								}
+							}
+
+							scOut := bits(_vkZeros(ps))
+							createRes := _vkCall(createSC.proc, dev, sp, 0, addr(scOut))
+							swapchain := _readOutPointer(scOut)
+							if _vkCallOk?(createRes) & swapchain > 0 {
+								_ -> { type: :error, error: 'vkCreateSwapchainKHR failed', detail: createRes }
+								true -> {
+									window._vkSwapchain <- swapchain
+
+									getSCImages := _vkGetProc(inst, 'vkGetSwapchainImagesKHR')
+									if getSCImages.type != :ok {
+										true -> getSCImages
+										_ -> {
+											imgCountBuf := bits([0, 0, 0, 0])
+											_vkCall(getSCImages.proc, dev, swapchain, addr(imgCountBuf), 0)
+											actualImgCount := windows.readU32(addr(imgCountBuf))
+											imgsBuf := bits(_vkZeros(actualImgCount * ps))
+											_vkCall(getSCImages.proc, dev, swapchain, addr(imgCountBuf), addr(imgsBuf))
+
+											images := {
+												fn _readImages(base, count, idx, acc) if idx < count {
+													true -> _readImages(base, count, idx + 1, acc << _ptrRead(base + idx * ps))
+													_ -> acc
+												}
+												_readImages(addr(imgsBuf), actualImgCount, 0, [])
+											}
+
+											window._vkSwapImages <- images
+											window._vkSwapImageCount <- actualImgCount
+
+											{
+												type: :ok
+												swapchain: swapchain
+												imageCount: actualImgCount
+												images: images
+												extent: { width: w, height: h }
+												format: fmt.format
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// --- Command pool, command buffers, sync objects ---
+
+fn createVulkanCommandResources(window) {
+	dev := window.vulkanDevice
+	qf := window.vulkanQueueFamily
+	is64 := windows.ptrSize() = 8
+	ps := windows.ptrSize()
+
+	// Command pool
+	cpSize := if is64 { true -> 24, _ -> 12 }
+	cpInfo := bits(_vkZeros(cpSize))
+	cpp := addr(cpInfo)
+	windows.writeU32(cpp, VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+	if is64 {
+		true -> {
+			windows.writeU32(cpp + 16, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+			windows.writeU32(cpp + 20, qf)
+		}
+		_ -> {
+			windows.writeU32(cpp + 8, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+			windows.writeU32(cpp + 12, qf)
+		}
+	}
+	poolOut := bits(_vkZeros(ps))
+	res := windows.vulkan1('vkCreateCommandPool', dev, cpp, 0, addr(poolOut))
+	pool := _readOutPointer(poolOut)
+	if _vkCallOk?(res) & pool > 0 {
+		_ -> { type: :error, error: 'vkCreateCommandPool failed', detail: res }
+		true -> {
+			window._vkCmdPool <- pool
+
+			// Command buffer
+			cbSize := if is64 { true -> 32, _ -> 20 }
+			cbInfo := bits(_vkZeros(cbSize))
+			cbp := addr(cbInfo)
+			windows.writeU32(cbp, VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+			if is64 {
+				true -> {
+					_vkWritePtr(cbp + 16, pool)
+					windows.writeU32(cbp + 24, VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+					windows.writeU32(cbp + 28, 1)
+				}
+				_ -> {
+					_vkWritePtr(cbp + 8, pool)
+					windows.writeU32(cbp + 12, VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+					windows.writeU32(cbp + 16, 1)
+				}
+			}
+			cmdOut := bits(_vkZeros(ps))
+			res2 := windows.vulkan1('vkAllocateCommandBuffers', dev, cbp, addr(cmdOut))
+			cmdBuf := _readOutPointer(cmdOut)
+			if _vkCallOk?(res2) & cmdBuf > 0 {
+				_ -> { type: :error, error: 'vkAllocateCommandBuffers failed', detail: res2 }
+				true -> {
+					window._vkCmdBuf <- cmdBuf
+
+					// Semaphores
+					semSize := if is64 { true -> 24, _ -> 12 }
+					semInfo := bits(_vkZeros(semSize))
+					windows.writeU32(addr(semInfo), VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO)
+
+					semOut1 := bits(_vkZeros(ps))
+					res3 := windows.vulkan1('vkCreateSemaphore', dev, addr(semInfo), 0, addr(semOut1))
+					imgAvail := _readOutPointer(semOut1)
+					if _vkCallOk?(res3) & imgAvail > 0 {
+						_ -> { type: :error, error: 'vkCreateSemaphore (imageAvailable) failed' }
+						true -> {
+							semOut2 := bits(_vkZeros(ps))
+							res4 := windows.vulkan1('vkCreateSemaphore', dev, addr(semInfo), 0, addr(semOut2))
+							renderDone := _readOutPointer(semOut2)
+							if _vkCallOk?(res4) & renderDone > 0 {
+								_ -> { type: :error, error: 'vkCreateSemaphore (renderFinished) failed' }
+								true -> {
+									window._vkSemImageAvail <- imgAvail
+									window._vkSemRenderDone <- renderDone
+
+									// Fence
+									fciSize := if is64 { true -> 24, _ -> 12 }
+									fci := bits(_vkZeros(fciSize))
+									windows.writeU32(addr(fci), VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
+									if is64 {
+										true -> windows.writeU32(addr(fci) + 16, VK_FENCE_CREATE_SIGNALED_BIT)
+										_ -> windows.writeU32(addr(fci) + 8, VK_FENCE_CREATE_SIGNALED_BIT)
+									}
+									fenceOut := bits(_vkZeros(ps))
+									res5 := windows.vulkan1('vkCreateFence', dev, addr(fci), 0, addr(fenceOut))
+									fence := _readOutPointer(fenceOut)
+									if _vkCallOk?(res5) & fence > 0 {
+										_ -> { type: :error, error: 'vkCreateFence failed' }
+										true -> {
+											window._vkFence <- fence
+											{ type: :ok, cmdPool: pool, cmdBuf: cmdBuf, imageAvailable: imgAvail, renderFinished: renderDone, fence: fence }
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// --- Staging buffer for pixel upload ---
+
+fn _findMemoryType(physicalDevice, typeBits, properties) {
+	// VkPhysicalDeviceMemoryProperties is large; memoryTypeCount at offset 0,
+	// then 32 entries of VkMemoryType (each 8 bytes: propertyFlags u32 + heapIndex u32),
+	// then heapCount + heaps.  Total ~520 bytes.
+	memProps := bits(_vkZeros(520))
+	windows.vulkan1('vkGetPhysicalDeviceMemoryProperties', physicalDevice, addr(memProps))
+	mp := addr(memProps)
+	typeCount := windows.readU32(mp)
+
+	fn _search(idx) if idx < typeCount {
+		true -> {
+			if (typeBits & (1 << idx)) > 0 {
+				true -> {
+					flags := windows.readU32(mp + 4 + idx * 8)
+					if (flags & properties) = properties {
+						true -> { found: true, index: idx }
+						_ -> _search(idx + 1)
+					}
+				}
+				_ -> _search(idx + 1)
+			}
+		}
+		_ -> { found: false, index: -1 }
+	}
+	_search(0)
+}
+
+fn createStagingBuffer(window) {
+	dev := window.vulkanDevice
+	pd := window.vulkanPhysicalDevice
+	is64 := windows.ptrSize() = 8
+	ps := windows.ptrSize()
+	bufSize := window._vkSwapExtent.width * window._vkSwapExtent.height * 4
+
+	// VkBufferCreateInfo
+	bciSize := if is64 { true -> 56, _ -> 36 }
+	bci := bits(_vkZeros(bciSize))
+	bp := addr(bci)
+	windows.writeU32(bp, VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+	if is64 {
+		true -> {
+			windows.writeU64(bp + 24, bufSize)
+			windows.writeU32(bp + 32, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+			windows.writeU32(bp + 36, VK_SHARING_MODE_EXCLUSIVE)
+		}
+		_ -> {
+			windows.writeU32(bp + 8, bufSize)
+			windows.writeU32(bp + 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+			windows.writeU32(bp + 20, VK_SHARING_MODE_EXCLUSIVE)
+		}
+	}
+
+	bufOut := bits(_vkZeros(ps))
+	res := windows.vulkan1('vkCreateBuffer', dev, bp, 0, addr(bufOut))
+	buf := _readOutPointer(bufOut)
+	if _vkCallOk?(res) & buf > 0 {
+		_ -> { type: :error, error: 'vkCreateBuffer failed', detail: res }
+		true -> {
+			memReqSize := if is64 { true -> 24, _ -> 12 }
+			memReq := bits(_vkZeros(memReqSize))
+			windows.vulkan1('vkGetBufferMemoryRequirements', dev, buf, addr(memReq))
+			mrp := addr(memReq)
+			reqSize := if is64 { true -> windows.readU64(mrp), _ -> windows.readU32(mrp) }
+			memTypeBits := if is64 {
+				true -> windows.readU32(mrp + 16)
+				_ -> windows.readU32(mrp + 8)
+			}
+
+			memType := _findMemoryType(pd, memTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+			if memType.found {
+				_ -> {
+					windows.vulkan1('vkDestroyBuffer', dev, buf, 0)
+					{ type: :error, error: 'no suitable host-visible memory type' }
+				}
+				true -> {
+					maiSize := if is64 { true -> 32, _ -> 16 }
+					mai := bits(_vkZeros(maiSize))
+					maip := addr(mai)
+					windows.writeU32(maip, VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+					if is64 {
+						true -> {
+							windows.writeU64(maip + 16, reqSize)
+							windows.writeU32(maip + 24, memType.index)
+						}
+						_ -> {
+							windows.writeU32(maip + 8, reqSize)
+							windows.writeU32(maip + 12, memType.index)
+						}
+					}
+
+					memOut := bits(_vkZeros(ps))
+					res2 := windows.vulkan1('vkAllocateMemory', dev, maip, 0, addr(memOut))
+					mem := _readOutPointer(memOut)
+					if _vkCallOk?(res2) & mem > 0 {
+						_ -> {
+							windows.vulkan1('vkDestroyBuffer', dev, buf, 0)
+							{ type: :error, error: 'vkAllocateMemory failed', detail: res2 }
+						}
+						true -> {
+							bindRes := windows.vulkan1('vkBindBufferMemory', dev, buf, mem, 0)
+							if _vkCallOk?(bindRes) {
+								_ -> {
+									windows.vulkan1('vkFreeMemory', dev, mem, 0)
+									windows.vulkan1('vkDestroyBuffer', dev, buf, 0)
+									{ type: :error, error: 'vkBindBufferMemory failed', detail: bindRes }
+								}
+								true -> {
+									mapOut := bits(_vkZeros(ps))
+									mapRes := windows.vulkan1('vkMapMemory', dev, mem, 0, bufSize, 0, addr(mapOut))
+									mapped := _readOutPointer(mapOut)
+									if _vkCallOk?(mapRes) & mapped > 0 {
+										_ -> {
+											windows.vulkan1('vkFreeMemory', dev, mem, 0)
+											windows.vulkan1('vkDestroyBuffer', dev, buf, 0)
+											{ type: :error, error: 'vkMapMemory failed', detail: mapRes }
+										}
+										true -> {
+											window._vkStagingBuf <- buf
+											window._vkStagingMem <- mem
+											window._vkStagingMapped <- mapped
+											window._vkStagingSize <- bufSize
+											{ type: :ok, buffer: buf, memory: mem, mapped: mapped, size: bufSize }
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// --- Cleanup ---
+
+fn destroyVulkanSwapchain(window) if type(window.vulkanDevice) = :int & window.vulkanDevice > 0 {
+	true -> {
+		dev := window.vulkanDevice
+
+		windows.vulkan1('vkDeviceWaitIdle', dev)
+
+		if type(window._vkStagingMapped) = :int & window._vkStagingMapped > 0 {
+			true -> {
+				windows.vulkan1('vkUnmapMemory', dev, window._vkStagingMem)
+				window._vkStagingMapped <- 0
+			}
+		}
+		if type(window._vkStagingBuf) = :int & window._vkStagingBuf > 0 {
+			true -> {
+				windows.vulkan1('vkDestroyBuffer', dev, window._vkStagingBuf, 0)
+				window._vkStagingBuf <- 0
+			}
+		}
+		if type(window._vkStagingMem) = :int & window._vkStagingMem > 0 {
+			true -> {
+				windows.vulkan1('vkFreeMemory', dev, window._vkStagingMem, 0)
+				window._vkStagingMem <- 0
+			}
+		}
+		if type(window._vkFence) = :int & window._vkFence > 0 {
+			true -> {
+				windows.vulkan1('vkDestroyFence', dev, window._vkFence, 0)
+				window._vkFence <- 0
+			}
+		}
+		if type(window._vkSemImageAvail) = :int & window._vkSemImageAvail > 0 {
+			true -> {
+				windows.vulkan1('vkDestroySemaphore', dev, window._vkSemImageAvail, 0)
+				window._vkSemImageAvail <- 0
+			}
+		}
+		if type(window._vkSemRenderDone) = :int & window._vkSemRenderDone > 0 {
+			true -> {
+				windows.vulkan1('vkDestroySemaphore', dev, window._vkSemRenderDone, 0)
+				window._vkSemRenderDone <- 0
+			}
+		}
+		if type(window._vkCmdPool) = :int & window._vkCmdPool > 0 {
+			true -> {
+				windows.vulkan1('vkDestroyCommandPool', dev, window._vkCmdPool, 0)
+				window._vkCmdPool <- 0
+				window._vkCmdBuf <- 0
+			}
+		}
+		if type(window._vkSwapchain) = :int & window._vkSwapchain > 0 {
+			true -> {
+				destroySC := _vkGetProc(window.vulkanInstance, 'vkDestroySwapchainKHR')
+				if destroySC.type = :ok {
+					true -> _vkCall(destroySC.proc, dev, window._vkSwapchain, 0)
+				}
+				window._vkSwapchain <- 0
+				window._vkSwapImages <- ?
+				window._vkSwapImageCount <- 0
+			}
+		}
+		windows.vulkan1('vkDestroyDevice', dev, 0)
+		window.vulkanDevice <- 0
+		window.vulkanQueue <- 0
+		window._vkSwapchainReady <- false
+		0
+	}
+	_ -> 0
+}
+
+// --- Full swapchain init (called after initVulkan2DLayer succeeds) ---
+
+fn initVulkanSwapchain(window) {
+	devResult := createVulkanDevice(window.vulkanInstance, window.vulkanPhysicalDevice, window.vulkanQueueFamily)
+	if devResult.type != :ok {
+		true -> devResult
+		_ -> {
+			window.vulkanDevice <- devResult.device
+			window.vulkanQueue <- devResult.queue
+
+			scResult := createSwapchain(window)
+			if scResult.type != :ok {
+				true -> {
+					windows.vulkan1('vkDestroyDevice', window.vulkanDevice, 0)
+					window.vulkanDevice <- 0
+					window.vulkanQueue <- 0
+					scResult
+				}
+				_ -> {
+					cmdResult := createVulkanCommandResources(window)
+					if cmdResult.type != :ok {
+						true -> {
+							destroySC := _vkGetProc(window.vulkanInstance, 'vkDestroySwapchainKHR')
+							if destroySC.type = :ok {
+								true -> _vkCall(destroySC.proc, window.vulkanDevice, window._vkSwapchain, 0)
+							}
+							windows.vulkan1('vkDestroyDevice', window.vulkanDevice, 0)
+							window.vulkanDevice <- 0
+							window.vulkanQueue <- 0
+							cmdResult
+						}
+						_ -> {
+							stagResult := createStagingBuffer(window)
+							if stagResult.type != :ok {
+								true -> {
+									destroyVulkanSwapchain(window)
+									stagResult
+								}
+								_ -> {
+									// Ensure BMI header for GetDIBits
+									fn zeros(n, acc) if n {
+										0 -> acc
+										_ -> zeros(n - 1, acc << 0)
+									}
+									bmi := bits({zeros(40, [])})
+									window._vkBmi <- bmi
+									window._vkBmiPtr <- addr(bmi)
+
+									window._vkSwapchainReady <- true
+									{ type: :ok }
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

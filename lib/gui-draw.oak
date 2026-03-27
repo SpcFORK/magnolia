@@ -1,29 +1,20 @@
 // gui-draw contains cross-platform drawing primitives for GUI facade.
 
+{ each: each } := import('std')
 windows := import('windows')
 linux := import('linux')
 { _default: _default, _err: _err } := import('gui-common')
+guiFonts := import('gui-fonts')
 
 fn _asBool(value) if value {
 	true -> true
 	_ -> false
 }
 
-fn _fontKey(fontSpec) {
-	if fontSpec {
-		? -> ?
-		_ -> {
-			family := _default(fontSpec.family, 'Segoe UI')
-			size := int(_default(fontSpec.size, 16))
-			weight := int(_default(fontSpec.weight, 400))
-			italic := _asBool(_default(fontSpec.italic, false))
-			underline := _asBool(_default(fontSpec.underline, false))
-			strikeOut := _asBool(_default(fontSpec.strikeOut, false))
-			family + '|' + string(size) + '|' + string(weight) + '|' + string(italic) + '|' + string(underline) + '|' + string(strikeOut)
-		}
-	}
-}
+// Font key generation delegates to gui-fonts.
+fn _fontKey(fontSpec) guiFonts.fontKey(fontSpec)
 
+// _windowsDeleteCachedFont clears the per-window font handle.
 fn _windowsDeleteCachedFont(window) {
 	fontHandle := _default(window._fontHandle, 0)
 	if fontHandle > 0 {
@@ -35,6 +26,9 @@ fn _windowsDeleteCachedFont(window) {
 	}
 }
 
+// _ensureWindowsFont uses gui-fonts' cachedFont to obtain or create a GDI
+// font handle matching the window's textFont spec.  The handle is also
+// stored on the window so that selectObject can be skipped when unchanged.
 fn _ensureWindowsFont(window) {
 	fontSpec := _default(window.textFont, ?)
 	if fontSpec {
@@ -50,30 +44,12 @@ fn _ensureWindowsFont(window) {
 				true -> cachedHandle
 				_ -> {
 					_windowsDeleteCachedFont(window)
-					family := _default(fontSpec.family, 'Segoe UI')
-					size := int(_default(fontSpec.size, 16))
-					weight := int(_default(fontSpec.weight, 400))
-					font := windows.createFont(
-						0 - size
-						0
-						0
-						0
-						weight
-						if _asBool(_default(fontSpec.italic, false)) { true -> 1, _ -> 0 }
-						if _asBool(_default(fontSpec.underline, false)) { true -> 1, _ -> 0 }
-						if _asBool(_default(fontSpec.strikeOut, false)) { true -> 1, _ -> 0 }
-						1
-						0
-						0
-						0
-						0
-						family
-					)
-					if windows.callOk?(font) & font.r1 > 0 {
+					result := guiFonts.cachedFont(?, fontSpec)
+					if result.type = :ok & result.handle > 0 {
 						true -> {
-							window._fontHandle <- font.r1
+							window._fontHandle <- result.handle
 							window._fontKey <- key
-							font.r1
+							result.handle
 						}
 						_ -> 0
 					}
@@ -83,20 +59,67 @@ fn _ensureWindowsFont(window) {
 	}
 }
 
-fn _webFontString(fontSpec) {
+// _ensureLinuxFont ensures a font is set on the GC for the window.
+// Uses gui-fonts' cached font with the X11 font name from textFont.family.
+fn _ensureLinuxFont(window, gcHandle) {
+	fontSpec := _default(window.textFont, ?)
 	if fontSpec {
-		? -> ?
+		? -> 0
 		_ -> {
-			if fontSpec.css {
-				? -> {
-					style := if _asBool(_default(fontSpec.italic, false)) { true -> 'italic ', _ -> '' }
-					weight := string(int(_default(fontSpec.weight, 400))) + ' '
-					size := string(int(_default(fontSpec.size, 16))) + 'px '
-					family := _default(fontSpec.family, 'sans-serif')
-					style + weight + size + family
+			fontName := _default(fontSpec.family, 'fixed')
+			key := fontName
+			cachedKey := _default(window._linuxFontKey, ?)
+			if cachedKey = key {
+				true -> 0
+				_ -> {
+					result := guiFonts.cachedFont(window.display, fontSpec)
+					if result.type = :ok & result.fontStruct > 0 {
+						true -> {
+							lf := import('linux-fonts')
+							fid := lf.fontStructFid(result.fontStruct)
+							lf.setFont(window.display, gcHandle, fid)
+							window._linuxFontKey <- key
+							0
+						}
+						_ -> 0
+					}
 				}
-				_ -> fontSpec.css
 			}
+		}
+	}
+}
+
+// Web font string generation delegates to gui-fonts.
+fn _webFontString(fontSpec) guiFonts.webFontString(fontSpec)
+
+// _windowsDeleteCachedPens deletes all cached GDI pen handles.
+fn _windowsDeleteCachedPens(window) {
+	if window._penCache != ? {
+		true -> {
+			keys(window._penCache) |> each(fn(k) {
+				handle := window._penCache.(k)
+				if type(handle) = :int & handle > 0 {
+					true -> windows.deleteObject(handle)
+				}
+			})
+			window._penCache <- {}
+			window._penCacheCount <- 0
+		}
+	}
+}
+
+// _windowsDeleteCachedBrushes deletes all cached GDI brush handles.
+fn _windowsDeleteCachedBrushes(window) {
+	if window._brushCache != ? {
+		true -> {
+			keys(window._brushCache) |> each(fn(k) {
+				handle := window._brushCache.(k)
+				if type(handle) = :int & handle > 0 {
+					true -> windows.deleteObject(handle)
+				}
+			})
+			window._brushCache <- {}
+			window._brushCacheCount <- 0
 		}
 	}
 }
@@ -104,9 +127,27 @@ fn _webFontString(fontSpec) {
 fn releaseResources(window) {
 	if window.type = :ok {
 		true -> if window.backend {
-			:windows -> _windowsDeleteCachedFont(window)
+			:windows -> {
+				_windowsDeleteCachedFont(window)
+				_windowsDeleteCachedPens(window)
+				_windowsDeleteCachedBrushes(window)
+				guiFonts.releaseCachedFonts(?)
+			}
+			:linux -> {
+				guiFonts.releaseCachedFonts(window.display)
+			}
 		}
 	}
+	0
+}
+
+// invalidateDrawCaches resets per-frame GDI object tracking so that the next
+// draw call re-selects its pen/brush into the DC.  Call at the start of each
+// frame to avoid stale selections after hot-runs or DC recreation.
+fn invalidateDrawCaches(window) {
+	window._curPen <- ?
+	window._curBrush <- ?
+	window._curNullPen <- ?
 	0
 }
 
@@ -167,6 +208,7 @@ fn drawText(window, x, y, text, color, defaultColor) if window.type {
 			}
 			if gcHandle > 0 {
 				true -> {
+					_ensureLinuxFont(window, gcHandle)
 					linux.setForeground(window.display, gcHandle, useColor)
 					linux.drawString(window.display, window.window, gcHandle, x, y, text)
 					{ type: :ok }
@@ -230,6 +272,19 @@ fn textWidth(window, text) if window.type {
 				_ -> _estimateTextWidth(window, text)
 			}
 		}
+		:linux -> {
+			fontSpec := _default(window.textFont, ?)
+			if fontSpec {
+				? -> _estimateTextWidth(window, text)
+				_ -> {
+					result := guiFonts.measureText(window.display, fontSpec, text)
+					if result.type = :ok {
+						true -> result.width
+						_ -> _estimateTextWidth(window, text)
+					}
+				}
+			}
+		}
 		_ -> _estimateTextWidth(window, text)
 	}
 	_ -> _estimateTextWidth(?, text)
@@ -260,26 +315,21 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 				}
 				if hdcValue > 0 {
 					true -> {
-						brush := windows.createSolidBrush(useColor)
-						if windows.callOk?(brush) & brush.r1 > 0 {
+						brushHandle := _getCachedBrush(window, useColor)
+						if brushHandle > 0 {
 							true -> {
-								prevBrush := windows.selectObject(hdcValue, brush.r1)
-								// Select NULL_PEN (stock object 8) to suppress default black outline
-								nullPen := windows.gdi32('GetStockObject', 8)
-								prevPen := if windows.callOk?(nullPen) & nullPen.r1 > 0 {
-									true -> windows.selectObject(hdcValue, nullPen.r1)
-									_ -> ?
+								// Only select brush if different from current
+								if window._curBrush != brushHandle -> {
+									windows.selectObject(hdcValue, brushHandle)
+									window._curBrush <- brushHandle
+								}
+								// Select NULL_PEN once per frame via cache
+								npHandle := _getNullPen()
+								if npHandle > 0 & window._curNullPen != true -> {
+									windows.selectObject(hdcValue, npHandle)
+									window._curNullPen <- true
 								}
 								windows.rectangle(hdcValue, x - 1, y - 1, x + width + 1, y + height + 1)
-								if prevPen != ? {
-									true -> if windows.callOk?(prevPen) & prevPen.r1 > 0 {
-										true -> windows.selectObject(hdcValue, prevPen.r1)
-									}
-								}
-								if windows.callOk?(prevBrush) & prevBrush.r1 > 0 {
-									true -> windows.selectObject(hdcValue, prevBrush.r1)
-								}
-								windows.deleteObject(brush.r1)
 								if window.frameHdc = 0 {
 									true -> windows.releaseDC(window.hwnd, hdcValue)
 								}
@@ -289,7 +339,7 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 								if window.frameHdc = 0 {
 									true -> windows.releaseDC(window.hwnd, hdcValue)
 								}
-								_err('CreateSolidBrush failed', brush)
+								_err('CreateSolidBrush failed', ?)
 							}
 						}
 					}
@@ -358,7 +408,6 @@ fn _getCachedPen(window, hdcValue, useColor) {
 			pen := windows.gdi32('CreatePen', 0, 1, useColor)
 			if windows.callOk?(pen) & pen.r1 > 0 {
 				true -> {
-					// Evict oldest if cache grows beyond 16 pens
 					if window._penCacheCount = ? {
 						true -> window._penCacheCount <- 0
 					}
@@ -371,6 +420,43 @@ fn _getCachedPen(window, hdcValue, useColor) {
 		}
 		_ -> cached
 	}
+}
+
+// Brush cache: reuse GDI brush handles by color to avoid CreateSolidBrush/DeleteObject per draw.
+fn _getCachedBrush(window, useColor) {
+	if window._brushCache = ? {
+		true -> window._brushCache <- {}
+	}
+	cached := window._brushCache.(useColor)
+	if cached {
+		? -> {
+			brush := windows.createSolidBrush(useColor)
+			if windows.callOk?(brush) & brush.r1 > 0 {
+				true -> {
+					if window._brushCacheCount = ? {
+						true -> window._brushCacheCount <- 0
+					}
+					window._brushCacheCount <- window._brushCacheCount + 1
+					window._brushCache.(useColor) <- brush.r1
+					brush.r1
+				}
+				_ -> 0
+			}
+		}
+		_ -> cached
+	}
+}
+
+// Cached NULL_PEN stock object (stock object 8) — avoids GetStockObject syscall per fillRect.
+_nullPenHandle := 0
+fn _getNullPen() {
+	if _nullPenHandle = 0 -> {
+		np := windows.gdi32('GetStockObject', 8)
+		if windows.callOk?(np) & np.r1 > 0 {
+			true -> _nullPenHandle <- np.r1
+		}
+	}
+	_nullPenHandle
 }
 
 // pushMask sets a rectangular clip region and translates the coordinate origin
@@ -479,12 +565,15 @@ fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
 						penHandle := _getCachedPen(window, hdcValue, useColor)
 						if penHandle > 0 {
 							true -> {
-								prevPen := windows.selectObject(hdcValue, penHandle)
+								// Only select pen if different from current
+								if window._curPen != penHandle -> {
+									windows.selectObject(hdcValue, penHandle)
+									window._curPen <- penHandle
+									// Clear null pen flag since we selected a real pen
+									window._curNullPen <- false
+								}
 								windows.gdi32('MoveToEx', hdcValue, x1, y1, 0)
 								windows.gdi32('LineTo', hdcValue, x2, y2)
-								if windows.callOk?(prevPen) & prevPen.r1 > 0 {
-									true -> windows.selectObject(hdcValue, prevPen.r1)
-								}
 								if window.frameHdc = 0 {
 									true -> windows.releaseDC(window.hwnd, hdcValue)
 								}

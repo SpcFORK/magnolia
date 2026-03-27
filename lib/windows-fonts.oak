@@ -1,0 +1,415 @@
+// windows-fonts provides Win32 GDI font enumeration, loading, metrics, and
+// management helpers.  Builds on windows-gdi's low-level CreateFontW wrapper
+// and exposes a higher-level, cache-friendly API.
+
+sys := import('sys')
+{
+	readU32: readU32
+} := import('writes')
+{
+	Gdi32: Gdi32
+	User32: User32
+} := import('windows-constants')
+
+fn _platformError(apiName) {
+	{
+		type: :error
+		error: apiName + ' is only available on Windows'
+	}
+}
+
+fn isWindows? ___runtime_sys_info().os = 'windows'
+
+fn wstr(s) utf16(s)
+
+fn gdi32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(Gdi32, symbol, args...)
+	_ -> _platformError('gdi32')
+}
+
+fn user32(symbol, args...) if isWindows?() {
+	true -> sys.resolveAndCall(User32, symbol, args...)
+	_ -> _platformError('user32')
+}
+
+// ---------------------------------------------------------------------------
+// Font weight constants (wingdi.h)
+// ---------------------------------------------------------------------------
+FW_DONTCARE   := 0
+FW_THIN       := 100
+FW_EXTRALIGHT := 200
+FW_LIGHT      := 300
+FW_NORMAL     := 400
+FW_MEDIUM     := 500
+FW_SEMIBOLD   := 600
+FW_BOLD       := 700
+FW_EXTRABOLD  := 800
+FW_HEAVY      := 900
+
+// ---------------------------------------------------------------------------
+// Charset constants
+// ---------------------------------------------------------------------------
+ANSI_CHARSET        := 0
+DEFAULT_CHARSET     := 1
+SYMBOL_CHARSET      := 2
+SHIFTJIS_CHARSET    := 128
+HANGUL_CHARSET      := 129
+GB2312_CHARSET      := 134
+CHINESEBIG5_CHARSET := 136
+OEM_CHARSET         := 255
+JOHAB_CHARSET       := 130
+HEBREW_CHARSET      := 177
+ARABIC_CHARSET      := 178
+GREEK_CHARSET       := 161
+TURKISH_CHARSET     := 162
+VIETNAMESE_CHARSET  := 163
+THAI_CHARSET        := 222
+EASTEUROPE_CHARSET  := 238
+RUSSIAN_CHARSET     := 204
+BALTIC_CHARSET      := 186
+
+// ---------------------------------------------------------------------------
+// Output precision
+// ---------------------------------------------------------------------------
+OUT_DEFAULT_PRECIS  := 0
+OUT_STRING_PRECIS   := 1
+OUT_STROKE_PRECIS   := 3
+OUT_TT_PRECIS       := 4
+OUT_DEVICE_PRECIS   := 5
+OUT_TT_ONLY_PRECIS  := 7
+OUT_OUTLINE_PRECIS  := 8
+
+// ---------------------------------------------------------------------------
+// Clip precision
+// ---------------------------------------------------------------------------
+CLIP_DEFAULT_PRECIS := 0
+
+// ---------------------------------------------------------------------------
+// Quality
+// ---------------------------------------------------------------------------
+DEFAULT_QUALITY        := 0
+DRAFT_QUALITY          := 1
+PROOF_QUALITY          := 2
+NONANTIALIASED_QUALITY := 3
+ANTIALIASED_QUALITY    := 4
+CLEARTYPE_QUALITY      := 5
+
+// ---------------------------------------------------------------------------
+// Pitch and family
+// ---------------------------------------------------------------------------
+DEFAULT_PITCH  := 0
+FIXED_PITCH    := 1
+VARIABLE_PITCH := 2
+
+FF_DONTCARE   := 0
+FF_ROMAN      := 16
+FF_SWISS      := 32
+FF_MODERN     := 48
+FF_SCRIPT     := 64
+FF_DECORATIVE := 80
+
+// ---------------------------------------------------------------------------
+// Stock font indices for GetStockObject
+// ---------------------------------------------------------------------------
+OEM_FIXED_FONT      := 10
+ANSI_FIXED_FONT     := 11
+ANSI_VAR_FONT       := 12
+SYSTEM_FONT         := 13
+DEVICE_DEFAULT_FONT := 14
+DEFAULT_GUI_FONT    := 17
+
+// ---------------------------------------------------------------------------
+// GDI text alignment flags (SetTextAlign)
+// ---------------------------------------------------------------------------
+TA_NOUPDATECP := 0
+TA_UPDATECP   := 1
+TA_LEFT       := 0
+TA_RIGHT      := 2
+TA_CENTER     := 6
+TA_TOP        := 0
+TA_BOTTOM     := 8
+TA_BASELINE   := 24
+
+// ---------------------------------------------------------------------------
+// TEXTMETRIC offsets (for 64-bit / LLP64 layout)
+// ---------------------------------------------------------------------------
+TM_HEIGHT_OFF           := 0
+TM_ASCENT_OFF           := 4
+TM_DESCENT_OFF          := 8
+TM_INTERNAL_LEADING_OFF := 12
+TM_EXTERNAL_LEADING_OFF := 16
+TM_AVE_CHAR_WIDTH_OFF   := 20
+TM_MAX_CHAR_WIDTH_OFF   := 24
+TM_WEIGHT_OFF           := 28
+
+// ---------------------------------------------------------------------------
+// createFontEx  – friendlier wrapper around CreateFontW
+//
+// Accepts a spec object:
+//   { family, size, weight, italic, underline, strikeOut, charSet, quality,
+//     pitch, escapement, orientation, outPrecision, clipPrecision }
+// Only `family` is required; everything else has sane defaults.
+// ---------------------------------------------------------------------------
+fn createFontEx(spec) if isWindows?() {
+	true -> {
+		family      := if spec.family      { ? -> 'Segoe UI', _ -> spec.family }
+		size        := int(if spec.size    { ? -> 16, _ -> spec.size })
+		weight      := int(if spec.weight  { ? -> FW_NORMAL, _ -> spec.weight })
+		italic      := if spec.italic      { true -> 1, _ -> 0 }
+		underline   := if spec.underline   { true -> 1, _ -> 0 }
+		strikeOut   := if spec.strikeOut   { true -> 1, _ -> 0 }
+		charSet     := int(if spec.charSet { ? -> DEFAULT_CHARSET, _ -> spec.charSet })
+		quality     := int(if spec.quality { ? -> CLEARTYPE_QUALITY, _ -> spec.quality })
+		pitch       := int(if spec.pitch   { ? -> DEFAULT_PITCH, _ -> spec.pitch })
+		escapement  := int(if spec.escapement  { ? -> 0, _ -> spec.escapement })
+		orientation := int(if spec.orientation { ? -> 0, _ -> spec.orientation })
+		outPrec     := int(if spec.outPrecision  { ? -> OUT_DEFAULT_PRECIS, _ -> spec.outPrecision })
+		clipPrec    := int(if spec.clipPrecision { ? -> CLIP_DEFAULT_PRECIS, _ -> spec.clipPrecision })
+
+		res := gdi32(
+			'CreateFontW'
+			0 - size
+			0
+			escapement
+			orientation
+			weight
+			italic
+			underline
+			strikeOut
+			charSet
+			outPrec
+			clipPrec
+			quality
+			pitch
+			wstr(family)
+		)
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> { type: :ok, handle: res.r1, family: family, size: size, weight: weight }
+			_ -> { type: :error, error: 'CreateFontW failed', detail: res }
+		}
+	}
+	_ -> _platformError('createFontEx')
+}
+
+// ---------------------------------------------------------------------------
+// deleteFont  – deletes a GDI font handle
+// ---------------------------------------------------------------------------
+fn deleteFont(handle) if isWindows?() {
+	true -> if type(handle) = :int & handle > 0 {
+		true -> gdi32('DeleteObject', handle)
+		_ -> 0
+	}
+	_ -> _platformError('deleteFont')
+}
+
+// ---------------------------------------------------------------------------
+// selectFont  – selects a font into a DC, returns previous font handle
+// ---------------------------------------------------------------------------
+fn selectFont(hdc, fontHandle) if isWindows?() {
+	true -> gdi32('SelectObject', hdc, fontHandle)
+	_ -> _platformError('selectFont')
+}
+
+// ---------------------------------------------------------------------------
+// getStockFont  – retrieves one of the pre-defined stock fonts
+// ---------------------------------------------------------------------------
+fn getStockFont(stockIndex) if isWindows?() {
+	true -> {
+		res := gdi32('GetStockObject', stockIndex)
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> { type: :ok, handle: res.r1 }
+			_ -> { type: :error, error: 'GetStockObject failed', detail: res }
+		}
+	}
+	_ -> _platformError('getStockFont')
+}
+
+// ---------------------------------------------------------------------------
+// getDefaultGuiFont  – returns the system default GUI font handle
+// ---------------------------------------------------------------------------
+fn getDefaultGuiFont() getStockFont(DEFAULT_GUI_FONT)
+
+// ---------------------------------------------------------------------------
+// setTextAlign  – sets text alignment for a DC
+// ---------------------------------------------------------------------------
+fn setTextAlign(hdc, flags) if isWindows?() {
+	true -> gdi32('SetTextAlign', hdc, flags)
+	_ -> _platformError('setTextAlign')
+}
+
+// ---------------------------------------------------------------------------
+// getTextMetrics  – returns TEXTMETRIC fields for the currently selected font
+//
+// Returns { type: :ok, height, ascent, descent, internalLeading,
+//           externalLeading, aveCharWidth, maxCharWidth, weight }
+// ---------------------------------------------------------------------------
+fn getTextMetrics(hdc) if isWindows?() {
+	true -> {
+		// TEXTMETRICW is 60 bytes on 64-bit Windows
+		buf := bits([
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0
+		])
+		res := gdi32('GetTextMetricsW', hdc, )
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> {
+				base := addr(buf)
+				{
+					type: :ok
+					height:          readU32(base + TM_HEIGHT_OFF)
+					ascent:          readU32(base + TM_ASCENT_OFF)
+					descent:         readU32(base + TM_DESCENT_OFF)
+					internalLeading: readU32(base + TM_INTERNAL_LEADING_OFF)
+					externalLeading: readU32(base + TM_EXTERNAL_LEADING_OFF)
+					aveCharWidth:    readU32(base + TM_AVE_CHAR_WIDTH_OFF)
+					maxCharWidth:    readU32(base + TM_MAX_CHAR_WIDTH_OFF)
+					weight:          readU32(base + TM_WEIGHT_OFF)
+				}
+			}
+			_ -> { type: :error, error: 'GetTextMetricsW failed', detail: res }
+		}
+	}
+	_ -> _platformError('getTextMetrics')
+}
+
+// ---------------------------------------------------------------------------
+// getTextExtent  – measures the pixel width and height of a string
+//
+// Returns { type: :ok, cx: <width>, cy: <height> }
+// ---------------------------------------------------------------------------
+fn getTextExtent(hdc, text) if isWindows?() {
+	true -> {
+		szBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+		res := gdi32('GetTextExtentPoint32W', hdc, wstr(text), len(text), )
+		if sys.ok?(res) & res.r1 > 0 {
+			true -> {
+				base := addr(szBuf)
+				{ type: :ok, cx: readU32(base), cy: readU32(base + 4) }
+			}
+			_ -> { type: :error, error: 'GetTextExtentPoint32W failed', detail: res }
+		}
+	}
+	_ -> _platformError('getTextExtent')
+}
+
+// ---------------------------------------------------------------------------
+// Font cache  – per-window or per-context font caching
+// ---------------------------------------------------------------------------
+_fontCacheMap := {}
+
+fn _fontCacheKey(spec) {
+	family  := if spec.family  { ? -> 'Segoe UI', _ -> spec.family }
+	size    := int(if spec.size    { ? -> 16, _ -> spec.size })
+	weight  := int(if spec.weight  { ? -> FW_NORMAL, _ -> spec.weight })
+	italic  := if spec.italic    { true -> '1', _ -> '0' }
+	under   := if spec.underline { true -> '1', _ -> '0' }
+	strike  := if spec.strikeOut { true -> '1', _ -> '0' }
+	family + '|' + string(size) + '|' + string(weight) + '|' + italic + '|' + under + '|' + strike
+}
+
+// cachedFont returns a cached GDI font handle for the given spec, creating
+// and caching a new one if no cached entry exists.
+fn cachedFont(spec) {
+	key := _fontCacheKey(spec)
+	existing := _fontCacheMap.(key)
+	if existing {
+		? -> {
+			created := createFontEx(spec)
+			if created.type = :ok {
+				true -> {
+					_fontCacheMap.(key) <- created.handle
+					created
+				}
+				_ -> created
+			}
+		}
+		_ -> { type: :ok, handle: existing, family: spec.family, size: spec.size, weight: spec.weight }
+	}
+}
+
+// releaseCachedFonts deletes all cached font handles and clears the cache.
+fn releaseCachedFonts() {
+	{ each: each } := import('std')
+	keys(_fontCacheMap) |> each(fn(k) {
+		h := _fontCacheMap.(k)
+		if type(h) = :int & h > 0 {
+			true -> deleteFont(h)
+		}
+	})
+	_fontCacheMap <- {}
+	0
+}
+
+// removeCachedFont removes and deletes a single cached font by spec.
+fn removeCachedFont(spec) {
+	key := _fontCacheKey(spec)
+	h := _fontCacheMap.(key)
+	if h {
+		? -> 0
+		_ -> {
+			if type(h) = :int & h > 0 {
+				true -> deleteFont(h)
+			}
+			_fontCacheMap.(key) <- ?
+			1
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// measureText  – measures text without requiring a pre-acquired DC
+//
+// spec is a font spec { family, size, weight, ... }.
+// hwnd may be ? for the desktop window DC.
+// Returns { type: :ok, width, height } or error.
+// ---------------------------------------------------------------------------
+fn measureText(hwnd, spec, text) if isWindows?() {
+	true -> {
+		hdc := user32('GetDC', if hwnd { ? -> 0, _ -> hwnd })
+		if sys.ok?(hdc) & hdc.r1 > 0 {
+			true -> {
+				dc := hdc.r1
+				font := cachedFont(spec)
+				prevFont := if font.type = :ok {
+					true -> selectFont(dc, font.handle)
+					_ -> ?
+				}
+				extent := getTextExtent(dc, text)
+				if prevFont {
+					? -> 0
+					_ -> if sys.ok?(prevFont) & prevFont.r1 > 0 {
+						true -> selectFont(dc, prevFont.r1)
+					}
+				}
+				user32('ReleaseDC', if hwnd { ? -> 0, _ -> hwnd }, dc)
+				if extent.type = :ok {
+					true -> { type: :ok, width: extent.cx, height: extent.cy }
+					_ -> extent
+				}
+			}
+			_ -> { type: :error, error: 'GetDC failed', detail: hdc }
+		}
+	}
+	_ -> _platformError('measureText')
+}
+
+// ---------------------------------------------------------------------------
+// fontLineHeight  – returns the line height (height + external leading) for a
+// font selected into the given DC.
+// ---------------------------------------------------------------------------
+fn fontLineHeight(hdc) if isWindows?() {
+	true -> {
+		tm := getTextMetrics(hdc)
+		if tm.type = :ok {
+			true -> { type: :ok, lineHeight: tm.height + tm.externalLeading }
+			_ -> tm
+		}
+	}
+	_ -> _platformError('fontLineHeight')
+}

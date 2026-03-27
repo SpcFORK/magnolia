@@ -5,9 +5,24 @@ guiEvents := import('gui-events')
 guiNativeLinux := import('gui-native-linux')
 { _default: _default } := import('gui-common')
 
-fn frameIntervalNt(window) _default(window.frameMs, 16) * 1000000
+// Cache computed interval/max-dt on the window to avoid repeated multiply per call.
+fn frameIntervalNt(window) if window._frameIntervalNtC {
+	? -> {
+		v := _default(window.frameMs, 16) * 1000000
+		window._frameIntervalNtC <- v
+		v
+	}
+	_ -> window._frameIntervalNtC
+}
 
-fn frameMaxDtNt(window) _default(window.maxFrameDtMs, 250) * 1000000
+fn frameMaxDtNt(window) if window._frameMaxDtNtC {
+	? -> {
+		v := _default(window.maxFrameDtMs, 250) * 1000000
+		window._frameMaxDtNtC <- v
+		v
+	}
+	_ -> window._frameMaxDtNtC
+}
 
 fn markUrgentFrameIfResizeDispatch(window, step) {
 	if window.backend = :windows & step.type = :dispatch {
@@ -35,10 +50,11 @@ fn maybeRunFrame(window, onFrame, force, publish) {
 				true -> {
 					last := _default(window._lastFrameNt, now)
 					rawDt := now - last
+					maxDt := frameMaxDtNt(window)
 					dtNs := if rawDt < 0 {
 						true -> 0
-						_ -> if rawDt > frameMaxDtNt(window) {
-							true -> frameMaxDtNt(window)
+						_ -> if rawDt > maxDt {
+							true -> maxDt
 							_ -> rawDt
 						}
 					}

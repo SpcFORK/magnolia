@@ -1,0 +1,566 @@
+// gui-lighting provides a multi-light Blinn-Phong shading system for 3D
+// scene rendering.
+//
+// Light types:
+//   DirectionalLight — parallel rays from a direction (sun-like)
+//   PointLight       — radial light from a position with distance attenuation
+//   SpotLight        — cone of light from a position with angular falloff
+//   AmbientLight     — uniform illumination from all directions
+//
+// Materials define surface response: ambient, diffuse, specular, shininess,
+// and optional per-channel emissive glow.
+//
+// LightScene collects multiple lights. shadeFaceColor applies the full scene
+// to a face and returns a packed RGB color.
+
+{ _default: _default, _clamp: _clamp } := import('gui-common')
+
+PI := 3.141592653589793
+
+// ---------- Vector helpers (self-contained) ----------
+
+fn _len3(x, y, z) pow(x * x + y * y + z * z, 0.5)
+
+fn _norm3(x, y, z) {
+	l := _len3(x, y, z)
+	if l <= 0.000001 {
+		true -> [0, 0, 1]
+		_ -> [x / l, y / l, z / l]
+	}
+}
+
+fn _dot(ax, ay, az, bx, by, bz) ax * bx + ay * by + az * bz
+
+// ---------- Light constructors ----------
+
+fn DirectionalLight(options) {
+	opts := _default(options, {})
+	{
+		type: :directional
+		x: _default(opts.x, 0)
+		y: _default(opts.y, -1)
+		z: _default(opts.z, 0)
+		intensity: _clamp(_default(opts.intensity, 1), 0, 10)
+		colorR: _clamp(int(_default(opts.colorR, 255)), 0, 255)
+		colorG: _clamp(int(_default(opts.colorG, 255)), 0, 255)
+		colorB: _clamp(int(_default(opts.colorB, 255)), 0, 255)
+	}
+}
+
+fn PointLight(options) {
+	opts := _default(options, {})
+	{
+		type: :point
+		px: _default(opts.px, 0)
+		py: _default(opts.py, 2)
+		pz: _default(opts.pz, 0)
+		intensity: _clamp(_default(opts.intensity, 1), 0, 10)
+		radius: _default(opts.radius, 10)
+		colorR: _clamp(int(_default(opts.colorR, 255)), 0, 255)
+		colorG: _clamp(int(_default(opts.colorG, 255)), 0, 255)
+		colorB: _clamp(int(_default(opts.colorB, 255)), 0, 255)
+	}
+}
+
+fn SpotLight(options) {
+	opts := _default(options, {})
+	{
+		type: :spot
+		px: _default(opts.px, 0)
+		py: _default(opts.py, 3)
+		pz: _default(opts.pz, 0)
+		x: _default(opts.x, 0)
+		y: _default(opts.y, -1)
+		z: _default(opts.z, 0)
+		intensity: _clamp(_default(opts.intensity, 1), 0, 10)
+		radius: _default(opts.radius, 10)
+		angle: _clamp(_default(opts.angle, 30), 1, 90)
+		penumbra: _clamp(_default(opts.penumbra, 5), 0, 45)
+		colorR: _clamp(int(_default(opts.colorR, 255)), 0, 255)
+		colorG: _clamp(int(_default(opts.colorG, 255)), 0, 255)
+		colorB: _clamp(int(_default(opts.colorB, 255)), 0, 255)
+	}
+}
+
+fn AmbientLight(options) {
+	opts := _default(options, {})
+	{
+		type: :ambient
+		intensity: _clamp(_default(opts.intensity, 0.2), 0, 1)
+		colorR: _clamp(int(_default(opts.colorR, 255)), 0, 255)
+		colorG: _clamp(int(_default(opts.colorG, 255)), 0, 255)
+		colorB: _clamp(int(_default(opts.colorB, 255)), 0, 255)
+	}
+}
+
+// ---------- Material ----------
+
+fn Material(options) {
+	opts := _default(options, {})
+	{
+		ambient: _clamp(_default(opts.ambient, 0.2), 0, 1)
+		diffuse: _clamp(_default(opts.diffuse, 0.8), 0, 1)
+		specular: _clamp(_default(opts.specular, 0.3), 0, 1)
+		shininess: _clamp(_default(opts.shininess, 32), 1, 256)
+		emissiveR: _clamp(int(_default(opts.emissiveR, 0)), 0, 255)
+		emissiveG: _clamp(int(_default(opts.emissiveG, 0)), 0, 255)
+		emissiveB: _clamp(int(_default(opts.emissiveB, 0)), 0, 255)
+	}
+}
+
+// ---------- LightScene ----------
+
+fn LightScene(options) {
+	opts := _default(options, {})
+	{
+		lights: _default(opts.lights, [])
+		globalAmbient: _clamp(_default(opts.globalAmbient, 0.1), 0, 1)
+	}
+}
+
+fn addLight(scene, light) {
+	scene.lights <- scene.lights << light
+	scene
+}
+
+fn removeLight(scene, index) {
+	fn sub(i, out) if i {
+		len(scene.lights) -> out
+		_ -> if i = index {
+			true -> sub(i + 1, out)
+			_ -> sub(i + 1, out << scene.lights.(i))
+		}
+	}
+	scene.lights <- sub(0, [])
+	scene
+}
+
+fn clearLights(scene) {
+	scene.lights <- []
+	scene
+}
+
+fn lightCount(scene) len(_default(scene.lights, []))
+
+// ---------- Face geometry ----------
+
+fn faceNormal(pa, pb, pc) {
+	ebx := pb.x - pa.x
+	eby := pb.y - pa.y
+	ebz := pb.z - pa.z
+	ecx := pc.x - pa.x
+	ecy := pc.y - pa.y
+	ecz := pc.z - pa.z
+	cx := eby * ecz - ebz * ecy
+	cy := ebz * ecx - ebx * ecz
+	cz := ebx * ecy - eby * ecx
+	_norm3(cx, cy, cz)
+}
+
+fn faceCenter(pa, pb, pc) {
+	{
+		x: (pa.x + pb.x + pc.x) / 3
+		y: (pa.y + pb.y + pc.y) / 3
+		z: (pa.z + pb.z + pc.z) / 3
+	}
+}
+
+// ---------- Per-light shading (Blinn-Phong) ----------
+
+fn _shadeDirectional(light, mat, n, vd) {
+	ld := _norm3(0 - light.x, 0 - light.y, 0 - light.z)
+	ndotl := _dot(n.0, n.1, n.2, ld.0, ld.1, ld.2)
+	diff := _clamp(ndotl, 0, 1) * mat.diffuse
+	hd := _norm3(ld.0 + vd.0, ld.1 + vd.1, ld.2 + vd.2)
+	ndoth := _dot(n.0, n.1, n.2, hd.0, hd.1, hd.2)
+	spec := if ndotl > 0 {
+		true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular
+		_ -> 0
+	}
+	total := (diff + spec) * light.intensity
+	{
+		r: total * light.colorR / 255
+		g: total * light.colorG / 255
+		b: total * light.colorB / 255
+	}
+}
+
+fn _shadePoint(light, mat, n, center, vd) {
+	dx := light.px - center.x
+	dy := light.py - center.y
+	dz := light.pz - center.z
+	dist := _len3(dx, dy, dz)
+	if dist <= 0.000001 {
+		true -> { r: 0, g: 0, b: 0 }
+		_ -> {
+			ld := _norm3(dx, dy, dz)
+			atten := _clamp(1 - (dist * dist) / (light.radius * light.radius), 0, 1)
+			ndotl := _dot(n.0, n.1, n.2, ld.0, ld.1, ld.2)
+			diff := _clamp(ndotl, 0, 1) * mat.diffuse * atten
+			hd := _norm3(ld.0 + vd.0, ld.1 + vd.1, ld.2 + vd.2)
+			ndoth := _dot(n.0, n.1, n.2, hd.0, hd.1, hd.2)
+			spec := if ndotl > 0 {
+				true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular * atten
+				_ -> 0
+			}
+			total := (diff + spec) * light.intensity
+			{
+				r: total * light.colorR / 255
+				g: total * light.colorG / 255
+				b: total * light.colorB / 255
+			}
+		}
+	}
+}
+
+fn _shadeSpot(light, mat, n, center, vd) {
+	dx := light.px - center.x
+	dy := light.py - center.y
+	dz := light.pz - center.z
+	dist := _len3(dx, dy, dz)
+	if dist <= 0.000001 {
+		true -> { r: 0, g: 0, b: 0 }
+		_ -> {
+			ld := _norm3(dx, dy, dz)
+			sd := _norm3(light.x, light.y, light.z)
+			cosAngle := _dot(0 - ld.0, 0 - ld.1, 0 - ld.2, sd.0, sd.1, sd.2)
+			cosOuter := cos(light.angle * PI / 180)
+			cosInner := cos((light.angle - light.penumbra) * PI / 180)
+			spotFactor := _clamp((cosAngle - cosOuter) / (cosInner - cosOuter + 0.00001), 0, 1)
+			if spotFactor <= 0 {
+				true -> { r: 0, g: 0, b: 0 }
+				_ -> {
+					atten := _clamp(1 - (dist * dist) / (light.radius * light.radius), 0, 1) * spotFactor
+					ndotl := _dot(n.0, n.1, n.2, ld.0, ld.1, ld.2)
+					diff := _clamp(ndotl, 0, 1) * mat.diffuse * atten
+					hd := _norm3(ld.0 + vd.0, ld.1 + vd.1, ld.2 + vd.2)
+					ndoth := _dot(n.0, n.1, n.2, hd.0, hd.1, hd.2)
+					spec := if ndotl > 0 {
+						true -> pow(_clamp(ndoth, 0, 1), mat.shininess) * mat.specular * atten
+						_ -> 0
+					}
+					total := (diff + spec) * light.intensity
+					{
+						r: total * light.colorR / 255
+						g: total * light.colorG / 255
+						b: total * light.colorB / 255
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _shadeAmbient(light, mat) {
+	{
+		r: mat.ambient * light.intensity * light.colorR / 255
+		g: mat.ambient * light.intensity * light.colorG / 255
+		b: mat.ambient * light.intensity * light.colorB / 255
+	}
+}
+
+// ---------- Accumulate contributions ----------
+
+fn _accumulate(lights, mat, n, center, vd, i, ar, ag, ab) if i {
+	len(lights) -> { r: ar, g: ag, b: ab }
+	_ -> {
+		light := lights.(i)
+		c := if light.type {
+			:directional -> _shadeDirectional(light, mat, n, vd)
+			:point -> _shadePoint(light, mat, n, center, vd)
+			:spot -> _shadeSpot(light, mat, n, center, vd)
+			:ambient -> _shadeAmbient(light, mat)
+			_ -> { r: 0, g: 0, b: 0 }
+		}
+		_accumulate(lights, mat, n, center, vd, i + 1, ar + c.r, ag + c.g, ab + c.b)
+	}
+}
+
+// ---------- Public shading ----------
+
+// shadeFaceColor applies every light in a scene to a triangle face and
+// returns a packed RGB color (via deps.rgb).
+//
+//   deps      — { rgb: fn(r,g,b) }
+//   baseColor — packed RGB of the unshadowed surface
+//   scene     — LightScene
+//   material  — Material (or ? for defaults)
+//   pa3,pb3,pc3 — world-space triangle vertices
+//   camPos    — { x, y, z } camera position for specular
+fn shadeFaceColor(deps, baseColor, scene, material, pa3, pb3, pc3, camPos) {
+	mat := _default(material, Material({}))
+	scn := _default(scene, LightScene({}))
+	n := faceNormal(pa3, pb3, pc3)
+	center := faceCenter(pa3, pb3, pc3)
+	cam := _default(camPos, { x: 0, y: 0, z: -5 })
+	vd := _norm3(cam.x - center.x, cam.y - center.y, cam.z - center.z)
+
+	lc := _accumulate(scn.lights, mat, n, center, vd, 0, 0, 0, 0)
+
+	cr := baseColor & 255
+	cg := (baseColor >> 8) & 255
+	cb := (baseColor >> 16) & 255
+
+	ga := scn.globalAmbient * mat.ambient
+	fr := _clamp(int(mat.emissiveR + cr * (ga + lc.r)), 0, 255)
+	fg := _clamp(int(mat.emissiveG + cg * (ga + lc.g)), 0, 255)
+	fb := _clamp(int(mat.emissiveB + cb * (ga + lc.b)), 0, 255)
+	deps.rgb(fr, fg, fb)
+}
+
+// shadeFaceIntensity returns a single [0..1] greyscale intensity for
+// backward-compatible use where a full color result is not needed.
+fn shadeFaceIntensity(scene, material, pa3, pb3, pc3, camPos) {
+	mat := _default(material, Material({}))
+	scn := _default(scene, LightScene({}))
+	n := faceNormal(pa3, pb3, pc3)
+	center := faceCenter(pa3, pb3, pc3)
+	cam := _default(camPos, { x: 0, y: 0, z: -5 })
+	vd := _norm3(cam.x - center.x, cam.y - center.y, cam.z - center.z)
+
+	lc := _accumulate(scn.lights, mat, n, center, vd, 0, 0, 0, 0)
+	ga := scn.globalAmbient * mat.ambient
+	_clamp(ga + (lc.r + lc.g + lc.b) / 3, 0, 1)
+}
+
+// ── Fast-path shading (optimized for batch rendering) ───────────────────
+
+// prepareScene pre-validates inputs and pre-normalizes light directions.
+// Call once per drawMeshLit call to avoid redundant per-face work.
+fn prepareScene(scene, material, camPos) {
+	mat := _default(material, Material({}))
+	scn := _default(scene, LightScene({}))
+	cam := _default(camPos, { x: 0, y: 0, z: -5 })
+	{
+		lights: _prepareLights(scn.lights, 0, [])
+		globalAmbient: scn.globalAmbient
+		mat: mat
+		hasSpecular: mat.specular > 0
+		camX: cam.x
+		camY: cam.y
+		camZ: cam.z
+	}
+}
+
+fn _prepareLights(lights, i, acc) if i {
+	len(lights) -> acc
+	_ -> {
+		l := lights.(i)
+		p := if l.type {
+			:directional -> {
+				nd := _norm3(0 - l.x, 0 - l.y, 0 - l.z)
+				{
+					type: :directional
+					ndx: nd.0, ndy: nd.1, ndz: nd.2
+					intensity: l.intensity
+					colorR: l.colorR, colorG: l.colorG, colorB: l.colorB
+				}
+			}
+			:spot -> {
+				sd := _norm3(l.x, l.y, l.z)
+				{
+					type: :spot
+					px: l.px, py: l.py, pz: l.pz
+					sdx: sd.0, sdy: sd.1, sdz: sd.2
+					intensity: l.intensity
+					radius: l.radius
+					cosOuter: cos(l.angle * PI / 180)
+					cosInner: cos((l.angle - l.penumbra) * PI / 180)
+					colorR: l.colorR, colorG: l.colorG, colorB: l.colorB
+				}
+			}
+			_ -> l
+		}
+		_prepareLights(lights, i + 1, acc << p)
+	}
+}
+
+// shadeFaceColorFast inlines normal/center/view-direction computation and
+// uses pre-prepared scene data to avoid per-face overhead.
+fn shadeFaceColorFast(rgbFn, baseColor, prep, pa3, pb3, pc3) {
+	mat := prep.mat
+	lights := prep.lights
+	nLights := len(lights)
+	hasSpec := prep.hasSpecular
+	// Inline face normal (cross product + normalize)
+	ebx := pb3.x - pa3.x
+	eby := pb3.y - pa3.y
+	ebz := pb3.z - pa3.z
+	ecx := pc3.x - pa3.x
+	ecy := pc3.y - pa3.y
+	ecz := pc3.z - pa3.z
+	rnx := eby * ecz - ebz * ecy
+	rny := ebz * ecx - ebx * ecz
+	rnz := ebx * ecy - eby * ecx
+	nl := pow(rnx * rnx + rny * rny + rnz * rnz, 0.5)
+	if nl <= 0.000001 {
+		true -> baseColor
+		_ -> {
+			nx := rnx / nl
+			ny := rny / nl
+			nz := rnz / nl
+			// Inline face center
+			fcx := (pa3.x + pb3.x + pc3.x) / 3
+			fcy := (pa3.y + pb3.y + pc3.y) / 3
+			fcz := (pa3.z + pb3.z + pc3.z) / 3
+			// Inline view direction normalize
+			rvx := prep.camX - fcx
+			rvy := prep.camY - fcy
+			rvz := prep.camZ - fcz
+			vl := pow(rvx * rvx + rvy * rvy + rvz * rvz, 0.5)
+			vdx := if vl > 0.000001 { true -> rvx / vl, _ -> 0 }
+			vdy := if vl > 0.000001 { true -> rvy / vl, _ -> 0 }
+			vdz := if vl > 0.000001 { true -> rvz / vl, _ -> 1 }
+
+			// Single accumulator mutated per light (avoids per-light object allocation)
+			acc := { r: 0, g: 0, b: 0 }
+			fn _accLoop(i) if i < nLights {
+				true -> {
+					l := lights.(i)
+					if l.type {
+						:directional -> {
+							// Pre-normalized direction from prepareScene
+							ndotl := nx * l.ndx + ny * l.ndy + nz * l.ndz
+							diff := if ndotl > 0 { true -> ndotl * mat.diffuse, _ -> 0 }
+							spec := if (ndotl > 0) & hasSpec {
+								true -> {
+									hx := l.ndx + vdx
+									hy := l.ndy + vdy
+									hz := l.ndz + vdz
+									hl := pow(hx * hx + hy * hy + hz * hz, 0.5)
+									if hl > 0.000001 {
+										true -> {
+											ndoth := (nx * hx + ny * hy + nz * hz) / hl
+											if ndoth > 0 {
+												true -> pow(ndoth, mat.shininess) * mat.specular
+												_ -> 0
+											}
+										}
+										_ -> 0
+									}
+								}
+								_ -> 0
+							}
+							t := (diff + spec) * l.intensity
+							acc.r <- acc.r + t * l.colorR / 255
+							acc.g <- acc.g + t * l.colorG / 255
+							acc.b <- acc.b + t * l.colorB / 255
+						}
+						:point -> {
+							dx := l.px - fcx
+							dy := l.py - fcy
+							dz := l.pz - fcz
+							d2 := dx * dx + dy * dy + dz * dz
+							r2 := l.radius * l.radius
+							if (d2 < r2) & (d2 > 0.000001) {
+								true -> {
+									dist := pow(d2, 0.5)
+									ldx := dx / dist
+									ldy := dy / dist
+									ldz := dz / dist
+									atten := 1 - d2 / r2
+									ndotl := nx * ldx + ny * ldy + nz * ldz
+									diff := if ndotl > 0 { true -> ndotl * mat.diffuse * atten, _ -> 0 }
+									spec := if (ndotl > 0) & hasSpec {
+										true -> {
+											hx := ldx + vdx
+											hy := ldy + vdy
+											hz := ldz + vdz
+											hl := pow(hx * hx + hy * hy + hz * hz, 0.5)
+											if hl > 0.000001 {
+												true -> {
+													ndoth := (nx * hx + ny * hy + nz * hz) / hl
+													if ndoth > 0 {
+														true -> pow(ndoth, mat.shininess) * mat.specular * atten
+														_ -> 0
+													}
+												}
+												_ -> 0
+											}
+										}
+										_ -> 0
+									}
+									t := (diff + spec) * l.intensity
+									acc.r <- acc.r + t * l.colorR / 255
+									acc.g <- acc.g + t * l.colorG / 255
+									acc.b <- acc.b + t * l.colorB / 255
+								}
+							}
+						}
+						:spot -> {
+							dx := l.px - fcx
+							dy := l.py - fcy
+							dz := l.pz - fcz
+							d2 := dx * dx + dy * dy + dz * dz
+							r2 := l.radius * l.radius
+							if (d2 < r2) & (d2 > 0.000001) {
+								true -> {
+									dist := pow(d2, 0.5)
+									ldx := dx / dist
+									ldy := dy / dist
+									ldz := dz / dist
+									cosA := (0 - ldx) * l.sdx + (0 - ldy) * l.sdy + (0 - ldz) * l.sdz
+									if cosA > l.cosOuter {
+										true -> {
+											sf := if cosA >= l.cosInner {
+												true -> 1
+												_ -> (cosA - l.cosOuter) / (l.cosInner - l.cosOuter + 0.00001)
+											}
+											atten := (1 - d2 / r2) * sf
+											ndotl := nx * ldx + ny * ldy + nz * ldz
+											diff := if ndotl > 0 { true -> ndotl * mat.diffuse * atten, _ -> 0 }
+											spec := if (ndotl > 0) & hasSpec {
+												true -> {
+													hx := ldx + vdx
+													hy := ldy + vdy
+													hz := ldz + vdz
+													hl := pow(hx * hx + hy * hy + hz * hz, 0.5)
+													if hl > 0.000001 {
+														true -> {
+															ndoth := (nx * hx + ny * hy + nz * hz) / hl
+															if ndoth > 0 {
+																true -> pow(ndoth, mat.shininess) * mat.specular * atten
+																_ -> 0
+															}
+														}
+														_ -> 0
+													}
+												}
+												_ -> 0
+											}
+											t := (diff + spec) * l.intensity
+											acc.r <- acc.r + t * l.colorR / 255
+											acc.g <- acc.g + t * l.colorG / 255
+											acc.b <- acc.b + t * l.colorB / 255
+										}
+									}
+								}
+							}
+						}
+						:ambient -> {
+							acc.r <- acc.r + mat.ambient * l.intensity * l.colorR / 255
+							acc.g <- acc.g + mat.ambient * l.intensity * l.colorG / 255
+							acc.b <- acc.b + mat.ambient * l.intensity * l.colorB / 255
+						}
+					}
+					_accLoop(i + 1)
+				}
+			}
+			_accLoop(0)
+
+			// Apply accumulated light to base color
+			cr := baseColor & 255
+			cg := (baseColor >> 8) & 255
+			cb := (baseColor >> 16) & 255
+			ga := prep.globalAmbient * mat.ambient
+			fr := int(mat.emissiveR + cr * (ga + acc.r))
+			fg := int(mat.emissiveG + cg * (ga + acc.g))
+			fb := int(mat.emissiveB + cb * (ga + acc.b))
+			rgbFn(
+				if fr < 0 { true -> 0, _ -> if fr > 255 { true -> 255, _ -> fr } }
+				if fg < 0 { true -> 0, _ -> if fg > 255 { true -> 255, _ -> fg } }
+				if fb < 0 { true -> 0, _ -> if fb > 255 { true -> 255, _ -> fb } }
+			)
+		}
+	}
+}

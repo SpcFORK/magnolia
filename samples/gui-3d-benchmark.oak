@@ -1,6 +1,12 @@
-// Magnolia GUI 3D benchmark: dense mesh frame timing
+// Magnolia GUI 3D benchmark: multi-shape stress test with per-frame timing.
+//
+// Renders a ground grid, orbiting solid spheres, cubes, pyramids, a torus,
+// a cylinder, a cone, and a prism — all rotating — to exercise the unified
+// mesh cache, numeric key hashing, and render queue.
 
 GUI := import('GUI')
+
+{ sin: sin, cos: cos } := import('math')
 
 window := GUI.createWindow('3D Benchmark', 800, 600)
 GUI.show(window)
@@ -9,27 +15,117 @@ GUI.onceClosed(window, fn() {
 	GUI.setTitle(window, 'Magnolia GUI 3D Benchmark - closed')
 })
 
-renderer := GUI.Renderer3D(window, { background: GUI.rgb(16, 24, 36) })
+renderer := GUI.Renderer3D(window, {
+	background: GUI.rgb(12, 18, 28)
+	camera: {
+		z: 12
+		fov: 75
+		mode: 'perspective'
+		backfaceCulling: true
+	}
+	light: {
+		x: 0.4
+		y: 0.8
+		z: -0.6
+		ambient: 0.25
+		diffuse: 0.75
+	}
+	drawDistance: 200
+})
 
-// Generate a dense grid mesh (100x100 faces)
-grid := GUI.GridMesh(100, 1)
+// --- Pre-allocate reusable transforms -----------------------------------------
+xfGrid    := { rx: 90, ry: 0, scale: 0.8, tx: 0, ty: -2, tz: 0 }
+xfCenter  := { rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+xfOrbit   := { rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
 
-angle := 0
+// 8 orbit slots for varied shapes
+orbitXFs := [
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+	{ rx: 0, ry: 0, rz: 0, scale: 1, tx: 0, ty: 0, tz: 0 }
+]
+orbitRadius := 5
+
+// --- Colors -------------------------------------------------------------------
+colGrid    := GUI.rgb(40, 60, 90)
+colSphere  := GUI.rgb(255, 140, 60)
+colCube    := GUI.rgb(60, 200, 255)
+colPyramid := GUI.rgb(255, 80, 120)
+colTorus   := GUI.rgb(180, 120, 255)
+colCyl     := GUI.rgb(100, 255, 160)
+colCone    := GUI.rgb(255, 220, 80)
+colPrism   := GUI.rgb(200, 200, 200)
+colCenter  := GUI.rgb(255, 255, 255)
+
+angle := 0.0
 frames := 0
 start := nanotime()
+lastFrameNs := nanotime()
+dtMs := 0.0
+
+// --- Helper: position an orbit transform at index i ---------------------------
+fn setOrbit(i, a, yOff) {
+	theta := a + float(i) * 0.785398  // i * PI/4
+	xf := orbitXFs.(i)
+	xf.tx <- sin(theta) * orbitRadius
+	xf.tz <- cos(theta) * orbitRadius
+	xf.ty <- yOff
+	xf.ry <- 0 - theta * 57.2958  // face center
+	xf.rx <- a * 30
+	xf
+}
 
 fn drawFrame(win) {
 	frame := GUI.beginFrame(window)
 	if frame.type = :ok -> {
-		angle <- angle + 0.02
-		transform := { rx: 30, ry: angle * 40, scale: 1.2, tx: 0, ty: 0, tz: 0 }
+		now := nanotime()
+		dtMs <- float(now - lastFrameNs) / 1000000.0
+		lastFrameNs <- now
+
+		angle <- angle + 0.015
+
 		renderer.clear()
-		renderer.renderGrid(100, 1, transform, GUI.rgb(120, 190, 255))
+
+		// Ground grid (wireframe)
+		xfGrid.ry <- angle * 8
+		renderer.renderGrid(20, 1, xfGrid, colGrid)
+
+		// Axes at origin
+		renderer.renderAxes(3, xfCenter)
+
+		// Center icosphere (solid)
+		xfCenter.ry <- angle * 60
+		xfCenter.rx <- angle * 20
+		renderer.renderIcosphereSolid(0.6, xfCenter, colCenter)
+
+		// Orbiting shapes — 2 spheres, 2 cubes, 1 pyramid, 1 torus, 1 cylinder, 1 cone
+		renderer.renderSphereSolid(0.5, 12, 6, setOrbit(0, angle, 0), colSphere)
+		renderer.renderSphereSolid(0.4, 12, 6, setOrbit(1, angle, 0.6), colSphere)
+		renderer.renderCubeSolid(0.9, setOrbit(2, angle, 0), colCube)
+		renderer.renderCubeSolid(0.7, setOrbit(3, angle, -0.4), colCube)
+		renderer.renderPyramidSolid(1, 1.2, setOrbit(4, angle, 0), colPyramid)
+		renderer.renderTorusSolid(0.6, 0.2, 12, 8, setOrbit(5, angle, 0.3), colTorus)
+		renderer.renderCylinderSolid(0.35, 1, 12, setOrbit(6, angle, 0), colCyl)
+		renderer.renderConeSolid(0.5, 1, 12, setOrbit(7, angle, -0.2), colCone)
+
+		// Static prism via render queue
+		renderer.enqueueMeshSolid(
+			GUI.PrismMesh(0.8, 1.5, 6)
+			{ rx: angle * 45, ry: angle * 30, scale: 1, tx: 0, ty: 2.5, tz: 0 }
+			colPrism
+		)
+		renderer.flushQueue()
+
 		frames <- frames + 1
-		if frames % 60 = 0 -> {
-			elapsed := (nanotime() - start) / 1 e9
-			fps := int(frames / elapsed)
-			GUI.setTitle(window, 'Magnolia GUI 3D Benchmark - ' + string(fps) + ' FPS')
+		if frames % 30 = 0 -> {
+			elapsed := float(nanotime() - start) / 1000000000.0
+			fps := int(float(frames) / elapsed)
+			GUI.setTitle(window, 'Magnolia 3D Benchmark | ' + string(fps) + ' FPS | ' + string(int(dtMs)) + 'ms/f | f' + string(frames))
 		}
 	}
 	GUI.endFrame(window)

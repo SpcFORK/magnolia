@@ -4,11 +4,13 @@
 
 fn Renderer3D(deps, window, options) {
 	opts := _default(options, {})
+	drawDistance := _default(opts.drawDistance, 0)
 	camera := _default(opts.camera, {
 		z: 5
 		fov: 90
 		mode: 'perspective'
 	})
+	camera.farPlane <- _default(camera.farPlane, drawDistance)
 	background := _default(opts.background, deps.rgb(8, 14, 22))
 	lineColor := _default(opts.lineColor, deps.rgb(96, 190, 255))
 	light := _default(opts.light, {
@@ -18,26 +20,13 @@ fn Renderer3D(deps, window, options) {
 		ambient: 0.22
 		diffuse: 0.78
 	})
+	lightScene := _default(opts.lightScene, ?)
+	material := _default(opts.material, ?)
 	experimental := _default(opts.experimental, {})
 	enableMaterialBatch := _default(experimental.materialBatch, false)
 	enableInstanceCache := _default(experimental.instanceCache, false)
 	maxInstanceCache := _default(experimental.maxInstanceCache, 256)
-	cubeMeshCache := {}
-	gridMeshCache := {}
-	axesMeshCache := {}
-	sphereMeshCache := {}
-	pyramidMeshCache := {}
-	cylinderMeshCache := {}
-	coneMeshCache := {}
-	torusMeshCache := {}
-	planeMeshCache := {}
-	hemisphereMeshCache := {}
-	wedgeMeshCache := {}
-	tubeMeshCache := {}
-	arrowMeshCache := {}
-	prismMeshCache := {}
-	stairsMeshCache := {}
-	icosphereMeshCache := {}
+	_meshCache := {}
 	instanceCache := {}
 	instanceCacheOrder := []
 	renderQueue := []
@@ -52,6 +41,24 @@ fn Renderer3D(deps, window, options) {
 		raw := (h * 16777619) + v
 		raw - int(raw / 2147483647) * 2147483647
 	}
+	// Numeric key builders: type discriminator + params → single numeric key.
+	// Avoids per-frame string allocation in mesh cache lookups.
+	fn _mk1(t, a) _hashCombine(t, a * 10000)
+	fn _mk2(t, a, b) _hashCombine(_hashCombine(t, a * 10000), b * 10000)
+	fn _mk3(t, a, b, c) _hashCombine(_hashCombine(_hashCombine(t, a * 10000), b * 10000), c * 10000)
+	fn _mk4(t, a, b, c, d) _hashCombine(_hashCombine(_hashCombine(_hashCombine(t, a * 10000), b * 10000), c * 10000), d * 10000)
+	fn _mk5(t, a, b, c, d, e) _hashCombine(_hashCombine(_hashCombine(_hashCombine(_hashCombine(t, a * 10000), b * 10000), c * 10000), d * 10000), e * 10000)
+
+	// Generic cache-through: numeric-key lookup, create on miss.
+	fn _cached(key, createFn) if cached := _meshCache.(key) {
+		? -> {
+			created := createFn()
+			_meshCache.(key) <- created
+			created
+		}
+		_ -> cached
+	}
+
 	fn _cacheKey(transform) if transform {
 		? -> 0
 		_ -> {
@@ -119,107 +126,56 @@ fn Renderer3D(deps, window, options) {
 		}
 	}
 
+	// Mesh factories — unified cache with numeric keys.
+	// Type IDs: cube=1, grid=2, axes=3, sphere=4, pyramid=5, cylinder=6,
+	// cone=7, torus=8, plane=9, hemisphere=10, wedge=11, tube=12,
+	// arrow=13, prism=14, stairs=15, icosphere=16
+
 	fn cubeMesh(size) {
-		resolvedSize := _default(size, 2)
-		key := string(resolvedSize)
-		if cached := cubeMeshCache.(key) {
-			? -> {
-				created := deps.CubeMesh(resolvedSize)
-				cubeMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		s := _default(size, 2)
+		_cached(_mk1(1, s), fn() deps.CubeMesh(s))
 	}
 
 	fn gridMesh(size, step) {
-		resolvedSize := _default(size, 10)
-		resolvedStep := _default(step, 1)
-		key := string(resolvedSize) + '|' + string(resolvedStep)
-		if cached := gridMeshCache.(key) {
-			? -> {
-				created := deps.GridMesh(resolvedSize, resolvedStep)
-				gridMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		s := _default(size, 10)
+		st := _default(step, 1)
+		_cached(_mk2(2, s, st), fn() deps.GridMesh(s, st))
 	}
 
 	fn axesMeshes(length) {
-		lenValue := _default(length, 3)
-		key := string(lenValue)
-		if cached := axesMeshCache.(key) {
-			? -> {
-				created := {
-					x: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(lenValue, 0, 0)], [[0, 1]])
-					y: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, lenValue, 0)], [[0, 1]])
-					z: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, 0, lenValue)], [[0, 1]])
-				}
-				axesMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		l := _default(length, 3)
+		_cached(_mk1(3, l), fn() {
+			x: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(l, 0, 0)], [[0, 1]])
+			y: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, l, 0)], [[0, 1]])
+			z: deps.Mesh([deps.Vec3(0, 0, 0), deps.Vec3(0, 0, l)], [[0, 1]])
+		})
 	}
 
 	fn sphereMesh(radius, segments, rings) {
 		r := _default(radius, 1)
 		s := _default(segments, 16)
 		rn := _default(rings, 8)
-		key := string(r) + '|' + string(s) + '|' + string(rn)
-		if cached := sphereMeshCache.(key) {
-			? -> {
-				created := deps.SphereMesh(r, s, rn)
-				sphereMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk3(4, r, s, rn), fn() deps.SphereMesh(r, s, rn))
 	}
 
 	fn pyramidMesh(base, height) {
 		b := _default(base, 2)
 		h := _default(height, 2)
-		key := string(b) + '|' + string(h)
-		if cached := pyramidMeshCache.(key) {
-			? -> {
-				created := deps.PyramidMesh(b, h)
-				pyramidMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk2(5, b, h), fn() deps.PyramidMesh(b, h))
 	}
 
 	fn cylinderMesh(radius, height, segments) {
 		r := _default(radius, 1)
 		h := _default(height, 2)
 		s := _default(segments, 16)
-		key := string(r) + '|' + string(h) + '|' + string(s)
-		if cached := cylinderMeshCache.(key) {
-			? -> {
-				created := deps.CylinderMesh(r, h, s)
-				cylinderMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk3(6, r, h, s), fn() deps.CylinderMesh(r, h, s))
 	}
 
 	fn coneMesh(radius, height, segments) {
 		r := _default(radius, 1)
 		h := _default(height, 2)
 		s := _default(segments, 16)
-		key := string(r) + '|' + string(h) + '|' + string(s)
-		if cached := coneMeshCache.(key) {
-			? -> {
-				created := deps.ConeMesh(r, h, s)
-				coneMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk3(7, r, h, s), fn() deps.ConeMesh(r, h, s))
 	}
 
 	fn torusMesh(majorR, minorR, majSegs, minSegs) {
@@ -227,15 +183,7 @@ fn Renderer3D(deps, window, options) {
 		rr := _default(minorR, 0.5)
 		ms := _default(majSegs, 16)
 		ns := _default(minSegs, 12)
-		key := string(R) + '|' + string(rr) + '|' + string(ms) + '|' + string(ns)
-		if cached := torusMeshCache.(key) {
-			? -> {
-				created := deps.TorusMesh(R, rr, ms, ns)
-				torusMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk4(8, R, rr, ms, ns), fn() deps.TorusMesh(R, rr, ms, ns))
 	}
 
 	fn planeMesh(width, depth, sw, sd) {
@@ -243,45 +191,21 @@ fn Renderer3D(deps, window, options) {
 		d := _default(depth, 4)
 		sww := _default(sw, 1)
 		sdd := _default(sd, 1)
-		key := string(w) + '|' + string(d) + '|' + string(sww) + '|' + string(sdd)
-		if cached := planeMeshCache.(key) {
-			? -> {
-				created := deps.PlaneMesh(w, d, sww, sdd)
-				planeMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk4(9, w, d, sww, sdd), fn() deps.PlaneMesh(w, d, sww, sdd))
 	}
 
 	fn hemisphereMesh(radius, segments, rings) {
 		r := _default(radius, 1)
 		s := _default(segments, 16)
 		rn := _default(rings, 8)
-		key := string(r) + '|' + string(s) + '|' + string(rn)
-		if cached := hemisphereMeshCache.(key) {
-			? -> {
-				created := deps.HemisphereMesh(r, s, rn)
-				hemisphereMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk3(10, r, s, rn), fn() deps.HemisphereMesh(r, s, rn))
 	}
 
 	fn wedgeMesh(width, height, depth) {
 		w := _default(width, 2)
 		h := _default(height, 2)
 		d := _default(depth, 2)
-		key := string(w) + '|' + string(h) + '|' + string(d)
-		if cached := wedgeMeshCache.(key) {
-			? -> {
-				created := deps.WedgeMesh(w, h, d)
-				wedgeMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk3(11, w, h, d), fn() deps.WedgeMesh(w, h, d))
 	}
 
 	fn tubeMesh(outerR, innerR, height, segments) {
@@ -289,15 +213,7 @@ fn Renderer3D(deps, window, options) {
 		iR := _default(innerR, 0.7)
 		h := _default(height, 2)
 		s := _default(segments, 16)
-		key := string(oR) + '|' + string(iR) + '|' + string(h) + '|' + string(s)
-		if cached := tubeMeshCache.(key) {
-			? -> {
-				created := deps.TubeMesh(oR, iR, h, s)
-				tubeMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk4(12, oR, iR, h, s), fn() deps.TubeMesh(oR, iR, h, s))
 	}
 
 	fn arrowMesh(shaftR, shaftH, headR, headH, segments) {
@@ -306,30 +222,14 @@ fn Renderer3D(deps, window, options) {
 		hr := _default(headR, 0.4)
 		hh := _default(headH, 0.5)
 		s := _default(segments, 12)
-		key := string(sr) + '|' + string(sh) + '|' + string(hr) + '|' + string(hh) + '|' + string(s)
-		if cached := arrowMeshCache.(key) {
-			? -> {
-				created := deps.ArrowMesh(sr, sh, hr, hh, s)
-				arrowMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk5(13, sr, sh, hr, hh, s), fn() deps.ArrowMesh(sr, sh, hr, hh, s))
 	}
 
 	fn prismMesh(radius, height, sides) {
 		r := _default(radius, 1)
 		h := _default(height, 2)
 		n := _default(sides, 6)
-		key := string(r) + '|' + string(h) + '|' + string(n)
-		if cached := prismMeshCache.(key) {
-			? -> {
-				created := deps.PrismMesh(r, h, n)
-				prismMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk3(14, r, h, n), fn() deps.PrismMesh(r, h, n))
 	}
 
 	fn stairsMesh(steps, width, stepH, stepD) {
@@ -337,28 +237,12 @@ fn Renderer3D(deps, window, options) {
 		w := _default(width, 2)
 		sh := _default(stepH, 0.5)
 		sd := _default(stepD, 0.5)
-		key := string(n) + '|' + string(w) + '|' + string(sh) + '|' + string(sd)
-		if cached := stairsMeshCache.(key) {
-			? -> {
-				created := deps.StairsMesh(n, w, sh, sd)
-				stairsMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk4(15, n, w, sh, sd), fn() deps.StairsMesh(n, w, sh, sd))
 	}
 
 	fn icosphereMesh(radius) {
 		r := _default(radius, 1)
-		key := string(r)
-		if cached := icosphereMeshCache.(key) {
-			? -> {
-				created := deps.IcosphereMesh(r)
-				icosphereMeshCache.(key) <- created
-				created
-			}
-			_ -> cached
-		}
+		_cached(_mk1(16, r), fn() deps.IcosphereMesh(r))
 	}
 
 	{
@@ -367,14 +251,20 @@ fn Renderer3D(deps, window, options) {
 		background: background
 		lineColor: lineColor
 		light: light
+		lightScene: lightScene
+		material: material
 		setCamera: fn(nextCamera) camera <- _default(nextCamera, camera)
 		setLight: fn(nextLight) light <- _default(nextLight, light)
+		setLightScene: fn(nextScene) lightScene <- _default(nextScene, lightScene)
+		setMaterial: fn(nextMat) material <- _default(nextMat, material)
+		setDrawDistance: fn(dist) camera.farPlane <- _default(dist, 0)
 		setProjection: fn(mode, orthoScale) camera <- {
 			z: _default(camera.z, 5)
 			fov: _default(camera.fov, 90)
 			mode: _default(mode, _default(camera.mode, 'perspective'))
 			orthoScale: _default(orthoScale, _default(camera.orthoScale, 4))
 			backfaceCulling: _default(camera.backfaceCulling, true)
+			farPlane: _default(camera.farPlane, 0)
 		}
 		clear: fn() deps.fillRect(window, 0, 0, window.width, window.height, background)
 		renderMeshSolid: fn(mesh, transform, color, borderColor) {
@@ -420,13 +310,23 @@ fn Renderer3D(deps, window, options) {
 		renderStairsSolid: fn(steps, width, stepH, stepD, transform, color, borderColor) deps.drawMeshSolid(window, stairsMesh(steps, width, stepH, stepD), transform, camera, _default(color, lineColor), light, borderColor)
 		renderIcosphere: fn(radius, transform, color) deps.drawMeshWireframe(window, icosphereMesh(radius), transform, camera, _default(color, lineColor))
 		renderIcosphereSolid: fn(radius, transform, color, borderColor) deps.drawMeshSolid(window, icosphereMesh(radius), transform, camera, _default(color, lineColor), light, borderColor)
+		renderMeshLit: fn(mesh, transform, color, materialOverride, borderColor) {
+			entryColor := _default(color, lineColor)
+			useMaterial := _default(materialOverride, material)
+			deps.drawMeshLit(window, mesh, transform, camera, entryColor, lightScene, useMaterial, borderColor)
+		}
+		renderCubeLit: fn(size, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, cubeMesh(size), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderSphereLit: fn(radius, segments, rings, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, sphereMesh(radius, segments, rings), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderPlaneLit: fn(width, depth, sw, sd, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, planeMesh(width, depth, sw, sd), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderCylinderLit: fn(radius, height, segments, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, cylinderMesh(radius, height, segments), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderConeLit: fn(radius, height, segments, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, coneMesh(radius, height, segments), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderTorusLit: fn(majorR, minorR, majSegs, minSegs, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, torusMesh(majorR, minorR, majSegs, minSegs), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderPyramidLit: fn(base, height, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, pyramidMesh(base, height), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
+		renderIcosphereLit: fn(radius, transform, color, materialOverride, borderColor) deps.drawMeshLit(window, icosphereMesh(radius), transform, camera, _default(color, lineColor), lightScene, _default(materialOverride, material), borderColor)
 		enqueueMeshSolid: fn(mesh, transform, color) _queuePush({ kind: 'solid', mesh: mesh, transform: transform, color: _default(color, lineColor) })
 		enqueueMeshWire: fn(mesh, transform, color) _queuePush({ kind: 'wire', mesh: mesh, transform: transform, color: _default(color, lineColor) })
 		flushQueue: fn() {
-			if enableMaterialBatch {
-				true -> _queueFlushByOrder(0)
-				_ -> _queueFlushByOrder(0)
-			}
+			_queueFlushByOrder(0)
 			renderQueue <- []
 			{ type: :ok }
 		}
