@@ -1,0 +1,172 @@
+// gui-video bridges the video frame format with the GUI pixel buffer and
+// rendering system.  It lets you convert between video.oak frames
+// ({width, height, channels, pixels:[byte...]}) and the shader pixel
+// buffer ({width, height, data:{packed-BGR-ints}}), render video frames
+// directly into a GUI window, apply video effects to shader buffers,
+// and export shader buffers / GUI regions as video frames.
+
+{
+	default: default
+	range: range
+	map: map
+	each: each
+} := import('std')
+video := import('video')
+guiColor := import('gui-color')
+guiShader := import('gui-shader')
+
+// ---- format conversion ------------------------------------------------
+
+// frameToBuffer converts a video.oak frame (channels >= 3, RGB byte order)
+// into a shader pixel buffer ({width, height, data:{}}) with packed BGR
+// integers.
+fn frameToBuffer(frame) {
+	w := frame.width
+	h := frame.height
+	ch := default(frame.channels, 3)
+	buf := guiShader.createBuffer(w, h)
+	total := w * h
+	fn _fill(i) if i < total {
+		true -> {
+			base := i * ch
+			r := default(frame.pixels.(base), 0)
+			g := default(frame.pixels.(base + 1), 0)
+			b := default(frame.pixels.(base + 2), 0)
+			buf.data.(i) <- guiColor.rgb(r, g, b)
+			_fill(i + 1)
+		}
+	}
+	_fill(0)
+	buf
+}
+
+// bufferToFrame converts a shader pixel buffer back into a 3-channel
+// video.oak frame.
+fn bufferToFrame(buf) {
+	w := buf.width
+	h := buf.height
+	total := w * h
+	pixels := range(total * 3) |> map(fn(_) 0)
+	fn _extract(i) if i < total {
+		true -> {
+			c := default(buf.data.(i), 0)
+			base := i * 3
+			pixels.(base) <- guiColor.colorR(c)
+			pixels.(base + 1) <- guiColor.colorG(c)
+			pixels.(base + 2) <- guiColor.colorB(c)
+			_extract(i + 1)
+		}
+	}
+	_extract(0)
+	video.frame(w, h, pixels, 3)
+}
+
+// ---- rendering video frames -------------------------------------------
+
+// renderFrame draws a video.oak frame into the GUI window at (ox, oy)
+// using fillRect(1x1) calls — the same approach as shaderRenderBuffer.
+// Pass a drawCtx with { fillRect } or ? to use gui-shader's _draw.
+fn renderFrame(drawCtx, window, frame, ox, oy) {
+	buf := frameToBuffer(frame)
+	guiShader.renderBuffer(window, buf, default(ox, 0), default(oy, 0))
+}
+
+// renderFrameScaled renders a video frame scaled by integer factor.
+fn renderFrameScaled(drawCtx, window, frame, ox, oy, scale) {
+	s := default(scale, 1)
+	ox := default(ox, 0)
+	oy := default(oy, 0)
+	w := frame.width
+	h := frame.height
+	ch := default(frame.channels, 3)
+	fn _row(y) if y < h {
+		true -> {
+			fn _col(x) if x < w {
+				true -> {
+					base := (y * w + x) * ch
+					r := default(frame.pixels.(base), 0)
+					g := default(frame.pixels.(base + 1), 0)
+					b := default(frame.pixels.(base + 2), 0)
+					c := guiColor.rgb(r, g, b)
+					if c != 0 -> drawCtx.fillRect(window, ox + x * s, oy + y * s, s, s, c)
+					_col(x + 1)
+				}
+			}
+			_col(0)
+			_row(y + 1)
+		}
+	}
+	_row(0)
+}
+
+// ---- apply video effects to shader buffers ----------------------------
+
+// bufferGrayscale applies video.toGrayscale to a shader pixel buffer
+// and returns a new buffer.
+fn bufferGrayscale(buf) {
+	f := bufferToFrame(buf)
+	g := video.toGrayscale(f)
+	frameToBuffer(g)
+}
+
+// bufferInvert applies video.invert to a shader pixel buffer.
+fn bufferInvert(buf) {
+	f := bufferToFrame(buf)
+	inv := video.invert(f)
+	frameToBuffer(inv)
+}
+
+// bufferThreshold applies video.threshold to a shader pixel buffer.
+fn bufferThreshold(buf, t) {
+	f := bufferToFrame(buf)
+	th := video.threshold(f, t)
+	frameToBuffer(th)
+}
+
+// bufferBlend blends two shader pixel buffers using video.blend.
+fn bufferBlend(bufA, bufB, alpha) {
+	fA := bufferToFrame(bufA)
+	fB := bufferToFrame(bufB)
+	mixed := video.blend(fA, fB, alpha)
+	frameToBuffer(mixed)
+}
+
+// bufferDiff computes per-channel absolute difference between two buffers.
+fn bufferDiff(bufA, bufB) {
+	fA := bufferToFrame(bufA)
+	fB := bufferToFrame(bufB)
+	d := video.frameDiff(fA, fB)
+	frameToBuffer(d)
+}
+
+// ---- capture shader buffer as video frame -----------------------------
+
+// captureBuffer is an alias for bufferToFrame — captures the current
+// pixel buffer state as a video.oak frame for further processing.
+fn captureBuffer(buf) bufferToFrame(buf)
+
+// ---- BMP export from video frames -------------------------------------
+
+// frameToBmpPixels converts a video.oak RGB frame into the BMP pixel
+// list expected by lib/bmp (list of [B, G, R] byte lists, bottom-up row
+// order).  The result can be passed directly to bmp.bmp(w, h, pixels).
+fn frameToBmpPixels(frame) {
+	w := frame.width
+	h := frame.height
+	ch := default(frame.channels, 3)
+	// BMP rows are stored bottom-up
+	br := range(h) |> with map() fn(row) {
+		y := h - 1 - row
+		range(w) |> with map() fn(x) {
+			base := (y * w + x) * ch
+			r := default(frame.pixels.(base), 0)
+			g := default(frame.pixels.(base + 1), 0)
+			b := default(frame.pixels.(base + 2), 0)
+			[b, g, r]
+		}
+	}
+    with std.reduce(br, []) fn(acc, rowPixels) {
+		with each(rowPixels) fn(px) acc << px
+		acc
+	}
+}

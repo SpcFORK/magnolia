@@ -1,3 +1,6 @@
+// gui-goal.oak
+// Run: magnolia run samples/gui-goal.oak
+
 {
 	println: println
 	string: string
@@ -6,6 +9,113 @@
 } := import('std')
 
 gui := import('GUI')
+
+fn Player(x, y, size, speed) {
+	{
+		x: x
+		y: y
+		size: size
+		speed: speed
+	}
+}
+
+fn Goal(x, y, size) {
+	{
+		x: x
+		y: y
+		size: size
+	}
+}
+
+fn Input(left, right, up, down) {
+	self := {
+		left: left
+		right: right
+		up: up
+		down: down
+	}
+
+	self.applyKey <- fn(key, isDown) {
+		if key = 'a' | key = 'A' | key = 'left' -> self.left <- isDown
+		if key = 'd' | key = 'D' | key = 'right' -> self.right <- isDown
+		if key = 'w' | key = 'W' | key = 'up' -> self.up <- isDown
+		if key = 's' | key = 'S' | key = 'down' -> self.down <- isDown
+	}
+
+	self.applyVk <- fn(vk, isDown) {
+		if vk = 65 | vk = 37 -> self.left <- isDown
+		if vk = 68 | vk = 39 -> self.right <- isDown
+		if vk = 87 | vk = 38 -> self.up <- isDown
+		if vk = 83 | vk = 40 -> self.down <- isDown
+	}
+
+	self
+}
+
+fn clampDt(dt) if dt < 0 {
+	true -> 0
+	_ -> if dt > 0.05 {
+		true -> 0.05
+		_ -> dt
+	}
+}
+
+fn State(worldW, worldH, timerMs, winFlashMs, wins, player, goal, input) {
+	self := {
+		worldW: worldW
+		worldH: worldH
+		timerMs: timerMs
+		winFlashMs: winFlashMs
+		wins: wins
+		player: player
+		goal: goal
+		input: input
+	}
+
+	self.resize <- fn(nextW, nextH) {
+		self.worldW <- nextW
+		self.worldH <- nextH
+	}
+
+	self.update <- fn(dt) {
+		useDt := clampDt(dt)
+		moveSpeed := self.player.speed
+		size := self.player.size
+
+		nextX := self.player.x
+		nextY := self.player.y
+
+		if self.input.left -> nextX <- nextX - moveSpeed * useDt
+		if self.input.right -> nextX <- nextX + moveSpeed * useDt
+		if self.input.up -> nextY <- nextY - moveSpeed * useDt
+		if self.input.down -> nextY <- nextY + moveSpeed * useDt
+
+		if nextX < 0 -> nextX <- 0
+		if nextY < 0 -> nextY <- 0
+		if nextX + size > self.worldW -> nextX <- self.worldW - size
+		if nextY + size > self.worldH -> nextY <- self.worldH - size
+
+		self.player.x <- nextX
+		self.player.y <- nextY
+
+		self.timerMs <- self.timerMs + (useDt * 1000)
+		if self.winFlashMs > 0 -> self.winFlashMs <- self.winFlashMs - (useDt * 1000)
+
+		hitX := (self.player.x + self.player.size) >= self.goal.x & self.player.x <= (self.goal.x + self.goal.size)
+		hitY := (self.player.y + self.player.size) >= self.goal.y & self.player.y <= (self.goal.y + self.goal.size)
+
+		if hitX & hitY -> {
+			self.wins <- self.wins + 1
+			self.winFlashMs <- 700
+			self.player.x <- 90
+			self.player.y <- 90
+			self.goal.x <- self.worldW - 130
+			self.goal.y <- self.worldH - 130
+		}
+	}
+
+	self
+}
 
 fn draw(window, state) {
 	frame := gui.beginFrame(window)
@@ -29,38 +139,38 @@ fn draw(window, state) {
 
 fn runGame(window) {
 	state := State(
-		window.width,
-		window.height,
-		0.0,
-		0.0,
-		0,
-		Player(90.0, 90.0, 34, 280.0),
-		Goal(window.width - 130, window.height - 130, 40),
+		window.width
+		window.height
+		0.0
+		0.0
+		0
+		Player(90.0, 90.0, 34, 280.0)
+		Goal(window.width - 130, window.height - 130, 40)
 		Input(false, false, false, false)
 	)
 
 	gui.show(window)
 	gui.setTitle(window, 'MG')
 
-    fn windowsLoop {
-        gui.onKeyDown(window, fn(vk) {
-            state.input.applyVk(vk, true)
-            if vk = 27 -> gui.close(window)
-        })
-        gui.onKeyUp(window, fn(vk) {
-            state.input.applyVk(vk, false)
-        })
-    }
+	fn windowsLoop {
+		gui.onKeyDown(window, fn(vk) {
+			state.input.applyVk(vk, true)
+			if vk = 27 -> gui.close(window)
+		})
+		gui.onKeyUp(window, fn(vk) {
+			state.input.applyVk(vk, false)
+		})
+	}
 
-    fn defaultLoop {
-        gui.onKeyDownEvent(window, fn(key, _evt) {
-            state.input.applyKey(key, true)
-            if key = 'escape' -> gui.close(window)
-        })
-        gui.onKeyUpEvent(window, fn(key, _evt) {
-            state.input.applyKey(key, false)
-        })
-    }
+	fn defaultLoop {
+		gui.onKeyDownEvent(window, fn(key, _evt) {
+			state.input.applyKey(key, true)
+			if key = 'escape' -> gui.close(window)
+		})
+		gui.onKeyUpEvent(window, fn(key, _evt) {
+			state.input.applyKey(key, false)
+		})
+	}
 
 	if window.backend = :windows {
 		true -> windowsLoop()
@@ -80,9 +190,9 @@ fn runGame(window) {
 window := gui.createWindow('MG', 960, 540, {
 	frameMs: 16
 	layer2D: 'auto'
-	icon: './magnolia.ico'
-	taskbarIcon: './magnolia.ico'
-	windowIcon: './magnolia.ico'
+	icon: './build/magnolia.ico'
+	taskbarIcon: './build/magnolia.ico'
+	windowIcon: './build/magnolia.ico'
 })
 
 if window.type {

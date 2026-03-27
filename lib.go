@@ -394,6 +394,9 @@ var libaudiowav string
 //go:embed lib/video.oak
 var libvideo string
 
+//go:embed lib/gui-video.oak
+var libguivideo string
+
 //go:embed lib/async-event-bus.oak
 var libasynceventbus string
 
@@ -502,7 +505,7 @@ var stdlibs = map[string]string{
 	"gui-render":                      libguirender,
 	"gui-3dmath":                      libgui3dmath,
 	"gui-raster":                      libguiraster,
-	"gui-lighting":                     libguilighting,
+	"gui-lighting":                    libguilighting,
 	"gui-web":                         libguiweb,
 	"gui-native-win":                  libguinativewin,
 	"gui-native-win-present":          libguinativewinpresent,
@@ -535,6 +538,7 @@ var stdlibs = map[string]string{
 	"audio-dsp":                       libaudiodsp,
 	"audio-wav":                       libaudiowav,
 	"video":                           libvideo,
+	"gui-video":                       libguivideo,
 	"async/event-bus":                 libasynceventbus,
 	"WLAN":                            libwlan,
 	"gui-shader":                      libguishader,

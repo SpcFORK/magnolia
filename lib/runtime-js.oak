@@ -10,6 +10,36 @@ function __oak_modularize(name, fn) {
 }
 function __oak_module_import(name) {
 	if (typeof __Oak_Modules[name] === \'object\') return __Oak_Modules[name];
+	// VFS-first: check virtual file system for overrides or dynamically created files
+	const __vfs = typeof __oak_get_vfs === \'function\' ? __oak_get_vfs() : null;
+	if (__vfs && typeof __vfs.readFile === \'function\') {
+		const __exts = [\'\', \'.oak\', \'.ok\', \'.mag\', \'.mg\'];
+		for (let __i = 0; __i < __exts.length; __i++) {
+			const __c = __vfs.readFile(name + __exts[__i]);
+			if (__c != null) {
+				const __src = (typeof __c === \'object\' && typeof __c.valueOf === \'function\')
+					? __c.valueOf() : String(__c);
+				__Oak_Modules[name] = {};
+				// attempt eval as pre-transpiled JS module (expression or factory)
+				try {
+					const __evald = new Function("return (" + __src + ")")();
+					if (typeof __evald === \'function\') {
+						const __mod = __evald();
+						if (__mod != null && typeof __mod === \'object\') return __Oak_Modules[name] = __mod;
+					} else if (__evald != null && typeof __evald === \'object\') {
+						return __Oak_Modules[name] = __evald;
+					}
+				} catch (__e) {}
+				// attempt JSON parse for data files
+				try {
+					const __json = JSON.parse(__src);
+					if (__json != null && typeof __json === \'object\') return __Oak_Modules[name] = __json;
+				} catch (__e) {}
+				// fallback: expose raw source content
+				return __Oak_Modules[name] = { __source: __as_oak_string(__src) };
+			}
+		}
+	}
 	const module = __Oak_Modules[name] || __Oak_Modules[__Oak_Import_Aliases[name]];
 	if (module) {
 		__Oak_Modules[name] = {}; // break circular imports
