@@ -16,19 +16,71 @@ fn _platformError(apiName) {
 	}
 }
 
-fn isWindows? ___runtime_sys_info().os = 'windows'
+_isWindowsPlatform := ___runtime_sys_info().os = 'windows'
+
+fn isWindows? _isWindowsPlatform
 
 fn wstr(s) utf16(s)
 
-fn user32(symbol, args...) if isWindows?() {
-	true -> sys.resolveAndCall(User32, symbol, args...)
+// Proc address caches — avoids sysproc + resolve + normalize overhead per call.
+_gdiProcCache := {}
+_userProcCache := {}
+
+fn _cachedGdi32(symbol, args...) if _isWindowsPlatform {
+	true -> {
+		addr := _gdiProcCache.(symbol)
+		if addr {
+			? -> {
+				resolved := sys.resolve(Gdi32, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_gdiProcCache.(symbol) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(addr, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
+	_ -> _platformError('gdi32')
+}
+
+fn _cachedUser32(symbol, args...) if _isWindowsPlatform {
+	true -> {
+		addr := _userProcCache.(symbol)
+		if addr {
+			? -> {
+				resolved := sys.resolve(User32, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_userProcCache.(symbol) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(addr, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
 	_ -> _platformError('user32')
 }
 
-fn gdi32(symbol, args...) if isWindows?() {
-	true -> sys.resolveAndCall(Gdi32, symbol, args...)
-	_ -> _platformError('gdi32')
-}
+fn user32(symbol, args...) _cachedUser32(symbol, args...)
+
+fn gdi32(symbol, args...) _cachedGdi32(symbol, args...)
 
 fn beginPaint(hwnd, paintStructPtr) if isWindows?() {
 	true -> user32('BeginPaint', hwnd, paintStructPtr)

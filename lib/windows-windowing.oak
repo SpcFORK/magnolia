@@ -44,17 +44,24 @@ fn _platformError(apiName) {
 	}
 }
 
-fn isWindows? ___runtime_sys_info().os = 'windows'
+_isWindowsPlatform := ___runtime_sys_info().os = 'windows'
+
+fn isWindows? _isWindowsPlatform
 
 fn wstr(s) utf16(s)
 
 fn cstr(s) s + char(0)
 
-fn ptrSize() if ___runtime_sys_info().arch {
-	'amd64' -> 8
-	'arm64' -> 8
+_cachedPtrSize := if _isWindowsPlatform {
+	true -> if ___runtime_sys_info().arch {
+		'amd64' -> 8
+		'arm64' -> 8
+		_ -> 4
+	}
 	_ -> 4
 }
+
+fn ptrSize() _cachedPtrSize
 
 fn writePtr(address, value) if ptrSize() {
 	8 -> writeU64(address, value)
@@ -80,13 +87,59 @@ fn noMessage?(res) {
 		(res.type = :error & res.errno = 1400)
 }
 
-fn kernel32(symbol, args...) if isWindows?() {
-	true -> sys.resolveAndCall(Kernel32, symbol, args...)
+// Proc address caches for kernel32/user32 hot-path calls.
+_k32ProcCache := {}
+_u32ProcCache := {}
+
+fn kernel32(symbol, args...) if _isWindowsPlatform {
+	true -> {
+		addr := _k32ProcCache.(symbol)
+		if addr {
+			? -> {
+				resolved := sys.resolve(Kernel32, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_k32ProcCache.(symbol) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(addr, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
 	_ -> _platformError('kernel32')
 }
 
-fn user32(symbol, args...) if isWindows?() {
-	true -> sys.resolveAndCall(User32, symbol, args...)
+fn user32(symbol, args...) if _isWindowsPlatform {
+	true -> {
+		addr := _u32ProcCache.(symbol)
+		if addr {
+			? -> {
+				resolved := sys.resolve(User32, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_u32ProcCache.(symbol) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(addr, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
 	_ -> _platformError('user32')
 }
 

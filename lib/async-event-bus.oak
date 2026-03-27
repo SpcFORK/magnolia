@@ -13,10 +13,10 @@
 
 fn _eventKey(name) string(name)
 
-fn _withoutToken(entries, token) entries |> filter(fn(entry) entry.token != token)
-
 cs EventBus {
-	entries := []
+	// Map from event key → list of listener entries.
+	// Avoids O(all_listeners) linear scan on every emit.
+	buckets := {}
 	nextToken := 1
 
 	fn allocToken {
@@ -25,11 +25,20 @@ cs EventBus {
 		token
 	}
 
+	fn _bucket(key) if buckets.(key) {
+		? -> {
+			buckets.(key) <- []
+			buckets.(key)
+		}
+		_ -> buckets.(key)
+	}
+
 	fn addListener(event, handler, once?) if type(handler) {
 		:function -> {
 			token := allocToken()
-			entries << {
-				event: _eventKey(event)
+			key := _eventKey(event)
+			_bucket(key) << {
+				event: key
 				token: token
 				handler: handler
 				once?: default(once?, false)
@@ -41,51 +50,74 @@ cs EventBus {
 
 	fn listenersFor(event) {
 		key := _eventKey(event)
-		entries |> filter(fn(entry) entry.event = key)
+		bucket := buckets.(key)
+		if bucket {
+			? -> []
+			_ -> bucket |> slice(0)
+		}
 	}
 
 	fn removeListener(event, tokenOrHandler) {
 		key := _eventKey(event)
-		before := len(entries)
-		entries <- if type(tokenOrHandler) {
-			:function -> entries |> filter(fn(entry) !(entry.event = key & entry.handler = tokenOrHandler))
-			_ -> entries |> filter(fn(entry) !(entry.event = key & entry.token = tokenOrHandler))
+		bucket := buckets.(key)
+		if bucket {
+			? -> 0
+			_ -> {
+				before := len(bucket)
+				buckets.(key) <- if type(tokenOrHandler) {
+					:function -> bucket |> filter(fn(entry) entry.handler != tokenOrHandler)
+					_ -> bucket |> filter(fn(entry) entry.token != tokenOrHandler)
+				}
+				before - len(buckets.(key))
+			}
 		}
-		before - len(entries)
 	}
 
 	fn emitSync(event, payload) {
 		key := _eventKey(event)
-		snapshot := listenersFor(key) |> slice(0)
-		dispatched := 0
-		onceTokens := []
-		snapshot |> each(fn(entry) {
-			entry.handler(payload, key)
-			dispatched <- dispatched + 1
-			if entry.once? -> onceTokens << entry.token
-		})
-		onceTokens |> each(fn(token) {
-			removeListener(key, token)
-		})
-		dispatched
+		bucket := buckets.(key)
+		if bucket {
+			? -> 0
+			_ -> {
+				snapshot := bucket |> slice(0)
+				dispatched := 0
+				onceTokens := []
+				snapshot |> each(fn(entry) {
+					entry.handler(payload, key)
+					dispatched <- dispatched + 1
+					if entry.once? -> onceTokens << entry.token
+				})
+				onceTokens |> each(fn(token) {
+					removeListener(key, token)
+				})
+				dispatched
+			}
+		}
 	}
 
 	fn emitAsync(event, payload, onDone) {
 		key := _eventKey(event)
-		snapshot := listenersFor(key) |> slice(0)
+		bucket := buckets.(key)
 		onDone := onDone |> default(fn(_) ?)
-
-		serial(snapshot, fn(entry, _, next, _) {
-			with wait(0) fn {
-				entry.handler(payload, key)
-				if entry.once? -> removeListener(key, entry.token)
-				next()
+		if bucket {
+			? -> {
+				onDone(0)
+				0
 			}
-		}, fn() {
-			onDone(len(snapshot))
-		})
-
-		len(snapshot)
+			_ -> {
+				snapshot := bucket |> slice(0)
+				serial(snapshot, fn(entry, _, next, _) {
+					with wait(0) fn {
+						entry.handler(payload, key)
+						if entry.once? -> removeListener(key, entry.token)
+						next()
+					}
+				}, fn() {
+					onDone(len(snapshot))
+				})
+				len(snapshot)
+			}
+		}
 	}
 
 	{
@@ -100,12 +132,12 @@ cs EventBus {
 		emitAsync: fn(event, payload, onDone) emitAsync(event, payload, onDone)
 		clear: fn(event) if event {
 			? -> {
-				entries <- []
+				buckets <- {}
 				true
 			}
 			_ -> {
 				key := _eventKey(event)
-				entries <- entries |> filter(fn(entry) entry.event != key)
+				buckets.(key) <- ?
 				true
 			}
 		}

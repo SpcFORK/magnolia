@@ -116,7 +116,41 @@ fn _platformError(apiName) {
 	}
 }
 
-fn isWindows? ___runtime_sys_info().os = 'windows'
+_isWindowsPlatform := ___runtime_sys_info().os = 'windows'
+
+fn isWindows? _isWindowsPlatform
+
+// Per-library proc address caches — avoids repeated loadDll/procAddress/sysproc
+// round-trips on every call.  First call resolves the full chain and caches the
+// integer address; subsequent calls go straight to syscall.
+_loaderProcCache := {}
+
+fn _cachedCallIn(library, symbol, args...) if _isWindowsPlatform {
+	true -> {
+		cacheKey := library + symbol
+		addr := _loaderProcCache.(cacheKey)
+		if addr {
+			? -> {
+				resolved := resolveInLoaded(library, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_loaderProcCache.(cacheKey) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(addr, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
+	_ -> _platformError('callIn')
+}
 
 fn _normalizeHandleResult(result, apiName, library) if sys.ok?(result) & result.r1 > 0 {
 	true -> {
@@ -230,26 +264,11 @@ fn resolveInLoaded(library, symbol) if isWindows?() {
 	_ -> _platformError('resolveInLoaded')
 }
 
-fn callIn(library, symbol, args...) if isWindows?() {
-	true -> {
-		resolved := resolveInLoaded(library, symbol)
-		if resolved.type {
-			:ok -> sys.call(resolved.proc, args...)
-			_ -> resolved
-		}
-	}
-	_ -> _platformError('callIn')
-}
+fn callIn(library, symbol, args...) _cachedCallIn(library, symbol, args...)
 
-fn user32(symbol, args...) if isWindows?() {
-	true -> callIn(User32, symbol, args...)
-	_ -> _platformError('user32')
-}
+fn user32(symbol, args...) _cachedCallIn(User32, symbol, args...)
 
-fn gdi32(symbol, args...) if isWindows?() {
-	true -> callIn(Gdi32, symbol, args...)
-	_ -> _platformError('gdi32')
-}
+fn gdi32(symbol, args...) _cachedCallIn(Gdi32, symbol, args...)
 
 fn advapi32(symbol, args...) if isWindows?() {
 	true -> callIn(Advapi32, symbol, args...)
