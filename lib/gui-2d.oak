@@ -87,6 +87,269 @@ fn rectIntersects(a, b) {
 	(ax < bx + bw) & (ax + aw > bx) & (ay < by + bh) & (ay + ah > by)
 }
 
+// --- 2D Collision & Shape Intersection ---
+
+// Circle shape constructor: center (cx, cy) and radius r.
+fn Circle2D(cx, cy, r) {
+	{
+		cx: _default(cx, 0)
+		cy: _default(cy, 0)
+		r: _default(r, 0)
+	}
+}
+
+// Point-in-rect test (using Rect2 fields).
+fn pointInRect2D(point, rect) {
+	px := _default(point.x, 0)
+	py := _default(point.y, 0)
+	rx := _default(rect.x, 0)
+	ry := _default(rect.y, 0)
+	rw := _default(rect.width, 0)
+	rh := _default(rect.height, 0)
+	(px >= rx) & (px <= rx + rw) & (py >= ry) & (py <= ry + rh)
+}
+
+// Point-in-circle test.
+fn pointInCircle2D(point, circle) {
+	dx := _default(point.x, 0) - _default(circle.cx, 0)
+	dy := _default(point.y, 0) - _default(circle.cy, 0)
+	r := _default(circle.r, 0)
+	(dx * dx + dy * dy) <= (r * r)
+}
+
+// Circle-circle overlap test.
+fn circleIntersects(a, b) {
+	dx := _default(a.cx, 0) - _default(b.cx, 0)
+	dy := _default(a.cy, 0) - _default(b.cy, 0)
+	radSum := _default(a.r, 0) + _default(b.r, 0)
+	(dx * dx + dy * dy) <= (radSum * radSum)
+}
+
+// Circle-rect overlap test.
+fn circleRectIntersects(circle, rect) {
+	cx := _default(circle.cx, 0)
+	cy := _default(circle.cy, 0)
+	cr := _default(circle.r, 0)
+	rx := _default(rect.x, 0)
+	ry := _default(rect.y, 0)
+	rw := _default(rect.width, 0)
+	rh := _default(rect.height, 0)
+	nearX := if cx < rx { true -> rx, _ -> if cx > (rx + rw) { true -> rx + rw, _ -> cx } }
+	nearY := if cy < ry { true -> ry, _ -> if cy > (ry + rh) { true -> ry + rh, _ -> cy } }
+	dx := cx - nearX
+	dy := cy - nearY
+	(dx * dx + dy * dy) <= (cr * cr)
+}
+
+// Squared distance between two 2D points.
+fn vec2Distance2(a, b) {
+	dx := _default(a.x, 0) - _default(b.x, 0)
+	dy := _default(a.y, 0) - _default(b.y, 0)
+	dx * dx + dy * dy
+}
+
+// Distance between two 2D points.
+fn vec2Distance(a, b) pow(vec2Distance2(a, b), 0.5)
+
+// Linearly interpolate between two Vec2s.
+fn vec2Lerp(a, b, t) Vec2(
+	_default(a.x, 0) + (_default(b.x, 0) - _default(a.x, 0)) * _default(t, 0)
+	_default(a.y, 0) + (_default(b.y, 0) - _default(a.y, 0)) * _default(t, 0)
+)
+
+// Rect union — smallest Rect2 enclosing both.
+fn rectUnion(a, b) {
+	ax := _default(a.x, 0)
+	ay := _default(a.y, 0)
+	aw := _default(a.width, 0)
+	ah := _default(a.height, 0)
+	bx := _default(b.x, 0)
+	by := _default(b.y, 0)
+	bw := _default(b.width, 0)
+	bh := _default(b.height, 0)
+	minX := if ax < bx { true -> ax, _ -> bx }
+	minY := if ay < by { true -> ay, _ -> by }
+	maxX1 := ax + aw
+	maxX2 := bx + bw
+	maxX := if maxX1 > maxX2 { true -> maxX1, _ -> maxX2 }
+	maxY1 := ay + ah
+	maxY2 := by + bh
+	maxY := if maxY1 > maxY2 { true -> maxY1, _ -> maxY2 }
+	Rect2(minX, minY, maxX - minX, maxY - minY)
+}
+
+// Rect clamp — clamp a point inside a rect.
+fn rectClampPoint(rect, point) {
+	rx := _default(rect.x, 0)
+	ry := _default(rect.y, 0)
+	rw := _default(rect.width, 0)
+	rh := _default(rect.height, 0)
+	px := _default(point.x, 0)
+	py := _default(point.y, 0)
+	cx := if px < rx { true -> rx, _ -> if px > (rx + rw) { true -> rx + rw, _ -> px } }
+	cy := if py < ry { true -> ry, _ -> if py > (ry + rh) { true -> ry + rh, _ -> py } }
+	Vec2(cx, cy)
+}
+
+// Line segment intersection.
+// Returns { hit: bool, x:, y:, t:, u: } where t,u are parametric [0,1] on each segment.
+fn lineSegmentIntersect2D(a1, a2, b1, b2) {
+	dxA := _default(a2.x, 0) - _default(a1.x, 0)
+	dyA := _default(a2.y, 0) - _default(a1.y, 0)
+	dxB := _default(b2.x, 0) - _default(b1.x, 0)
+	dyB := _default(b2.y, 0) - _default(b1.y, 0)
+	denom := dxA * dyB - dyA * dxB
+	if denom > -0.000001 & denom < 0.000001 {
+		true -> { hit: false, x: 0, y: 0, t: 0, u: 0 }
+		_ -> {
+			ox := _default(b1.x, 0) - _default(a1.x, 0)
+			oy := _default(b1.y, 0) - _default(a1.y, 0)
+			t := (ox * dyB - oy * dxB) / denom
+			u := (ox * dyA - oy * dxA) / denom
+			if t >= 0 & t <= 1 & u >= 0 & u <= 1 {
+				true -> { hit: true, x: _default(a1.x, 0) + t * dxA, y: _default(a1.y, 0) + t * dyA, t: t, u: u }
+				_ -> { hit: false, x: 0, y: 0, t: 0, u: 0 }
+			}
+		}
+	}
+}
+
+// Ray-rect intersection. Ray from origin Vec2 along direction Vec2.
+// Returns { hit: bool, tmin:, nx:, ny: } where nx,ny is the hit normal.
+fn rayRectIntersect2D(origin, dir, rect) {
+	dx := _default(dir.x, 0)
+	dy := _default(dir.y, 0)
+	ox := _default(origin.x, 0)
+	oy := _default(origin.y, 0)
+	rx := _default(rect.x, 0)
+	ry := _default(rect.y, 0)
+	rw := _default(rect.width, 0)
+	rh := _default(rect.height, 0)
+	invDx := if dx > -0.000001 & dx < 0.000001 { true -> 999999999, _ -> 1 / dx }
+	invDy := if dy > -0.000001 & dy < 0.000001 { true -> 999999999, _ -> 1 / dy }
+	tx1 := (rx - ox) * invDx
+	tx2 := (rx + rw - ox) * invDx
+	ty1 := (ry - oy) * invDy
+	ty2 := (ry + rh - oy) * invDy
+	txMin := if tx1 < tx2 { true -> tx1, _ -> tx2 }
+	txMax := if tx1 > tx2 { true -> tx1, _ -> tx2 }
+	tyMin := if ty1 < ty2 { true -> ty1, _ -> ty2 }
+	tyMax := if ty1 > ty2 { true -> ty1, _ -> ty2 }
+	tmin := if txMin > tyMin { true -> txMin, _ -> tyMin }
+	tmax := if txMax < tyMax { true -> txMax, _ -> tyMax }
+	if tmax < 0 | tmin > tmax {
+		true -> { hit: false, tmin: 0, nx: 0, ny: 0 }
+		_ -> {
+			nx := if tmin = txMin { true -> if dx < 0 { true -> 1, _ -> -1 }, _ -> 0 }
+			ny := if tmin = tyMin { true -> if dy < 0 { true -> 1, _ -> -1 }, _ -> 0 }
+			{ hit: true, tmin: tmin, nx: nx, ny: ny }
+		}
+	}
+}
+
+// Swept AABB collision.
+// Moving rect with velocity vel against static rect target.
+// Returns { hit:, tmin:, nx:, ny: }.
+fn sweptRectIntersect2D(movingRect, vel, targetRect) {
+	// Minkowski expansion: expand target by moving rect size
+	expanded := Rect2(
+		_default(targetRect.x, 0) - _default(movingRect.width, 0)
+		_default(targetRect.y, 0) - _default(movingRect.height, 0)
+		_default(targetRect.width, 0) + _default(movingRect.width, 0)
+		_default(targetRect.height, 0) + _default(movingRect.height, 0)
+	)
+	rayRectIntersect2D(Vec2(movingRect.x, movingRect.y), vel, expanded)
+}
+
+// Overlap depth / minimum translation vector for two intersecting Rect2s.
+// Returns { x:, y: } — the smallest push to separate them (signed).
+fn rectOverlapDepth2D(a, b) {
+	ax := _default(a.x, 0)
+	ay := _default(a.y, 0)
+	aw := _default(a.width, 0)
+	ah := _default(a.height, 0)
+	bx := _default(b.x, 0)
+	by := _default(b.y, 0)
+	bw := _default(b.width, 0)
+	bh := _default(b.height, 0)
+	ox := if (ax + aw / 2) < (bx + bw / 2) {
+		true -> (ax + aw) - bx
+		_ -> 0 - ((bx + bw) - ax)
+	}
+	oy := if (ay + ah / 2) < (by + bh / 2) {
+		true -> (ay + ah) - by
+		_ -> 0 - ((by + bh) - ay)
+	}
+	Vec2(ox, oy)
+}
+
+// Check if a rect (x,y,size,size) collides with any Rect2 in a list.
+fn _rectCollidesAnySub(rect, colliders, idx) if idx < len(colliders) {
+	true -> {
+		col := colliders.(idx)
+		if rectIntersects(rect, col) {
+			true -> true
+			_ -> _rectCollidesAnySub(rect, colliders, idx + 1)
+		}
+	}
+	_ -> false
+}
+fn rectCollidesAny(rect, colliders) _rectCollidesAnySub(rect, colliders, 0)
+
+// Check if a Circle2D collides with any Rect2 in a list.
+fn _circleCollidesAnySub(circle, colliders, idx) if idx < len(colliders) {
+	true -> {
+		col := colliders.(idx)
+		if circleRectIntersects(circle, col) {
+			true -> true
+			_ -> _circleCollidesAnySub(circle, colliders, idx + 1)
+		}
+	}
+	_ -> false
+}
+fn circleCollidesAny(circle, colliders) _circleCollidesAnySub(circle, colliders, 0)
+
+// Axis-separated rect movement resolution.
+// player has { x, y, width, height }, returns resolved { x, y }.
+fn resolveRectMove(player, nextPos, colliders) {
+	w := _default(player.width, 0)
+	h := _default(player.height, 0)
+	resolvedX := player.x
+	resolvedY := player.y
+
+	if rectCollidesAny(Rect2(nextPos.x, player.y, w, h), colliders) {
+		true -> ?
+		_ -> resolvedX <- nextPos.x
+	}
+
+	if rectCollidesAny(Rect2(resolvedX, nextPos.y, w, h), colliders) {
+		true -> ?
+		_ -> resolvedY <- nextPos.y
+	}
+
+	Vec2(resolvedX, resolvedY)
+}
+
+// Axis-separated circle movement resolution.
+// player has { cx, cy, r }, returns resolved Vec2.
+fn resolveCircleMove(player, nextPos, colliders) {
+	r := _default(player.r, 0)
+	resolvedX := player.cx
+	resolvedY := player.cy
+
+	if circleCollidesAny(Circle2D(nextPos.x, player.cy, r), colliders) {
+		true -> ?
+		_ -> resolvedX <- nextPos.x
+	}
+
+	if circleCollidesAny(Circle2D(resolvedX, nextPos.y, r), colliders) {
+		true -> ?
+		_ -> resolvedY <- nextPos.y
+	}
+
+	Vec2(resolvedX, resolvedY)
+}
+
 fn Transform2D(options) {
 	opts := _default(options, {})
 	{

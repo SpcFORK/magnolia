@@ -1,0 +1,246 @@
+// libcodecols provides column-counting and histogram rendering for source code
+// analysis. Designed after Rasmus Andersson's linelen_hist.sh.
+// https://gist.github.com/rsms/36bda3b5c8ab83d951e45ed788a184f4
+//
+// Core workflow:
+//   lines := split(mySource, '\n')
+//   cols  := columnCounts(lines)
+//   freqs := frequencies(cols)
+//   renderHistogram(freqs)           // prints to stdout
+//
+// Extended analysis:
+//   result := analyze(mySource)      // all-in-one
+//   result.stats                     // { min, max, mean, median, total, p90, p99 }
+
+{
+	println: println
+	default: default
+	map: map
+	range: range
+	filter: filter
+	reduce: reduce
+	values: values
+	identity: identity
+	partition: partition
+	each: each
+	slice: slice
+} := import('std')
+{
+	split: split
+	join: join
+	padEnd: padEnd
+	padStart: padStart
+} := import('str')
+sort := import('sort')
+math := import('math')
+
+// histo renders a Unicode histogram bar for a value scaled to sub-character
+// precision (1/8th block increments).
+//
+// Example:
+//   histo(24) // => '███'
+//   histo(5)  // => '▋'
+//   histo(0)  // => ''
+fn histo(n) {
+	whole := int(n / 8)
+	rem := n % 8
+	graph := range(whole) |> map(fn '█') |> join() + if int(rem) {
+		0 -> ''
+		1 -> '▏'
+		2 -> '▎'
+		3 -> '▍'
+		4 -> '▌'
+		5 -> '▋'
+		6 -> '▊'
+		7 -> '▉'
+	}
+	if graph = '' & n > 0 {
+		true -> '▏'
+		_ -> graph
+	}
+}
+
+// columnCounts takes a list of line strings and returns a list of column
+// widths, rounding each up to the nearest even number. Empty lines are
+// excluded.
+//
+// Example:
+//   columnCounts(['hello', '', 'hi']) // => [6, 2]
+fn columnCounts(lines) lines |>
+	filter(fn(s) s != '') |>
+	map(fn(line) len(line) + len(line) % 2)
+
+// frequencies takes a list of column counts and returns a map of
+// { columnWidth: occurrenceCount }.
+//
+// Example:
+//   frequencies([4, 4, 6, 8]) // => { '4': 2, '6': 1, '8': 1 }
+fn frequencies(cols) cols |>
+	sort.sort!() |>
+	partition(identity) |>
+	reduce({}, fn(freq, ns) freq.(ns.0) := len(ns))
+
+// percentile computes the p-th percentile of a sorted list of numbers.
+// p is in range [0, 100].
+//
+// Example:
+//   percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 90) // => 9
+fn percentile(sortedVals, p) {
+	n := len(sortedVals)
+	if n {
+		0 -> 0
+		_ -> {
+			idx := int(p / 100 * (n - 1))
+			sortedVals.(idx)
+		}
+	}
+}
+
+// stats computes summary statistics for a list of column counts.
+// Returns { min, max, mean, median, total, lineCount, p75, p90, p95, p99 }.
+//
+// Example:
+//   stats([10, 20, 30, 40]) // => { min: 10, max: 40, mean: 25, ... }
+fn stats(cols) {
+	sorted := sort.sort!(cols)
+	n := len(sorted)
+	if n {
+		0 -> {
+			min: 0, max: 0, mean: 0, median: 0
+			total: 0, lineCount: 0
+			p75: 0, p90: 0, p95: 0, p99: 0
+		}
+		_ -> {
+			min: sorted.0
+			max: sorted.(n - 1)
+			mean: math.mean(sorted) |> math.round(2)
+			median: math.median(sorted)
+			total: reduce(sorted, 0, fn(a, b) a + b)
+			lineCount: n
+			p75: percentile(sorted, 75)
+			p90: percentile(sorted, 90)
+			p95: percentile(sorted, 95)
+			p99: percentile(sorted, 99)
+		}
+	}
+}
+
+// renderHistogram prints a formatted histogram table to stdout.
+//
+// freqs is a frequency map from frequencies().
+// opts is an optional config object:
+//   { maxCols: ?     // max column number to display (default: auto)
+//     histoWidth: ?  // max bar width in characters (default: 60)
+//     step: ?        // column step size (default: 2) }
+//
+// Example:
+//   renderHistogram(freqs, { histoWidth: 40 })
+fn renderHistogram(freqs, opts) {
+	opts := default(opts, {})
+	step := opts.step |> default(2)
+
+	maxCol := math.max(keys(freqs) |> map(int)...)
+	maxCount := math.max(values(freqs)...)
+	histoWidth := opts.histoWidth |> default(60) |> math.min(maxCount)
+	maxListedCols := opts.maxCols |> default(maxCol)
+
+	colWidth := math.max(
+		len('cols')
+		len(string(maxCol))
+	)
+	countWidth := math.max(
+		len('count')
+		len(string(maxCount))
+	)
+
+	println(
+		'cols' |> padEnd(colWidth, ' ')
+		'count' |> padEnd(countWidth, ' ')
+	)
+	range(step, maxListedCols + 1, step) |> each(
+		fn(n) println(
+			string(n) |> padEnd(colWidth, ' ')
+			freqs.(n) |> default(0) |> string() |> padEnd(countWidth, ' ')
+			histo(freqs.(n) |> default(0) |> math.scale(0, maxCount, 0, histoWidth * 8))
+		)
+	)
+}
+
+// formatHistogram returns the histogram as a list of strings (one per row)
+// instead of printing to stdout.
+//
+// freqs is a frequency map from frequencies().
+// opts is the same config as renderHistogram().
+//
+// Example:
+//   lines := formatHistogram(freqs, {})
+fn formatHistogram(freqs, opts) {
+	opts := default(opts, {})
+	step := opts.step |> default(2)
+
+	maxCol := math.max(keys(freqs) |> map(int)...)
+	maxCount := math.max(values(freqs)...)
+	histoWidth := opts.histoWidth |> default(60) |> math.min(maxCount)
+	maxListedCols := opts.maxCols |> default(maxCol)
+
+	colWidth := math.max(
+		len('cols')
+		len(string(maxCol))
+	)
+	countWidth := math.max(
+		len('count')
+		len(string(maxCount))
+	)
+
+	header := 'cols' |> padEnd(colWidth, ' ') + ' ' +
+		'count' |> padEnd(countWidth, ' ')
+
+	rows := range(step, maxListedCols + 1, step) |> map(
+		fn(n) {
+			c := freqs.(n) |> default(0)
+			string(n) |> padEnd(colWidth, ' ') + ' ' +
+				string(c) |> padEnd(countWidth, ' ') + ' ' +
+				histo(c |> math.scale(0, maxCount, 0, histoWidth * 8))
+		}
+	)
+
+	[header] |> reduce(rows, fn(acc, r) acc << r)
+}
+
+// analyze performs a full column analysis on source text.
+// Returns { cols, freqs, stats } where:
+//   cols  - list of per-line column counts
+//   freqs - frequency map
+//   stats - summary statistics object
+//
+// Example:
+//   result := analyze(readFile('main.c'))
+//   result.stats.mean   // average line length
+//   result.stats.p90    // 90th-percentile line length
+fn analyze(text) {
+	lines := split(text, '\n')
+	c := columnCounts(lines)
+	f := frequencies(c)
+	s := stats(c)
+	{
+		cols: c
+		freqs: f
+		stats: s
+	}
+}
+
+// report performs a full analysis and prints the histogram plus summary.
+// text is raw source code. opts is passed to renderHistogram.
+//
+// Example:
+//   report(readFile('main.c'), { histoWidth: 40 })
+fn report(text, opts) {
+	result := analyze(text)
+	renderHistogram(result.freqs, opts)
+	println('average columns per line:', result.stats.mean)
+	println('median columns per line:', result.stats.median)
+	println('90th percentile:', result.stats.p90)
+	println('95th percentile:', result.stats.p95)
+	println('total lines:', result.stats.lineCount)
+	result
+}

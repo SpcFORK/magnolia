@@ -172,101 +172,128 @@ fn drawTriangleFilled(deps, window, p0, p1, p2, color, borderColor) {
 	}
 }
 
-fn _slice(list, i, end, out) if i {
-	end -> out
-	_ -> _slice(list, i + 1, end, out << list.(i))
-}
-
 fn _concatLists(left, right, i, out) if i {
 	len(right) -> out
 	_ -> _concatLists(left, right, i + 1, out << right.(i))
 }
 
-fn _compactTris(tris, i, out) if i {
-	len(tris) -> out
-	_ -> {
-		t := tris.(i)
-		if t {
-			? -> _compactTris(tris, i + 1, out)
-			_ -> _compactTris(tris, i + 1, out << t)
-		}
-	}
-}
-
-fn _mergeDepth(left, right, i, j, out) if [i, j] {
-	[len(left), len(right)] -> out
-	[len(left), _] -> _mergeDepth(left, right, i, j + 1, out << right.(j))
-	[_, len(right)] -> _mergeDepth(left, right, i + 1, j, out << left.(i))
-	_ -> {
-		la := left.(i)
-		rb := right.(j)
-		if [la, rb] {
-			[?, ?] -> _mergeDepth(left, right, i + 1, j + 1, out)
-			[?, _] -> _mergeDepth(left, right, i + 1, j, out)
-			[_, ?] -> _mergeDepth(left, right, i, j + 1, out)
-			_ -> if la.depth <= rb.depth {
-				true -> _mergeDepth(left, right, i + 1, j, out << la)
-				_ -> _mergeDepth(left, right, i, j + 1, out << rb)
-			}
-		}
-	}
-}
-
-// In-place insertion sort for small triangle batches — avoids allocation
-// overhead of merge sort when the triangle count is low.
-fn _insertionSortDepth(arr) {
-	n := len(arr)
-	fn _outer(i) if i >= n {
-		true -> arr
+// In-place compaction: shifts valid (non-?) entries to the front, returns count.
+fn _compactTrisInPlace(tris) {
+	n := len(tris)
+	fn compact(r, w) if r >= n {
+		true -> w
 		_ -> {
-			key := arr.(i)
-			if key {
-				? -> _outer(i + 1)
+			t := tris.(r)
+			if t {
+				? -> compact(r + 1, w)
 				_ -> {
-					fn _inner(j) if j < 0 {
-						true -> {
-							arr.(j + 1) <- key
-							_outer(i + 1)
-						}
-						_ -> if arr.(j) {
-							? -> {
-								arr.(j + 1) <- key
-								_outer(i + 1)
-							}
-							_ -> if arr.(j).depth > key.depth {
-								true -> {
-									arr.(j + 1) <- arr.(j)
-									_inner(j - 1)
-								}
-								_ -> {
-									arr.(j + 1) <- key
-									_outer(i + 1)
-								}
-							}
-						}
+					if r != w {
+						true -> tris.(w) <- t
 					}
-					_inner(i - 1)
+					compact(r + 1, w + 1)
 				}
 			}
 		}
 	}
-	if n <= 1 {
+	compact(0, 0)
+}
+
+// Range-based insertion sort for in-place quicksort partitions.
+fn _insertionSortRange(arr, lo, hi) {
+	fn _outer(i) if i > hi {
 		true -> arr
-		_ -> _outer(1)
+		_ -> {
+			key := arr.(i)
+			keyDepth := key.depth
+			fn _inner(j) if j < lo {
+				true -> {
+					arr.(j + 1) <- key
+					_outer(i + 1)
+				}
+				_ -> if arr.(j).depth > keyDepth {
+					true -> {
+						arr.(j + 1) <- arr.(j)
+						_inner(j - 1)
+					}
+					_ -> {
+						arr.(j + 1) <- key
+						_outer(i + 1)
+					}
+				}
+			}
+			_inner(i - 1)
+		}
+	}
+	if hi <= lo {
+		true -> arr
+		_ -> _outer(lo + 1)
 	}
 }
 
-fn _sortDepth(tris) if len(tris) <= 1 {
-	true -> tris
-	_ -> if len(tris) <= 16 {
-		true -> _insertionSortDepth(tris)
-		_ -> {
-			mid := int(len(tris) / 2)
-			left := _sortDepth(_slice(tris, 0, mid, []))
-			right := _sortDepth(_slice(tris, mid, len(tris), []))
-			_mergeDepth(left, right, 0, 0, [])
+fn _partition(arr, lo, hi) {
+	pivotDepth := arr.(hi).depth
+	fn scan(j, i) if j >= hi {
+		true -> {
+			tmp := arr.(i)
+			arr.(i) <- arr.(hi)
+			arr.(hi) <- tmp
+			i
+		}
+		_ -> if arr.(j).depth <= pivotDepth {
+			true -> {
+				tmp := arr.(i)
+				arr.(i) <- arr.(j)
+				arr.(j) <- tmp
+				scan(j + 1, i + 1)
+			}
+			_ -> scan(j + 1, i)
 		}
 	}
+	scan(lo, lo)
+}
+
+fn _sortDepthRange(arr, lo, hi) if (hi - lo) < 16 {
+	true -> _insertionSortRange(arr, lo, hi)
+	_ -> {
+		// Median-of-three pivot selection to avoid worst-case O(N²)
+		mid := lo + int((hi - lo) / 2)
+		if arr.(lo).depth > arr.(mid).depth {
+			true -> {
+				t := arr.(lo)
+				arr.(lo) <- arr.(mid)
+				arr.(mid) <- t
+			}
+		}
+		if arr.(lo).depth > arr.(hi).depth {
+			true -> {
+				t := arr.(lo)
+				arr.(lo) <- arr.(hi)
+				arr.(hi) <- t
+			}
+		}
+		if arr.(mid).depth > arr.(hi).depth {
+			true -> {
+				t := arr.(mid)
+				arr.(mid) <- arr.(hi)
+				arr.(hi) <- t
+			}
+		}
+		t := arr.(mid)
+		arr.(mid) <- arr.(hi)
+		arr.(hi) <- t
+		p := _partition(arr, lo, hi)
+		_sortDepthRange(arr, lo, p - 1)
+		_sortDepthRange(arr, p + 1, hi)
+	}
+}
+
+// In-place depth sort: quicksort with median-of-three + insertion sort fallback.
+// Eliminates all intermediate array allocations from the old merge sort.
+fn _sortDepthInPlace(tris, count) {
+	if count > 1 {
+		true -> _sortDepthRange(tris, 0, count - 1)
+	}
+	tris
 }
 
 fn _vecSub(deps, a, b) deps.Vec3(a.x - b.x, a.y - b.y, a.z - b.z)
@@ -609,15 +636,15 @@ fn _collectFacesRange(deps, window, faces, faceColors, verts, projected, default
 	_ -> _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, start + 1, end, _processFace(deps, window, start, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, acc))
 }
 
-fn _drawTriangles(deps, window, tris, i, drawn) if i {
-	len(tris) -> drawn
+fn _drawTriangles(deps, window, tris, i, count, drawn) if i >= count {
+	true -> drawn
 	_ -> {
 		t := tris.(i)
 		if t {
-			? -> _drawTriangles(deps, window, tris, i + 1, drawn)
+			? -> _drawTriangles(deps, window, tris, i + 1, count, drawn)
 			_ -> {
 				drawTriangleFilled(deps, window, t.a, t.b, t.c, t.color)
-				_drawTriangles(deps, window, tris, i + 1, drawn + 1)
+				_drawTriangles(deps, window, tris, i + 1, count, drawn + 1)
 			}
 		}
 	}
@@ -661,8 +688,9 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light, borderColo
 				}
 				_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, [])
 			}
-			tris := _sortDepth(_compactTris(trisRaw, 0, []))
-			drawn := _drawTriangles(deps, window, tris, 0, 0)
+			trisCount := _compactTrisInPlace(trisRaw)
+			_sortDepthInPlace(trisRaw, trisCount)
+			drawn := _drawTriangles(deps, window, trisRaw, 0, trisCount, 0)
 
 			if borderColor != ? {
 				true -> {
@@ -846,8 +874,9 @@ fn drawMeshLit(deps, window, mesh, transform, camera, color, scene, material, bo
 				}
 				_ -> _collectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, 0, [])
 			}
-			tris := _sortDepth(trisRaw)
-			drawn := _drawTriangles(deps, window, tris, 0, 0)
+			trisCount := len(trisRaw)
+			_sortDepthInPlace(trisRaw, trisCount)
+			drawn := _drawTriangles(deps, window, trisRaw, 0, trisCount, 0)
 
 			if borderColor != ? {
 				true -> {

@@ -484,3 +484,201 @@ fn Vec3Reflect(v, n) {
 	Vec3Sub(v, Vec3Scale(n, d))
 }
 
+// --- 3D Collision & Intersection Primitives ---
+
+// AABB3: axis-aligned bounding box defined by min and max corners.
+fn AABB3(minX, minY, minZ, maxX, maxY, maxZ) {
+	{
+		minX: _default(minX, 0), minY: _default(minY, 0), minZ: _default(minZ, 0)
+		maxX: _default(maxX, 0), maxY: _default(maxY, 0), maxZ: _default(maxZ, 0)
+	}
+}
+
+// Sphere3D: center and radius.
+fn Sphere3D(cx, cy, cz, r) {
+	{
+		cx: _default(cx, 0)
+		cy: _default(cy, 0)
+		cz: _default(cz, 0)
+		r: _default(r, 0)
+	}
+}
+
+// Plane3D: defined by normal (nx,ny,nz) and distance d from origin.
+fn Plane3D(nx, ny, nz, d) {
+	{
+		nx: _default(nx, 0)
+		ny: _default(ny, 0)
+		nz: _default(nz, 1)
+		d: _default(d, 0)
+	}
+}
+
+// Point-in-AABB test.
+fn pointInAABB3(point, box) {
+	px := point.x, py := point.y, pz := point.z
+	(px >= box.minX) & (px <= box.maxX) &
+	(py >= box.minY) & (py <= box.maxY) &
+	(pz >= box.minZ) & (pz <= box.maxZ)
+}
+
+// Point-in-sphere test.
+fn pointInSphere3D(point, sphere) {
+	dx := point.x - sphere.cx
+	dy := point.y - sphere.cy
+	dz := point.z - sphere.cz
+	r := sphere.r
+	(dx * dx + dy * dy + dz * dz) <= (r * r)
+}
+
+// AABB-AABB overlap test.
+fn aabb3Intersects(a, b) {
+	(a.minX <= b.maxX) & (a.maxX >= b.minX) &
+	(a.minY <= b.maxY) & (a.maxY >= b.minY) &
+	(a.minZ <= b.maxZ) & (a.maxZ >= b.minZ)
+}
+
+// Sphere-sphere overlap test.
+fn sphere3DIntersects(a, b) {
+	dx := a.cx - b.cx
+	dy := a.cy - b.cy
+	dz := a.cz - b.cz
+	radSum := a.r + b.r
+	(dx * dx + dy * dy + dz * dz) <= (radSum * radSum)
+}
+
+// Sphere-AABB overlap test.
+fn sphereAABB3Intersects(sphere, box) {
+	cx := sphere.cx, cy := sphere.cy, cz := sphere.cz
+	// Clamp sphere center to nearest point on AABB
+	nx := if cx < box.minX { true -> box.minX, _ -> if cx > box.maxX { true -> box.maxX, _ -> cx } }
+	ny := if cy < box.minY { true -> box.minY, _ -> if cy > box.maxY { true -> box.maxY, _ -> cy } }
+	nz := if cz < box.minZ { true -> box.minZ, _ -> if cz > box.maxZ { true -> box.maxZ, _ -> cz } }
+	dx := cx - nx
+	dy := cy - ny
+	dz := cz - nz
+	r := sphere.r
+	(dx * dx + dy * dy + dz * dz) <= (r * r)
+}
+
+// Signed distance from point to plane.
+fn planePointDistance(plane, point) {
+	plane.nx * point.x + plane.ny * point.y + plane.nz * point.z - plane.d
+}
+
+// Which side of a plane a point is on: :front, :back, or :on.
+fn planeClassifyPoint(plane, point) {
+	dist := planePointDistance(plane, point)
+	if dist > 0.000001 {
+		true -> :front
+		_ -> if dist < -0.000001 {
+			true -> :back
+			_ -> :on
+		}
+	}
+}
+
+// Ray-sphere intersection. Ray from origin Vec3 along dir Vec3.
+// Returns { hit: bool, t:, point: Vec3 }.
+fn raySphere3DIntersect(origin, dir, sphere) {
+	ocx := origin.x - sphere.cx
+	ocy := origin.y - sphere.cy
+	ocz := origin.z - sphere.cz
+	a := dir.x * dir.x + dir.y * dir.y + dir.z * dir.z
+	b := 2 * (ocx * dir.x + ocy * dir.y + ocz * dir.z)
+	c := ocx * ocx + ocy * ocy + ocz * ocz - sphere.r * sphere.r
+	disc := b * b - 4 * a * c
+	if disc < 0 {
+		true -> { hit: false, t: 0, point: Vec3(0, 0, 0) }
+		_ -> {
+			sqrtDisc := pow(disc, 0.5)
+			t0 := (0 - b - sqrtDisc) / (2 * a)
+			t1 := (0 - b + sqrtDisc) / (2 * a)
+			t := if t0 >= 0 { true -> t0, _ -> t1 }
+			if t >= 0 {
+				true -> { hit: true, t: t, point: Vec3(origin.x + dir.x * t, origin.y + dir.y * t, origin.z + dir.z * t) }
+				_ -> { hit: false, t: 0, point: Vec3(0, 0, 0) }
+			}
+		}
+	}
+}
+
+// Ray-AABB intersection (slab method).
+// Returns { hit: bool, tmin:, tmax: }.
+fn rayAABB3Intersect(origin, dir, box) {
+	invX := if dir.x > -0.000001 & dir.x < 0.000001 { true -> 999999999, _ -> 1 / dir.x }
+	invY := if dir.y > -0.000001 & dir.y < 0.000001 { true -> 999999999, _ -> 1 / dir.y }
+	invZ := if dir.z > -0.000001 & dir.z < 0.000001 { true -> 999999999, _ -> 1 / dir.z }
+
+	tx1 := (box.minX - origin.x) * invX
+	tx2 := (box.maxX - origin.x) * invX
+	ty1 := (box.minY - origin.y) * invY
+	ty2 := (box.maxY - origin.y) * invY
+	tz1 := (box.minZ - origin.z) * invZ
+	tz2 := (box.maxZ - origin.z) * invZ
+
+	txMin := if tx1 < tx2 { true -> tx1, _ -> tx2 }
+	txMax := if tx1 > tx2 { true -> tx1, _ -> tx2 }
+	tyMin := if ty1 < ty2 { true -> ty1, _ -> ty2 }
+	tyMax := if ty1 > ty2 { true -> ty1, _ -> ty2 }
+	tzMin := if tz1 < tz2 { true -> tz1, _ -> tz2 }
+	tzMax := if tz1 > tz2 { true -> tz1, _ -> tz2 }
+
+	tmin0 := if txMin > tyMin { true -> txMin, _ -> tyMin }
+	tmin := if tmin0 > tzMin { true -> tmin0, _ -> tzMin }
+	tmax0 := if txMax < tyMax { true -> txMax, _ -> tyMax }
+	tmax := if tmax0 < tzMax { true -> tmax0, _ -> tzMax }
+
+	if tmax < 0 | tmin > tmax {
+		true -> { hit: false, tmin: 0, tmax: 0 }
+		_ -> { hit: true, tmin: tmin, tmax: tmax }
+	}
+}
+
+// Ray-plane intersection.
+// Returns { hit: bool, t:, point: Vec3 }.
+fn rayPlane3DIntersect(origin, dir, plane) {
+	denom := plane.nx * dir.x + plane.ny * dir.y + plane.nz * dir.z
+	if denom > -0.000001 & denom < 0.000001 {
+		true -> { hit: false, t: 0, point: Vec3(0, 0, 0) }
+		_ -> {
+			t := (plane.d - (plane.nx * origin.x + plane.ny * origin.y + plane.nz * origin.z)) / denom
+			if t >= 0 {
+				true -> { hit: true, t: t, point: Vec3(origin.x + dir.x * t, origin.y + dir.y * t, origin.z + dir.z * t) }
+				_ -> { hit: false, t: 0, point: Vec3(0, 0, 0) }
+			}
+		}
+	}
+}
+
+// Closest point on AABB to a given point.
+fn aabb3ClosestPoint(box, point) {
+	cx := if point.x < box.minX { true -> box.minX, _ -> if point.x > box.maxX { true -> box.maxX, _ -> point.x } }
+	cy := if point.y < box.minY { true -> box.minY, _ -> if point.y > box.maxY { true -> box.maxY, _ -> point.y } }
+	cz := if point.z < box.minZ { true -> box.minZ, _ -> if point.z > box.maxZ { true -> box.maxZ, _ -> point.z } }
+	Vec3(cx, cy, cz)
+}
+
+// AABB union — smallest AABB enclosing both.
+fn aabb3Union(a, b) {
+	mnX := if a.minX < b.minX { true -> a.minX, _ -> b.minX }
+	mnY := if a.minY < b.minY { true -> a.minY, _ -> b.minY }
+	mnZ := if a.minZ < b.minZ { true -> a.minZ, _ -> b.minZ }
+	mxX := if a.maxX > b.maxX { true -> a.maxX, _ -> b.maxX }
+	mxY := if a.maxY > b.maxY { true -> a.maxY, _ -> b.maxY }
+	mxZ := if a.maxZ > b.maxZ { true -> a.maxZ, _ -> b.maxZ }
+	AABB3(mnX, mnY, mnZ, mxX, mxY, mxZ)
+}
+
+// AABB center and half-extents.
+fn aabb3Center(box) Vec3(
+	(box.minX + box.maxX) / 2
+	(box.minY + box.maxY) / 2
+	(box.minZ + box.maxZ) / 2
+)
+fn aabb3HalfExtents(box) Vec3(
+	(box.maxX - box.minX) / 2
+	(box.maxY - box.minY) / 2
+	(box.maxZ - box.minZ) / 2
+)
+

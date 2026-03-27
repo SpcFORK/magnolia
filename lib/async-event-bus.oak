@@ -11,7 +11,16 @@
 	serial: serial
 } := import('std')
 
-fn _eventKey(name) string(name)
+// Cache atom→string conversions to avoid per-emit string allocation.
+_eventKeyCache := {}
+fn _eventKey(name) if _eventKeyCache.(name) {
+	? -> {
+		s := string(name)
+		_eventKeyCache.(name) <- s
+		s
+	}
+	_ -> _eventKeyCache.(name)
+}
 
 cs EventBus {
 	// Map from event key → list of listener entries.
@@ -82,13 +91,18 @@ cs EventBus {
 				// Safe to iterate bucket directly: removeListener replaces
 				// buckets.(key) with a new array, so the original is unchanged.
 				dispatched := 0
-				onceTokens := []
+				onceTokens := ?
 				bucket |> each(fn(entry) {
 					entry.handler(payload, key)
 					dispatched <- dispatched + 1
-					if entry.once? -> onceTokens << entry.token
+					if entry.once? {
+						true -> if onceTokens {
+							? -> onceTokens <- [entry.token]
+							_ -> onceTokens << entry.token
+						}
+					}
 				})
-				if len(onceTokens) > 0 -> onceTokens |> each(fn(token) {
+				if onceTokens != ? -> onceTokens |> each(fn(token) {
 					removeListener(key, token)
 				})
 				dispatched

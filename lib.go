@@ -412,6 +412,9 @@ var libwindowsfonts string
 //go:embed lib/linux-fonts.oak
 var liblinuxfonts string
 
+//go:embed lib/codecols.oak
+var libcodecols string
+
 var stdlibs = map[string]string{
 	"std":                             libstd,
 	"str":                             libstr,
@@ -550,6 +553,7 @@ var stdlibs = map[string]string{
 	"gui-fonts":                       libguifonts,
 	"windows-fonts":                   libwindowsfonts,
 	"linux-fonts":                     liblinuxfonts,
+	"codecols":                        libcodecols,
 }
 
 var stdlibAutoLoadOrder = []string{

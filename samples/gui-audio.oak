@@ -17,6 +17,7 @@ windows := import('windows')
 
 SND_ASYNC := 1
 SND_MEMORY := 4
+SND_NOSTOP := 16
 
 fn sampleAt(samples, i) if i < 0 {
 	true -> 0.0
@@ -26,18 +27,27 @@ fn sampleAt(samples, i) if i < 0 {
 	}
 }
 
-fn drawWave(window, samples, i, maxI, x, y, w, h, color) if i < maxI {
-	true -> {
-		a := sampleAt(samples, i)
-		b := sampleAt(samples, i + 1)
-		x0 := x + int(float(i) / float(maxI) * float(w))
-		x1 := x + int(float(i + 1) / float(maxI) * float(w))
-		y0 := y + int((1.0 - (a + 1.0) / 2.0) * float(h))
-		y1 := y + int((1.0 - (b + 1.0) / 2.0) * float(h))
-		gui.drawLine(window, x0, y0, x1, y1, color)
-		drawWave(window, samples, i + 1, maxI, x, y, w, h, color)
+fn drawWave(window, samples, x, y, w, h, color) {
+	total := len(samples)
+	if total < 2 -> ?
+	stride := if total > w { true -> int(total / w), _ -> 1 }
+	fW := float(w)
+	fH := float(h)
+	fTotal := float(total)
+	prevX := x
+	prevY := y + int(fH / 2)
+	fn _drawStep(i) if i < total {
+		true -> {
+			s := sampleAt(samples, i)
+			px := x + int(float(i) / fTotal * fW)
+			py := y + int((1.0 - (s + 1.0) / 2.0) * fH)
+			gui.drawLine(window, prevX, prevY, px, py, color)
+			prevX <- px
+			prevY <- py
+			_drawStep(i + stride)
+		}
 	}
-	_ -> ?
+	_drawStep(0)
 }
 
 fn makeToneBuffer(name, freq, seconds, sampleRate) {
@@ -56,8 +66,15 @@ fn makeToneBuffer(name, freq, seconds, sampleRate) {
 fn stopPlayback() windows.winmm('PlaySoundA', 0, 0, 0)
 
 fn playToneBuffer(tone) {
-	res := windows.winmm('PlaySoundA', addr(tone.wav), 0, SND_ASYNC | SND_MEMORY)
-	windows.callOk?(res) & res.r1 > 0
+	res := windows.winmm('PlaySoundA', addr(tone.wav), 0, SND_ASYNC | SND_MEMORY | SND_NOSTOP)
+	if !(windows.callOk?(res) & res.r1 > 0) {
+		true -> {
+			stopPlayback()
+			res <- windows.winmm('PlaySoundA', addr(tone.wav), 0, SND_ASYNC | SND_MEMORY)
+			windows.callOk?(res) & res.r1 > 0
+		}
+		_ -> true
+	}
 }
 
 fn playNextTone(state) {
@@ -104,7 +121,7 @@ fn draw(window, state) {
 		plotW := window.width - 84
 		plotH := 188
 		gui.drawRect2D(window, plotX, plotY, plotW, plotH, accent, false)
-		drawWave(window, state.current.samples, 0, len(state.current.samples) - 1, plotX + 8, plotY + 8, plotW - 16, plotH - 16, waveColor)
+		drawWave(window, state.current.samples, plotX + 8, plotY + 8, plotW - 16, plotH - 16, waveColor)
 
 		gui.endFrame(window)
 	}
@@ -112,15 +129,24 @@ fn draw(window, state) {
 
 fn run(window) {
 	sampleRate := 22050
-	t1 := makeToneBuffer('A4', 440, 0.20, sampleRate)
-	t2 := makeToneBuffer('C5', 523, 0.20, sampleRate)
-	t3 := makeToneBuffer('E5', 659, 0.24, sampleRate)
-	t4 := makeToneBuffer('G5', 784, 0.24, sampleRate)
+	t1 := { done: false, result: ? }
+	t2 := { done: false, result: ? }
+	t3 := { done: false, result: ? }
+	t4 := { done: false, result: ? }
+	go(fn(f) { f.result <- makeToneBuffer('A4', 440, 0.20, sampleRate); f.done <- true }, t1)
+	go(fn(f) { f.result <- makeToneBuffer('C5', 523, 0.20, sampleRate); f.done <- true }, t2)
+	go(fn(f) { f.result <- makeToneBuffer('E5', 659, 0.24, sampleRate); f.done <- true }, t3)
+	go(fn(f) { f.result <- makeToneBuffer('G5', 784, 0.24, sampleRate); f.done <- true }, t4)
+	fn _awaitAll(a, b, c, d) if a.done & b.done & c.done & d.done {
+		true -> ?
+		_ -> { wait(0.001); _awaitAll(a, b, c, d) }
+	}
+	_awaitAll(t1, t2, t3, t4)
 	tones := [
-		t1
-		t2
-		t3
-		t4
+		t1.result
+		t2.result
+		t3.result
+		t4.result
 	]
 
 	winmmReady := false
