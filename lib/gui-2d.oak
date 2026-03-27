@@ -379,22 +379,44 @@ fn drawGrid2D(deps, window, spacing, color, originX, originY) {
 			oy := _default(originY, 0)
 			startX := ox % s
 			startY := oy % s
-			fn drawV(x) if x > w {
-				true -> { type: :ok }
+			if deps.drawLinesBatch {
+				? -> {
+					fn drawV(x) if x <= w {
+						true -> {
+							deps.drawLine(window, int(x), 0, int(x), int(h), color)
+							drawV(x + s)
+						}
+					}
+					fn drawH(y) if y <= h {
+						true -> {
+							deps.drawLine(window, 0, int(y), int(w), int(y), color)
+							drawH(y + s)
+						}
+					}
+					drawV(startX)
+					drawH(startY)
+				}
 				_ -> {
-					deps.drawLine(window, int(x), 0, int(x), int(h), color)
-					drawV(x + s)
+					segs := []
+					ih := int(h)
+					iw := int(w)
+					fn collectV(x) if x <= w {
+						true -> {
+							segs << { x1: int(x), y1: 0, x2: int(x), y2: ih }
+							collectV(x + s)
+						}
+					}
+					fn collectH(y) if y <= h {
+						true -> {
+							segs << { x1: 0, y1: int(y), x2: iw, y2: int(y) }
+							collectH(y + s)
+						}
+					}
+					collectV(startX)
+					collectH(startY)
+					deps.drawLinesBatch(window, segs, color)
 				}
 			}
-			fn drawH(y) if y > h {
-				true -> { type: :ok }
-				_ -> {
-					deps.drawLine(window, 0, int(y), int(w), int(y), color)
-					drawH(y + s)
-				}
-			}
-			drawV(startX)
-			drawH(startY)
 		}
 	}
 }
@@ -459,24 +481,39 @@ fn drawEllipse2D(deps, window, cx, cy, rx, ry, color, filled, borderColor) {
 }
 
 // drawArc2D draws an arc (portion of a circle) from startAngle to endAngle (degrees).
-fn _drawArcSub(deps, window, cx, cy, radius, curAngle, endAngle, stepAngle, color) if curAngle >= endAngle {
-	true -> { type: :ok }
-	_ -> {
-		nextAngle := if curAngle + stepAngle > endAngle {
-			true -> endAngle
-			_ -> curAngle + stepAngle
+fn _drawArcSub(deps, window, cx, cy, radius, curAngle, endAngle, stepAngle, color) {
+	// Collect all arc segments, then batch-draw
+	segs := []
+	fn collect(angle) if angle < endAngle {
+		true -> {
+			nextAngle := if angle + stepAngle > endAngle {
+				true -> endAngle
+				_ -> angle + stepAngle
+			}
+			r1 := _degToRad(angle)
+			r2 := _degToRad(nextAngle)
+			segs << {
+				x1: int(cx + radius * cos(r1))
+				y1: int(cy + radius * sin(r1))
+				x2: int(cx + radius * cos(r2))
+				y2: int(cy + radius * sin(r2))
+			}
+			collect(nextAngle)
 		}
-		r1 := _degToRad(curAngle)
-		r2 := _degToRad(nextAngle)
-		deps.drawLine(
-			window
-			int(cx + radius * cos(r1))
-			int(cy + radius * sin(r1))
-			int(cx + radius * cos(r2))
-			int(cy + radius * sin(r2))
-			color
-		)
-		_drawArcSub(deps, window, cx, cy, radius, nextAngle, endAngle, stepAngle, color)
+	}
+	collect(curAngle)
+	if deps.drawLinesBatch {
+		? -> {
+			fn fallback(i) if i < len(segs) {
+				true -> {
+					seg := segs.(i)
+					deps.drawLine(window, seg.x1, seg.y1, seg.x2, seg.y2, color)
+					fallback(i + 1)
+				}
+			}
+			fallback(0)
+		}
+		_ -> deps.drawLinesBatch(window, segs, color)
 	}
 }
 
@@ -628,13 +665,30 @@ fn _bezierCubicPoint(p0, p1, p2, p3, t) {
 	Vec2(_bezierLerp(dx, ex, t), _bezierLerp(dy, ey, t))
 }
 
-fn _drawBezierSub(deps, window, evalFn, prev, i, steps, color) if i > steps {
-	true -> { type: :ok }
-	_ -> {
-		t := i / steps
-		cur := evalFn(t)
-		deps.drawLine(window, int(prev.x), int(prev.y), int(cur.x), int(cur.y), color)
-		_drawBezierSub(deps, window, evalFn, cur, i + 1, steps, color)
+fn _drawBezierSub(deps, window, evalFn, prev, i, steps, color) {
+	// Collect all Bezier segments, then batch-draw
+	segs := []
+	fn collect(idx, p) if idx <= steps {
+		true -> {
+			t := idx / steps
+			cur := evalFn(t)
+			segs << { x1: int(p.x), y1: int(p.y), x2: int(cur.x), y2: int(cur.y) }
+			collect(idx + 1, cur)
+		}
+	}
+	collect(i, prev)
+	if deps.drawLinesBatch {
+		? -> {
+			fn fallback(j) if j < len(segs) {
+				true -> {
+					seg := segs.(j)
+					deps.drawLine(window, seg.x1, seg.y1, seg.x2, seg.y2, color)
+					fallback(j + 1)
+				}
+			}
+			fallback(0)
+		}
+		_ -> deps.drawLinesBatch(window, segs, color)
 	}
 }
 
@@ -657,32 +711,49 @@ fn drawBezier2D(deps, window, points, color, steps) {
 }
 
 // drawRing2D draws an annulus (ring) — a circle with a hole.
-fn _drawRingRow(deps, window, cx, cy, outerR, innerR, y, color) if y > outerR {
-	true -> { type: :ok }
-	_ -> {
-		ox := pow(outerR * outerR - y * y, 0.5)
-		hasInner := y * y < innerR * innerR
-		if hasInner {
-			true -> {
-				ix := pow(innerR * innerR - y * y, 0.5)
-				// Draw two horizontal spans per half: left band and right band
-				deps.drawLine(window, int(cx - ox) - 1, int(cy + y), int(cx - ix) + 1, int(cy + y), color)
-				deps.drawLine(window, int(cx + ix) - 1, int(cy + y), int(cx + ox) + 1, int(cy + y), color)
-				if y > 0 {
-					true -> {
-						deps.drawLine(window, int(cx - ox) - 1, int(cy - y), int(cx - ix) + 1, int(cy - y), color)
-						deps.drawLine(window, int(cx + ix) - 1, int(cy - y), int(cx + ox) + 1, int(cy - y), color)
+fn _drawRingRow(deps, window, cx, cy, outerR, innerR, y, color) {
+	// Collect all ring scanline segments into a batch array, then draw once
+	segs := []
+	fn collectRow(y) if y <= outerR {
+		true -> {
+			ox := pow(outerR * outerR - y * y, 0.5)
+			hasInner := y * y < innerR * innerR
+			if hasInner {
+				true -> {
+					ix := pow(innerR * innerR - y * y, 0.5)
+					segs << { x1: int(cx - ox) - 1, y1: int(cy + y), x2: int(cx - ix) + 1, y2: int(cy + y) }
+					segs << { x1: int(cx + ix) - 1, y1: int(cy + y), x2: int(cx + ox) + 1, y2: int(cy + y) }
+					if y > 0 {
+						true -> {
+							segs << { x1: int(cx - ox) - 1, y1: int(cy - y), x2: int(cx - ix) + 1, y2: int(cy - y) }
+							segs << { x1: int(cx + ix) - 1, y1: int(cy - y), x2: int(cx + ox) + 1, y2: int(cy - y) }
+						}
+					}
+				}
+				_ -> {
+					segs << { x1: int(cx - ox) - 1, y1: int(cy + y), x2: int(cx + ox) + 1, y2: int(cy + y) }
+					if y > 0 {
+						true -> segs << { x1: int(cx - ox) - 1, y1: int(cy - y), x2: int(cx + ox) + 1, y2: int(cy - y) }
 					}
 				}
 			}
-			_ -> {
-				deps.drawLine(window, int(cx - ox) - 1, int(cy + y), int(cx + ox) + 1, int(cy + y), color)
-				if y > 0 {
-					true -> deps.drawLine(window, int(cx - ox) - 1, int(cy - y), int(cx + ox) + 1, int(cy - y), color)
+			collectRow(y + 1)
+		}
+	}
+	collectRow(y)
+	if deps.drawLinesBatch {
+		? -> {
+			// Fallback: draw each segment individually
+			fn fallbackDraw(i) if i < len(segs) {
+				true -> {
+					seg := segs.(i)
+					deps.drawLine(window, seg.x1, seg.y1, seg.x2, seg.y2, color)
+					fallbackDraw(i + 1)
 				}
 			}
+			fallbackDraw(0)
 		}
-		_drawRingRow(deps, window, cx, cy, outerR, innerR, y + 1, color)
+		_ -> deps.drawLinesBatch(window, segs, color)
 	}
 }
 
@@ -809,29 +880,42 @@ fn drawSector2D(deps, window, cx, cy, radius, startAngle, endAngle, color, fille
 		true -> { type: :ok }
 		_ -> if _default(filled, false) {
 			true -> {
-				// Fill sector using triangle fan from center
-				segs := int(_clamp(r * 0.8, 8, 64))
-				stepDeg := (ea - sa) / segs
-				fn fillFan(i, prevAngle) if i > segs {
-					true -> { type: :ok }
-					_ -> {
+				// Fill sector using triangle fan from center — batch all lines
+				segCount := int(_clamp(r * 0.8, 8, 64))
+				stepDeg := (ea - sa) / segCount
+				lines := []
+				icx := int(cx)
+				icy := int(cy)
+				fn collectFan(i, prevAngle) if i <= segCount {
+					true -> {
 						curAngle := prevAngle + stepDeg
-						r1 := _degToRad(prevAngle)
-						r2 := _degToRad(curAngle)
-						px1 := cx + r * cos(r1)
-						py1 := cy + r * sin(r1)
-						px2 := cx + r * cos(r2)
-						py2 := cy + r * sin(r2)
-						// Draw lines from center to arc and along the arc
-						deps.drawLine(window, int(cx), int(cy), int(px1), int(py1), color)
-						deps.drawLine(window, int(px1), int(py1), int(px2), int(py2), color)
-						fillFan(i + 1, curAngle)
+						rad1 := _degToRad(prevAngle)
+						rad2 := _degToRad(curAngle)
+						px1 := int(cx + r * cos(rad1))
+						py1 := int(cy + r * sin(rad1))
+						px2 := int(cx + r * cos(rad2))
+						py2 := int(cy + r * sin(rad2))
+						lines << { x1: icx, y1: icy, x2: px1, y2: py1 }
+						lines << { x1: px1, y1: py1, x2: px2, y2: py2 }
+						collectFan(i + 1, curAngle)
 					}
 				}
+				collectFan(0, sa)
 				r2 := _degToRad(ea)
-				fillFan(0, sa)
-				// Close: line from center to end angle
-				deps.drawLine(window, int(cx), int(cy), int(cx + r * cos(r2)), int(cy + r * sin(r2)), color)
+				lines << { x1: icx, y1: icy, x2: int(cx + r * cos(r2)), y2: int(cy + r * sin(r2)) }
+				if deps.drawLinesBatch {
+					? -> {
+						fn fallback(i) if i < len(lines) {
+							true -> {
+								seg := lines.(i)
+								deps.drawLine(window, seg.x1, seg.y1, seg.x2, seg.y2, color)
+								fallback(i + 1)
+							}
+						}
+						fallback(0)
+					}
+					_ -> deps.drawLinesBatch(window, lines, color)
+				}
 			}
 			_ -> {
 				// Outline: two radial lines + arc
@@ -862,15 +946,32 @@ fn drawRegularPolygon2D(deps, window, cx, cy, radius, sides, color, filled) {
 }
 
 // drawSpiral2D draws an Archimedean spiral.
-fn _drawSpiralSub(deps, window, cx, cy, r, growth, angle, endAngle, step, prevX, prevY, color) if angle > endAngle {
-	true -> { type: :ok }
-	_ -> {
-		curR := r + growth * angle / (2 * PI)
-		rad := _degToRad(angle)
-		curX := cx + curR * cos(rad)
-		curY := cy + curR * sin(rad)
-		deps.drawLine(window, int(prevX), int(prevY), int(curX), int(curY), color)
-		_drawSpiralSub(deps, window, cx, cy, r, growth, angle + step, endAngle, step, curX, curY, color)
+fn _drawSpiralSub(deps, window, cx, cy, r, growth, angle, endAngle, step, prevX, prevY, color) {
+	// Collect all spiral segments, then batch-draw
+	segs := []
+	fn collect(a, px, py) if a <= endAngle {
+		true -> {
+			curR := r + growth * a / (2 * PI)
+			rad := _degToRad(a)
+			curX := cx + curR * cos(rad)
+			curY := cy + curR * sin(rad)
+			segs << { x1: int(px), y1: int(py), x2: int(curX), y2: int(curY) }
+			collect(a + step, curX, curY)
+		}
+	}
+	collect(angle, prevX, prevY)
+	if deps.drawLinesBatch {
+		? -> {
+			fn fallback(i) if i < len(segs) {
+				true -> {
+					seg := segs.(i)
+					deps.drawLine(window, seg.x1, seg.y1, seg.x2, seg.y2, color)
+					fallback(i + 1)
+				}
+			}
+			fallback(0)
+		}
+		_ -> deps.drawLinesBatch(window, segs, color)
 	}
 }
 

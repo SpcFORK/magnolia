@@ -18,6 +18,10 @@ fn _platformError(apiName) {
 
 _isWindowsPlatform := ___runtime_sys_info().os = 'windows'
 
+// Pre-allocated 8-byte buffer for SIZE struct (cx, cy) used by getTextExtentPoint32.
+// Reused across calls since it's only needed transiently within each call.
+_szBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+
 fn isWindows? _isWindowsPlatform
 
 fn wstr(s) utf16(s)
@@ -165,11 +169,10 @@ fn createSolidBrush(colorRef) if isWindows?() {
 
 fn getTextExtentPoint32(hdc, text) if isWindows?() {
 	true -> {
-		szBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
 		res := gdi32('GetTextExtentPoint32W', hdc, wstr(text), len(text), )
 		if res.r1 > 0 {
 			true -> {
-				base := addr(szBuf)
+				base := addr(_szBuf)
 				cx := readU32(base)
 				cy := readU32(base + 4)
 				{ type: :ok, cx: cx, cy: cy }

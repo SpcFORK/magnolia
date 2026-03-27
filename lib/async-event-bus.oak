@@ -79,15 +79,16 @@ cs EventBus {
 		if bucket {
 			? -> 0
 			_ -> {
-				snapshot := bucket |> slice(0)
+				// Safe to iterate bucket directly: removeListener replaces
+				// buckets.(key) with a new array, so the original is unchanged.
 				dispatched := 0
 				onceTokens := []
-				snapshot |> each(fn(entry) {
+				bucket |> each(fn(entry) {
 					entry.handler(payload, key)
 					dispatched <- dispatched + 1
 					if entry.once? -> onceTokens << entry.token
 				})
-				onceTokens |> each(fn(token) {
+				if len(onceTokens) > 0 -> onceTokens |> each(fn(token) {
 					removeListener(key, token)
 				})
 				dispatched

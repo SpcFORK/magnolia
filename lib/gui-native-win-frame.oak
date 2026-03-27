@@ -7,7 +7,9 @@ fn _windowClientSize(window) {
 	// Skip syscall if dimensions are cached and not stale (no resize event)
 	if _default(window._clientSizeStale, true) {
 		true -> {
-			rect := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+			// Reuse rect buffer across calls to avoid per-resize allocation
+			if window._clientSizeRect = ? -> window._clientSizeRect <- bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+			rect := window._clientSizeRect
 			res := windows.user32('GetClientRect', window.hwnd, addr(rect))
 			if windows.callOk?(res) & res.r1 > 0 {
 				true -> {
@@ -26,22 +28,18 @@ fn _windowClientSize(window) {
 					window._cachedClientW <- w
 					window._cachedClientH <- h
 					window._clientSizeStale <- false
-					{
-						type: :ok
-						width: w
-						height: h
-					}
+					// Cache result object to avoid per-call allocation
+					if window._clientSizeResult = ? -> window._clientSizeResult <- { type: :ok, width: w, height: h }
+					window._clientSizeResult.width <- w
+					window._clientSizeResult.height <- h
+					window._clientSizeResult
 				}
 				_ -> _err('GetClientRect failed', res)
 			}
 		}
 		_ -> {
-			// Return cached dimensions
-			{
-				type: :ok
-				width: window._cachedClientW
-				height: window._cachedClientH
-			}
+			// Return cached result object (width/height already up to date)
+			window._clientSizeResult
 		}
 	}
 }

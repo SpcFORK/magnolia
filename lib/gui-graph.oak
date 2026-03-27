@@ -72,11 +72,19 @@ fn graphMapY(value, y, height, range) {
 
 // ─── Internal ────────────────────────────────────────────────────────────────
 
-fn _graphDrawBorder(ctx, window, x, y, width, height, color) {
-	ctx.drawLine(window, x, y, x + width, y, color)
-	ctx.drawLine(window, x, y + height, x + width, y + height, color)
-	ctx.drawLine(window, x, y, x, y + height, color)
-	ctx.drawLine(window, x + width, y, x + width, y + height, color)
+fn _graphDrawBorder(ctx, window, x, y, width, height, color) if ctx.drawLinesBatch {
+	? -> {
+		ctx.drawLine(window, x, y, x + width, y, color)
+		ctx.drawLine(window, x, y + height, x + width, y + height, color)
+		ctx.drawLine(window, x, y, x, y + height, color)
+		ctx.drawLine(window, x + width, y, x + width, y + height, color)
+	}
+	_ -> ctx.drawLinesBatch(window, [
+		{ x1: x, y1: y, x2: x + width, y2: y }
+		{ x1: x, y1: y + height, x2: x + width, y2: y + height }
+		{ x1: x, y1: y, x2: x, y2: y + height }
+		{ x1: x + width, y1: y, x2: x + width, y2: y + height }
+	], color)
 }
 
 // ─── Graph drawing (ctx-injected) ────────────────────────────────────────────
@@ -93,27 +101,51 @@ fn drawGraphAxes(ctx, window, x, y, width, height, options) {
 	if backgroundColor != ? -> ctx.fillRect(window, x, y, width, height, backgroundColor)
 
 	if showGrid {
-		true -> {
-			if xTicks < 1 -> xTicks <- 1
-			if yTicks < 1 -> yTicks <- 1
-
-			fn drawXGrid(i) if i <= xTicks {
-				true -> {
-					gx := x + int((float(i) * float(width)) / float(xTicks))
-					ctx.drawLine(window, gx, y, gx, y + height, gridColor)
-					drawXGrid(i + 1)
+		true -> if ctx.drawLinesBatch {
+			? -> {
+				// Fallback: individual drawLine calls
+				if xTicks < 1 -> xTicks <- 1
+				if yTicks < 1 -> yTicks <- 1
+				fn drawXGrid(i) if i <= xTicks {
+					true -> {
+						gx := x + int((float(i) * float(width)) / float(xTicks))
+						ctx.drawLine(window, gx, y, gx, y + height, gridColor)
+						drawXGrid(i + 1)
+					}
 				}
-			}
-			drawXGrid(0)
-
-			fn drawYGrid(i) if i <= yTicks {
-				true -> {
-					gy := y + int((float(i) * float(height)) / float(yTicks))
-					ctx.drawLine(window, x, gy, x + width, gy, gridColor)
-					drawYGrid(i + 1)
+				drawXGrid(0)
+				fn drawYGrid(i) if i <= yTicks {
+					true -> {
+						gy := y + int((float(i) * float(height)) / float(yTicks))
+						ctx.drawLine(window, x, gy, x + width, gy, gridColor)
+						drawYGrid(i + 1)
+					}
 				}
+				drawYGrid(0)
 			}
-			drawYGrid(0)
+			_ -> {
+				// Batch all grid lines into a single native call
+				if xTicks < 1 -> xTicks <- 1
+				if yTicks < 1 -> yTicks <- 1
+				gridSegs := []
+				fn collectX(i) if i <= xTicks {
+					true -> {
+						gx := x + int((float(i) * float(width)) / float(xTicks))
+						gridSegs << { x1: gx, y1: y, x2: gx, y2: y + height }
+						collectX(i + 1)
+					}
+				}
+				collectX(0)
+				fn collectY(i) if i <= yTicks {
+					true -> {
+						gy := y + int((float(i) * float(height)) / float(yTicks))
+						gridSegs << { x1: x, y1: gy, x2: x + width, y2: gy }
+						collectY(i + 1)
+					}
+				}
+				collectY(0)
+				ctx.drawLinesBatch(window, gridSegs, gridColor)
+			}
 		}
 	}
 

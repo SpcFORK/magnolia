@@ -121,16 +121,30 @@ fn transformVertices(vertices, transform, i, out) {
 	tx := _default(ts.tx, 0)
 	ty := _default(ts.ty, 0)
 	tz := _default(ts.tz, 0)
-	rx := degToRad(_default(ts.rx, 0))
-	ry := degToRad(_default(ts.ry, 0))
-	rz := degToRad(_default(ts.rz, 0))
+	_rx := _default(ts.rx, 0)
+	_ry := _default(ts.ry, 0)
+	_rz := _default(ts.rz, 0)
+	rx := degToRad(_rx)
+	ry := degToRad(_ry)
+	rz := degToRad(_rz)
 
-	cx := cos(rx)
-	sx := sin(rx)
-	cy := cos(ry)
-	sy := sin(ry)
-	cz := cos(rz)
-	sz := sin(rz)
+	// Use cached trig values if angles unchanged
+	cx := if ts._cRx = _rx { true -> ts._cx, _ -> cos(rx) }
+	sx := if ts._cRx = _rx { true -> ts._sx, _ -> sin(rx) }
+	cy := if ts._cRy = _ry { true -> ts._cy, _ -> cos(ry) }
+	sy := if ts._cRy = _ry { true -> ts._sy, _ -> sin(ry) }
+	cz := if ts._cRz = _rz { true -> ts._cz, _ -> cos(rz) }
+	sz := if ts._cRz = _rz { true -> ts._sz, _ -> sin(rz) }
+	// Store trig values for next call
+	ts._cRx <- _rx
+	ts._cx <- cx
+	ts._sx <- sx
+	ts._cRy <- _ry
+	ts._cy <- cy
+	ts._sy <- sy
+	ts._cRz <- _rz
+	ts._cz <- cz
+	ts._sz <- sz
 
 	fn sub(j, acc) if j {
 		len(vertices) -> acc
@@ -191,16 +205,28 @@ fn transformVerticesBatch(meshes, transforms, i, out) if i {
 		tx := _default(ts.tx, 0)
 		ty := _default(ts.ty, 0)
 		tz := _default(ts.tz, 0)
-		rx := degToRad(_default(ts.rx, 0))
-		ry := degToRad(_default(ts.ry, 0))
-		rz := degToRad(_default(ts.rz, 0))
+		_rx := _default(ts.rx, 0)
+		_ry := _default(ts.ry, 0)
+		_rz := _default(ts.rz, 0)
+		rx := degToRad(_rx)
+		ry := degToRad(_ry)
+		rz := degToRad(_rz)
 
-		cx := cos(rx)
-		sx := sin(rx)
-		cy := cos(ry)
-		sy := sin(ry)
-		cz := cos(rz)
-		sz := sin(rz)
+		cx := if ts._cRx = _rx { true -> ts._cx, _ -> cos(rx) }
+		sx := if ts._cRx = _rx { true -> ts._sx, _ -> sin(rx) }
+		cy := if ts._cRy = _ry { true -> ts._cy, _ -> cos(ry) }
+		sy := if ts._cRy = _ry { true -> ts._sy, _ -> sin(ry) }
+		cz := if ts._cRz = _rz { true -> ts._cz, _ -> cos(rz) }
+		sz := if ts._cRz = _rz { true -> ts._sz, _ -> sin(rz) }
+		ts._cRx <- _rx
+		ts._cx <- cx
+		ts._sx <- sx
+		ts._cRy <- _ry
+		ts._cy <- cy
+		ts._sy <- sy
+		ts._cRz <- _rz
+		ts._cz <- cz
+		ts._sz <- sz
 
 		fn batchSub(j, acc) if j {
 			len(mesh.vertices) -> acc

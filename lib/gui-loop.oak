@@ -64,11 +64,11 @@ fn maybeRunFrame(window, onFrame, force, publish) {
 					dt := float(dtNs) / 1000000000.0
 					window._lastFrameNt <- now
 					onFrame(window, dt)
-					publish(window, :frame, {
-						type: :frame
-						dt: dt
-						timeNs: now
-					})
+					// Reuse frame event object to avoid per-frame allocation
+					if window._frameEvt = ? -> window._frameEvt <- { type: :frame, dt: 0, timeNs: 0 }
+					window._frameEvt.dt <- dt
+					window._frameEvt.timeNs <- now
+					publish(window, :frame, window._frameEvt)
 					interval := frameIntervalNt(window)
 					// Reuse nanotime from frame start to avoid redundant syscall
 					scheduledBase := if forceNow {

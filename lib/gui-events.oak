@@ -107,9 +107,19 @@ FORM_VK_ESCAPE := 27
 
 // ─── Win32 message buffer readers ───────────────────────────────────────────
 
-fn formMsgType(window) _default(window._cachedMsgType, windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE))
-fn formMsgWParam(window) _default(window._cachedMsgWP, windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM))
-fn formMsgLParam(window) _default(window._cachedMsgLP, windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM))
+// Use if-expressions so readU32 fallback is only evaluated on cache miss.
+fn formMsgType(window) if window._cachedMsgType {
+	? -> windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+	_ -> window._cachedMsgType
+}
+fn formMsgWParam(window) if window._cachedMsgWP {
+	? -> windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
+	_ -> window._cachedMsgWP
+}
+fn formMsgLParam(window) if window._cachedMsgLP {
+	? -> windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+	_ -> window._cachedMsgLP
+}
 fn formLoWord(v) v & 65535
 fn formHiWord(v)(v >> 16) & 65535
 
@@ -128,13 +138,15 @@ fn _clearDispatchContext(window) {
 
 fn formEventContext(window) {
 	lp := formMsgLParam(window)
-	{
-		mt: formMsgType(window)
-		wp: formMsgWParam(window)
-		lp: lp
-		mx: formLoWord(lp)
-		my: formHiWord(lp)
-	}
+	// Reuse a cached context object instead of allocating per dispatch.
+	if window._eventCtx = ? -> window._eventCtx <- { mt: ?, wp: ?, lp: ?, mx: ?, my: ? }
+	ctx := window._eventCtx
+	ctx.mt <- formMsgType(window)
+	ctx.wp <- formMsgWParam(window)
+	ctx.lp <- lp
+	ctx.mx <- formLoWord(lp)
+	ctx.my <- formHiWord(lp)
+	ctx
 }
 
 fn formInRect?(mx, my, rx, ry, rw, rh) {

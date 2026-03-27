@@ -7,6 +7,9 @@ linux := import('linux')
 guiFonts := import('gui-fonts')
 { writeU32: writeU32 } := import('writes')
 
+// Shared success sentinel — avoids per-call { type: :ok } allocation.
+_OK := { type: :ok }
+
 fn _asBool(value) if value {
 	true -> true
 	_ -> false
@@ -196,7 +199,7 @@ fn drawText(window, x, y, text, color, defaultColor) if window.type {
 					if window.frameHdc = 0 {
 						true -> windows.releaseDC(window.hwnd, hdcValue)
 					}
-					{ type: :ok }
+					_OK
 				}
 				_ -> _err('GetDC failed', ?)
 			}
@@ -219,9 +222,12 @@ fn drawText(window, x, y, text, color, defaultColor) if window.type {
 			if gcHandle > 0 {
 				true -> {
 					_ensureLinuxFont(window, gcHandle)
-					linux.setForeground(window.display, gcHandle, useColor)
+					if window._curLinuxFgColor != useColor -> {
+						linux.setForeground(window.display, gcHandle, useColor)
+						window._curLinuxFgColor <- useColor
+					}
 					linux.drawString(window.display, window.window, gcHandle, x, y, text)
-					{ type: :ok }
+					_OK
 				}
 				_ -> _err('XCreateGC failed', ?)
 			}
@@ -237,7 +243,7 @@ fn drawText(window, x, y, text, color, defaultColor) if window.type {
 				font: fontCss
 				color: useColor
 			}
-			{ type: :ok }
+			_OK
 		}
 		_ -> _err('Unknown window backend', window)
 	}
@@ -343,7 +349,7 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 								if window.frameHdc = 0 {
 									true -> windows.releaseDC(window.hwnd, hdcValue)
 								}
-								{ type: :ok }
+								_OK
 							}
 							_ -> {
 								if window.frameHdc = 0 {
@@ -375,7 +381,7 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 					true -> {
 						linux.setForeground(window.display, gcHandle, useColor)
 						linux.fillRectangle(window.display, window.window, gcHandle, x - 1, y - 1, width + 2, height + 2)
-						{ type: :ok }
+						_OK
 					}
 					_ -> _err('XCreateGC failed', ?)
 				}
@@ -390,17 +396,17 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 					color: useColor
 					borderColor: borderColor
 				}
-				{ type: :ok }
+				_OK
 			}
 			_ -> _err('Unknown window backend', window)
 		}
 		if borderColor != ? {
-			true -> {
-				drawLine(window, x, y, x + width, y, borderColor)
-				drawLine(window, x, y + height, x + width, y + height, borderColor)
-				drawLine(window, x, y, x, y + height, borderColor)
-				drawLine(window, x + width, y, x + width, y + height, borderColor)
-			}
+			true -> drawLinesBatch(window, [
+				{ x1: x, y1: y, x2: x + width, y2: y }
+				{ x1: x, y1: y + height, x2: x + width, y2: y + height }
+				{ x1: x, y1: y, x2: x, y2: y + height }
+				{ x1: x + width, y1: y, x2: x + width, y2: y + height }
+			], borderColor)
 		}
 		result
 	}
@@ -510,7 +516,7 @@ fn pushMask(window, x, y, w, h) if window.type {
 					windows.gdi32('SaveDC', hdcValue)
 					windows.gdi32('IntersectClipRect', hdcValue, int(x), int(y), int(x + w), int(y + h))
 					windows.gdi32('OffsetViewportOrgEx', hdcValue, int(x), int(y), 0)
-					{ type: :ok }
+					_OK
 				}
 				_ -> _err('pushMask requires active frame (call beginFrame first)', ?)
 			}
@@ -526,7 +532,7 @@ fn pushMask(window, x, y, w, h) if window.type {
 			}
 			window._maskOffsetX <- window._maskOffsetX + int(x)
 			window._maskOffsetY <- window._maskOffsetY + int(y)
-			{ type: :ok }
+			_OK
 		}
 		:web -> {
 			window.messages <- window.messages << {
@@ -538,7 +544,7 @@ fn pushMask(window, x, y, w, h) if window.type {
 				translateX: x
 				translateY: y
 			}
-			{ type: :ok }
+			_OK
 		}
 		_ -> _err('Unknown window backend', window)
 	}
@@ -556,7 +562,7 @@ fn popMask(window) if window.type {
 			if hdcValue > 0 {
 				true -> {
 					windows.gdi32('RestoreDC', hdcValue, -1)
-					{ type: :ok }
+					_OK
 				}
 				_ -> _err('popMask requires active frame', ?)
 			}
@@ -570,11 +576,11 @@ fn popMask(window) if window.type {
 					window._maskStack <- window._maskStack |> slice(0, len(window._maskStack) - 1)
 				}
 			}
-			{ type: :ok }
+			_OK
 		}
 		:web -> {
 			window.messages <- window.messages << { type: :popClip }
-			{ type: :ok }
+			_OK
 		}
 		_ -> _err('Unknown window backend', window)
 	}
@@ -613,7 +619,7 @@ fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
 								if window.frameHdc = 0 {
 									true -> windows.releaseDC(window.hwnd, hdcValue)
 								}
-								{ type: :ok }
+								_OK
 							}
 							_ -> {
 								if window.frameHdc = 0 {
@@ -645,7 +651,7 @@ fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
 					true -> {
 						linux.setForeground(window.display, gcHandle, useColor)
 						linux.drawLine(window.display, window.window, gcHandle, x1, y1, x2, y2)
-						{ type: :ok }
+						_OK
 					}
 					_ -> _err('XCreateGC failed', ?)
 				}
@@ -659,7 +665,7 @@ fn drawLine(window, x1, y1, x2, y2, color, defaultColor) if window.type {
 					y2: y2
 					color: useColor
 				}
-				{ type: :ok }
+				_OK
 			}
 			_ -> _err('Unknown window backend', window)
 		}
@@ -711,7 +717,7 @@ fn fillEllipse(window, cx, cy, rx, ry, fillColor, borderColor) if window.type {
 				true -> if _setupFillGDI(window, hdcValue, fillColor, borderColor) {
 					true -> {
 						windows.ellipse(hdcValue, int(cx - rx) - 1, int(cy - ry) - 1, int(cx + rx) + 1, int(cy + ry) + 1)
-						{ type: :ok }
+						_OK
 					}
 					_ -> _err('brush setup failed', ?)
 				}
@@ -734,7 +740,7 @@ fn fillRoundedRect(window, x, y, width, height, radius, fillColor, borderColor) 
 					true -> {
 						cornerDiam := int(radius * 2)
 						windows.gdi32('RoundRect', hdcValue, int(x), int(y), int(x + width), int(y + height), cornerDiam, cornerDiam)
-						{ type: :ok }
+						_OK
 					}
 					_ -> _err('brush setup failed', ?)
 				}
@@ -786,7 +792,7 @@ fn fillPolygon(window, pts, fillColor, borderColor) if window.type {
 						}
 						packPt(0)
 						windows.gdi32('Polygon', hdcValue, base, n)
-						{ type: :ok }
+						_OK
 					}
 					_ -> _err('brush setup failed', ?)
 				}
@@ -825,7 +831,7 @@ fn drawPolylineNative(window, pts, color) if window.type {
 							}
 							packPt(0)
 							windows.gdi32('Polyline', hdcValue, base, n)
-							{ type: :ok }
+							_OK
 						}
 						_ -> ?
 					}
@@ -834,6 +840,60 @@ fn drawPolylineNative(window, pts, color) if window.type {
 			}
 		}
 		_ -> ?
+	}
+	_ -> ?
+}
+
+// drawLinesBatch draws multiple disconnected line segments with a single pen
+// selection. segs is an array of {x1, y1, x2, y2} objects.
+fn drawLinesBatch(window, segs, color, defaultColor) if window.type {
+	:ok -> {
+		useColor := _default(color, defaultColor)
+		n := len(segs)
+		if n > 0 {
+			true -> if window.backend {
+				:windows -> {
+					hdcValue := if window.frameHdc > 0 { true -> window.frameHdc, _ -> 0 }
+					if hdcValue > 0 {
+						true -> {
+							penHandle := _getCachedPen(window, hdcValue, useColor)
+							if penHandle > 0 {
+								true -> {
+									if window._curPen != penHandle -> {
+										windows.selectObject(hdcValue, penHandle)
+										window._curPen <- penHandle
+										window._curNullPen <- false
+									}
+									fn loop(i) if i < n {
+										true -> {
+											seg := segs.(i)
+											windows.gdi32('MoveToEx', hdcValue, seg.x1, seg.y1, 0)
+											windows.gdi32('LineTo', hdcValue, seg.x2, seg.y2)
+											loop(i + 1)
+										}
+									}
+									loop(0)
+									_OK
+								}
+								_ -> ?
+							}
+						}
+						_ -> ?
+					}
+				}
+				_ -> {
+					// Fallback: draw each segment individually
+					fn fallback(i) if i < n {
+						true -> {
+							seg := segs.(i)
+							drawLine(window, seg.x1, seg.y1, seg.x2, seg.y2, useColor)
+							fallback(i + 1)
+						}
+					}
+					fallback(0)
+				}
+			}
+		}
 	}
 	_ -> ?
 }
