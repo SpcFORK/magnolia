@@ -507,25 +507,35 @@ fn Parser(tokens) {
 		next() // eat {
 
 		staticExprs := []
-		fn subStatic {
-			if eof?() | peek().type = :rightBrace -> { found: false }
-
-			// Try parsing parents clause
-			pr := tryParseClassParentsClause()
-			if pr != ? -> {
-				if !eof?() & peek().type = :comma -> next()
-				{ found: true, parents: pr.parents, body: pr.body }
+		fn subStatic if eof?() | peek().type = :rightBrace {
+			true -> { found: false }
+			_ -> {
+				// Try parsing parents clause
+				pr := tryParseClassParentsClause()
+				if pr != ? {
+					true -> {
+						if !eof?() & peek().type = :comma -> next()
+						{ found: true, parents: pr.parents, body: pr.body }
+					}
+					_ -> {
+						// Parse static expression
+						expr := parseNode()
+						if type(expr) = :object & expr.type = :error {
+							true -> { found: false }
+							_ -> {
+								cm := expect(:comma)
+								if type(cm) = :object & cm.type = :error {
+									true -> { found: false }
+									_ -> {
+										staticExprs << expr
+										subStatic()
+									}
+								}
+							}
+						}
+					}
+				}
 			}
-
-			// Parse static expression
-			expr := parseNode()
-			if type(expr) = :object & expr.type = :error -> { found: false }
-
-			cm := expect(:comma)
-			if type(cm) = :object & cm.type = :error -> { found: false }
-
-			staticExprs << expr
-			subStatic()
 		}
 
 		r := subStatic()
