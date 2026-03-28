@@ -279,10 +279,10 @@ fn PyramidMesh(base, height) {
 		]
 		faces: [
 			[0, 1, 2, 3]
-			[0, 1, 4]
-			[1, 2, 4]
-			[2, 3, 4]
-			[3, 0, 4]
+			[1, 0, 4]
+			[2, 1, 4]
+			[3, 2, 4]
+			[0, 3, 4]
 		]
 	}
 }
@@ -340,9 +340,9 @@ fn CylinderMesh(radius, height, segments) {
 		}
 	}
 
-	fn buildCapFace(i, out) if i {
-		segs -> out
-		_ -> buildCapFace(i + 1, out << i)
+	fn buildCapFace(i, out) if i < 0 {
+		true -> out
+		_ -> buildCapFace(i - 1, out << i)
 	}
 
 	fn buildBotCapFace(i, out) if i {
@@ -351,7 +351,7 @@ fn CylinderMesh(radius, height, segments) {
 	}
 
 	sideFaces := buildSideFaces(0, [])
-	topFace := buildCapFace(0, [])
+	topFace := buildCapFace(segs - 1, [])
 	botFace := buildBotCapFace(0, [])
 
 	{
@@ -391,7 +391,7 @@ fn ConeMesh(radius, height, segments) {
 		segs -> faces
 		_ -> {
 			next := (i + 1) % segs
-			buildSideFaces(i + 1, faces << [i, next, apexIdx])
+			buildSideFaces(i + 1, faces << [i, apexIdx, next])
 		}
 	}
 
@@ -490,7 +490,7 @@ fn SphereMesh(radius, segments, rings) {
 		segs -> faces
 		_ -> {
 			next := (seg + 1) % segs
-			buildTopFaces(seg + 1, faces << [topIdx, 1 + seg, 1 + next])
+			buildTopFaces(seg + 1, faces << [topIdx, 1 + next, 1 + seg])
 		}
 	}
 
@@ -565,7 +565,7 @@ fn TorusMesh(majorRadius, minorRadius, majorSegments, minorSegments) {
 				c := vertIdx(ni, nj)
 				d := vertIdx(i, nj)
 				e := edges << [a, b] << [a, d]
-				f := faces << [a, b, c, d]
+				f := faces << [a, d, c, b]
 				buildEdgesAndFaces(i, j + 1, e, f)
 			}
 		}
@@ -728,7 +728,7 @@ fn HemisphereMesh(radius, segments, rings) {
 		segs -> faces
 		_ -> {
 			next := (seg + 1) % segs
-			buildTopFaces(seg + 1, faces << [topIdx, 1 + seg, 1 + next])
+			buildTopFaces(seg + 1, faces << [topIdx, 1 + next, 1 + seg])
 		}
 	}
 
@@ -790,10 +790,10 @@ fn WedgeMesh(width, height, depth) {
 		]
 		faces: [
 			[0, 1, 2, 3]
-			[0, 1, 5, 4]
+			[4, 5, 1, 0]
 			[0, 3, 4]
-			[1, 2, 5]
-			[2, 3, 4, 5]
+			[2, 1, 5]
+			[3, 2, 5, 4]
 		]
 	}
 }
@@ -855,9 +855,9 @@ fn TubeMesh(outerRadius, innerRadius, height, segments) {
 			// Outer wall
 			f <- f << [toBase + i, toBase + next, boBase + next, boBase + i]
 			// Inner wall
-			f <- f << [tiBase + i, tiBase + next, biBase + next, biBase + i]
+			f <- f << [tiBase + i, biBase + i, biBase + next, tiBase + next]
 			// Top annular face
-			f <- f << [toBase + i, toBase + next, tiBase + next, tiBase + i]
+			f <- f << [toBase + i, tiBase + i, tiBase + next, toBase + next]
 			// Bottom annular face
 			f <- f << [boBase + i, boBase + next, biBase + next, biBase + i]
 			buildFaces(i + 1, f)
@@ -931,9 +931,9 @@ fn ArrowMesh(shaftRadius, shaftHeight, headRadius, headHeight, segments) {
 			next := (i + 1) % segs
 			f := faces
 			// Shaft wall
-			f <- f << [sbBase + i, sbBase + next, stBase + next, stBase + i]
+			f <- f << [sbBase + i, stBase + i, stBase + next, sbBase + next]
 			// Head cone
-			f <- f << [hbBase + i, hbBase + next, apexIdx]
+			f <- f << [hbBase + i, apexIdx, hbBase + next]
 			buildFaces(i + 1, f)
 		}
 	}
@@ -1006,7 +1006,12 @@ fn PrismMesh(radius, height, sides) {
 		_ -> buildCapFace(base, i + 1, out << (base + i))
 	}
 
-	topFace := buildCapFace(0, 0, [])
+	fn buildRevCapFace(base, i, out) if i < 0 {
+		true -> out
+		_ -> buildRevCapFace(base, i - 1, out << (base + i))
+	}
+
+	topFace := buildRevCapFace(0, n - 1, [])
 	botFace := buildCapFace(n, 0, [])
 
 	{
@@ -1037,7 +1042,7 @@ fn StairsMesh(steps, width, stepHeight, stepDepth) {
 			// 8 vertices per step (a box)
 			newVerts := verts << Vec3(x0, y0, z0) << Vec3(x1, y0, z0) << Vec3(x1, y1, z0) << Vec3(x0, y1, z0) << Vec3(x0, y0, z1) << Vec3(x1, y0, z1) << Vec3(x1, y1, z1) << Vec3(x0, y1, z1)
 			newEdges := edges << [base, base + 1] << [base + 1, base + 2] << [base + 2, base + 3] << [base + 3, base] << [base + 4, base + 5] << [base + 5, base + 6] << [base + 6, base + 7] << [base + 7, base + 4] << [base, base + 4] << [base + 1, base + 5] << [base + 2, base + 6] << [base + 3, base + 7]
-			newFaces := faces << [base, base + 1, base + 2, base + 3] << [base + 4, base + 5, base + 6, base + 7] << [base, base + 1, base + 5, base + 4] << [base + 2, base + 3, base + 7, base + 6] << [base + 1, base + 2, base + 6, base + 5] << [base, base + 3, base + 7, base + 4]
+			newFaces := faces << [base, base + 3, base + 2, base + 1] << [base + 4, base + 5, base + 6, base + 7] << [base, base + 1, base + 5, base + 4] << [base + 2, base + 3, base + 7, base + 6] << [base + 1, base + 2, base + 6, base + 5] << [base, base + 4, base + 7, base + 3]
 			buildStep(i + 1, newVerts, newEdges, newFaces)
 		}
 	}

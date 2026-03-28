@@ -158,46 +158,57 @@ fn _ensureGlBmiHeader(window) {
 	}
 }
 
-fn presentFrameOpenGL(window) {
-	hdc := window.frameTargetHdc
-	ctx := window.openglContext
-	w := window.width
-	h := window.height
+fn presentFrameOpenGL(window) if window._res != ? {
+	// When resolution scaling is active, GL needs float functions (glPixelZoom,
+	// glClearColor) which can't be called through Oak's integer-only syscall
+	// bridge.  Decline so endFrame falls back to the GDI StretchBlt path.
+	true -> { presented: false, error: 'GL presenter defers to GDI for resolution scaling' }
+	_ -> {
+		hdc := window.frameTargetHdc
+		ctx := window.openglContext
+		w := window.width
+		h := window.height
 
-	if !(ctx > 0 & hdc > 0) -> {
-		{ presented: false, error: 'no GL context or DC' }
+		if !(ctx > 0 & hdc > 0) {
+			true -> { presented: false, error: 'no GL context or DC' }
+			_ -> {
+				mk := windows.opengl32('wglMakeCurrent', hdc, ctx)
+				if !(windows.callOk?(mk) & mk.r1 > 0) {
+					true -> { presented: false, error: 'wglMakeCurrent failed', detail: mk }
+					_ -> {
+						pixelBuf := _ensureGlPixelBuffer(window)
+						if pixelBuf = 0 {
+							true -> {
+								windows.opengl32('wglMakeCurrent', 0, 0)
+								{ presented: false, error: 'pixel buffer allocation failed' }
+							}
+							_ -> {
+								bmiPtr := _ensureGlBmiHeader(window)
+								windows.writeU32(bmiPtr + 0, 40)
+								windows.writeU32(bmiPtr + 4, w)
+								windows.writeU32(bmiPtr + 8, h)
+								windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
+								windows.writeU32(bmiPtr + 16, BI_RGB)
+
+								windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, pixelBuf, bmiPtr, DIB_RGB_COLORS)
+
+								windows.opengl32('glViewport', 0, 0, w, h)
+								windows.opengl32('glPixelStorei', GL_UNPACK_ALIGNMENT, 4)
+								windows.opengl32('glClear', GL_COLOR_BUFFER_BIT)
+								windows.opengl32('glRasterPos2i', -1, -1)
+								windows.opengl32('glDrawPixels', w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixelBuf)
+
+								windows.gdi32('SwapBuffers', hdc)
+								windows.opengl32('wglMakeCurrent', 0, 0)
+
+								{ presented: true }
+							}
+						}
+					}
+				}
+			}
+		}
 	}
-
-	mk := windows.opengl32('wglMakeCurrent', hdc, ctx)
-	if !(windows.callOk?(mk) & mk.r1 > 0) -> {
-		{ presented: false, error: 'wglMakeCurrent failed', detail: mk }
-	}
-
-	pixelBuf := _ensureGlPixelBuffer(window)
-	if pixelBuf = 0 -> {
-		windows.opengl32('wglMakeCurrent', 0, 0)
-		{ presented: false, error: 'pixel buffer allocation failed' }
-	}
-
-	bmiPtr := _ensureGlBmiHeader(window)
-	windows.writeU32(bmiPtr + 0, 40)
-	windows.writeU32(bmiPtr + 4, w)
-	windows.writeU32(bmiPtr + 8, h)
-	windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
-	windows.writeU32(bmiPtr + 16, BI_RGB)
-
-	windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, pixelBuf, bmiPtr, DIB_RGB_COLORS)
-
-	windows.opengl32('glViewport', 0, 0, w, h)
-	windows.opengl32('glPixelStorei', GL_UNPACK_ALIGNMENT, 4)
-	windows.opengl32('glClear', GL_COLOR_BUFFER_BIT)
-	windows.opengl32('glRasterPos2i', -1, -1)
-	windows.opengl32('glDrawPixels', w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixelBuf)
-
-	windows.gdi32('SwapBuffers', hdc)
-	windows.opengl32('wglMakeCurrent', 0, 0)
-
-	{ presented: true }
 }
 
 fn releaseGlPixelBuffer(window) {

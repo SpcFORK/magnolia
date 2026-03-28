@@ -2,8 +2,12 @@
 
 windows := import('windows')
 guiNativeWinOpenGL := import('gui-native-win-opengl')
+{ _default: _default } := import('gui-common')
 
 SRCCOPY := 13369376
+// SetStretchBltMode constants
+COLORONCOLOR := 3
+HALFTONE := 4
 
 fn presentFrameViaOpenGL(window) {
 	if window.presenterBackend = :opengl & window.openglContext > 0 {
@@ -35,15 +39,69 @@ fn presentFrameViaOpenGL(window) {
 	}
 }
 
-fn presentFrameViaGdi(window) windows.gdi32(
-	'BitBlt'
-	window.frameTargetHdc
-	0
-	0
-	window.width
-	window.height
-	window.frameHdc
-	0
-	0
-	SRCCOPY
-)
+fn presentFrameViaGdi(window) {
+	r := window._res
+	if r != ? {
+		// Virtual resolution active — scale the logical back-buffer to the
+		// physical window using StretchBlt.
+		true -> {
+			pw := _default(r.pw, window.width)
+			ph := _default(r.ph, window.height)
+			sx := _default(r.sx, 1.0)
+			sy := _default(r.sy, 1.0)
+			ox := _default(r.ox, 0)
+			oy := _default(r.oy, 0)
+			dstW := int(float(r.dw) * sx)
+			dstH := int(float(r.dh) * sy)
+
+			// Clear letterbox bars when the scaled image doesn't fill the window.
+			if ox > 0 | oy > 0 -> {
+				// Use PatBlt with BLACKNESS to paint bars without needing a brush
+				BLACKNESS := 66
+				if ox > 0 -> {
+					windows.gdi32('PatBlt', window.frameTargetHdc, 0, 0, ox, ph, BLACKNESS)
+					windows.gdi32('PatBlt', window.frameTargetHdc, ox + dstW, 0, pw - ox - dstW, ph, BLACKNESS)
+				}
+				if oy > 0 -> {
+					windows.gdi32('PatBlt', window.frameTargetHdc, 0, 0, pw, oy, BLACKNESS)
+					windows.gdi32('PatBlt', window.frameTargetHdc, 0, oy + dstH, pw, ph - oy - dstH, BLACKNESS)
+				}
+			}
+
+			// Use COLORONCOLOR for pixel-perfect, HALFTONE for smooth scaling
+			stretchMode := if _default(r.pp, false) {
+				true -> COLORONCOLOR
+				_ -> HALFTONE
+			}
+			windows.gdi32('SetStretchBltMode', window.frameTargetHdc, stretchMode)
+			windows.gdi32(
+				'StretchBlt'
+				window.frameTargetHdc
+				ox
+				oy
+				dstW
+				dstH
+				window.frameHdc
+				0
+				0
+				r.dw
+				r.dh
+				SRCCOPY
+			)
+		}
+
+		// No virtual resolution — 1:1 BitBlt (original path)
+		_ -> windows.gdi32(
+			'BitBlt'
+			window.frameTargetHdc
+			0
+			0
+			window.width
+			window.height
+			window.frameHdc
+			0
+			0
+			SRCCOPY
+		)
+	}
+}

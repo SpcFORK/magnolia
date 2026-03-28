@@ -6,6 +6,34 @@ windows := import('windows')
 eventBusLib := import('async/event-bus')
 { _default: _default } := import('gui-common')
 
+// ─── Mouse coordinate transform helper ──────────────────────────────────────
+// When a design resolution is active (window._res exists), raw Win32 mouse
+// coordinates (physical) are mapped to the logical coordinate space so game
+// code sees positions in design units.  Reads only from the _res sub-object
+// to avoid touching the window map from dispatch goroutines.
+// Reusable coordinate result — avoids allocating a new {x:, y:} per dispatch.
+_mapResult := { x: 0, y: 0 }
+
+fn _mapMouseXY(window, physX, physY) {
+	r := window._res
+	if r != ? {
+		true -> {
+			sx := _default(r.sx, 1.0)
+			sy := _default(r.sy, 1.0)
+			ox := _default(r.ox, 0)
+			oy := _default(r.oy, 0)
+			_mapResult.x <- if sx > 0 { true -> int((float(physX) - float(ox)) / sx), _ -> physX }
+			_mapResult.y <- if sy > 0 { true -> int((float(physY) - float(oy)) / sy), _ -> physY }
+			_mapResult
+		}
+		_ -> {
+			_mapResult.x <- physX
+			_mapResult.y <- physY
+			_mapResult
+		}
+	}
+}
+
 // ─── Event bus lazy init ────────────────────────────────────────────────────
 
 fn _ensureEventBus(window) if window.type {
@@ -144,8 +172,11 @@ fn formEventContext(window) {
 	ctx.mt <- formMsgType(window)
 	ctx.wp <- formMsgWParam(window)
 	ctx.lp <- lp
-	ctx.mx <- formLoWord(lp)
-	ctx.my <- formHiWord(lp)
+	rawMx := formLoWord(lp)
+	rawMy := formHiWord(lp)
+	mapped := _mapMouseXY(window, rawMx, rawMy)
+	ctx.mx <- mapped.x
+	ctx.my <- mapped.y
 	ctx
 }
 
@@ -238,35 +269,40 @@ fn onceKeyUpEvent(window, handler) {
 fn onMouseMove(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MOUSEMOVE -> {
 		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
 	})
 }
 
 fn onLButtonDown(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONDOWN -> {
 		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
 	})
 }
 
 fn onLButtonUp(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONUP -> {
 		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
 	})
 }
 
 fn onRButtonDown(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONDOWN -> {
 		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
 	})
 }
 
 fn onRButtonUp(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_RBUTTONUP -> {
 		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
 	})
 }
 
@@ -291,7 +327,52 @@ fn onChar(window, handler) {
 fn onResize(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_SIZE -> {
 		lp := formMsgLParam(window)
-		handler(formLoWord(lp), formHiWord(lp))
+		physW := formLoWord(lp)
+		physH := formHiWord(lp)
+		// Refresh scale factors when the physical window changes.
+		// Write to _res sub-object directly to avoid extra module call.
+		r := window._res
+		if r != ? {
+			true -> {
+				r.pw <- physW
+				r.ph <- physH
+				// Inline recompute of scale factors
+				dw := float(r.dw)
+				dh := float(r.dh)
+				pw := float(physW)
+				ph := float(physH)
+				mode := _default(r.mode, 'fit')
+				pp := _default(r.pp, false)
+				if mode {
+					'stretch' -> {
+						r.sx <- pw / dw
+						r.sy <- ph / dh
+						r.ox <- 0
+						r.oy <- 0
+					}
+					'fill' -> {
+						s := if pw / dw > ph / dh { true -> pw / dw, _ -> ph / dh }
+						r.sx <- s
+						r.sy <- s
+						r.ox <- int((pw - dw * s) / 2.0)
+						r.oy <- int((ph - dh * s) / 2.0)
+					}
+					_ -> {
+						s := if pw / dw < ph / dh { true -> pw / dw, _ -> ph / dh }
+						if pp -> {
+							floored := int(s)
+							if floored < 1 { true -> s <- 1.0, _ -> s <- float(floored) }
+						}
+						r.sx <- s
+						r.sy <- s
+						r.ox <- int((pw - dw * s) / 2.0)
+						r.oy <- int((ph - dh * s) / 2.0)
+					}
+				}
+				handler(r.dw, r.dh)
+			}
+			_ -> handler(physW, physH)
+		}
 	})
 }
 

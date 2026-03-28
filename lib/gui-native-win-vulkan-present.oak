@@ -28,7 +28,12 @@ windows := import('windows')
 
 fn presentFrameVulkan(window) if _default(window._vkSwapchainReady, false) {
 	_ -> { presented: false, error: 'swapchain not ready' }
-	true -> {
+	true -> if window._res != ? {
+		// Vulkan swapchain is at physical size but the backbuffer is at logical
+		// size when resolution scaling is active.  Decline to let the GDI
+		// StretchBlt path handle the scaling correctly.
+		true -> { presented: false, error: 'Vulkan defers to GDI for resolution scaling' }
+		_ -> {
 		dev := window.vulkanDevice
 		queue := window.vulkanQueue
 		inst := window.vulkanInstance
@@ -230,5 +235,5 @@ fn presentFrameVulkan(window) if _default(window._vkSwapchainReady, false) {
 				}
 			}
 		}
-	}
+	}}
 }

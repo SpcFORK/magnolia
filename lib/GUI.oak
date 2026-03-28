@@ -34,6 +34,7 @@ guiLoop := import('gui-loop')
 guiShader := import('gui-shader')
 guiFonts := import('gui-fonts')
 guiVideo := import('gui-video')
+guiResolution := import('gui-resolution')
 _guiImportT4 := nanotime()
 
 // Module-import timing exposed for diagnostics.
@@ -135,6 +136,16 @@ fn createWindow(title, width, height, options) {
 	if created.type {
 		:ok -> {
 			_ensureEventBus(created)
+			// Auto-configure design resolution if specified in options.
+			// designWidth/designHeight define the logical coordinate space;
+			// the window is created at the requested physical size and the
+			// back-buffer renders at the design resolution, then scales up.
+			if opts.designWidth != ? & opts.designHeight != ? -> {
+				guiResolution.setDesignResolution(created, opts.designWidth, opts.designHeight, {
+					scaleMode: opts.scaleMode
+					pixelPerfect: opts.pixelPerfect
+				})
+			}
 			created
 		}
 		_ -> created
@@ -258,6 +269,26 @@ fn lockResize(window, locked) if window.type {
 	_ -> window
 }
 
+// ─── Virtual / design resolution ────────────────────────────────────────────
+// Set a fixed logical resolution.  All drawing happens in design coords;
+// the back-buffer is allocated at the logical size and scaled to the
+// physical window at present time.
+//   options.scaleMode   – 'fit' | 'fill' | 'stretch'  (default 'fit')
+//   options.pixelPerfect – true rounds 'fit' scale to integer multiples
+fn setDesignResolution(window, logicalWidth, logicalHeight, options) guiResolution.setDesignResolution(window, logicalWidth, logicalHeight, options)
+fn clearDesignResolution(window) guiResolution.clearDesignResolution(window)
+fn hasDesignResolution?(window) guiResolution.hasDesignResolution?(window)
+fn designWidth(window) guiResolution.designWidth(window)
+fn designHeight(window) guiResolution.designHeight(window)
+fn physicalWidth(window) guiResolution.physicalWidth(window)
+fn physicalHeight(window) guiResolution.physicalHeight(window)
+fn resolutionScaleX(window) guiResolution.scaleX(window)
+fn resolutionScaleY(window) guiResolution.scaleY(window)
+fn resolutionOffsetX(window) guiResolution.offsetX(window)
+fn resolutionOffsetY(window) guiResolution.offsetY(window)
+fn physicalToLogical(window, px, py) guiResolution.physicalToLogical(window, px, py)
+fn logicalToPhysical(window, lx, ly) guiResolution.logicalToPhysical(window, lx, ly)
+
 fn createCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
 fn initWebGL(window, contextName, attrs) guiWeb.initWebGL(window, contextName, attrs)
 fn webglCreateShader(window, shaderType, source) guiWeb.webglCreateShader(window, shaderType, source)
@@ -305,10 +336,11 @@ fn endFrame(window) if window.type {
 			if window._frameStart {
 				? -> 0
 				_ -> {
-					delta := nanotime() - window._frameStart
+					now := nanotime()
+					delta := now - window._frameStart
 					window._fpsCount <- _default(window._fpsCount, 0) + 1
 					window._fpsAccum <- _default(window._fpsAccum, 0) + delta
-					if nanotime() - _default(window._fpsLastReport, 0) >= 1000000000 -> {
+					if now - _default(window._fpsLastReport, 0) >= 1000000000 -> {
 						fps := int(window._fpsCount * 1000000000 / window._fpsAccum)
 						titleBase := _default(window._titleBase, window.title)
 						window._titleBase <- titleBase
@@ -316,7 +348,7 @@ fn endFrame(window) if window.type {
 						std.println('FPS: ' + string(fps))
 						window._fpsCount <- 0
 						window._fpsAccum <- 0
-						window._fpsLastReport <- nanotime()
+						window._fpsLastReport <- now
 					}
 				}
 			}
@@ -537,12 +569,12 @@ fn CubeMesh(size) {
 			[3, 7]
 		]
 		faces: [
-			[0, 1, 2, 3]
+			[0, 3, 2, 1]
 			[4, 5, 6, 7]
 			[0, 1, 5, 4]
 			[2, 3, 7, 6]
 			[1, 2, 6, 5]
-			[0, 3, 7, 4]
+			[0, 4, 7, 3]
 		]
 		faceColors: [
 			rgb(250, 94, 94)

@@ -96,11 +96,26 @@ fn sleepUntilNextFrame(window) {
 			remaining := next - now
 			if remaining > 0 {
 				true -> {
-					sleepMs := int((remaining + 999999) / 1000000)
-					if sleepMs < 1 -> sleepMs <- 1
-					if window.backend {
-						:windows -> windows.kernel32('Sleep', sleepMs)
-						:linux -> guiNativeLinux.sleepFrame(sleepMs)
+					// Sleep for the bulk of the wait, but leave ~1.5 ms for a
+					// spin-wait to avoid OS scheduler oversleep (Sleep rounds up
+					// and the scheduler quantum is 1-15 ms on Windows).
+					spinReserveNs := 1500000
+					sleepNs := remaining - spinReserveNs
+					if sleepNs > 1000000 {
+						true -> {
+							sleepMs := int(sleepNs / 1000000)
+							if window.backend {
+								:windows -> windows.kernel32('Sleep', sleepMs)
+								:linux -> guiNativeLinux.sleepFrame(sleepMs)
+							}
+						}
+					}
+					// Spin-wait for the remaining sub-millisecond portion.
+					if nanotime() < next -> {
+						0
+						// Busy-spin until deadline
+						fn _spin() if nanotime() < next -> _spin()
+						_spin()
 					}
 				}
 			}

@@ -2,6 +2,7 @@
 
 windows := import('windows')
 { _default: _default, _err: _err } := import('gui-common')
+guiResolution := import('gui-resolution')
 
 fn _windowClientSize(window) {
 	// Skip syscall if dimensions are cached and not stale (no resize event)
@@ -116,8 +117,25 @@ fn prepareBeginFrameTarget(window, targetHdc) {
 	size := _windowClientSize(window)
 	if size.type {
 		:ok -> {
-			window.width <- size.width
-			window.height <- size.height
+			// When a design resolution is active (window._res exists), the
+			// physical client size updates window._res.pw/ph and width/height
+			// stay at the logical (design) dimensions.  The back-buffer is
+			// allocated at the logical size; the presenter scales to physical.
+			r := window._res
+			if r != ? {
+				true -> {
+					// Recompute scale factors when physical size changes
+					if r.pw != size.width | r.ph != size.height -> {
+						guiResolution.updatePhysicalSize(window, size.width, size.height)
+					}
+					window.width <- r.dw
+					window.height <- r.dh
+				}
+				_ -> {
+					window.width <- size.width
+					window.height <- size.height
+				}
+			}
 			ready := _ensureBackbuffer(window, targetHdc)
 			finalReady := if ready.type = :ok {
 				true -> ready

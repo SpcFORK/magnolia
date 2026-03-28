@@ -16,6 +16,9 @@ var libstr string
 //go:embed lib/math.oak
 var libmath string
 
+//go:embed lib/math-base.oak
+var libmathbase string
+
 //go:embed lib/math-geo.oak
 var libmathgeo string
 
@@ -277,6 +280,9 @@ var libguimesh string
 //go:embed lib/gui-render.oak
 var libguirender string
 
+//go:embed lib/gui-resolution.oak
+var libguiresolution string
+
 //go:embed lib/gui-3dmath.oak
 var libgui3dmath string
 
@@ -419,6 +425,7 @@ var stdlibs = map[string]string{
 	"std":                             libstd,
 	"str":                             libstr,
 	"math":                            libmath,
+	"math-base":                       libmathbase,
 	"math-geo":                        libmathgeo,
 	"math-stats":                      libmathstats,
 	"sort":                            libsort,
@@ -506,6 +513,7 @@ var stdlibs = map[string]string{
 	"gui-common":                      libguicommon,
 	"win-common":                      libwincommon,
 	"gui-render":                      libguirender,
+	"gui-resolution":                  libguiresolution,
 	"gui-3dmath":                      libgui3dmath,
 	"gui-raster":                      libguiraster,
 	"gui-lighting":                    libguilighting,

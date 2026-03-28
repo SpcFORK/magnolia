@@ -1012,7 +1012,7 @@ func (p *parser) parseUnit() (astNode, error) {
 		p.pushMinPrec(0)
 		defer p.popMinPrec()
 
-		itemNodes := []astNode{}
+		itemNodes := make([]astNode, 0, 4)
 		for !p.isEOF() && p.peek().kind != rightBracket {
 			node, err := p.parseNode()
 			if err != nil {
@@ -1322,7 +1322,7 @@ func (p *parser) parseUnit() (astNode, error) {
 		defer p.popMinPrec()
 
 		var condNode astNode
-		branches := []ifBranch{}
+		branches := make([]ifBranch, 0, 4)
 
 		// if no explicit condition is provided (i.e. if the keyword is
 		// followed by a { ... }), we assume the condition is "true" to allow
@@ -1452,7 +1452,7 @@ func (p *parser) parseUnit() (astNode, error) {
 		p.pushMinPrec(0)
 		defer p.popMinPrec()
 
-		exprs := []astNode{}
+		exprs := make([]astNode, 0, 4)
 		for !p.isEOF() && p.peek().kind != rightParen {
 			expr, err := p.parseNode()
 			if err != nil {
@@ -1532,7 +1532,7 @@ func (p *parser) parseSubNode() (astNode, error) {
 		case leftParen:
 			next := p.next() // eat the leftParen
 
-			args := []astNode{}
+			args := make([]astNode, 0, 4)
 			var restArg astNode = nil
 			for !p.isEOF() && p.peek().kind != rightParen {
 				arg, err := p.parseNode()
@@ -1665,7 +1665,7 @@ func (p *parser) parseNode() (astNode, error) {
 }
 
 func (p *parser) parse() ([]astNode, error) {
-	nodes := []astNode{}
+	nodes := make([]astNode, 0, 8)
 
 	for !p.isEOF() {
 		node, err := p.parseNode()

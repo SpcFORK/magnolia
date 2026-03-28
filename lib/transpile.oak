@@ -114,92 +114,188 @@ fn walkNode(node, visitor) if node.type {
 	_ -> visitor(node)
 }
 
-// Example transpilers
+// Constant folding transpiler -- folds compile-time constant expressions
+// into their literal values.  Matches the Go-side optimize.go pass so that
+// both the interpreter and the bundler perform equivalent optimizations.
 
-// optimizeConstants is an example transpiler that folds constant expressions
+fn _mkInt(pos, value) {
+	type: :int
+	tok: { pos: pos, type: :int, val: value }
+	val: value
+}
+fn _mkFloat(pos, value) {
+	type: :float
+	tok: { pos: pos, type: :float, val: value }
+	val: value
+}
+fn _mkBool(pos, value) {
+	type: :bool
+	tok: { pos: pos, type: :bool, val: value }
+	val: value
+}
+fn _mkString(pos, value) {
+	type: :string
+	tok: { pos: pos, type: :string, val: value }
+	val: value
+}
+
+fn _isConst?(n) if n.type {
+	:int, :float, :bool, :string, :atom, :null -> true
+	_ -> false
+}
+fn _isNum?(n) n.type = :int | n.type = :float
+fn _isInt?(n) n.type = :int
+
+// optimizeConstants folds constant expressions in the AST.
+// Handles: unary, binary (int, float, string, bool), equality,
+// and single-expression block unwrapping.
 fn optimizeConstants(node) if node.type {
+	// --- Unary folding ---
+	:unary -> if node.right.type {
+		:int -> if node.op {
+			:minus -> _mkInt(node.tok.pos, 0 - node.right.val)
+			_ -> node
+		}
+		:float -> if node.op {
+			:minus -> _mkFloat(node.tok.pos, 0 - node.right.val)
+			_ -> node
+		}
+		:bool -> if node.op {
+			:exclam -> _mkBool(node.tok.pos, !node.right.val)
+			_ -> node
+		}
+		_ -> node
+	}
+
+	// --- Binary folding ---
 	:binary -> {
-		fn intNode(value) {
-			type: :int
-			tok: {
-				pos: node.tok.pos
-				type: :int
-				val: value
-			}
-			val: value
-		}
+		p := node.tok.pos
 
-		fn floatNode(value) {
-			type: :float
-			tok: {
-				pos: node.tok.pos
-				type: :float
-				val: value
-			}
-			val: value
-		}
-
-		fn boolNode(value) {
-			type: :bool
-			tok: {
-				pos: node.tok.pos
-				type: :bool
-				val: value
-			}
-			val: value
-		}
-
-		fn literalNumber?(n) n.type = :int | n.type = :float
-		fn literalInt?(n) n.type = :int
-
-		if literalNumber?(node.left) & literalNumber?(node.right) {
+		// Equality / inequality on any constant pair
+		if (node.op = :eq | node.op = :neq) & _isConst?(node.left) & _isConst?(node.right) {
 			true -> {
-				l := node.left.val
-				r := node.right.val
-				li := node.left.type = :int
-				ri := node.right.type = :int
-
-				if {
-					node.op = :plus & li & ri -> intNode(l + r)
-					node.op = :minus & li & ri -> intNode(l - r)
-					node.op = :times & li & ri -> intNode(l * r)
-					node.op = :divide & ri & r = 0 -> node
-					node.op = :divide & !ri & r = 0 -> node
-					node.op = :divide & li & ri -> {
-						q := l / r
-						if q * r = l {
-							true -> intNode(q)
-							_ -> floatNode(float(l) / float(r))
-						}
+				eq? := if node.left.type {
+					:int -> if node.right.type {
+						:int -> node.left.val = node.right.val
+						:float -> float(node.left.val) = node.right.val
+						_ -> false
 					}
-					node.op = :divide -> floatNode(float(l) / float(r))
-					node.op = :modulus & ri & r = 0 -> node
-					node.op = :modulus & !ri & r = 0 -> node
-					node.op = :modulus & li & ri -> intNode(l % r)
-					node.op = :modulus -> floatNode(l % r)
-					node.op = :power & li & ri & r >= 0 -> {
-						powv := pow(l, r)
-						if powv = int(powv) {
-							true -> intNode(powv)
-							_ -> floatNode(powv)
-						}
+					:float -> if node.right.type {
+						:float -> node.left.val = node.right.val
+						:int -> node.left.val = float(node.right.val)
+						_ -> false
 					}
-					node.op = :power -> floatNode(pow(l, r))
-					node.op = :and & li & ri -> intNode(l & r)
-					node.op = :or & li & ri -> intNode(l | r)
-					node.op = :xor & li & ri -> intNode(l ^ r)
-					node.op = :greater -> boolNode(l > r)
-					node.op = :less -> boolNode(l < r)
-					node.op = :geq -> boolNode(l >= r)
-					node.op = :leq -> boolNode(l <= r)
-					node.op = :eq -> boolNode(l = r)
-					node.op = :neq -> boolNode(l != r)
+					:bool -> if node.right.type {
+						:bool -> node.left.val = node.right.val
+						_ -> false
+					}
+					:string -> if node.right.type {
+						:string -> node.left.val = node.right.val
+						_ -> false
+					}
+					:atom -> if node.right.type {
+						:atom -> node.left.val = node.right.val
+						_ -> false
+					}
+					:null -> node.right.type = :null
+					_ -> ?
+				}
+				if eq? != ? {
+					true -> {
+						result := if node.op {
+							:neq -> !eq?
+							_ -> eq?
+						}
+						_mkBool(p, result)
+					}
 					_ -> node
 				}
 			}
-			_ -> node
+			_ -> {
+				// Numeric binary ops
+				if _isNum?(node.left) & _isNum?(node.right) {
+					true -> {
+						l := node.left.val
+						r := node.right.val
+						li := _isInt?(node.left)
+						ri := _isInt?(node.right)
+						bothInt := li & ri
+
+						if {
+							node.op = :plus & bothInt -> _mkInt(p, l + r)
+							node.op = :plus & !bothInt -> _mkFloat(p, float(l) + float(r))
+							node.op = :minus & bothInt -> _mkInt(p, l - r)
+							node.op = :minus & !bothInt -> _mkFloat(p, float(l) - float(r))
+							node.op = :times & bothInt -> _mkInt(p, l * r)
+							node.op = :times & !bothInt -> _mkFloat(p, float(l) * float(r))
+							node.op = :divide & r = 0 -> node
+							node.op = :divide & bothInt -> {
+								q := l / r
+								if q * r = l {
+									true -> _mkInt(p, q)
+									_ -> _mkFloat(p, float(l) / float(r))
+								}
+							}
+							node.op = :divide -> _mkFloat(p, float(l) / float(r))
+							node.op = :modulus & r = 0 -> node
+							node.op = :modulus & bothInt -> _mkInt(p, l % r)
+							node.op = :modulus -> _mkFloat(p, float(l) % float(r))
+							node.op = :power & bothInt & r >= 0 -> {
+								powv := pow(l, r)
+								if powv = int(powv) {
+									true -> _mkInt(p, int(powv))
+									_ -> _mkFloat(p, powv)
+								}
+							}
+							node.op = :power -> _mkFloat(p, pow(float(l), float(r)))
+							node.op = :and & bothInt -> _mkInt(p, l & r)
+							node.op = :or & bothInt -> _mkInt(p, l | r)
+							node.op = :xor & bothInt -> _mkInt(p, l ^ r)
+							node.op = :pushArrow & bothInt & r >= 0 -> _mkInt(p, l << r)
+							node.op = :rshift & bothInt & r >= 0 -> _mkInt(p, l >> r)
+							node.op = :greater -> _mkBool(p, l > r)
+							node.op = :less -> _mkBool(p, l < r)
+							node.op = :geq -> _mkBool(p, l >= r)
+							node.op = :leq -> _mkBool(p, l <= r)
+							_ -> node
+						}
+					}
+					_ -> {
+						// String concatenation
+						if node.op = :plus & node.left.type = :string & node.right.type = :string {
+							true -> _mkString(p, node.left.val + node.right.val)
+							_ -> {
+								// Boolean algebra
+								if node.left.type = :bool & node.right.type = :bool {
+									true -> {
+										lv := node.left.val
+										rv := node.right.val
+										if {
+											node.op = :plus | node.op = :or -> _mkBool(p, lv | rv)
+											node.op = :times | node.op = :and -> _mkBool(p, lv & rv)
+											node.op = :xor -> _mkBool(p, lv ^ rv)
+											_ -> node
+										}
+									}
+									_ -> node
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
+
+	// --- Single-expression block unwrap ---
+	:block -> if len(node.exprs) {
+		1 -> if _isConst?(node.exprs.0) {
+			true -> node.exprs.0
+			_ -> node
+		}
+		_ -> node
+	}
+
 	_ -> node
 }
 

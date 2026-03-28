@@ -17,8 +17,11 @@ const (
 	colorCyan   = "\033[36m"
 )
 
+const errorBoxWidth = 60
+
 // ErrorDisplayConfig controls how errors are displayed
 type ErrorDisplayConfig struct {
+	Writer         io.Writer
 	UseColor       bool
 	ShowContext    bool
 	ContextLines   int
@@ -35,105 +38,79 @@ func DefaultErrorConfig() ErrorDisplayConfig {
 	}
 }
 
+func (c ErrorDisplayConfig) writer() io.Writer {
+	if c.Writer != nil {
+		return c.Writer
+	}
+	return os.Stderr
+}
+
+func (c ErrorDisplayConfig) colorize(color, text string) string {
+	if c.UseColor {
+		return color + text + colorReset
+	}
+	return text
+}
+
 // DisplayError formats and displays an error with enhanced formatting
 func DisplayError(err error, config ErrorDisplayConfig) {
 	if err == nil {
 		return
 	}
 
-	// Helper function to apply color
-	applyColor := func(color, text string) string {
-		if config.UseColor {
-			return color + text + colorReset
-		}
-		return text
-	}
-
-	// Display different error types differently
 	switch e := err.(type) {
 	case parseError:
-		displayParseError(e, config, applyColor)
+		displayErrorBox(config, "Parse Error", e.fileName, e.pos, e.reason, nil)
 	case *runtimeError:
-		displayRuntimeError(e, config, applyColor)
+		displayErrorBox(config, "Runtime Error", e.fileName, e.pos, e.reason, e.stackTrace)
 	default:
-		// Generic error display
-		fmt.Fprintf(os.Stderr, "%s\n", applyColor(colorRed, err.Error()))
+		fmt.Fprintf(config.writer(), "%s\n", config.colorize(colorRed, err.Error()))
 	}
 }
 
-func displayParseError(e parseError, config ErrorDisplayConfig, applyColor func(string, string) string) {
-	// Header
-	fmt.Fprintf(os.Stderr, "\n%s\n", applyColor(colorBold+colorRed, "╭─ Parse Error ─────────────────────────────────────────────"))
-	fmt.Fprintf(os.Stderr, "│\n")
+func displayErrorBox(config ErrorDisplayConfig, kind, fileName string, p pos, reason string, stackTrace []stackEntry) {
+	w := config.writer()
+
+	// Header with dynamic width
+	dashCount := max(3, errorBoxWidth-4-len(kind))
+	header := "╭─ " + kind + " " + strings.Repeat("─", dashCount)
+	fmt.Fprintf(w, "\n%s\n", config.colorize(colorBold+colorRed, header))
+	fmt.Fprintf(w, "│\n")
 
 	// Position information
-	if e.fileName != "" {
-		fmt.Fprintf(os.Stderr, "│ %s %s\n",
-			applyColor(colorCyan, "File:"),
-			applyColor(colorBold, e.fileName))
+	if fileName != "" {
+		fmt.Fprintf(w, "│ %s %s\n",
+			config.colorize(colorCyan, "File:"),
+			config.colorize(colorBold, fileName))
 	}
-	fmt.Fprintf(os.Stderr, "│ %s %s\n",
-		applyColor(colorCyan, "Position:"),
-		applyColor(colorBold, e.pos.String()))
-	fmt.Fprintf(os.Stderr, "│\n")
+	fmt.Fprintf(w, "│ %s %s\n",
+		config.colorize(colorCyan, "Position:"),
+		config.colorize(colorBold, p.String()))
+	fmt.Fprintf(w, "│\n")
 
 	// Error message
-	fmt.Fprintf(os.Stderr, "│ %s\n", applyColor(colorRed, e.reason))
+	fmt.Fprintf(w, "│ %s\n", config.colorize(colorRed, reason))
 
 	// Source context
-	if config.ShowContext && e.fileName != "" {
-		displaySourceContext(e.fileName, e.line, e.col, config, applyColor)
-	}
-
-	// Footer
-	fmt.Fprintf(os.Stderr, "╰───────────────────────────────────────────────────────────\n\n")
-}
-
-func displayRuntimeError(e *runtimeError, config ErrorDisplayConfig, applyColor func(string, string) string) {
-	// Header
-	fmt.Fprintf(os.Stderr, "\n%s\n", applyColor(colorBold+colorRed, "╭─ Runtime Error ───────────────────────────────────────────"))
-	fmt.Fprintf(os.Stderr, "│\n")
-
-	// Position information
-	if e.fileName != "" {
-		fmt.Fprintf(os.Stderr, "│ %s %s\n",
-			applyColor(colorCyan, "File:"),
-			applyColor(colorBold, e.fileName))
-	}
-	fmt.Fprintf(os.Stderr, "│ %s %s\n",
-		applyColor(colorCyan, "Position:"),
-		applyColor(colorBold, e.pos.String()))
-	fmt.Fprintf(os.Stderr, "│\n")
-
-	// Error message
-	fmt.Fprintf(os.Stderr, "│ %s\n", applyColor(colorRed, e.reason))
-
-	// Source context
-	if config.ShowContext && e.fileName != "" {
-		displaySourceContext(e.fileName, e.line, e.col, config, applyColor)
+	if config.ShowContext && fileName != "" {
+		displaySourceContext(w, fileName, p.line, p.col, config)
 	}
 
 	// Stack trace
-	if config.ShowStackTrace && len(e.stackTrace) > 0 {
-		fmt.Fprintf(os.Stderr, "│\n")
-		fmt.Fprintf(os.Stderr, "│ %s\n", applyColor(colorYellow, "Stack Trace:"))
-		for _, entry := range e.stackTrace {
-			fmt.Fprintf(os.Stderr, "│   %s\n", applyColor(colorGray, entry.String()))
+	if config.ShowStackTrace && len(stackTrace) > 0 {
+		fmt.Fprintf(w, "│\n")
+		fmt.Fprintf(w, "│ %s\n", config.colorize(colorYellow, "Stack Trace:"))
+		for _, entry := range stackTrace {
+			fmt.Fprintf(w, "│   %s\n", config.colorize(colorGray, entry.String()))
 		}
 	}
 
 	// Footer
-	fmt.Fprintf(os.Stderr, "╰───────────────────────────────────────────────────────────\n\n")
+	fmt.Fprintf(w, "╰%s\n\n", strings.Repeat("─", errorBoxWidth-1))
 }
 
-func displaySourceContext(fileName string, line, col int, config ErrorDisplayConfig, applyColor func(string, string) string) {
-	file, err := os.Open(fileName)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	content, err := io.ReadAll(file)
+func displaySourceContext(w io.Writer, fileName string, line, col int, config ErrorDisplayConfig) {
+	content, err := os.ReadFile(fileName)
 	if err != nil {
 		return
 	}
@@ -143,38 +120,35 @@ func displaySourceContext(fileName string, line, col int, config ErrorDisplayCon
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "│\n")
-	fmt.Fprintf(os.Stderr, "│ %s\n", applyColor(colorCyan, "Context:"))
+	fmt.Fprintf(w, "│\n")
+	fmt.Fprintf(w, "│ %s\n", config.colorize(colorCyan, "Context:"))
 
-	// Calculate the range of lines to show
-	startLine := 1
-	if line-config.ContextLines > 1 {
-		startLine = line - config.ContextLines
-	}
-	endLine := len(lines)
-	if line+config.ContextLines < len(lines) {
-		endLine = line + config.ContextLines
-	}
+	startLine := max(1, line-config.ContextLines)
+	endLine := min(len(lines), line+config.ContextLines)
 
-	// Display context lines
 	for i := startLine; i <= endLine; i++ {
 		lineNum := fmt.Sprintf("%4d", i)
 
 		if i == line {
-			// The error line - highlight it
-			fmt.Fprintf(os.Stderr, "│ %s │ %s\n",
-				applyColor(colorRed+colorBold, lineNum),
-				applyColor(colorRed, lines[i-1]))
+			fmt.Fprintf(w, "│ %s │ %s\n",
+				config.colorize(colorRed+colorBold, lineNum),
+				config.colorize(colorRed, lines[i-1]))
 
-			// Show the error pointer
+			// Show error pointer, preserving tab alignment
 			if col > 0 {
-				pointer := strings.Repeat(" ", col-1) + "^"
-				fmt.Fprintf(os.Stderr, "│      │ %s\n", applyColor(colorRed+colorBold, pointer))
+				src := lines[i-1]
+				prefixLen := min(col-1, len(src))
+				pointer := strings.Map(func(r rune) rune {
+					if r == '\t' {
+						return '\t'
+					}
+					return ' '
+				}, src[:prefixLen]) + "^"
+				fmt.Fprintf(w, "│      │ %s\n", config.colorize(colorRed+colorBold, pointer))
 			}
 		} else {
-			// Context line
-			fmt.Fprintf(os.Stderr, "│ %s │ %s\n",
-				applyColor(colorGray, lineNum),
+			fmt.Fprintf(w, "│ %s │ %s\n",
+				config.colorize(colorGray, lineNum),
 				lines[i-1])
 		}
 	}

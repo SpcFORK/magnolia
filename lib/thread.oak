@@ -128,20 +128,20 @@ cs WaitGroup {
 	go(fn() {
 		count := 0
 		fn loop {
-			msg := chan_recv(countCh)
+			msg := chan_recv(countCh).data
 			if msg.type {
 				:add -> {
-					count := count + msg.delta
-					if count < 0 -> count := 0
+					count <- count + msg.delta
+					if count < 0 -> count <- 0
 					loop()
 				}
 				:done -> {
-					count := count - 1
+					count <- count - 1
 					if count <= 0 -> {
-						count := 0
+						count <- 0
 						// Unblock every waiter once the counter reaches zero.
 						range(len(waiters)) |> each(fn(i) chan_send(waiters.(i), true))
-						waiters := []
+						waiters <- []
 					}
 					loop()
 				}
@@ -150,11 +150,12 @@ cs WaitGroup {
 						true -> chan_send(msg.reply, true)
 						_ -> {
 							// Store reply channel for when count reaches 0
-							waiters := append(waiters, msg.reply)
+							waiters << msg.reply
 						}
 					}
 					loop()
 				}
+				:close -> ?
 			}
 		}
 		loop()
@@ -181,6 +182,10 @@ cs WaitGroup {
 			})
 			chan_recv(replyCh)
 		}
+
+		// close terminates the background manager goroutine.
+		// Call after wait() returns to allow clean program exit.
+		close: fn() chan_send(countCh, { type: :close })
 	}
 }
 
@@ -203,7 +208,7 @@ cs Future(fnToRun) {
 	{
 		// get blocks until the result is available and returns it
 		get: fn() {
-			result := chan_recv(resultCh)
+			result := chan_recv(resultCh).data
 			if result.type {
 				:success -> result.value
 				_ -> ?
@@ -212,7 +217,7 @@ cs Future(fnToRun) {
 
 		// then chains a function to be called with the result
 		then: fn(callback) Future(fn() callback(
-			chan_recv(resultCh).value
+			chan_recv(resultCh).data.value
 		))
 	}
 }
@@ -230,7 +235,7 @@ cs Pool(numWorkers) {
 	// Spawn worker goroutines
 	range(numWorkers) |> each(fn(_) go(fn() {
 		fn workerLoop {
-			task := chan_recv(taskCh)
+			task := chan_recv(taskCh).data
 			if task.type {
 				:task -> {
 					// Execute the task
@@ -289,10 +294,10 @@ fn parallel(fns) {
 	}))
 
 	// Collect results
-	results := []
+	results := range(len(fns)) |> map(fn(_) ?)
 	range(len(fns)) |> each(fn(_) {
 		item := chan_recv(resultCh)
-		results.(item.index) := item.value
+		results.(item.data.index) := item.data.value
 	})
 
 	results
@@ -325,10 +330,10 @@ fn pmapConcurrent(list, fnToRun, maxConcurrent) {
 	pool.close()
 
 	// Collect results
-	results := []
+	results := range(len(list)) |> map(fn(_) ?)
 	range(len(list)) |> each(fn(_) {
 		item := chan_recv(resultCh)
-		results.(item.index) := item.value
+		results.(item.data.index) := item.data.value
 	})
 
 	pool.wait()
@@ -377,7 +382,7 @@ fn pipeline(input, stages...) {
 			// Start each stage
 			stages |> each(fn(stageFn, i) go(fn() {
 				fn stageLoop {
-					data := chan_recv(channels.(i))
+					data := chan_recv(channels.(i)).data
 					if data.type {
 						:data -> {
 							result := stageFn(data.value)
@@ -404,7 +409,7 @@ fn pipeline(input, stages...) {
 			chan_send(channels.0, { type: :done })
 
 			// Get result from last channel
-			result := chan_recv(channels.(len(stages)))
+			result := chan_recv(channels.(len(stages))).data
 			if result.type {
 				:data -> result.value
 				_ -> ?
@@ -439,7 +444,7 @@ fn debounce(fnToRun, waitTime) {
 
 	fn(args...) {
 		mutex.lock()
-		callCounter := callCounter + 1
+		callCounter <- callCounter + 1
 		thisCall := callCounter
 		mutex.unlock()
 
@@ -468,7 +473,7 @@ fn throttle(fnToRun, waitTime) {
 		now := time()
 		shouldRun := now - lastCall >= waitTime
 		if shouldRun {
-			true -> lastCall := now
+			true -> lastCall <- now
 		}
 		mutex.unlock()
 

@@ -1,0 +1,213 @@
+// gui-resolution provides fixed/virtual resolution and scaling for the GUI
+// system.  Games can define a "design resolution" (the logical coordinate
+// space) that is independent of the actual window size.  All drawing happens
+// in the logical coordinate space; the presenter backend then scales the
+// back-buffer to fit the physical window.
+//
+// Scale modes:
+//   'fit'     – maintain aspect ratio, letter/pillarbox if needed (default)
+//   'fill'    – maintain aspect ratio, crop to fill the window
+//   'stretch' – stretch to fill (may distort)
+//
+// All resolution state is stored in a single window._res sub-object to
+// minimise concurrent map writes on the shared window map (Oak maps are
+// Go maps under the hood and are not safe for concurrent writes).
+//
+// Usage:
+//   gui := import('GUI')
+//   window := gui.createWindow('Game', 1280, 720, { ... })
+//   gui.setDesignResolution(window, 320, 180)
+//   // All subsequent draw calls use 320×180 logical coords.
+//   // Mouse events are auto-mapped back to logical coords.
+
+{ _default: _default } := import('gui-common')
+
+// --- Helpers to read _res safely ------------------------------------------
+
+fn _res(window) _default(window._res, ?)
+
+fn _hasRes?(window) window._res != ?
+
+// --- Public API -----------------------------------------------------------
+
+// Set a fixed logical (design) resolution on the window.
+// After calling this, window.width / window.height reflect the logical size,
+// and the frame back-buffer is allocated at logical dimensions.  The GDI
+// presenter will StretchBlt from logical → physical at endFrame.
+//
+// options:
+//   scaleMode  – 'fit' (default) | 'fill' | 'stretch'
+//   pixelPerfect – when true with 'fit', rounds scale to nearest integer
+fn setDesignResolution(window, logicalWidth, logicalHeight, options) {
+	opts := _default(options, {})
+	mode := _default(opts.scaleMode, 'fit')
+	pp := _default(opts.pixelPerfect, false)
+
+	// Build or reuse the _res sub-object.  Only ONE new key on window map.
+	r := if window._res {
+		? -> {
+			obj := {
+				dw: logicalWidth
+				dh: logicalHeight
+				pw: window.width
+				ph: window.height
+				sx: 1.0
+				sy: 1.0
+				ox: 0
+				oy: 0
+				mode: mode
+				pp: pp
+			}
+			window._res <- obj
+			obj
+		}
+		_ -> window._res
+	}
+
+	// Update the sub-object fields (writes to r, not to window)
+	r.dw <- logicalWidth
+	r.dh <- logicalHeight
+	if r.pw = ? | r.pw = 0 -> r.pw <- window.width
+	if r.ph = ? | r.ph = 0 -> r.ph <- window.height
+	r.mode <- mode
+	r.pp <- pp
+
+	// width/height become the logical dimensions — this is what game code and
+	// the back-buffer allocator see.
+	window.width <- logicalWidth
+	window.height <- logicalHeight
+
+	// Force back-buffer re-creation on next beginFrame
+	window.frameWidth <- 0
+	window.frameHeight <- 0
+	// Mark client size stale so prepareBeginFrameTarget re-reads physical dims
+	window._clientSizeStale <- true
+
+	_recomputeScale(window)
+	window
+}
+
+// Remove virtual resolution – revert to 1:1 physical rendering.
+fn clearDesignResolution(window) {
+	r := _res(window)
+	if r != ? -> {
+		window.width <- _default(r.pw, window.width)
+		window.height <- _default(r.ph, window.height)
+	}
+	window._res <- ?
+	window.frameWidth <- 0
+	window.frameHeight <- 0
+	window._clientSizeStale <- true
+	window
+}
+
+fn hasDesignResolution?(window) _hasRes?(window)
+
+fn designWidth(window) if _hasRes?(window) { true -> window._res.dw, _ -> window.width }
+fn designHeight(window) if _hasRes?(window) { true -> window._res.dh, _ -> window.height }
+fn physicalWidth(window) if _hasRes?(window) { true -> _default(window._res.pw, window.width), _ -> window.width }
+fn physicalHeight(window) if _hasRes?(window) { true -> _default(window._res.ph, window.height), _ -> window.height }
+fn scaleX(window) if _hasRes?(window) { true -> _default(window._res.sx, 1.0), _ -> 1.0 }
+fn scaleY(window) if _hasRes?(window) { true -> _default(window._res.sy, 1.0), _ -> 1.0 }
+fn offsetX(window) if _hasRes?(window) { true -> _default(window._res.ox, 0), _ -> 0 }
+fn offsetY(window) if _hasRes?(window) { true -> _default(window._res.oy, 0), _ -> 0 }
+
+// Convert physical (mouse / screen) coords → logical (design) coords.
+fn physicalToLogical(window, px, py) {
+	r := _res(window)
+	if r != ? {
+		true -> {
+			sx := _default(r.sx, 1.0)
+			sy := _default(r.sy, 1.0)
+			ox := _default(r.ox, 0)
+			oy := _default(r.oy, 0)
+			{
+				x: if sx > 0 { true -> int((float(px) - float(ox)) / sx), _ -> px }
+				y: if sy > 0 { true -> int((float(py) - float(oy)) / sy), _ -> py }
+			}
+		}
+		_ -> { x: px, y: py }
+	}
+}
+
+// Convert logical (design) coords → physical (screen) coords.
+fn logicalToPhysical(window, lx, ly) {
+	r := _res(window)
+	if r != ? {
+		true -> {
+			sx := _default(r.sx, 1.0)
+			sy := _default(r.sy, 1.0)
+			ox := _default(r.ox, 0)
+			oy := _default(r.oy, 0)
+			{
+				x: int(float(lx) * sx + float(ox))
+				y: int(float(ly) * sy + float(oy))
+			}
+		}
+		_ -> { x: lx, y: ly }
+	}
+}
+
+// Called when the physical window size changes (e.g. on resize).
+fn updatePhysicalSize(window, physW, physH) {
+	r := _res(window)
+	if r != ? -> {
+		r.pw <- physW
+		r.ph <- physH
+		_recomputeScale(window)
+	}
+}
+
+// --- Internal -------------------------------------------------------------
+
+fn _recomputeScale(window) {
+	r := window._res
+	dw := float(r.dw)
+	dh := float(r.dh)
+	pw := float(_default(r.pw, r.dw))
+	ph := float(_default(r.ph, r.dh))
+
+	mode := _default(r.mode, 'fit')
+	pp := _default(r.pp, false)
+
+	if mode {
+		'stretch' -> {
+			r.sx <- pw / dw
+			r.sy <- ph / dh
+			r.ox <- 0
+			r.oy <- 0
+		}
+
+		'fill' -> {
+			sx := pw / dw
+			sy := ph / dh
+			s := if sx > sy { true -> sx, _ -> sy }
+			scaledW := dw * s
+			scaledH := dh * s
+			r.sx <- s
+			r.sy <- s
+			r.ox <- int((pw - scaledW) / 2.0)
+			r.oy <- int((ph - scaledH) / 2.0)
+		}
+
+		// 'fit' (default) – letterbox / pillarbox
+		_ -> {
+			sx := pw / dw
+			sy := ph / dh
+			s := if sx < sy { true -> sx, _ -> sy }
+			if pp -> {
+				floored := int(s)
+				if floored < 1 {
+					true -> s <- 1.0
+					_ -> s <- float(floored)
+				}
+			}
+			scaledW := dw * s
+			scaledH := dh * s
+			r.sx <- s
+			r.sy <- s
+			r.ox <- int((pw - scaledW) / 2.0)
+			r.oy <- int((ph - scaledH) / 2.0)
+		}
+	}
+}

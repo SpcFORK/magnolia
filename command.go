@@ -144,6 +144,14 @@ func runPackFile() bool {
 }
 
 func runFile(filePath string) {
+	runFileWithMode(filePath, false)
+}
+
+func runFileBytecode(filePath string) {
+	runFileWithMode(filePath, true)
+}
+
+func runFileWithMode(filePath string, bytecodeMode bool) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Printf("Could not open %s: %s\n", filePath, err)
@@ -156,9 +164,16 @@ func runFile(filePath string) {
 	defer ctx.Wait()
 	ctx.LoadBuiltins()
 
-	if _, err = ctx.Eval(file); err != nil {
-		DisplayError(err, DefaultErrorConfig())
-		os.Exit(1)
+	if bytecodeMode {
+		if _, err = ctx.EvalBytecode(file); err != nil {
+			DisplayError(err, DefaultErrorConfig())
+			os.Exit(1)
+		}
+	} else {
+		if _, err = ctx.Eval(file); err != nil {
+			DisplayError(err, DefaultErrorConfig())
+			os.Exit(1)
+		}
 	}
 }
 

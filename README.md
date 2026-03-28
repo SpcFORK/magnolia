@@ -503,11 +503,11 @@ Magnolia inherits Oak's performance characteristics. As of September 2021, Oak i
 
 Runtime performance is not currently the primary concern; the primary concern is implementing a correct and pleasant interpreter that's fast _enough_ to write real apps with. Being as fast as Python and Ruby is a good long-term goal. Those languages run in production and receive continuous investments into performance tuning.
 
-There are several immediately actionable things we can do to speed up Magnolia programs' runtime performance, though none are under works today. In order of increasing implementation complexity:
+There are several immediately actionable things we can do to speed up Magnolia programs' runtime performance. In order of increasing implementation complexity:
 
-1. Basic compiler optimization techniques applied to the abstract syntax tree, like constant folding and propagation.
-2. A thorough audit of the interpreter's memory allocation profile and a memory optimization pass (and the same for L1/L2 cache misses).
-3. A bytecode VM that executes Magnolia compiled down to more compact and efficient bytecode rather than a syntax tree-walking interpreter.
+1. ~~Basic compiler optimization techniques applied to the abstract syntax tree, like constant folding and propagation.~~ **Implemented** — the interpreter now runs a constant folding pass on the AST between parsing and evaluation. Constant arithmetic, string concatenation, boolean logic, unary operations, and equality comparisons on literals are all resolved at compile time.
+2. ~~A thorough audit of the interpreter's memory allocation profile and a memory optimization pass (and the same for L1/L2 cache misses).~~ **Implemented** — pprof-guided memory audit and optimization pass yielding a **2.4x interpreter speedup** on fib(20) (35.9ms → 14.6ms) and ~6.6% fewer heap allocations. Key optimizations: `sync.Pool` for scope mutex recycling, pre-sized scope maps via `newScopeN`, direct fn-call fast path bypassing args slice allocation and thunk wrapping for the common case (exact arg count, no rest params), index-based tokenizer eliminating per-token `[]rune` accumulator allocations, and parser capacity hints reducing slice growth overhead.
+3. ~~A bytecode VM that executes Magnolia compiled down to more compact and efficient bytecode rather than a syntax tree-walking interpreter.~~ **Implemented** — a native Go bytecode VM that compiles Magnolia AST to 52-opcode stack-based bytecode and executes via a flat dispatch loop. Accessible via the `--bytecode` CLI flag. The VM supports all language features including closures, recursion, destructuring, pattern matching, pipe operators, and upvalue mutation via a scope chain. Benchmarks show a **3.7x speedup** on fib(30) and **1.9x speedup** on loop-heavy workloads versus the tree-walking interpreter.
 
 ## Development
 

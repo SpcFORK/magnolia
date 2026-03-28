@@ -146,8 +146,8 @@ fn releaseResources(window) {
 }
 
 // invalidateDrawCaches resets per-frame GDI object tracking so that the next
-// draw call re-selects its pen/brush into the DC.  Call at the start of each
-// frame to avoid stale selections after hot-runs or DC recreation.
+// draw call re-selects its pen/brush into the DC.  Called when the back-buffer
+// DC changes (resize, hot-run) to avoid stale selections.
 fn invalidateDrawCaches(window) {
 	window._curPen <- ?
 	window._curBrush <- ?
@@ -414,10 +414,11 @@ fn fillRect(window, x, y, width, height, color, defaultColor, borderColor) if wi
 }
 
 // Pen cache: reuse GDI pen handles by color to avoid CreatePen/DeleteObject per draw.
-_maxCacheSize := 128
+_maxCacheSize := 256
 
 fn _evictPenCache(window) {
-	{ each: each } := import('std')
+	// Evict the entire cache.  With 256 slots, eviction is rare enough
+	// that a full flush is simpler than partial LRU and keeps the map clean.
 	keys(window._penCache) |> each(fn(k) {
 		h := window._penCache.(k)
 		if type(h) = :int & h > 0 -> windows.deleteObject(h)
@@ -428,7 +429,6 @@ fn _evictPenCache(window) {
 }
 
 fn _evictBrushCache(window) {
-	{ each: each } := import('std')
 	keys(window._brushCache) |> each(fn(k) {
 		h := window._brushCache.(k)
 		if type(h) = :int & h > 0 -> windows.deleteObject(h)

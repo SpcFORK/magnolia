@@ -231,13 +231,10 @@ func TestDisplayError_ParseWithoutFileContext(t *testing.T) {
 }
 
 func TestDisplaySourceContext_FileMissing(t *testing.T) {
-	output := captureStderr(t, func() {
-		displaySourceContext("definitely-missing-file.oak", 1, 1, ErrorDisplayConfig{UseColor: false, ShowContext: true, ContextLines: 1}, func(_, text string) string {
-			return text
-		})
-	})
+	var buf strings.Builder
+	displaySourceContext(&buf, "definitely-missing-file.oak", 1, 1, ErrorDisplayConfig{UseColor: false, ShowContext: true, ContextLines: 1})
 
-	if output != "" {
-		t.Fatalf("expected no output for missing context file, got: %q", output)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output for missing context file, got: %q", buf.String())
 	}
 }

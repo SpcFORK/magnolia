@@ -222,6 +222,146 @@ fn run(t) {
 		)
 	}
 
+	// --- New constant folding tests: unary, string, bool, equality, block ---
+
+	{
+		'optimizeConstants folds unary negate int' |> t.eq(
+			transpile.optimizeConstants({
+				type: :unary
+				op: :minus
+				tok: Token(:minus, ?).tok
+				right: Int(42)
+			}).val
+			-42
+		)
+
+		'optimizeConstants folds unary negate float' |> t.eq(
+			transpile.optimizeConstants({
+				type: :unary
+				op: :minus
+				tok: Token(:minus, ?).tok
+				right: Token(:float, 3.14)
+			}).val
+			-3.14
+		)
+
+		'optimizeConstants folds unary boolean not' |> t.eq(
+			transpile.optimizeConstants({
+				type: :unary
+				op: :exclam
+				tok: Token(:exclam, ?).tok
+				right: Token(:bool, true)
+			}).val
+			false
+		)
+
+		'optimizeConstants folds string concatenation' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :plus
+				tok: Token(:plus, ?).tok
+				left: Token(:string, 'hello ')
+				right: Token(:string, 'world')
+			}).val
+			'hello world'
+		)
+
+		'optimizeConstants folds boolean or' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :or
+				tok: Token(:or, ?).tok
+				left: Token(:bool, false)
+				right: Token(:bool, true)
+			}).val
+			true
+		)
+
+		'optimizeConstants folds boolean and' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :and
+				tok: Token(:and, ?).tok
+				left: Token(:bool, true)
+				right: Token(:bool, false)
+			}).val
+			false
+		)
+
+		'optimizeConstants folds boolean xor' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :xor
+				tok: Token(:xor, ?).tok
+				left: Token(:bool, true)
+				right: Token(:bool, true)
+			}).val
+			false
+		)
+
+		'optimizeConstants folds equality on ints' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :eq
+				tok: Token(:eq, ?).tok
+				left: Int(5)
+				right: Int(5)
+			}).val
+			true
+		)
+
+		'optimizeConstants folds inequality on strings' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :neq
+				tok: Token(:neq, ?).tok
+				left: Token(:string, 'a')
+				right: Token(:string, 'b')
+			}).val
+			true
+		)
+
+		'optimizeConstants folds left shift' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :pushArrow
+				tok: Token(:pushArrow, ?).tok
+				left: Int(4)
+				right: Int(2)
+			}).val
+			16
+		)
+
+		'optimizeConstants folds right shift' |> t.eq(
+			transpile.optimizeConstants({
+				type: :binary
+				op: :rshift
+				tok: Token(:rshift, ?).tok
+				left: Int(16)
+				right: Int(2)
+			}).val
+			4
+		)
+
+		'optimizeConstants unwraps single-constant block' |> t.eq(
+			transpile.optimizeConstants({
+				type: :block
+				exprs: [Int(42)]
+				tok: Token(:leftBrace, ?).tok
+			})
+			Int(42)
+		)
+
+		'optimizeConstants preserves multi-expression block' |> t.eq(
+			transpile.optimizeConstants({
+				type: :block
+				exprs: [Int(1), Int(2)]
+				tok: Token(:leftBrace, ?).tok
+			}).type
+			:block
+		)
+	}
+
 	{
 		'removeDebugCalls drops direct debug calls' |> t.eq(
 			len(

@@ -258,34 +258,29 @@ func (t *tokenizer) back() {
 }
 
 func (t *tokenizer) readUntilRune(c rune) string {
-	accumulator := []rune{}
+	start := t.index
 	for !t.isEOF() && t.peek() != c {
-		accumulator = append(accumulator, t.next())
+		t.next()
 	}
-	return string(accumulator)
+	return string(t.source[start:t.index])
 }
 
 func (t *tokenizer) readValidIdentifier() string {
-	accumulator := []rune{}
-	for {
-		if t.isEOF() {
-			break
-		}
-
-		c := t.next()
+	start := t.index
+	for !t.isEOF() {
+		c := t.source[t.index]
 		if unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '?' || c == '!' {
-			accumulator = append(accumulator, c)
+			t.next()
 		} else {
-			t.back()
 			break
 		}
 	}
-	return string(accumulator)
+	return string(t.source[start:t.index])
 }
 
 func (t *tokenizer) readValidNumeral() string {
 	sawDot := false
-	accumulator := []rune{}
+	start := t.index
 	for {
 		if t.isEOF() {
 			break
@@ -293,34 +288,27 @@ func (t *tokenizer) readValidNumeral() string {
 
 		c := t.next()
 		if unicode.IsDigit(c) {
-			accumulator = append(accumulator, c)
+			// keep going
 		} else if c == '.' && !sawDot {
-			// Only treat '.' as part of a float literal when followed by a digit.
-			// This keeps property access like `x.0.name` tokenized correctly.
 			if !t.isEOF() && unicode.IsDigit(t.peek()) {
 				sawDot = true
-				accumulator = append(accumulator, c)
 			} else {
 				t.back()
 				break
 			}
 		} else if c == 'e' || c == 'E' {
-			// Scientific notation: 1e9, 1.2e-3, etc.
-			accumulator = append(accumulator, c)
-			// Optional sign
 			if !t.isEOF() && (t.peek() == '+' || t.peek() == '-') {
-				accumulator = append(accumulator, t.next())
+				t.next()
 			}
-			// Exponent digits
 			for !t.isEOF() && unicode.IsDigit(t.peek()) {
-				accumulator = append(accumulator, t.next())
+				t.next()
 			}
 		} else {
 			t.back()
 			break
 		}
 	}
-	return string(accumulator)
+	return string(t.source[start:t.index])
 }
 
 func isValidNumeralBaseDigit(c rune, base int) bool {
@@ -335,21 +323,16 @@ func isValidNumeralBaseDigit(c rune, base int) bool {
 }
 
 func (t *tokenizer) readValidNumeralBase(base int) string {
-	accumulator := []rune{}
-	for {
-		if t.isEOF() {
-			break
-		}
-
-		c := t.next()
+	start := t.index
+	for !t.isEOF() {
+		c := t.source[t.index]
 		if isValidNumeralBaseDigit(c, base) {
-			accumulator = append(accumulator, c)
+			t.next()
 		} else {
-			t.back()
 			break
 		}
 	}
-	return string(accumulator)
+	return string(t.source[start:t.index])
 }
 
 func (t *tokenizer) nextToken() token {
@@ -542,7 +525,8 @@ func (t *tokenizer) nextToken() token {
 }
 
 func (t *tokenizer) tokenize() []token {
-	tokens := []token{}
+	// Heuristic: most source has ~1 token per 4 characters
+	tokens := make([]token, 0, len(t.source)/4+8)
 
 	if !t.isEOF() && t.peek() == '#' && t.peekAhead(1) == '!' {
 		// shebang-style ignored line, keep taking until EOL

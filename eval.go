@@ -372,17 +372,32 @@ type scope struct {
 	mu     *sync.RWMutex
 }
 
+var muPool = sync.Pool{
+	New: func() interface{} {
+		return &sync.RWMutex{}
+	},
+}
+
 func newScope(parent *scope) scope {
 	return scope{
 		parent: parent,
-		vars:   map[string]Value{},
-		mu:     &sync.RWMutex{},
+		vars:   make(map[string]Value),
+		mu:     muPool.Get().(*sync.RWMutex),
+	}
+}
+
+// newScopeN creates a scope with a pre-sized map for n expected variables.
+func newScopeN(parent *scope, n int) scope {
+	return scope{
+		parent: parent,
+		vars:   make(map[string]Value, n),
+		mu:     muPool.Get().(*sync.RWMutex),
 	}
 }
 
 func (sc *scope) lockRef() *sync.RWMutex {
 	if sc.mu == nil {
-		sc.mu = &sync.RWMutex{}
+		sc.mu = muPool.Get().(*sync.RWMutex)
 	}
 	return sc.mu
 }
@@ -400,10 +415,9 @@ func (sc *scope) snapshotVars() map[string]Value {
 }
 
 func (sc *scope) get(name string) (Value, *runtimeError) {
-	mu := sc.lockRef()
-	mu.RLock()
+	sc.mu.RLock()
 	v, ok := sc.vars[name]
-	mu.RUnlock()
+	sc.mu.RUnlock()
 	if ok {
 		return v, nil
 	}
@@ -414,21 +428,19 @@ func (sc *scope) get(name string) (Value, *runtimeError) {
 }
 
 func (sc *scope) put(name string, v Value) {
-	mu := sc.lockRef()
-	mu.Lock()
+	sc.mu.Lock()
 	sc.vars[name] = v
-	mu.Unlock()
+	sc.mu.Unlock()
 }
 
 func (sc *scope) update(name string, v Value) *runtimeError {
-	mu := sc.lockRef()
-	mu.Lock()
+	sc.mu.Lock()
 	if _, ok := sc.vars[name]; ok {
 		sc.vars[name] = v
-		mu.Unlock()
+		sc.mu.Unlock()
 		return nil
 	}
-	mu.Unlock()
+	sc.mu.Unlock()
 	if sc.parent != nil {
 		return sc.parent.update(name, v)
 	}
@@ -576,6 +588,8 @@ func (c *Context) evalGo(programReader io.Reader) (Value, error) {
 		return nil, err
 	}
 
+	nodes = optimizeAST(nodes)
+
 	val, runtimeErr := c.evalNodes(nodes)
 	if runtimeErr == nil {
 		return val, nil
@@ -590,25 +604,65 @@ func (c *Context) Eval(programReader io.Reader) (Value, error) {
 	return c.evalGo(programReader)
 }
 
+// EvalBytecode parses, optimizes, compiles to bytecode, and executes via the
+// stack-based VM instead of the tree-walking interpreter.
+func (c *Context) EvalBytecode(programReader io.Reader) (Value, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	program, err := io.ReadAll(programReader)
+	if err != nil {
+		return nil, err
+	}
+
+	fileName := c.currentFile
+	if fileName == "" {
+		fileName = "(input)"
+	}
+	tokenizer := newTokenizer(string(program), fileName)
+	tokens := tokenizer.tokenize()
+
+	parser := newParser(tokens)
+	nodes, parseErr := parser.parse()
+	if parseErr != nil {
+		return nil, parseErr
+	}
+
+	nodes = optimizeAST(nodes)
+
+	chunk := compileToByteCode(nodes)
+	vm := newVM(chunk, c)
+	val, runtimeErr := vm.run()
+	if runtimeErr == nil {
+		return val, nil
+	}
+	return val, runtimeErr
+}
+
 func normalizeCallArgs(paramCount int, args []Value) []Value {
 	if len(args) >= paramCount {
 		return args
 	}
 
-	normalized := make([]Value, len(args), paramCount)
+	normalized := make([]Value, paramCount)
 	copy(normalized, args)
-	for len(normalized) < paramCount {
-		normalized = append(normalized, null)
+	// remaining slots are already nil (zero value), fill with null
+	for i := len(args); i < paramCount; i++ {
+		normalized[i] = null
 	}
 	return normalized
 }
 
 func bindCallScope(parent *scope, params []string, restArg string, args []Value) scope {
-	callScope := newScope(parent)
+	n := len(params)
+	if restArg != "" {
+		n++
+	}
+	callScope := newScopeN(parent, n)
 
 	for i, argName := range params {
 		if argName != "" {
-			callScope.put(argName, args[i])
+			callScope.vars[argName] = args[i]
 		}
 	}
 
@@ -619,7 +673,7 @@ func bindCallScope(parent *scope, params []string, restArg string, args []Value)
 		} else {
 			restList = ListValue{}
 		}
-		callScope.put(restArg, &restList)
+		callScope.vars[restArg] = &restList
 	}
 
 	return callScope
@@ -658,7 +712,7 @@ func (c *Context) constructClassValue(class ClassValue, args ...Value) (Value, *
 			continue
 		}
 
-		parentInstance, err := c.EvalFnValue(parentValue, false, args...)
+		parentInstance, err := c.evalFnCall(parentValue, false, args)
 		if err != nil {
 			err.stackTrace = append(err.stackTrace, stackEntry{
 				name: class.defn.name,
@@ -715,20 +769,48 @@ func (c *Context) constructClassValue(class ClassValue, args ...Value) (Value, *
 	return instance, nil
 }
 
+// EvalFnValue is the variadic convenience wrapper, used by env.go builtins.
 func (c *Context) EvalFnValue(maybeFn Value, thunkable bool, args ...Value) (Value, *runtimeError) {
+	return c.evalFnCall(maybeFn, thunkable, args)
+}
+
+// evalFnCall is the slice-based fast path for function evaluation.
+func (c *Context) evalFnCall(maybeFn Value, thunkable bool, args []Value) (Value, *runtimeError) {
 	if fn, ok := maybeFn.(FnValue); ok {
 		args = normalizeCallArgs(len(fn.defn.args), args)
 		fnScope := bindCallScope(&fn.scope, fn.defn.args, fn.defn.restArg, args)
 
-		thunk := thunkValue{
-			defn:  fn.defn,
-			scope: fnScope,
-		}
 		if thunkable {
-			return thunk, nil
+			return thunkValue{
+				defn:  fn.defn,
+				scope: fnScope,
+			}, nil
 		}
 
-		return c.unwrapThunk(thunk)
+		// Direct evaluation — skip thunk wrapper for non-thunkable calls
+		v, err := c.evalExprWithOpt(fn.defn.body, fnScope, true)
+		if err != nil {
+			err.stackTrace = append(err.stackTrace, stackEntry{
+				name: fn.defn.name,
+				pos:  fn.defn.pos(),
+			})
+			return nil, err
+		}
+		// Unwrap any returned thunks (tail call optimization)
+		for {
+			thunk, isThunk := v.(thunkValue)
+			if !isThunk {
+				return v, nil
+			}
+			v, err = c.evalExprWithOpt(thunk.defn.body, thunk.scope, true)
+			if err != nil {
+				err.stackTrace = append(err.stackTrace, stackEntry{
+					name: thunk.defn.name,
+					pos:  thunk.defn.pos(),
+				})
+				return nil, err
+			}
+		}
 	} else if fn, ok := maybeFn.(BuiltinFnValue); ok {
 		return fn.fn(args)
 	} else if class, ok := maybeFn.(ClassValue); ok {
@@ -1616,6 +1698,45 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return nil, err
 		}
 
+		// Fast path: direct FnValue call with exact args and no rest/spread
+		if fn, isFn := maybeFn.(FnValue); isFn && n.restArg == nil &&
+			fn.defn.restArg == "" && len(n.args) == len(fn.defn.args) {
+			nParams := len(fn.defn.args)
+			fnScope := newScopeN(&fn.scope, nParams)
+			for i, argNode := range n.args {
+				argVal, err := c.evalExpr(argNode, sc)
+				if err != nil {
+					return nil, err
+				}
+				if fn.defn.args[i] != "" {
+					fnScope.vars[fn.defn.args[i]] = argVal
+				}
+			}
+			if thunkable {
+				return thunkValue{defn: fn.defn, scope: fnScope}, nil
+			}
+			v, err := c.evalExprWithOpt(fn.defn.body, fnScope, true)
+			if err != nil {
+				err.stackTrace = append(err.stackTrace, stackEntry{
+					name: fn.defn.name, pos: fn.defn.pos(),
+				})
+				return nil, err
+			}
+			for {
+				thunk, isThunk := v.(thunkValue)
+				if !isThunk {
+					return v, nil
+				}
+				v, err = c.evalExprWithOpt(thunk.defn.body, thunk.scope, true)
+				if err != nil {
+					err.stackTrace = append(err.stackTrace, stackEntry{
+						name: thunk.defn.name, pos: thunk.defn.pos(),
+					})
+					return nil, err
+				}
+			}
+		}
+
 		args := make([]Value, len(n.args))
 		for i, argNode := range n.args {
 			args[i], err = c.evalExpr(argNode, sc)
@@ -1640,7 +1761,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			args = append(args, *restList...)
 		}
 
-		val, err := c.EvalFnValue(maybeFn, thunkable, args...)
+		val, err := c.evalFnCall(maybeFn, thunkable, args)
 		// we only overwrite the error pos if it's nil (i.e. if it was a "nil
 		// is not a function" error, where EvalFnValue can't correctly position
 		// the error itself)
