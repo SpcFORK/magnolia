@@ -672,7 +672,7 @@ func (c *Context) oakType(args []Value) (Value, *runtimeError) {
 		return AtomValue("list"), nil
 	case ObjectValue:
 		return AtomValue("object"), nil
-	case FnValue, BuiltinFnValue, ClassValue:
+	case FnValue, BuiltinFnValue, ClassValue, *closureVal:
 		return AtomValue("function"), nil
 	case PointerValue:
 		return AtomValue("pointer"), nil

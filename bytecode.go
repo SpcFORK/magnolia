@@ -62,11 +62,12 @@ const (
 	opTailCall   opcode = 44 // u8 arity
 	opBuiltin    opcode = 45 // u16 builtin index, u8 arity
 	opImport     opcode = 46 // u16 constant pool index (module name)
-	opDeepEq     opcode = 47
-	opSwap       opcode = 48
-	opMatchJump  opcode = 49 // pop & compare TOS, jump i32 if no match
-	opScopePush  opcode = 50
-	opScopePop   opcode = 51
+	opImportDyn  opcode = 47 // pop string from stack, import that module
+	opDeepEq     opcode = 48
+	opSwap       opcode = 49
+	opMatchJump  opcode = 50 // pop & compare TOS, jump i32 if no match
+	opScopePush  opcode = 51
+	opScopePop   opcode = 52
 )
 
 var opcodeNames = [...]string{
@@ -81,7 +82,7 @@ var opcodeNames = [...]string{
 	"GET_PROP", "SET_PROP",
 	"JUMP", "JUMP_FALSE",
 	"CLOSURE", "CALL", "RETURN", "TAIL_CALL",
-	"BUILTIN", "IMPORT", "DEEP_EQ",
+	"BUILTIN", "IMPORT", "IMPORT_DYN", "DEEP_EQ",
 	"SWAP", "MATCH_JUMP",
 	"SCOPE_PUSH", "SCOPE_POP",
 }
@@ -600,7 +601,14 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 		co.compileNode(n.right)
 		for _, entry := range left.entries {
 			co.emitOp(opDup)
-			co.compileNode(entry.key)
+			// Keys in destructuring patterns are property names, not variable refs
+			if ident, ok := entry.key.(identifierNode); ok {
+				idx := co.addString(ident.payload)
+				co.emitOp(opConstStr)
+				co.emitU16(idx)
+			} else {
+				co.compileNode(entry.key)
+			}
 			co.emitOp(opGetProp)
 			if ident, ok := entry.val.(identifierNode); ok {
 				idx := co.declareLocal(ident.payload)
@@ -744,6 +752,21 @@ func (co *compiler) compileClass(n classNode) {
 
 // compileFnCall compiles a function call.
 func (co *compiler) compileFnCall(n fnCallNode) {
+	// Check for import() calls
+	if ident, ok := n.fn.(identifierNode); ok && ident.payload == "import" && len(n.args) == 1 && n.restArg == nil {
+		if strArg, ok := n.args[0].(stringNode); ok {
+			// import('literal') → opImport with constant index
+			idx := co.addString(string(strArg.payload))
+			co.emitOp(opImport)
+			co.emitU16(idx)
+			return
+		}
+		// import(expr) → evaluate expr, then opImportDyn
+		co.compileNode(n.args[0])
+		co.emitOp(opImportDyn)
+		return
+	}
+
 	// Check for built-in function calls
 	if ident, ok := n.fn.(identifierNode); ok {
 		if bi := resolveBuiltinIndex(ident.payload); bi >= 0 {
@@ -913,6 +936,7 @@ func disassemble(chunk *bytecodeChunk) string {
 type closureVal struct {
 	fnIdx       int
 	parentScope *vmScope // captured scope (shared reference, not a copy)
+	call        func(args []Value) (Value, *runtimeError) // set for interop with tree-walker
 }
 
 // callFrame represents a single function call on the call stack.
@@ -1046,6 +1070,93 @@ func (vm *VM) vmError(reason string) *runtimeError {
 	return err
 }
 
+// wrapClosureForInterop wraps a bytecode closureVal as a BuiltinFnValue so
+// it can be called by the tree-walking interpreter.  Each invocation spawns
+// a small child VM that runs only the closure's body and returns.
+func (vm *VM) wrapClosureForInterop(cv *closureVal) BuiltinFnValue {
+	chunk := vm.chunk
+	ctx := vm.ctx
+	return BuiltinFnValue{
+		name: chunk.functions[cv.fnIdx].name,
+		fn: func(args []Value) (Value, *runtimeError) {
+			child := newVM(chunk, ctx)
+			return child.callClosure(cv, args)
+		},
+	}
+}
+
+// callClosure executes a closureVal with the given arguments in a fresh
+// mini-run and returns the result.
+func (vm *VM) callClosure(cv *closureVal, args []Value) (Value, *runtimeError) {
+	ft := &vm.chunk.functions[cv.fnIdx]
+
+	locals := make([]Value, ft.localCount)
+	for i := range locals {
+		locals[i] = null
+	}
+	for i := 0; i < ft.arity && i < len(args); i++ {
+		locals[i] = args[i]
+	}
+	if ft.hasRestArg && ft.arity < len(locals) {
+		var restList ListValue
+		if len(args) > ft.arity {
+			restList = ListValue(args[ft.arity:])
+		} else {
+			restList = ListValue{}
+		}
+		locals[ft.arity] = &restList
+	}
+
+	scope := &vmScope{
+		names:  ft.localNames,
+		values: locals,
+		parent: cv.parentScope,
+	}
+
+	vm.frames = append(vm.frames, callFrame{
+		returnPC: len(vm.chunk.code), // halt after return
+		baseSlot: vm.sp,
+		fnIdx:    cv.fnIdx,
+		locals:   locals,
+		scope:    scope,
+	})
+	vm.pc = ft.offset
+	return vm.run()
+}
+
+// interopValue prepares a value for safe use by the tree-walking interpreter.
+// closureVal gets its call field populated so evalFnCall can invoke it.
+// Objects/lists are walked in-place (not copied) to find nested closureVals.
+func (vm *VM) interopValue(v Value) Value {
+	switch val := v.(type) {
+	case *closureVal:
+		vm.ensureClosureCallable(val)
+	case ObjectValue:
+		for _, item := range val {
+			vm.interopValue(item)
+		}
+	case *ListValue:
+		for _, item := range *val {
+			vm.interopValue(item)
+		}
+	}
+	return v
+}
+
+// ensureClosureCallable populates the call field on a closureVal so that
+// the tree-walking interpreter can invoke it through evalFnCall.
+func (vm *VM) ensureClosureCallable(cv *closureVal) {
+	if cv.call != nil {
+		return
+	}
+	chunk := vm.chunk
+	ctx := vm.ctx
+	cv.call = func(args []Value) (Value, *runtimeError) {
+		child := newVM(chunk, ctx)
+		return child.callClosure(cv, args)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // VM execution — single flat loop, no recursive run() calls
 // ---------------------------------------------------------------------------
@@ -1137,7 +1248,17 @@ func (vm *VM) run() (Value, *runtimeError) {
 				}
 			} else {
 				if slot < len(topLocals) {
-					vm.push(topLocals[slot])
+					v := topLocals[slot]
+					if v == null && slot < len(vm.chunk.topLevelNames) {
+						// Phantom local not yet assigned — check Context scope (builtins)
+						if cv, _ := vm.ctx.scope.get(vm.chunk.topLevelNames[slot]); cv != nil && cv != null {
+							vm.push(cv)
+						} else {
+							vm.push(null)
+						}
+					} else {
+						vm.push(v)
+					}
 				} else {
 					vm.push(null)
 				}
@@ -1165,6 +1286,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			nameIdx := vm.fetchU16()
 			name := vm.chunk.constants[nameIdx].str
 			scope := vm.currentScope(topScope)
+			found := false
 			if scope != nil {
 				// For a function frame, start searching from the parent scope
 				// (the closure's captured scope), not the current function's scope
@@ -1175,13 +1297,18 @@ func (vm *VM) run() (Value, *runtimeError) {
 				} else {
 					searchScope = scope
 				}
-				if val, found := searchScope.get(name); found {
+				if val, ok := searchScope.get(name); ok {
+					vm.push(val)
+					found = true
+				}
+			}
+			if !found {
+				// Fall back to the tree-walker scope (builtins, globals)
+				if val, _ := vm.ctx.scope.get(name); val != nil && val != null {
 					vm.push(val)
 				} else {
 					vm.push(null)
 				}
-			} else {
-				vm.push(null)
 			}
 
 		case opStoreUpval:
@@ -1457,6 +1584,9 @@ func (vm *VM) run() (Value, *runtimeError) {
 				vm.pc = ft.offset
 
 			case BuiltinFnValue:
+				for i, a := range args {
+					args[i] = vm.interopValue(a)
+				}
 				result, bErr := fn.fn(args)
 				if bErr != nil {
 					return nil, bErr
@@ -1464,9 +1594,22 @@ func (vm *VM) run() (Value, *runtimeError) {
 				vm.push(result)
 
 			case FnValue:
+				for i, a := range args {
+					args[i] = vm.interopValue(a)
+				}
 				result, fErr := vm.ctx.evalFnCall(fn, false, args)
 				if fErr != nil {
 					return nil, fErr
+				}
+				vm.push(result)
+
+			case ClassValue:
+				for i, a := range args {
+					args[i] = vm.interopValue(a)
+				}
+				result, cErr := vm.ctx.evalFnCall(fn, false, args)
+				if cErr != nil {
+					return nil, cErr
 				}
 				vm.push(result)
 
@@ -1557,15 +1700,30 @@ func (vm *VM) run() (Value, *runtimeError) {
 				// For non-closures, just do a regular call
 				switch fn2 := callee.(type) {
 				case BuiltinFnValue:
+					for i, a := range args {
+						args[i] = vm.interopValue(a)
+					}
 					result, bErr := fn2.fn(args)
 					if bErr != nil {
 						return nil, bErr
 					}
 					vm.push(result)
 				case FnValue:
+					for i, a := range args {
+						args[i] = vm.interopValue(a)
+					}
 					result, fErr := vm.ctx.evalFnCall(fn2, false, args)
 					if fErr != nil {
 						return nil, fErr
+					}
+					vm.push(result)
+				case ClassValue:
+					for i, a := range args {
+						args[i] = vm.interopValue(a)
+					}
+					result, cErr := vm.ctx.evalFnCall(fn2, false, args)
+					if cErr != nil {
+						return nil, cErr
 					}
 					vm.push(result)
 				default:
@@ -1589,6 +1747,20 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opImport:
 			idx := vm.fetchU16()
 			modName := vm.chunk.constants[idx].str
+			result, err := vm.doImport(modName)
+			if err != nil {
+				return nil, err
+			}
+			vm.push(result)
+
+		case opImportDyn:
+			modVal := vm.pop()
+			var modName string
+			if s, ok := modVal.(*StringValue); ok {
+				modName = string(*s)
+			} else {
+				return nil, vm.vmError(fmt.Sprintf("import() expects a string argument, got %s", modVal))
+			}
 			result, err := vm.doImport(modName)
 			if err != nil {
 				return nil, err

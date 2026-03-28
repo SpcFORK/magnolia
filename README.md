@@ -499,15 +499,26 @@ The bundler and compiler are built on top of past work with the [September](http
 
 ### Performance
 
-Magnolia inherits Oak's performance characteristics. As of September 2021, Oak is about 5-6x slower than Python 3.9 on pure function call and number-crunching overhead (assessed by a basic `fib(30)` benchmark). These figures are worst-case estimates -- because the language's data structures are far simpler than Python's, the ratios start to go down on more realistic complex programs. But nonetheless, this gives a good estimate of the kind of performance you can expect from Magnolia programs.
+Magnolia inherits Oak's performance characteristics. As of September 2021, Oak is about 5-6x slower than Python 3.9 on pure function call and number-crunching overhead (assessed by a basic `fib(30)` benchmark). These are worst-case estimates — the language's simpler data structures narrow the gap on realistic programs. Being as fast as Python and Ruby is a good long-term goal.
 
-Runtime performance is not currently the primary concern; the primary concern is implementing a correct and pleasant interpreter that's fast _enough_ to write real apps with. Being as fast as Python and Ruby is a good long-term goal. Those languages run in production and receive continuous investments into performance tuning.
+Runtime performance is not the primary concern today; correctness and a pleasant developer experience come first. That said, significant work has already landed, and there's a clear roadmap ahead.
 
-There are several immediately actionable things we can do to speed up Magnolia programs' runtime performance. In order of increasing implementation complexity:
+#### Done
 
-1. ~~Basic compiler optimization techniques applied to the abstract syntax tree, like constant folding and propagation.~~ **Implemented** — the interpreter now runs a constant folding pass on the AST between parsing and evaluation. Constant arithmetic, string concatenation, boolean logic, unary operations, and equality comparisons on literals are all resolved at compile time.
-2. ~~A thorough audit of the interpreter's memory allocation profile and a memory optimization pass (and the same for L1/L2 cache misses).~~ **Implemented** — pprof-guided memory audit and optimization pass yielding a **2.4x interpreter speedup** on fib(20) (35.9ms → 14.6ms) and ~6.6% fewer heap allocations. Key optimizations: `sync.Pool` for scope mutex recycling, pre-sized scope maps via `newScopeN`, direct fn-call fast path bypassing args slice allocation and thunk wrapping for the common case (exact arg count, no rest params), index-based tokenizer eliminating per-token `[]rune` accumulator allocations, and parser capacity hints reducing slice growth overhead.
-3. ~~A bytecode VM that executes Magnolia compiled down to more compact and efficient bytecode rather than a syntax tree-walking interpreter.~~ **Implemented** — a native Go bytecode VM that compiles Magnolia AST to 52-opcode stack-based bytecode and executes via a flat dispatch loop. Accessible via the `--bytecode` CLI flag. The VM supports all language features including closures, recursion, destructuring, pattern matching, pipe operators, and upvalue mutation via a scope chain. Benchmarks show a **3.7x speedup** on fib(30) and **1.9x speedup** on loop-heavy workloads versus the tree-walking interpreter.
+1. ~~Constant folding and propagation on the AST.~~ **Implemented** — constant arithmetic, string concatenation, boolean logic, unary operations, and equality comparisons on literals are resolved at compile time.
+2. ~~Memory allocation audit and optimization pass.~~ **Implemented** — pprof-guided pass yielding a **2.4x speedup** on fib(20) (35.9ms → 14.6ms) and ~6.6% fewer heap allocations. Key wins: `sync.Pool` for scope mutexes, pre-sized scope maps (`newScopeN`), direct fn-call fast path (no args slice / thunk wrapping for the common case), index-based tokenizer (no per-token `[]rune` allocator), and parser capacity hints.
+3. ~~Bytecode VM.~~ **Implemented** — 52-opcode stack-based VM accessible via `--bytecode`. Supports closures, recursion, destructuring, pattern matching, pipes, and upvalue mutation. **3.7x speedup** on fib(30), **1.9x** on loop-heavy workloads vs. the tree-walking interpreter.
+
+#### TODO
+
+6. **Register-based bytecode VM** — introduce a register-based design to cut push/pop overhead side-by-side with the stack-based dispatch and enable easier peephole optimizations and more.
+11. **SIMD-accelerated string / list builtins** — use platform SIMD intrinsics for `find`, `map`, `filter`, and bulk string operations on contiguous memory.
+10. **JIT compilation of hot bytecode paths** — profile the bytecode VM at runtime, identify hot traces, and compile them to native machine code via a lightweight JIT backend.
+9. **Parallel GC or arenas for short-lived scopes** — reduce stop-the-world GC pauses by giving hot inner loops their own allocation arena that can be freed in bulk.
+7. **Escape analysis and stack allocation** — identify closures and objects that don't outlive their creating scope and allocate them on the stack instead of the heap.
+8. **Lazy / copy-on-write strings and lists** — defer cloning until mutation, reducing allocation pressure for pipe-heavy functional code.
+4. **Inline caching for property access** — cache the offset of frequently accessed object keys so repeated lookups (e.g., `obj.x` inside a loop) skip the map hash.
+5. **NaN-boxing or tagged-pointer value representation** — pack small ints, bools, and atoms into a single 64-bit word to eliminate per-value heap allocations and improve cache locality.
 
 ## Development
 

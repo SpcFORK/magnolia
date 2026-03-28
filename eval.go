@@ -815,6 +815,8 @@ func (c *Context) evalFnCall(maybeFn Value, thunkable bool, args []Value) (Value
 		return fn.fn(args)
 	} else if class, ok := maybeFn.(ClassValue); ok {
 		return c.constructClassValue(class, args...)
+	} else if cv, ok := maybeFn.(*closureVal); ok && cv.call != nil {
+		return cv.call(args)
 	}
 
 	return nil, &runtimeError{
