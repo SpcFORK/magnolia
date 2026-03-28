@@ -136,6 +136,9 @@ var libvirtual string
 //go:embed lib/VirtualToken.oak
 var libvirtualtoken string
 
+//go:embed lib/Virtual-Bytecode.oak
+var libvirtualbytecode string
+
 //go:embed lib/pack-utils.oak
 var libpackutils string
 
@@ -469,6 +472,7 @@ var stdlibs = map[string]string{
 	"syntaxfmt":                       libsyntaxfmt,
 	"Virtual":                         libvirtual,
 	"VirtualToken":                    libvirtualtoken,
+	"Virtual-Bytecode":                libvirtualbytecode,
 	"pack-utils":                      libpackutils,
 	"bundle-ast":                      libbundleast,
 	"bundle-utils":                    libbundleutils,
@@ -586,6 +590,7 @@ var stdlibAutoLoadOrder = []string{
 	"gpus",
 	"syntax",
 	"Virtual",
+	"Virtual-Bytecode",
 	"shell",
 }
 

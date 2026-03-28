@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -152,15 +152,21 @@ func runFileBytecode(filePath string) {
 }
 
 func runFileWithMode(filePath string, bytecodeMode bool) {
-	file, err := os.Open(filePath)
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		fmt.Printf("Could not resolve %s: %s\n", filePath, err)
+		os.Exit(1)
+	}
+
+	file, err := os.Open(absFilePath)
 	if err != nil {
 		fmt.Printf("Could not open %s: %s\n", filePath, err)
 		os.Exit(1)
 	}
 	defer file.Close()
 
-	ctx := NewContext(path.Dir(filePath))
-	ctx.currentFile = filePath
+	ctx := NewContext(filepath.Dir(absFilePath))
+	ctx.currentFile = absFilePath
 	defer ctx.Wait()
 	ctx.LoadBuiltins()
 
@@ -193,7 +199,7 @@ func runRepl() {
 	var historyFilePath string
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
-		historyFilePath = path.Join(homeDir, ".oak_history")
+		historyFilePath = filepath.Join(homeDir, ".oak_history")
 	}
 
 	rl, err := readline.NewEx(&readline.Config{

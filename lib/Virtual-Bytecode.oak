@@ -1,0 +1,1350 @@
+// Virtual-Bytecode.oak -- Oak bytecode VM runner compatible with both
+// wasm-vm.oak chunks and bytecode.go chunks.
+
+std := import('std')
+{
+	default: default
+	slice: stdSlice
+	clone: clone
+	map: map
+	each: each
+	take: take
+	append: append
+	merge: merge
+	contains?: contains?
+} := std
+
+syntax := import('syntax')
+wasmVM := import('wasm-vm')
+fmt := import('fmt')
+printf := fmt.printf
+str := import('str')
+join := str.join
+
+builtinKeys := keys
+builtinValues := values
+
+MODE_WASM := :wasm
+MODE_GO := :go
+
+CONST_STRING := 0
+CONST_ATOM := 1
+CONST_FLOAT := 2
+
+I32_SIGN := 2147483648
+I32_WRAP := 4294967296
+
+fn rangeN(n) [0] |> take(if n < 0 { true -> 0, _ -> n })
+
+fn bytesFromString(s) {
+	rangeN(len(s)) |> map(fn(i) codepoint(s.(i)) & 0xFF)
+}
+
+fn bytesFromAny(v) if type(v) {
+	:string -> bytesFromString(v)
+	:list -> v |> map(fn(b) int(b) & 0xFF)
+	_ -> []
+}
+
+fn readU16(bs, at) {
+	(bs.(at) & 0xFF) | ((bs.(at + 1) & 0xFF) << 8)
+}
+
+fn readU32(bs, at) {
+	(bs.(at) & 0xFF) |
+	((bs.(at + 1) & 0xFF) << 8) |
+	((bs.(at + 2) & 0xFF) << 16) |
+	((bs.(at + 3) & 0xFF) << 24)
+}
+
+fn readI32(bs, at) {
+	u := readU32(bs, at)
+	if u >= I32_SIGN {
+		true -> u - I32_WRAP
+		_ -> u
+	}
+}
+
+fn bytesToString(bs, start, count) {
+	if count <= 0 {
+		true -> ''
+		_ -> rangeN(count) |> map(fn(i) char(bs.(start + i) & 0xFF)) |> join('')
+	}
+}
+
+fn normalizeConstEntry(entry, mode) {
+	if mode = MODE_GO {
+		true -> {
+			kind := entry.kind |> default(?)
+			if kind {
+				0 -> { type: :string, value: entry.str |> default('') }
+				1 -> { type: :atom, value: entry.str |> default('') }
+				2 -> { type: :float, value: entry.f |> default(0.0) }
+				_ -> {
+					type: entry.type |> default(:string)
+					value: entry.value |> default(entry.str |> default(''))
+				}
+			}
+		}
+		_ -> {
+			type: entry.type |> default(:string)
+			value: entry.value |> default(entry.str |> default(''))
+		}
+	}
+}
+
+fn decodeConstantPoolBytes(raw) {
+	bs := bytesFromAny(raw)
+	if len(bs) < 4 {
+		true -> []
+		_ -> {
+			count := readU32(bs, 0)
+			cursor := 4
+			out := []
+
+			fn readEntry(i) if i < count & cursor < len(bs) {
+				true -> {
+					tag := bs.(cursor) & 0xFF
+					cursor <- cursor + 1
+					if cursor + 4 <= len(bs) {
+						true -> {
+							slen := readU32(bs, cursor)
+							cursor <- cursor + 4
+							payload := bytesToString(bs, cursor, slen)
+							cursor <- cursor + slen
+							entry := if tag {
+								0 -> { type: :string, value: payload }
+								1 -> { type: :atom, value: payload }
+								2 -> {
+									fv := float(payload) |> default(0.0)
+									{ type: :float, value: fv }
+								}
+								_ -> { type: :string, value: payload }
+							}
+							out <- out |> append([entry])
+						}
+					}
+					readEntry(i + 1)
+				}
+			}
+			readEntry(0)
+			out
+		}
+	}
+}
+
+fn decodeFunctionTableBytes(raw) {
+	bs := bytesFromAny(raw)
+	if len(bs) < 4 {
+		true -> []
+		_ -> {
+			count := readU32(bs, 0)
+			cursor := 4
+			out := []
+
+			fn readEntry(i) if i < count & cursor + 9 <= len(bs) {
+				true -> {
+					off := readU32(bs, cursor)
+					ar := readU16(bs, cursor + 4)
+					lc := readU16(bs, cursor + 6)
+					hr := bs.(cursor + 8) != 0
+					cursor <- cursor + 9
+					out <- out |> append([{
+						offset: off
+						arity: ar
+						localCount: lc
+						hasRestArg: hr
+						name: ''
+						localNames: []
+					}])
+					readEntry(i + 1)
+				}
+			}
+			readEntry(0)
+			out
+		}
+	}
+}
+
+fn detectMode(raw) {
+	if raw.mode {
+		:go -> MODE_GO
+		:wasm -> MODE_WASM
+		_ -> if raw.topLevelNames {
+			? -> {
+				if len(raw.constants |> default([])) > 0 {
+					true -> {
+						c0 := raw.constants.(0)
+						if c0.kind {
+							? -> MODE_WASM
+							_ -> MODE_GO
+						}
+					}
+					_ -> MODE_WASM
+				}
+			}
+			_ -> MODE_GO
+		}
+	}
+}
+
+fn normalizeFunctions(rawFunctions) {
+	rawFunctions |> default([]) |> map(fn(ft) {
+		{
+			offset: ft.offset |> default(0)
+			arity: ft.arity |> default(0)
+			localCount: ft.localCount |> default(0)
+			name: ft.name |> default('')
+			hasRestArg: ft.hasRestArg |> default(false)
+			localNames: ft.localNames |> default([])
+		}
+	})
+}
+
+fn normalizeChunk(raw) {
+	mode := detectMode(raw)
+	code := bytesFromAny(raw.code |> default(raw.bytecode |> default([])))
+
+	constants := if len(raw.constants |> default([])) > 0 {
+		true -> raw.constants |> map(fn(c) normalizeConstEntry(c, mode))
+		_ -> decodeConstantPoolBytes(raw.constpool |> default(raw.constantPool |> default('')))
+	}
+
+	functions := if len(raw.functions |> default([])) > 0 {
+		true -> normalizeFunctions(raw.functions)
+		_ -> decodeFunctionTableBytes(raw.fntable |> default(raw.functionTable |> default('')))
+	}
+
+	{
+		mode: mode
+		code: code
+		constants: constants
+		functions: functions
+		topLevelNames: raw.topLevelNames |> default([])
+		metadata: raw.metadata |> default({})
+	}
+}
+
+fn defaultOpcodes(mode) if mode {
+	:go -> {
+		HALT: 0
+		NOP: 1
+		CONST_NULL: 2
+		CONST_EMPTY: 3
+		CONST_TRUE: 4
+		CONST_FALSE: 5
+		CONST_INT: 6
+		CONST_FLOAT: 7
+		CONST_STRING: 8
+		CONST_ATOM: 9
+		POP: 10
+		DUP: 11
+		LOAD_LOCAL: 12
+		STORE_LOCAL: 13
+		LOAD_UPVAL: 14
+		STORE_UPVAL: 15
+		ADD: 16
+		SUB: 17
+		MUL: 18
+		DIV: 19
+		MOD: 20
+		POW: 21
+		NEG: 22
+		BAND: 23
+		BOR: 24
+		BXOR: 25
+		BRSHIFT: 26
+		EQ: 27
+		NEQ: 28
+		GT: 29
+		LT: 30
+		GEQ: 31
+		LEQ: 32
+		NOT: 33
+		CONCAT: 34
+		MAKE_LIST: 35
+		MAKE_OBJECT: 36
+		GET_PROP: 37
+		SET_PROP: 38
+		JUMP: 39
+		JUMP_FALSE: 40
+		CLOSURE: 41
+		CALL: 42
+		RETURN: 43
+		TAIL_CALL: 44
+		BUILTIN: 45
+		IMPORT: 46
+		IMPORT_DYN: 47
+		DEEP_EQ: 48
+		SWAP: 49
+		MATCH_JUMP: 50
+		SCOPE_PUSH: 51
+		SCOPE_POP: 52
+		CALL_SPREAD: 53
+		UPVAL_BY_NAME: true
+	}
+	_ -> {
+		HALT: 0
+		NOP: 1
+		CONST_NULL: 2
+		CONST_EMPTY: 3
+		CONST_TRUE: 4
+		CONST_FALSE: 5
+		CONST_INT: 6
+		CONST_FLOAT: 7
+		CONST_STRING: 8
+		CONST_ATOM: 9
+		POP: 10
+		DUP: 11
+		LOAD_LOCAL: 12
+		STORE_LOCAL: 13
+		LOAD_UPVAL: 14
+		STORE_UPVAL: 15
+		ADD: 16
+		SUB: 17
+		MUL: 18
+		DIV: 19
+		MOD: 20
+		POW: 21
+		NEG: 22
+		BAND: 23
+		BOR: 24
+		BXOR: 25
+		BRSHIFT: 26
+		EQ: 27
+		NEQ: 28
+		GT: 29
+		LT: 30
+		GEQ: 31
+		LEQ: 32
+		NOT: 33
+		CONCAT: 34
+		MAKE_LIST: 35
+		MAKE_OBJECT: 36
+		GET_PROP: 37
+		SET_PROP: 38
+		JUMP: 39
+		JUMP_FALSE: 40
+		CLOSURE: 41
+		CALL: 42
+		RETURN: 43
+		TAIL_CALL: 44
+		BUILTIN: 45
+		IMPORT: 46
+		DEEP_EQ: 47
+		SWAP: 48
+		MATCH_JUMP: 49
+		SCOPE_PUSH: 50
+		SCOPE_POP: 51
+		CALL_SPREAD: ?
+		IMPORT_DYN: ?
+		UPVAL_BY_NAME: false
+	}
+}
+
+fn stackPush(vm, v) {
+	vm.stack <- vm.stack |> append([v])
+}
+
+fn stackPop(vm) {
+	n := len(vm.stack)
+	if n <= 0 {
+		true -> ?
+		_ -> {
+			v := vm.stack.(n - 1)
+			vm.stack <- stdSlice(vm.stack, 0, n - 1)
+			v
+		}
+	}
+}
+
+fn stackPeek(vm) {
+	n := len(vm.stack)
+	if n <= 0 {
+		true -> ?
+		_ -> vm.stack.(n - 1)
+	}
+}
+
+fn currentFrameIndex(vm) len(vm.frames) - 1
+
+fn currentFrame(vm) {
+	i := currentFrameIndex(vm)
+	if i >= 0 {
+		true -> vm.frames.(i)
+		_ -> ?
+	}
+}
+
+fn setCurrentFrame(vm, frame) {
+	i := currentFrameIndex(vm)
+	if i >= 0 {
+		true -> vm.frames.(i) <- frame
+	}
+}
+
+fn currentScope(vm) {
+	frame := currentFrame(vm)
+	if frame {
+		? -> vm.topScope
+		_ -> frame.scope
+	}
+}
+
+fn scopeGetByName(scope, name) {
+	if scope = ? {
+		true -> ?
+		_ -> {
+			fn findSlot(i) if i < len(scope.names) {
+				true -> if scope.names.(i) = name {
+					true -> scope.values.(i)
+					_ -> findSlot(i + 1)
+				}
+				_ -> ?
+			}
+			val := findSlot(0)
+			if val = ? {
+				true -> scopeGetByName(scope.parent, name)
+				_ -> val
+			}
+		}
+	}
+}
+
+fn scopeSetByName(scope, name, val) {
+	if scope = ? {
+		true -> false
+		_ -> {
+			fn setSlot(i) if i < len(scope.names) {
+				true -> if scope.names.(i) = name {
+					true -> {
+						scope.values.(i) <- val
+						true
+					}
+					_ -> setSlot(i + 1)
+				}
+				_ -> false
+			}
+			if setSlot(0) {
+				true -> true
+				_ -> scopeSetByName(scope.parent, name, val)
+			}
+		}
+	}
+}
+
+fn scopeAtDepth(scope, depth) {
+	if depth <= 0 {
+		true -> scope
+		_ -> scopeAtDepth(scope.parent |> default(?), depth - 1)
+	}
+}
+
+fn scopeGetByDepthSlot(scope, depth, slot) {
+	target := scopeAtDepth(scope, depth)
+	if target = ? {
+		true -> ?
+		_ -> if slot >= 0 & slot < len(target.values) {
+			true -> target.values.(slot)
+			_ -> ?
+		}
+	}
+}
+
+fn scopeSetByDepthSlot(scope, depth, slot, val) {
+	target := scopeAtDepth(scope, depth)
+	if target = ? {
+		true -> false
+		_ -> if slot >= 0 & slot < len(target.values) {
+			true -> {
+				target.values.(slot) <- val
+				true
+			}
+			_ -> false
+		}
+	}
+}
+
+fn fetchU8(vm) {
+	v := vm.chunk.code.(vm.pc)
+	vm.pc <- vm.pc + 1
+	v & 0xFF
+}
+
+fn fetchU16(vm) {
+	v := readU16(vm.chunk.code, vm.pc)
+	vm.pc <- vm.pc + 2
+	v
+}
+
+fn fetchI32(vm) {
+	v := readI32(vm.chunk.code, vm.pc)
+	vm.pc <- vm.pc + 4
+	v
+}
+
+fn constValueAt(vm, idx) {
+	if idx < 0 | idx >= len(vm.chunk.constants) {
+		true -> ?
+		_ -> {
+			c := vm.chunk.constants.(idx)
+			if c.type {
+				:string -> c.value
+				:atom -> atom(c.value)
+				:float -> c.value
+				_ -> c.value
+			}
+		}
+	}
+}
+
+fn keyToString(k) if type(k) {
+	:string -> k
+	:atom -> string(k)
+	_ -> string(k)
+}
+
+fn vmGetProp(obj, key) if type(obj) {
+	:string -> if type(key) = :int {
+		true -> {
+			i := key
+			if i < 0 | i >= len(obj) {
+				true -> ?
+				_ -> slice(obj, i, i + 1)
+			}
+		}
+		_ -> ?
+	}
+	:list -> if type(key) = :int {
+		true -> {
+			i := key
+			if i < 0 | i >= len(obj) {
+				true -> ?
+				_ -> obj.(i)
+			}
+		}
+		_ -> ?
+	}
+	:object -> obj.(keyToString(key)) |> default(?)
+	_ -> ?
+}
+
+fn vmSetProp(obj, key, val) if type(obj) {
+	:list -> {
+		if type(key) = :int {
+			true -> {
+				i := key
+				if i >= 0 & i < len(obj) {
+					true -> obj.(i) <- val
+				}
+			}
+		}
+		val
+	}
+	:object -> {
+		obj.(keyToString(key)) <- val
+		val
+	}
+	_ -> val
+}
+
+fn isTruthy(v) if type(v) {
+	:bool -> v
+	:null -> false
+	:empty -> false
+	:int -> v != 0
+	_ -> true
+}
+
+fn deepEq(a, b) {
+	if type(a) = :list & type(b) = :list {
+		true -> {
+			if len(a) != len(b) {
+				true -> false
+				_ -> {
+					ok := true
+					fn loop(i) if i < len(a) {
+						true -> {
+							if !deepEq(a.(i), b.(i)) {
+								true -> ok <- false
+							}
+							loop(i + 1)
+						}
+					}
+					loop(0)
+					ok
+				}
+			}
+		}
+		_ -> if type(a) = :object & type(b) = :object {
+			true -> {
+				ka := builtinKeys(a)
+				kb := builtinKeys(b)
+				if len(ka) != len(kb) {
+					true -> false
+					_ -> {
+						ok := true
+						ka |> each(fn(k) {
+							if !contains?(b, k) | !deepEq(a.(k), b.(k)) {
+								true -> ok <- false
+							}
+						})
+						ok
+					}
+				}
+			}
+			_ -> a = b
+		}
+	}
+}
+
+fn vmAdd(a, b) if type(a) {
+	:int -> if type(b) {
+		:int -> a + b
+		:float -> float(a) + b
+		_ -> ?
+	}
+	:float -> if type(b) {
+		:int -> a + float(b)
+		:float -> a + b
+		_ -> ?
+	}
+	:string -> if type(b) = :string {
+		true -> a << b
+		_ -> ?
+	}
+	:bool -> if type(b) = :bool {
+		true -> a | b
+		_ -> ?
+	}
+	_ -> ?
+}
+
+fn vmSub(a, b) if type(a) {
+	:int -> if type(b) {
+		:int -> a - b
+		:float -> float(a) - b
+		_ -> ?
+	}
+	:float -> if type(b) {
+		:int -> a - float(b)
+		:float -> a - b
+		_ -> ?
+	}
+	_ -> ?
+}
+
+fn vmMul(a, b) if type(a) {
+	:int -> if type(b) {
+		:int -> a * b
+		:float -> float(a) * b
+		_ -> ?
+	}
+	:float -> if type(b) {
+		:int -> a * float(b)
+		:float -> a * b
+		_ -> ?
+	}
+	:bool -> if type(b) = :bool {
+		true -> a & b
+		_ -> ?
+	}
+	_ -> ?
+}
+
+fn vmDiv(a, b) {
+	if (type(b) = :int & b = 0) | (type(b) = :float & b = 0.0) {
+		true -> ?
+		_ -> if type(a) {
+			:int -> if type(b) {
+				:int -> float(a) / float(b)
+				:float -> float(a) / b
+				_ -> ?
+			}
+			:float -> if type(b) {
+				:int -> a / float(b)
+				:float -> a / b
+				_ -> ?
+			}
+			_ -> ?
+		}
+	}
+}
+
+fn vmMod(a, b) {
+	if (type(b) = :int & b = 0) | (type(b) = :float & b = 0.0) {
+		true -> ?
+		_ -> if type(a) = :int & type(b) = :int {
+			true -> a % b
+			_ -> float(a) % float(b)
+		}
+	}
+}
+
+fn vmPow(a, b) pow(float(a), float(b))
+
+fn vmCompare(op, a, b) if op {
+	:gt -> a > b
+	:lt -> a < b
+	:geq -> a >= b
+	:leq -> a <= b
+	_ -> false
+}
+
+fn vmConcat(a, b) if type(a) {
+	:int -> if type(b) = :int {
+		true -> a << b
+		_ -> ?
+	}
+	:string -> if type(b) {
+		:string -> a << b
+		:int -> a << char(b & 0xFF)
+		_ -> ?
+	}
+	:list -> {
+		out := clone(a)
+		out <- out << b
+		out
+	}
+	_ -> ?
+}
+
+fn builtinAppend(x, y) if type(x) {
+	:list -> if type(y) = :list {
+		true -> append(clone(x), y)
+		_ -> {
+			out := clone(x)
+			out <- out << y
+			out
+		}
+	}
+	:string -> if type(y) = :string {
+		true -> x << y
+		_ -> x
+	}
+	_ -> ?
+}
+
+fn callBuiltin(idx, args) if idx {
+	0 -> {
+		if len(args) > 0 {
+			true -> printf(string(args.(0)))
+		}
+		?
+	}
+	1 -> if len(args) < 1 {
+		true -> 0
+		_ -> if type(args.(0)) {
+			:string -> len(args.(0))
+			:list -> len(args.(0))
+			:object -> len(args.(0))
+			_ -> 0
+		}
+	}
+	2 -> if len(args) < 1 {
+		true -> :null
+		_ -> type(args.(0))
+	}
+	3 -> if len(args) < 1 {
+		true -> ''
+		_ -> string(args.(0))
+	}
+	4 -> if len(args) < 1 {
+		true -> 0
+		_ -> int(args.(0)) |> default(0)
+	}
+	5 -> if len(args) < 1 {
+		true -> 0.0
+		_ -> float(args.(0)) |> default(0.0)
+	}
+	6 -> if len(args) < 1 {
+		true -> ?
+		_ -> {
+			s := string(args.(0))
+			if len(s) <= 0 {
+				true -> ?
+				_ -> codepoint(s.(0))
+			}
+		}
+	}
+	7 -> if len(args) < 1 {
+		true -> ''
+		_ -> char(int(args.(0)) & 0xFF)
+	}
+	8 -> if len(args) < 1 {
+		true -> []
+		_ -> if type(args.(0)) = :object {
+			true -> builtinKeys(args.(0))
+			_ -> []
+		}
+	}
+	9 -> if len(args) < 1 {
+		true -> []
+		_ -> if type(args.(0)) = :object {
+			true -> builtinValues(args.(0))
+			_ -> []
+		}
+	}
+	10 -> if len(args) < 3 {
+		true -> ?
+		_ -> slice(args.(0), args.(1), args.(2))
+	}
+	11 -> if len(args) < 2 {
+		true -> ?
+		_ -> builtinAppend(args.(0), args.(1))
+	}
+	12 -> {
+		if len(args) > 0 {
+			true -> wait(args.(0))
+			_ -> ?
+		}
+		?
+	}
+	13 -> {
+		code := if len(args) > 0 {
+			true -> int(args.(0)) |> default(0)
+			_ -> 0
+		}
+		exit(code)
+		?
+	}
+	_ -> ?
+}
+
+fn makeFrame(vm, closure, args, returnPC) {
+	ft := vm.chunk.functions.(closure.fnIdx)
+	localCount := ft.localCount |> default(0)
+	if localCount < ft.arity {
+		true -> localCount <- ft.arity
+	}
+	locals := rangeN(localCount) |> map(fn(_) ?)
+
+	fn fillArg(i) if i < ft.arity & i < len(args) {
+		true -> {
+			locals.(i) <- args.(i)
+			fillArg(i + 1)
+		}
+	}
+	fillArg(0)
+
+	if ft.hasRestArg {
+		true -> {
+			restIdx := ft.arity
+			if restIdx < len(locals) {
+				true -> {
+					rest := if len(args) > ft.arity {
+						true -> stdSlice(args, ft.arity)
+						_ -> []
+					}
+					locals.(restIdx) <- rest
+				}
+			}
+		}
+	}
+
+	localNames := ft.localNames |> default([])
+	scope := {
+		names: localNames
+		values: locals
+		parent: closure.parentScope
+	}
+
+	{
+		returnPC: returnPC
+		baseSlot: len(vm.stack)
+		fnIdx: closure.fnIdx
+		locals: locals
+		scope: scope
+	}
+}
+
+fn invokeCallable(vm, callee, args) {
+	if type(callee) = :object & callee.type = :closure {
+		true -> {
+			frame := makeFrame(vm, callee, args, vm.pc)
+			vm.frames <- vm.frames |> append([frame])
+			vm.pc <- vm.chunk.functions.(callee.fnIdx).offset
+		}
+		_ -> if type(callee) = :function {
+			true -> stackPush(vm, callee(args...))
+			_ -> stackPush(vm, ?)
+		}
+	}
+}
+
+fn popArgs(vm, arity) {
+	out := rangeN(arity) |> map(fn(_) ?)
+	fn fill(i) if i >= 0 {
+		true -> {
+			out.(i) <- stackPop(vm)
+			fill(i - 1)
+		}
+	}
+	fill(arity - 1)
+	out
+}
+
+fn runChunk(rawChunk, opts) {
+	chunk := normalizeChunk(rawChunk)
+	op := defaultOpcodes(chunk.mode)
+	opts := opts |> default({})
+	globals := opts.globals |> default({})
+
+	topCount := if chunk.mode = MODE_GO {
+		true -> if len(chunk.topLevelNames) < 256 {
+			true -> 256
+			_ -> len(chunk.topLevelNames)
+		}
+		_ -> len(chunk.topLevelNames)
+	}
+	topLocals := rangeN(topCount) |> map(fn(_) ?)
+	topScope := {
+		names: chunk.topLevelNames
+		values: topLocals
+		parent: ?
+	}
+
+	vm := {
+		chunk: chunk
+		op: op
+		pc: 0
+		stack: []
+		frames: []
+		topLocals: topLocals
+		topScope: topScope
+		globals: globals
+		finished: false
+		result: ?
+	}
+
+	fn step() {
+		if !vm.finished {
+			true -> {
+			if vm.pc >= len(vm.chunk.code) {
+				true -> {
+					vm.finished <- true
+					vm.result <- if len(vm.stack) > 0 {
+						true -> stackPop(vm)
+						_ -> ?
+					}
+				}
+			}
+
+			if !vm.finished {
+				true -> {
+					opcode := fetchU8(vm)
+					if {
+					opcode = op.HALT -> {
+						vm.finished <- true
+						vm.result <- if len(vm.stack) > 0 {
+							true -> stackPop(vm)
+							_ -> ?
+						}
+					}
+					opcode = op.NOP -> ?
+					opcode = op.CONST_NULL -> stackPush(vm, ?)
+					opcode = op.CONST_EMPTY -> stackPush(vm, _)
+					opcode = op.CONST_TRUE -> stackPush(vm, true)
+					opcode = op.CONST_FALSE -> stackPush(vm, false)
+					opcode = op.CONST_INT -> stackPush(vm, fetchI32(vm))
+					opcode = op.CONST_FLOAT -> stackPush(vm, constValueAt(vm, fetchU16(vm)) |> default(0.0))
+					opcode = op.CONST_STRING -> stackPush(vm, constValueAt(vm, fetchU16(vm)) |> default(''))
+					opcode = op.CONST_ATOM -> stackPush(vm, constValueAt(vm, fetchU16(vm)) |> default(:null))
+					opcode = op.POP -> stackPop(vm)
+					opcode = op.DUP -> stackPush(vm, stackPeek(vm))
+					opcode = op.SWAP -> {
+						a := stackPop(vm)
+						b := stackPop(vm)
+						stackPush(vm, a)
+						stackPush(vm, b)
+					}
+					opcode = op.LOAD_LOCAL -> {
+						slot := fetchU16(vm)
+						frame := currentFrame(vm)
+						if frame {
+							? -> {
+								if slot >= 0 & slot < len(vm.topLocals) {
+									true -> {
+										val := vm.topLocals.(slot)
+										if val = ? & slot < len(vm.chunk.topLevelNames) {
+											true -> {
+												name := vm.chunk.topLevelNames.(slot)
+												g := vm.globals.(name) |> default(?)
+												if g = ? {
+													true -> stackPush(vm, val)
+													_ -> {
+														vm.topLocals.(slot) <- g
+														stackPush(vm, g)
+													}
+												}
+											}
+											_ -> stackPush(vm, val)
+										}
+									}
+									_ -> stackPush(vm, ?)
+								}
+							}
+							_ -> if slot >= 0 & slot < len(frame.locals) {
+								true -> stackPush(vm, frame.locals.(slot))
+								_ -> stackPush(vm, ?)
+							}
+						}
+					}
+					opcode = op.STORE_LOCAL -> {
+						slot := fetchU16(vm)
+						val := stackPop(vm)
+						frame := currentFrame(vm)
+						if frame {
+							? -> {
+								if slot >= 0 & slot < len(vm.topLocals) {
+									true -> vm.topLocals.(slot) <- val
+								}
+							}
+							_ -> {
+								if slot >= 0 & slot < len(frame.locals) {
+									true -> frame.locals.(slot) <- val
+								}
+								setCurrentFrame(vm, frame)
+							}
+						}
+					}
+					opcode = op.LOAD_UPVAL -> {
+						frame := currentFrame(vm)
+						searchScope := if frame {
+							? -> vm.topScope
+							_ -> frame.scope.parent
+						}
+						if op.UPVAL_BY_NAME {
+							true -> {
+								nameIdx := fetchU16(vm)
+								nameVal := constValueAt(vm, nameIdx)
+								name := string(nameVal)
+								val := scopeGetByName(searchScope, name)
+								if val = ? {
+									true -> stackPush(vm, vm.globals.(name) |> default(?))
+									_ -> stackPush(vm, val)
+								}
+							}
+							_ -> {
+								depth := fetchU16(vm)
+								slot := fetchU16(vm)
+								stackPush(vm, scopeGetByDepthSlot(searchScope, depth, slot))
+							}
+						}
+					}
+					opcode = op.STORE_UPVAL -> {
+						val := stackPop(vm)
+						frame := currentFrame(vm)
+						searchScope := if frame {
+							? -> vm.topScope
+							_ -> frame.scope.parent
+						}
+						if op.UPVAL_BY_NAME {
+							true -> {
+								nameIdx := fetchU16(vm)
+								name := string(constValueAt(vm, nameIdx))
+								scopeSetByName(searchScope, name, val)
+							}
+							_ -> {
+								depth := fetchU16(vm)
+								slot := fetchU16(vm)
+								scopeSetByDepthSlot(searchScope, depth, slot, val)
+							}
+						}
+					}
+					opcode = op.ADD -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmAdd(l, r))
+					}
+					opcode = op.SUB -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmSub(l, r))
+					}
+					opcode = op.MUL -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmMul(l, r))
+					}
+					opcode = op.DIV -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmDiv(l, r))
+					}
+					opcode = op.MOD -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmMod(l, r))
+					}
+					opcode = op.POW -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmPow(l, r))
+					}
+					opcode = op.NEG -> {
+						x := stackPop(vm)
+						stackPush(vm, -x)
+					}
+					opcode = op.BAND -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, l & r)
+					}
+					opcode = op.BOR -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, l | r)
+					}
+					opcode = op.BXOR -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, l ^ r)
+					}
+					opcode = op.BRSHIFT -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, l >> r)
+					}
+					opcode = op.EQ -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, l = r)
+					}
+					opcode = op.NEQ -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, l != r)
+					}
+					opcode = op.DEEP_EQ -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, deepEq(l, r))
+					}
+					opcode = op.GT -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmCompare(:gt, l, r))
+					}
+					opcode = op.LT -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmCompare(:lt, l, r))
+					}
+					opcode = op.GEQ -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmCompare(:geq, l, r))
+					}
+					opcode = op.LEQ -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmCompare(:leq, l, r))
+					}
+					opcode = op.NOT -> {
+						x := stackPop(vm)
+						stackPush(vm, !isTruthy(x))
+					}
+					opcode = op.CONCAT -> {
+						r := stackPop(vm)
+						l := stackPop(vm)
+						stackPush(vm, vmConcat(l, r))
+					}
+					opcode = op.MAKE_LIST -> {
+						count := fetchU16(vm)
+						items := []
+						fn loop(i) if i < count {
+							true -> {
+								items <- [stackPop(vm)] |> append(items)
+								loop(i + 1)
+							}
+						}
+						loop(0)
+						stackPush(vm, items)
+					}
+					opcode = op.MAKE_OBJECT -> {
+						count := fetchU16(vm)
+						obj := {}
+						fn loop(i) if i < count {
+							true -> {
+								val := stackPop(vm)
+								key := stackPop(vm)
+								obj.(keyToString(key)) <- val
+								loop(i + 1)
+							}
+						}
+						loop(0)
+						stackPush(vm, obj)
+					}
+					opcode = op.GET_PROP -> {
+						key := stackPop(vm)
+						obj := stackPop(vm)
+						stackPush(vm, vmGetProp(obj, key))
+					}
+					opcode = op.SET_PROP -> {
+						val := stackPop(vm)
+						key := stackPop(vm)
+						obj := stackPop(vm)
+						stackPush(vm, vmSetProp(obj, key, val))
+					}
+					opcode = op.JUMP -> vm.pc <- fetchI32(vm)
+					opcode = op.JUMP_FALSE -> {
+						target := fetchI32(vm)
+						cond := stackPop(vm)
+						if !isTruthy(cond) {
+							true -> vm.pc <- target
+						}
+					}
+					opcode = op.CLOSURE -> {
+						fnIdx := fetchU16(vm)
+						stackPush(vm, {
+							type: :closure
+							fnIdx: fnIdx
+							parentScope: currentScope(vm)
+						})
+					}
+					opcode = op.CALL -> {
+						arity := fetchU8(vm)
+						args := popArgs(vm, arity)
+						callee := stackPop(vm)
+						invokeCallable(vm, callee, args)
+					}
+					opcode = op.CALL_SPREAD -> {
+						arity := fetchU8(vm)
+						raw := popArgs(vm, arity)
+						callee := stackPop(vm)
+						args := if arity > 0 & type(raw.(arity - 1)) = :list {
+							true -> {
+								prefix := if arity > 1 {
+									true -> stdSlice(raw, 0, arity - 1)
+									_ -> []
+								}
+								append(prefix, raw.(arity - 1))
+							}
+							_ -> raw
+						}
+						invokeCallable(vm, callee, args)
+					}
+					opcode = op.RETURN -> {
+						ret := stackPop(vm)
+						if len(vm.frames) <= 0 {
+							true -> {
+								vm.finished <- true
+								vm.result <- ret
+							}
+							_ -> {
+								frame := vm.frames.(len(vm.frames) - 1)
+								vm.frames <- stdSlice(vm.frames, 0, len(vm.frames) - 1)
+								vm.pc <- frame.returnPC
+								stackPush(vm, ret)
+							}
+						}
+					}
+					opcode = op.TAIL_CALL -> {
+						arity := fetchU8(vm)
+						args := popArgs(vm, arity)
+						callee := stackPop(vm)
+						if type(callee) = :object & callee.type = :closure {
+							true -> {
+								if len(vm.frames) > 0 {
+									true -> {
+										retPC := vm.frames.(len(vm.frames) - 1).returnPC
+										vm.frames <- stdSlice(vm.frames, 0, len(vm.frames) - 1)
+										frame := makeFrame(vm, callee, args, retPC)
+										vm.frames <- vm.frames |> append([frame])
+										vm.pc <- vm.chunk.functions.(callee.fnIdx).offset
+									}
+									_ -> invokeCallable(vm, callee, args)
+								}
+							}
+							_ -> invokeCallable(vm, callee, args)
+						}
+					}
+					opcode = op.BUILTIN -> {
+						bi := fetchU16(vm)
+						arity := fetchU8(vm)
+						args := popArgs(vm, arity)
+						stackPush(vm, callBuiltin(bi, args))
+					}
+					opcode = op.IMPORT -> {
+						if chunk.mode = MODE_GO {
+							true -> {
+								idx := fetchU16(vm)
+								_name := string(constValueAt(vm, idx) |> default(''))
+								stackPush(vm, ?)
+							}
+							_ -> stackPush(vm, ?)
+						}
+					}
+					opcode = op.IMPORT_DYN -> {
+						_name := string(stackPop(vm) |> default(''))
+						stackPush(vm, ?)
+					}
+					opcode = op.SCOPE_PUSH -> ?
+					opcode = op.SCOPE_POP -> ?
+					opcode = op.MATCH_JUMP -> {
+						target := fetchI32(vm)
+						pat := stackPop(vm)
+						top := stackPeek(vm)
+						if !(top = pat) {
+							true -> vm.pc <- target
+						}
+					}
+					_ -> {
+						vm.finished <- true
+						vm.result <- {
+							type: :error
+							message: 'Unknown opcode: ' << string(opcode)
+							pc: vm.pc - 1
+						}
+					}
+					}
+				}
+			}
+
+				step()
+			}
+		}
+	}
+
+	step()
+	vm.result
+}
+
+fn compileAst(ast) {
+	node := if type(ast) = :list {
+		true -> { type: :block, exprs: ast }
+		_ -> ast
+	}
+	wasmVM.compileProgram(node)
+}
+
+fn compileSource(source) {
+	ast := syntax.parse(source)
+	if type(ast) = :object & ast.type = :error {
+		true -> ast
+		_ -> compileAst(ast)
+	}
+}
+
+fn runSource(source, opts) {
+	compiled := compileSource(source)
+	if type(compiled) = :object & compiled.type = :error {
+		true -> compiled
+		_ -> runChunk(compiled, opts)
+	}
+}
+
+run := runSource
+
+{
+	MODE_WASM: MODE_WASM
+	MODE_GO: MODE_GO
+	normalizeChunk: normalizeChunk
+	decodeConstantPoolBytes: decodeConstantPoolBytes
+	decodeFunctionTableBytes: decodeFunctionTableBytes
+	compileAst: compileAst
+	compileSource: compileSource
+	runChunk: runChunk
+	run: runSource
+}

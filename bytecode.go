@@ -68,6 +68,7 @@ const (
 	opMatchJump  opcode = 50 // pop & compare TOS, jump i32 if no match
 	opScopePush  opcode = 51
 	opScopePop   opcode = 52
+	opCallSpread opcode = 53 // u8 arity — last arg is a list to spread
 )
 
 var opcodeNames = [...]string{
@@ -85,6 +86,7 @@ var opcodeNames = [...]string{
 	"BUILTIN", "IMPORT", "IMPORT_DYN", "DEEP_EQ",
 	"SWAP", "MATCH_JUMP",
 	"SCOPE_PUSH", "SCOPE_POP",
+	"CALL_SPREAD",
 }
 
 // ---------------------------------------------------------------------------
@@ -798,8 +800,10 @@ func (co *compiler) compileFnCall(n fnCallNode) {
 	arity := len(n.args)
 	if n.restArg != nil {
 		arity++
+		co.emitOp(opCallSpread)
+	} else {
+		co.emitOp(opCall)
 	}
-	co.emitOp(opCall)
 	co.emit(byte(arity & 0xFF))
 }
 
@@ -901,7 +905,7 @@ func disassemble(chunk *bytecodeChunk) string {
 			v := int(bc[i+1]) | int(bc[i+2])<<8
 			fmt.Fprintf(&sb, " fn#%d", v)
 			advance = 3
-		case opCall, opTailCall:
+		case opCall, opTailCall, opCallSpread:
 			fmt.Fprintf(&sb, " (%d args)", bc[i+1])
 			advance = 2
 		case opMakeList, opMakeObj:
@@ -935,7 +939,7 @@ func disassemble(chunk *bytecodeChunk) string {
 // closureVal represents a function closure on the VM stack.
 type closureVal struct {
 	fnIdx       int
-	parentScope *vmScope // captured scope (shared reference, not a copy)
+	parentScope *vmScope                                  // captured scope (shared reference, not a copy)
 	call        func(args []Value) (Value, *runtimeError) // set for interop with tree-walker
 }
 
@@ -1252,6 +1256,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 					if v == null && slot < len(vm.chunk.topLevelNames) {
 						// Phantom local not yet assigned — check Context scope (builtins)
 						if cv, _ := vm.ctx.scope.get(vm.chunk.topLevelNames[slot]); cv != nil && cv != null {
+							topLocals[slot] = cv // cache so upvalue lookups also find it
 							vm.push(cv)
 						} else {
 							vm.push(null)
@@ -1297,7 +1302,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 				} else {
 					searchScope = scope
 				}
-				if val, ok := searchScope.get(name); ok {
+				if val, ok := searchScope.get(name); ok && val != nil && val != null {
 					vm.push(val)
 					found = true
 				}
@@ -1379,39 +1384,126 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opBAnd:
 			right := vm.pop()
 			left := vm.pop()
-			if li, ok := left.(IntValue); ok {
-				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li & ri))
+			switch lv := left.(type) {
+			case IntValue:
+				if rv, ok := right.(IntValue); ok {
+					vm.push(IntValue(lv & rv))
 				} else {
 					vm.push(null)
 				}
-			} else {
+			case BoolValue:
+				if rv, ok := right.(BoolValue); ok {
+					vm.push(BoolValue(bool(lv) && bool(rv)))
+				} else {
+					vm.push(null)
+				}
+			case *StringValue:
+				if rv, ok := right.(*StringValue); ok {
+					maxLen := len(*lv)
+					if len(*rv) > maxLen {
+						maxLen = len(*rv)
+					}
+					res := make([]byte, maxLen)
+					for i := 0; i < maxLen; i++ {
+						var lb, rb byte
+						if i < len(*lv) {
+							lb = (*lv)[i]
+						}
+						if i < len(*rv) {
+							rb = (*rv)[i]
+						}
+						res[i] = lb & rb
+					}
+					sv := StringValue(res)
+					vm.push(&sv)
+				} else {
+					vm.push(null)
+				}
+			default:
 				vm.push(null)
 			}
 
 		case opBOr:
 			right := vm.pop()
 			left := vm.pop()
-			if li, ok := left.(IntValue); ok {
-				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li | ri))
+			switch lv := left.(type) {
+			case IntValue:
+				if rv, ok := right.(IntValue); ok {
+					vm.push(IntValue(lv | rv))
 				} else {
 					vm.push(null)
 				}
-			} else {
+			case BoolValue:
+				if rv, ok := right.(BoolValue); ok {
+					vm.push(BoolValue(bool(lv) || bool(rv)))
+				} else {
+					vm.push(null)
+				}
+			case *StringValue:
+				if rv, ok := right.(*StringValue); ok {
+					maxLen := len(*lv)
+					if len(*rv) > maxLen {
+						maxLen = len(*rv)
+					}
+					res := make([]byte, maxLen)
+					for i := 0; i < maxLen; i++ {
+						var lb, rb byte
+						if i < len(*lv) {
+							lb = (*lv)[i]
+						}
+						if i < len(*rv) {
+							rb = (*rv)[i]
+						}
+						res[i] = lb | rb
+					}
+					sv := StringValue(res)
+					vm.push(&sv)
+				} else {
+					vm.push(null)
+				}
+			default:
 				vm.push(null)
 			}
 
 		case opBXor:
 			right := vm.pop()
 			left := vm.pop()
-			if li, ok := left.(IntValue); ok {
-				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li ^ ri))
+			switch lv := left.(type) {
+			case IntValue:
+				if rv, ok := right.(IntValue); ok {
+					vm.push(IntValue(lv ^ rv))
 				} else {
 					vm.push(null)
 				}
-			} else {
+			case BoolValue:
+				if rv, ok := right.(BoolValue); ok {
+					vm.push(BoolValue(bool(lv) != bool(rv)))
+				} else {
+					vm.push(null)
+				}
+			case *StringValue:
+				if rv, ok := right.(*StringValue); ok {
+					maxLen := len(*lv)
+					if len(*rv) > maxLen {
+						maxLen = len(*rv)
+					}
+					res := make([]byte, maxLen)
+					for i := 0; i < maxLen; i++ {
+						var lb, rb byte
+						if i < len(*lv) {
+							lb = (*lv)[i]
+						}
+						if i < len(*rv) {
+							rb = (*rv)[i]
+						}
+						res[i] = lb ^ rb
+					}
+					sv := StringValue(res)
+					vm.push(&sv)
+				} else {
+					vm.push(null)
+				}
+			default:
 				vm.push(null)
 			}
 
@@ -1507,7 +1599,11 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opGetProp:
 			key := vm.pop()
 			obj := vm.pop()
-			vm.push(vmGetProp(obj, key))
+			result, errReason := vmGetProp(obj, key)
+			if errReason != "" {
+				return nil, vm.vmError(errReason)
+			}
+			vm.push(result)
 
 		case opSetProp:
 			val := vm.pop()
@@ -1627,6 +1723,97 @@ func (vm *VM) run() (Value, *runtimeError) {
 			vm.pc = frame.returnPC
 			vm.sp = frame.baseSlot
 			vm.push(retVal)
+
+		case opCallSpread:
+			arity := int(vm.fetchU8())
+			raw := make([]Value, arity)
+			for j := arity - 1; j >= 0; j-- {
+				raw[j] = vm.pop()
+			}
+			callee := vm.pop()
+
+			// Spread the last argument if it's a list
+			var args []Value
+			if arity > 0 {
+				last := raw[arity-1]
+				if lv, ok := last.(*ListValue); ok {
+					args = make([]Value, 0, arity-1+len(*lv))
+					args = append(args, raw[:arity-1]...)
+					args = append(args, *lv...)
+				} else {
+					args = raw
+				}
+			} else {
+				args = raw
+			}
+
+			switch fn := callee.(type) {
+			case *closureVal:
+				ft := &vm.chunk.functions[fn.fnIdx]
+				locals := make([]Value, ft.localCount)
+				for i := range locals {
+					locals[i] = null
+				}
+				paramCount := ft.arity
+				for i := 0; i < paramCount && i < len(args); i++ {
+					locals[i] = args[i]
+				}
+				if ft.hasRestArg && paramCount < len(locals) {
+					var restList ListValue
+					if len(args) > paramCount {
+						restList = ListValue(args[paramCount:])
+					} else {
+						restList = ListValue{}
+					}
+					locals[paramCount] = &restList
+				}
+				scope := &vmScope{
+					names:  ft.localNames,
+					values: locals,
+					parent: fn.parentScope,
+				}
+				vm.frames = append(vm.frames, callFrame{
+					returnPC: vm.pc,
+					baseSlot: vm.sp,
+					fnIdx:    fn.fnIdx,
+					locals:   locals,
+					scope:    scope,
+				})
+				vm.pc = ft.offset
+
+			case BuiltinFnValue:
+				for i, a := range args {
+					args[i] = vm.interopValue(a)
+				}
+				result, bErr := fn.fn(args)
+				if bErr != nil {
+					return nil, bErr
+				}
+				vm.push(result)
+
+			case FnValue:
+				for i, a := range args {
+					args[i] = vm.interopValue(a)
+				}
+				result, fErr := vm.ctx.evalFnCall(fn, false, args)
+				if fErr != nil {
+					return nil, fErr
+				}
+				vm.push(result)
+
+			case ClassValue:
+				for i, a := range args {
+					args[i] = vm.interopValue(a)
+				}
+				result, cErr := vm.ctx.evalFnCall(fn, false, args)
+				if cErr != nil {
+					return nil, cErr
+				}
+				vm.push(result)
+
+			default:
+				return nil, vm.vmError(fmt.Sprintf("%s is not a function and cannot be called", callee))
+			}
 
 		case opTailCall:
 			arity := int(vm.fetchU8())
@@ -1858,6 +2045,8 @@ func (vm *VM) callBuiltin(idx int, args []Value) (Value, *runtimeError) {
 		switch v := args[0].(type) {
 		case *StringValue:
 			return args[0], nil
+		case AtomValue:
+			return MakeString(string(v)), nil
 		default:
 			_ = v
 			return MakeString(args[0].String()), nil
@@ -2045,6 +2234,8 @@ func vmAdd(a, b Value) Value {
 			return IntValue(av + bv)
 		case FloatValue:
 			return FloatValue(float64(av) + float64(bv))
+		case PointerValue:
+			return PointerValue(uintptr(bv) + uintptr(av))
 		}
 	case FloatValue:
 		switch bv := b.(type) {
@@ -2052,6 +2243,10 @@ func vmAdd(a, b Value) Value {
 			return FloatValue(float64(av) + float64(bv))
 		case FloatValue:
 			return FloatValue(av + bv)
+		}
+	case PointerValue:
+		if bv, ok := b.(IntValue); ok {
+			return PointerValue(uintptr(av) + uintptr(bv))
 		}
 	case *StringValue:
 		if bv, ok := b.(*StringValue); ok {
@@ -2077,6 +2272,8 @@ func vmSub(a, b Value) Value {
 			return IntValue(av - bv)
 		case FloatValue:
 			return FloatValue(float64(av) - float64(bv))
+		case PointerValue:
+			return PointerValue(uintptr(bv) - uintptr(av))
 		}
 	case FloatValue:
 		switch bv := b.(type) {
@@ -2084,6 +2281,13 @@ func vmSub(a, b Value) Value {
 			return FloatValue(float64(av) - float64(bv))
 		case FloatValue:
 			return FloatValue(av - bv)
+		}
+	case PointerValue:
+		switch bv := b.(type) {
+		case IntValue:
+			return PointerValue(uintptr(av) - uintptr(bv))
+		case PointerValue:
+			return IntValue(int64(uintptr(av) - uintptr(bv)))
 		}
 	}
 	return null
@@ -2121,7 +2325,7 @@ func vmDiv(a, b Value) (Value, string) {
 			if bv == 0 {
 				return nil, "Division by zero"
 			}
-			return IntValue(av / bv), ""
+			return FloatValue(float64(av) / float64(bv)), ""
 		case FloatValue:
 			if bv == 0 {
 				return nil, "Division by zero"
@@ -2205,6 +2409,8 @@ func vmGt(a, b Value) Value {
 			return BoolValue(av > bv)
 		case FloatValue:
 			return BoolValue(float64(av) > float64(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) > uintptr(bv))
 		}
 	case FloatValue:
 		switch bv := b.(type) {
@@ -2212,6 +2418,13 @@ func vmGt(a, b Value) Value {
 			return BoolValue(float64(av) > float64(bv))
 		case FloatValue:
 			return BoolValue(av > bv)
+		}
+	case PointerValue:
+		switch bv := b.(type) {
+		case IntValue:
+			return BoolValue(uintptr(av) > uintptr(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) > uintptr(bv))
 		}
 	case *StringValue:
 		if bv, ok := b.(*StringValue); ok {
@@ -2229,6 +2442,8 @@ func vmLt(a, b Value) Value {
 			return BoolValue(av < bv)
 		case FloatValue:
 			return BoolValue(float64(av) < float64(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) < uintptr(bv))
 		}
 	case FloatValue:
 		switch bv := b.(type) {
@@ -2236,6 +2451,13 @@ func vmLt(a, b Value) Value {
 			return BoolValue(float64(av) < float64(bv))
 		case FloatValue:
 			return BoolValue(av < bv)
+		}
+	case PointerValue:
+		switch bv := b.(type) {
+		case IntValue:
+			return BoolValue(uintptr(av) < uintptr(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) < uintptr(bv))
 		}
 	case *StringValue:
 		if bv, ok := b.(*StringValue); ok {
@@ -2253,6 +2475,8 @@ func vmGeq(a, b Value) Value {
 			return BoolValue(av >= bv)
 		case FloatValue:
 			return BoolValue(float64(av) >= float64(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) >= uintptr(bv))
 		}
 	case FloatValue:
 		switch bv := b.(type) {
@@ -2260,6 +2484,17 @@ func vmGeq(a, b Value) Value {
 			return BoolValue(float64(av) >= float64(bv))
 		case FloatValue:
 			return BoolValue(av >= bv)
+		}
+	case PointerValue:
+		switch bv := b.(type) {
+		case IntValue:
+			return BoolValue(uintptr(av) >= uintptr(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) >= uintptr(bv))
+		}
+	case *StringValue:
+		if bv, ok := b.(*StringValue); ok {
+			return BoolValue(string(*av) >= string(*bv))
 		}
 	}
 	return BoolValue(false)
@@ -2273,6 +2508,8 @@ func vmLeq(a, b Value) Value {
 			return BoolValue(av <= bv)
 		case FloatValue:
 			return BoolValue(float64(av) <= float64(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) <= uintptr(bv))
 		}
 	case FloatValue:
 		switch bv := b.(type) {
@@ -2281,12 +2518,30 @@ func vmLeq(a, b Value) Value {
 		case FloatValue:
 			return BoolValue(av <= bv)
 		}
+	case PointerValue:
+		switch bv := b.(type) {
+		case IntValue:
+			return BoolValue(uintptr(av) <= uintptr(bv))
+		case PointerValue:
+			return BoolValue(uintptr(av) <= uintptr(bv))
+		}
+	case *StringValue:
+		if bv, ok := b.(*StringValue); ok {
+			return BoolValue(string(*av) <= string(*bv))
+		}
 	}
 	return BoolValue(false)
 }
 
 func vmConcat(left, right Value) Value {
 	switch lv := left.(type) {
+	case IntValue:
+		if rv, ok := right.(IntValue); ok {
+			if rv < 0 {
+				return null
+			}
+			return IntValue(lv << uint(rv))
+		}
 	case *StringValue:
 		if rv, ok := right.(*StringValue); ok {
 			result := make([]byte, len(*lv)+len(*rv))
@@ -2312,25 +2567,27 @@ func vmConcat(left, right Value) Value {
 	return null
 }
 
-func vmGetProp(obj Value, key Value) Value {
+func vmGetProp(obj Value, key Value) (Value, string) {
 	switch o := obj.(type) {
 	case *StringValue:
 		if idx, ok := key.(IntValue); ok {
 			i := int(idx)
 			if i < 0 || i >= len(*o) {
-				return null
+				return null, ""
 			}
 			sv := StringValue([]byte{(*o)[i]})
-			return &sv
+			return &sv, ""
 		}
+		return nil, fmt.Sprintf("Cannot index into string with non-integer index %s", key)
 	case *ListValue:
 		if idx, ok := key.(IntValue); ok {
 			i := int(idx)
 			if i < 0 || i >= len(*o) {
-				return null
+				return null, ""
 			}
-			return (*o)[i]
+			return (*o)[i], ""
 		}
+		return nil, fmt.Sprintf("Cannot index into list with non-integer index %s", key)
 	case ObjectValue:
 		var keyStr string
 		switch k := key.(type) {
@@ -2342,11 +2599,25 @@ func vmGetProp(obj Value, key Value) Value {
 			keyStr = key.String()
 		}
 		if v, ok := o[keyStr]; ok {
-			return v
+			return v, ""
 		}
-		return null
+		return null, ""
+	case ClassValue:
+		var keyStr string
+		switch k := key.(type) {
+		case *StringValue:
+			keyStr = string(*k)
+		case AtomValue:
+			keyStr = string(k)
+		default:
+			keyStr = key.String()
+		}
+		if v, ok := o.static[keyStr]; ok {
+			return v, ""
+		}
+		return null, ""
 	}
-	return null
+	return nil, fmt.Sprintf("Expected string, list, or object in left-hand side of property access, got %s", obj)
 }
 
 func vmSetProp(obj Value, key Value, val Value) {
@@ -2469,6 +2740,10 @@ func (c *closureVal) String() string {
 }
 
 func (c *closureVal) Eq(other Value) bool {
+	if _, ok := other.(EmptyValue); ok {
+		return true
+	}
+
 	if oc, ok := other.(*closureVal); ok {
 		return c.fnIdx == oc.fnIdx
 	}

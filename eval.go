@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -452,6 +453,8 @@ func (sc *scope) update(name string, v Value) *runtimeError {
 type engine struct {
 	// interpreter lock to ensure lack of data races
 	sync.Mutex
+	// serializes asynchronous callback evaluation spawned from builtins
+	asyncEvalLock sync.Mutex
 	// interpreter event loop waitgroup
 	sync.WaitGroup
 	// for deduplicating imports
@@ -486,6 +489,19 @@ type Context struct {
 	vm Value
 }
 
+func normalizeRootPath(rootPath string) string {
+	if rootPath == "" {
+		rootPath = "."
+	}
+
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return filepath.Clean(rootPath)
+	}
+
+	return absRoot
+}
+
 func NewContext(rootPath string) Context {
 	eng := engine{
 		importMap: map[string]scope{},
@@ -499,7 +515,7 @@ func NewContext(rootPath string) Context {
 	}
 	return Context{
 		eng:      &eng,
-		rootPath: rootPath,
+		rootPath: normalizeRootPath(rootPath),
 		scope:    newScope(nil),
 		vm:       nil,
 	}
@@ -517,7 +533,7 @@ func NewContextWithCwd() Context {
 func (c *Context) ChildContext(rootPath string) Context {
 	return Context{
 		eng:      c.eng,
-		rootPath: rootPath,
+		rootPath: normalizeRootPath(rootPath),
 		scope:    newScope(nil),
 	}
 }
@@ -771,6 +787,14 @@ func (c *Context) constructClassValue(class ClassValue, args ...Value) (Value, *
 
 // EvalFnValue is the variadic convenience wrapper, used by env.go builtins.
 func (c *Context) EvalFnValue(maybeFn Value, thunkable bool, args ...Value) (Value, *runtimeError) {
+	return c.evalFnCall(maybeFn, thunkable, args)
+}
+
+// EvalFnValueAsync serializes callback evaluation across asynchronous Go
+// goroutines to avoid concurrent writes to shared Oak object maps.
+func (c *Context) EvalFnValueAsync(maybeFn Value, thunkable bool, args ...Value) (Value, *runtimeError) {
+	c.eng.asyncEvalLock.Lock()
+	defer c.eng.asyncEvalLock.Unlock()
 	return c.evalFnCall(maybeFn, thunkable, args)
 }
 

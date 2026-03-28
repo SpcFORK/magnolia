@@ -41,8 +41,8 @@ OP_POP           := 10
 OP_DUP           := 11
 OP_LOAD_LOCAL    := 12  // u16 slot index
 OP_STORE_LOCAL   := 13  // u16 slot index
-OP_LOAD_UPVAL    := 14  // u16 depth, u16 slot index
-OP_STORE_UPVAL   := 15  // u16 depth, u16 slot index
+OP_LOAD_UPVAL    := 14  // u16 name constant index (name-based scope chain lookup)
+OP_STORE_UPVAL   := 15  // u16 name constant index (name-based scope chain lookup)
 OP_ADD           := 16
 OP_SUB           := 17
 OP_MUL           := 18
@@ -73,14 +73,16 @@ OP_CALL          := 42  // u8 arity
 OP_RETURN        := 43
 OP_TAIL_CALL     := 44  // u8 arity
 OP_BUILTIN       := 45  // u16 builtin index, u8 arity
-OP_IMPORT        := 46
-OP_DEEP_EQ       := 47
-OP_SWAP          := 48  // swap top two stack entries
-OP_MATCH_JUMP    := 49  // pop value, compare with TOS, jump i32 if no match
-OP_SCOPE_PUSH    := 50  // push a new scope level
-OP_SCOPE_POP     := 51  // pop scope level
+OP_IMPORT        := 46  // u16 constant pool index (module name)
+OP_IMPORT_DYN    := 47  // pop string from stack, import that module
+OP_DEEP_EQ       := 48
+OP_SWAP          := 49  // swap top two stack entries
+OP_MATCH_JUMP    := 50  // pop value, compare with TOS, jump i32 if no match
+OP_SCOPE_PUSH    := 51  // push a new scope level
+OP_SCOPE_POP     := 52  // pop scope level
+OP_CALL_SPREAD   := 53  // u8 arity — last arg is a list to spread
 
-NUM_OPCODES      := 52
+NUM_OPCODES      := 54
 
 // Opcode names for debugging / disassembly
 OpcodeName := [
@@ -95,9 +97,10 @@ OpcodeName := [
 	'GET_PROP', 'SET_PROP'
 	'JUMP', 'JUMP_FALSE'
 	'CLOSURE', 'CALL', 'RETURN', 'TAIL_CALL'
-	'BUILTIN', 'IMPORT', 'DEEP_EQ'
+	'BUILTIN', 'IMPORT', 'IMPORT_DYN', 'DEEP_EQ'
 	'SWAP', 'MATCH_JUMP'
 	'SCOPE_PUSH', 'SCOPE_POP'
+	'CALL_SPREAD'
 ]
 
 // ---------------------------------------------------------------------------
@@ -154,8 +157,8 @@ fn createCompiler() {
 		functions: []
 		// Current scope's local variable names (list of strings)
 		locals: []
-		// Scope stack for entering/leaving functions
-		scopeStack: []
+		// Parent scope locals stack for upvalue resolution
+		parentLocals: []
 		// Compilation errors
 		errors: []
 	}
@@ -264,21 +267,25 @@ fn declareLocal(c, name) {
 	}
 }
 
-fn pushScope(c) {
-	c.scopeStack <- c.scopeStack |> append([{
-		locals: clone(c.locals)
-	}])
-}
-
-fn popScope(c) {
-	depth := len(c.scopeStack)
-	if depth > 0 {
+fn resolveUpvalue(c, name) {
+	fn findParent(i) if i >= 0 {
 		true -> {
-			saved := c.scopeStack.(depth - 1)
-			c.scopeStack <- slice(c.scopeStack, 0, depth - 1)
-			c.locals <- saved.locals
+			parent := c.parentLocals.(i)
+			fn findName(j) if j < len(parent) {
+				true -> if parent.(j) = name {
+					true -> true
+					_ -> findName(j + 1)
+				}
+				_ -> false
+			}
+			if findName(0) {
+				true -> true
+				_ -> findParent(i - 1)
+			}
 		}
+		_ -> false
 	}
+	findParent(len(c.parentLocals) - 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -342,11 +349,27 @@ fn compileNode(c, node) if node {
 					emitByte(c, OP_LOAD_LOCAL)
 					emitU16(c, localIdx)
 				}
-				_ -> {
-					// Implicit global / forward reference — declare as local
-					newIdx := declareLocal(c, node.val)
-					emitByte(c, OP_LOAD_LOCAL)
-					emitU16(c, newIdx)
+				_ -> if resolveUpvalue(c, node.val) {
+					true -> {
+						nameIdx := addString(c, node.val)
+						emitByte(c, OP_LOAD_UPVAL)
+						emitU16(c, nameIdx)
+					}
+					_ -> if len(c.parentLocals) > 0 {
+						// Inside a function body: unresolved identifiers are treated
+						// as outer variables and loaded dynamically via scope chain.
+						true -> {
+							nameIdx := addString(c, node.val)
+							emitByte(c, OP_LOAD_UPVAL)
+							emitU16(c, nameIdx)
+						}
+						// Top-level: forward reference — declare as local.
+						_ -> {
+							newIdx := declareLocal(c, node.val)
+							emitByte(c, OP_LOAD_LOCAL)
+							emitU16(c, newIdx)
+						}
+					}
 				}
 			}
 		}
@@ -356,31 +379,63 @@ fn compileNode(c, node) if node {
 			if node.op {
 				:minus -> emitByte(c, OP_NEG)
 				:exclam -> emitByte(c, OP_NOT)
+				:tilde -> {
+					emitByte(c, OP_CONST_INT)
+					emitI32(c, ~1)
+					emitByte(c, OP_BXOR)
+				}
 			}
 		}
 
 		:binary -> {
-			compileNode(c, node.left)
-			compileNode(c, node.right)
-			if node.op {
-				:plus -> emitByte(c, OP_ADD)
-				:minus -> emitByte(c, OP_SUB)
-				:times -> emitByte(c, OP_MUL)
-				:divide -> emitByte(c, OP_DIV)
-				:modulus -> emitByte(c, OP_MOD)
-				:power -> emitByte(c, OP_POW)
-				:and -> emitByte(c, OP_BAND)
-				:or -> emitByte(c, OP_BOR)
-				:xor -> emitByte(c, OP_BXOR)
-				:rshift -> emitByte(c, OP_BRSHIFT)
-				:eq -> emitByte(c, OP_EQ)
-				:deepEq -> emitByte(c, OP_DEEP_EQ)
-				:neq -> emitByte(c, OP_NEQ)
-				:greater -> emitByte(c, OP_GT)
-				:less -> emitByte(c, OP_LT)
-				:geq -> emitByte(c, OP_GEQ)
-				:leq -> emitByte(c, OP_LEQ)
-				:pushArrow -> emitByte(c, OP_CONCAT)
+			// Pipe operator: x |> f(a, b) desugars to f(x, a, b)
+			if node.op = :pipeArrow {
+				true -> if node.right.type = :fnCall {
+					true -> {
+						compileNode(c, node.right.function)
+						compileNode(c, node.left)
+						node.right.args |> each(fn(arg) compileNode(c, arg))
+						arity := 1 + len(node.right.args)
+						if node.right.restArg != ? & node.right.restArg != '' {
+							true -> {
+								compileNode(c, node.right.restArg)
+								arity <- arity + 1
+							}
+						}
+						emitByte(c, OP_CALL)
+						emitByte(c, arity & 0xFF)
+					}
+					_ -> {
+						compileNode(c, node.right)
+						compileNode(c, node.left)
+						emitByte(c, OP_CALL)
+						emitByte(c, 1)
+					}
+				}
+				_ -> {
+					compileNode(c, node.left)
+					compileNode(c, node.right)
+					if node.op {
+						:plus -> emitByte(c, OP_ADD)
+						:minus -> emitByte(c, OP_SUB)
+						:times -> emitByte(c, OP_MUL)
+						:divide -> emitByte(c, OP_DIV)
+						:modulus -> emitByte(c, OP_MOD)
+						:power -> emitByte(c, OP_POW)
+						:and -> emitByte(c, OP_BAND)
+						:or -> emitByte(c, OP_BOR)
+						:xor -> emitByte(c, OP_BXOR)
+						:rshift -> emitByte(c, OP_BRSHIFT)
+						:eq -> emitByte(c, OP_EQ)
+						:deepEq -> emitByte(c, OP_DEEP_EQ)
+						:neq -> emitByte(c, OP_NEQ)
+						:greater -> emitByte(c, OP_GT)
+						:less -> emitByte(c, OP_LT)
+						:geq -> emitByte(c, OP_GEQ)
+						:leq -> emitByte(c, OP_LEQ)
+						:pushArrow -> emitByte(c, OP_CONCAT)
+					}
+				}
 			}
 		}
 
@@ -455,19 +510,28 @@ fn compileAssignment(c, node) {
 	if node.left.type {
 		:identifier -> {
 			compileNode(c, node.right)
-			idx := if node.local? {
-				true -> declareLocal(c, node.left.val)
-				_ -> {
-					existing := resolveLocal(c, node.left.val)
-					if existing >= 0 {
-						true -> existing
-						_ -> declareLocal(c, node.left.val)
+			localIdx := resolveLocal(c, node.left.val)
+			if localIdx >= 0 {
+				true -> {
+					emitByte(c, OP_DUP)
+					emitByte(c, OP_STORE_LOCAL)
+					emitU16(c, localIdx)
+				}
+				_ -> if resolveUpvalue(c, node.left.val) {
+					true -> {
+						nameIdx := addString(c, node.left.val)
+						emitByte(c, OP_DUP)
+						emitByte(c, OP_STORE_UPVAL)
+						emitU16(c, nameIdx)
+					}
+					_ -> {
+						newIdx := declareLocal(c, node.left.val)
+						emitByte(c, OP_DUP)
+						emitByte(c, OP_STORE_LOCAL)
+						emitU16(c, newIdx)
 					}
 				}
 			}
-			emitByte(c, OP_DUP)
-			emitByte(c, OP_STORE_LOCAL)
-			emitU16(c, idx)
 		}
 		:propertyAccess -> {
 			// obj.key <- value  →  push obj, push key, push value, SET_PROP
@@ -506,7 +570,14 @@ fn compileAssignment(c, node) {
 			compileNode(c, node.right)
 			node.left.entries |> each(fn(entry) {
 				emitByte(c, OP_DUP)
-				compileNode(c, entry.key)
+				if entry.key.type = :identifier {
+					true -> {
+						idx := addString(c, entry.key.val)
+						emitByte(c, OP_CONST_STRING)
+						emitU16(c, idx)
+					}
+					_ -> compileNode(c, entry.key)
+				}
 				emitByte(c, OP_GET_PROP)
 				if entry.val.type = :identifier {
 					true -> {
@@ -571,8 +642,14 @@ fn compileIfExpr(c, node) {
 // ---------------------------------------------------------------------------
 
 fn compileFunction(c, node) {
-	fnIdx := len(c.functions)
+	// Do NOT capture fn index here; nested functions may register first.
+	nameSlot := 0
+	if node.name != '' & node.name != ? {
+		true -> nameSlot <- declareLocal(c, node.name)
+	}
+
 	savedLocals := clone(c.locals)
+	c.parentLocals <- c.parentLocals |> append([savedLocals])
 
 	// Jump over the inline function body in the bytecode stream
 	emitByte(c, OP_JUMP)
@@ -594,6 +671,10 @@ fn compileFunction(c, node) {
 
 	fnBodyEnd := currentOffset(c)
 	localCount := len(c.locals)
+	localNamesCopy := clone(c.locals)
+
+	// Pop parent locals stack
+	c.parentLocals <- c.parentLocals |> slice(0, len(c.parentLocals) - 1)
 
 	// Restore outer locals
 	c.locals <- savedLocals
@@ -601,13 +682,15 @@ fn compileFunction(c, node) {
 	// Patch the jump-over
 	patchI32(c, jumpOverOffset, fnBodyEnd)
 
-	// Register function template
+	// Register function template after body compilation.
+	fnIdx := len(c.functions)
 	c.functions <- c.functions |> append([{
 		offset: fnBodyStart
 		arity: len(node.args)
 		localCount: localCount
 		name: if node.name { ?, '' -> '', _ -> node.name }
 		hasRestArg: node.restArg != '' & node.restArg != ?
+		localNames: localNamesCopy
 	}])
 
 	// Emit CLOSURE instruction in the outer code
@@ -629,34 +712,60 @@ fn compileFunction(c, node) {
 // Compile function calls
 // ---------------------------------------------------------------------------
 
-fn compileFnCall(c, node) {
-	// Check for built-in calls
-	if node.function.type = :identifier {
+fn compileGenericCall(c, node) {
+	compileNode(c, node.function)
+	node.args |> each(fn(arg) compileNode(c, arg))
+	arity := len(node.args)
+	if node.restArg != ? & node.restArg != '' {
 		true -> {
-			builtinIdx := resolveBuiltin(node.function.val)
-			if builtinIdx >= 0 {
+			compileNode(c, node.restArg)
+			arity <- arity + 1
+			emitByte(c, OP_CALL_SPREAD)
+		}
+		_ -> emitByte(c, OP_CALL)
+	}
+	emitByte(c, arity & 0xFF)
+}
+
+fn compileFnCall(c, node) {
+	// import('literal') and import(expr) are compiled specially.
+	if node.function.type = :identifier & node.function.val = 'import' & len(node.args) = 1 & (node.restArg = ? | node.restArg = '') {
+		true -> {
+			arg0 := node.args.(0)
+			if arg0.type = :string {
 				true -> {
-					// Emit args then BUILTIN
-					node.args |> each(fn(arg) compileNode(c, arg))
-					emitByte(c, OP_BUILTIN)
-					emitU16(c, builtinIdx)
-					emitByte(c, len(node.args) & 0xFF)
+					idx := addString(c, arg0.val)
+					emitByte(c, OP_IMPORT)
+					emitU16(c, idx)
 				}
 				_ -> {
-					// Regular function call
-					compileNode(c, node.function)
-					node.args |> each(fn(arg) compileNode(c, arg))
-					emitByte(c, OP_CALL)
-					emitByte(c, len(node.args) & 0xFF)
+					compileNode(c, arg0)
+					emitByte(c, OP_IMPORT_DYN)
 				}
 			}
 		}
-		_ -> {
-			// Expression function call (e.g. obj.method(...), (fn()...)())
-			compileNode(c, node.function)
-			node.args |> each(fn(arg) compileNode(c, arg))
-			emitByte(c, OP_CALL)
-			emitByte(c, len(node.args) & 0xFF)
+		_ -> if node.function.type = :identifier {
+			true -> {
+				builtinIdx := resolveBuiltin(node.function.val)
+				if builtinIdx >= 0 {
+					true -> {
+						// Emit args then BUILTIN
+						node.args |> each(fn(arg) compileNode(c, arg))
+						arity := len(node.args)
+						if node.restArg != ? & node.restArg != '' {
+							true -> {
+								compileNode(c, node.restArg)
+								arity <- arity + 1
+							}
+						}
+						emitByte(c, OP_BUILTIN)
+						emitU16(c, builtinIdx)
+						emitByte(c, arity & 0xFF)
+					}
+					_ -> compileGenericCall(c, node)
+				}
+			}
+			_ -> compileGenericCall(c, node)
 		}
 	}
 }
@@ -802,10 +911,9 @@ fn disassemble(c) {
 					advance <- 3
 				}
 				op = OP_LOAD_UPVAL | op = OP_STORE_UPVAL -> {
-					d := bc.(i+1) | (bc.(i+2) << 8)
-					v := bc.(i+3) | (bc.(i+4) << 8)
-					line <- line << ' ^' << string(d) << ' @' << string(v)
-					advance <- 5
+					v := bc.(i+1) | (bc.(i+2) << 8)
+					line <- line << ' #' << string(v)
+					advance <- 3
 				}
 				op = OP_JUMP | op = OP_JUMP_FALSE | op = OP_MATCH_JUMP -> {
 					v := bc.(i+1) | (bc.(i+2) << 8) | (bc.(i+3) << 16) | (bc.(i+4) << 24)
@@ -817,7 +925,7 @@ fn disassemble(c) {
 					line <- line << ' fn#' << string(v)
 					advance <- 3
 				}
-				op = OP_CALL | op = OP_TAIL_CALL -> {
+				op = OP_CALL | op = OP_TAIL_CALL | op = OP_CALL_SPREAD -> {
 					v := bc.(i+1)
 					line <- line << ' (' << string(v) << ' args)'
 					advance <- 2
@@ -895,11 +1003,13 @@ fn disassemble(c) {
 	OP_TAIL_CALL: OP_TAIL_CALL
 	OP_BUILTIN: OP_BUILTIN
 	OP_IMPORT: OP_IMPORT
+	OP_IMPORT_DYN: OP_IMPORT_DYN
 	OP_DEEP_EQ: OP_DEEP_EQ
 	OP_SWAP: OP_SWAP
 	OP_MATCH_JUMP: OP_MATCH_JUMP
 	OP_SCOPE_PUSH: OP_SCOPE_PUSH
 	OP_SCOPE_POP: OP_SCOPE_POP
+	OP_CALL_SPREAD: OP_CALL_SPREAD
 	NUM_OPCODES: NUM_OPCODES
 
 	// Built-in indices

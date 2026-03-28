@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -408,8 +407,7 @@ func (c *Context) callbackify(syncFn builtinFn) builtinFn {
 		}
 
 		lastArg := args[len(args)-1]
-		callback, isCallbackFn := lastArg.(FnValue)
-		if !isCallbackFn {
+		if !c.isCallableValue(lastArg) {
 			return syncFn(args)
 		}
 
@@ -426,7 +424,7 @@ func (c *Context) callbackify(syncFn builtinFn) builtinFn {
 
 			c.Lock()
 			defer c.Unlock()
-			_, err = c.EvalFnValue(callback, false, evt)
+			_, err = c.EvalFnValueAsync(lastArg, false, evt)
 			if err != nil {
 				c.eng.reportErr(err)
 				return
@@ -434,6 +432,31 @@ func (c *Context) callbackify(syncFn builtinFn) builtinFn {
 		}()
 
 		return null, nil
+	}
+}
+
+// isCallableValue reports whether v can be invoked by evalFnCall.
+func (c *Context) isCallableValue(v Value) bool {
+	switch fn := v.(type) {
+	case FnValue, BuiltinFnValue, ClassValue:
+		return true
+	case *closureVal:
+		return fn.call != nil
+	default:
+		return false
+	}
+}
+
+// isGoTargetValue reports whether v is a valid target for go().
+// Builtins/classes are intentionally excluded to preserve existing behavior.
+func (c *Context) isGoTargetValue(v Value) bool {
+	switch fn := v.(type) {
+	case FnValue:
+		return true
+	case *closureVal:
+		return fn.call != nil
+	default:
+		return false
 	}
 }
 
@@ -494,6 +517,12 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 		if !filepath.IsAbs(resolved) {
 			resolved = filepath.Join(c.rootPath, resolved)
 		}
+		resolved = filepath.Clean(resolved)
+		if !filepath.IsAbs(resolved) {
+			if absPath, absErr := filepath.Abs(resolved); absErr == nil {
+				resolved = absPath
+			}
+		}
 
 		file, err = os.Open(resolved)
 		if err == nil {
@@ -515,7 +544,8 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 		return ObjectValue(imported.vars), nil
 	}
 
-	ctx := c.ChildContext(path.Dir(filePath))
+	ctx := c.ChildContext(filepath.Dir(filePath))
+	ctx.currentFile = filePath
 	c.eng.importLock.Lock()
 	c.eng.importMap[filePath] = ctx.scope
 	c.eng.importLock.Unlock()
@@ -1408,10 +1438,10 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	fn, ok := args[0].(FnValue)
-	if !ok {
+	fn := args[0]
+	if !c.isGoTargetValue(fn) {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("go argument must be a function, got %s", args[0]),
+			reason: fmt.Sprintf("go argument must be a function, got %s", fn),
 		}
 	}
 
@@ -1422,7 +1452,7 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 		defer c.eng.Done()
 		c.Lock()
 		defer c.Unlock()
-		_, err := c.EvalFnValue(fn, false, fnArgs...)
+		_, err := c.EvalFnValueAsync(fn, false, fnArgs...)
 		if err != nil {
 			c.eng.reportErr(err)
 		}
@@ -1507,8 +1537,8 @@ func (c *Context) oakChanSend(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	callback, ok := args[2].(FnValue)
-	if !ok {
+	callback := args[2]
+	if !c.isCallableValue(callback) {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("chan_send callback must be a function, got %s", args[2]),
 		}
@@ -1521,7 +1551,7 @@ func (c *Context) oakChanSend(args []Value) (Value, *runtimeError) {
 
 		c.Lock()
 		defer c.Unlock()
-		_, err := c.EvalFnValue(callback, false, chanSentObj())
+		_, err := c.EvalFnValueAsync(callback, false, chanSentObj())
 		if err != nil {
 			c.eng.reportErr(err)
 		}
@@ -1553,8 +1583,8 @@ func (c *Context) oakChanRecv(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	callback, ok := args[1].(FnValue)
-	if !ok {
+	callback := args[1]
+	if !c.isCallableValue(callback) {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("chan_recv callback must be a function, got %s", args[1]),
 		}
@@ -1567,7 +1597,7 @@ func (c *Context) oakChanRecv(args []Value) (Value, *runtimeError) {
 
 		c.Lock()
 		defer c.Unlock()
-		_, err := c.EvalFnValue(callback, false, chanDataObj(value))
+		_, err := c.EvalFnValueAsync(callback, false, chanDataObj(value))
 		if err != nil {
 			c.eng.reportErr(err)
 		}
@@ -1911,7 +1941,7 @@ func (c *Context) oakWrite(args []Value) (Value, *runtimeError) {
 
 type oakHTTPHandler struct {
 	ctx         *Context
-	oakCallback FnValue
+	oakCallback Value
 }
 
 func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1932,7 +1962,7 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		bodyBuf, err := io.ReadAll(r.Body)
 		if err != nil {
 			ctx.Lock()
-			_, rtErr := ctx.EvalFnValue(cb, false, errObj(
+			_, rtErr := ctx.EvalFnValueAsync(cb, false, errObj(
 				fmt.Sprintf("Could not read request in listen(), %s", err.Error()),
 			))
 			ctx.Unlock()
@@ -1969,7 +1999,7 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, err := ctx.EvalFnValue(cb, false, ObjectValue{
+		_, err := ctx.EvalFnValueAsync(cb, false, ObjectValue{
 			"type": AtomValue("req"),
 			"req": ObjectValue{
 				"method":  MakeString(method),
@@ -2045,7 +2075,7 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, rtErr := ctx.EvalFnValue(cb, false, errObj(
+		_, rtErr := ctx.EvalFnValueAsync(cb, false, errObj(
 			fmt.Sprintf("Error writing request body in listen/end: %s", err.Error()),
 		))
 		if rtErr != nil {
@@ -2060,10 +2090,11 @@ func (ctx *Context) oakListen(args []Value) (Value, *runtimeError) {
 	}
 
 	host, ok1 := args[0].(*StringValue)
-	cb, ok2 := args[1].(FnValue)
+	cb := args[1]
+	ok2 := ctx.isCallableValue(cb)
 	if !ok1 || !ok2 {
 		return nil, &runtimeError{
-			reason: fmt.Sprintf("Mismatched types in call listen(%s)", args[0]),
+			reason: fmt.Sprintf("Mismatched types in call listen(%s, %s)", args[0], args[1]),
 		}
 	}
 
@@ -2071,7 +2102,7 @@ func (ctx *Context) oakListen(args []Value) (Value, *runtimeError) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, err2 := ctx.EvalFnValue(cb, false, errObj(msg))
+		_, err2 := ctx.EvalFnValueAsync(cb, false, errObj(msg))
 		if err2 != nil {
 			ctx.eng.reportErr(err2)
 		}
@@ -2585,7 +2616,8 @@ func (ctx *Context) oakSocketListen(args []Value) (Value, *runtimeError) {
 	}
 
 	address, okAddress := args[0].(*StringValue)
-	cb, okCb := args[1].(FnValue)
+	cb := args[1]
+	okCb := ctx.isCallableValue(cb)
 	if !okAddress || !okCb {
 		return nil, &runtimeError{reason: fmt.Sprintf("Mismatched types in call socket_listen(%s, %s)", args[0], args[1])}
 	}
@@ -2603,7 +2635,7 @@ func (ctx *Context) oakSocketListen(args []Value) (Value, *runtimeError) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, err2 := ctx.EvalFnValue(cb, false, errObj(msg))
+		_, err2 := ctx.EvalFnValueAsync(cb, false, errObj(msg))
 		if err2 != nil {
 			ctx.eng.reportErr(err2)
 		}
@@ -2645,7 +2677,7 @@ func (ctx *Context) oakSocketListen(args []Value) (Value, *runtimeError) {
 			socket := storeSocket(conn, options.useTLS, options.useTLS)
 
 			ctx.Lock()
-			_, cbErr := ctx.EvalFnValue(cb, false, ObjectValue{
+			_, cbErr := ctx.EvalFnValueAsync(cb, false, ObjectValue{
 				"type":   AtomValue("connect"),
 				"socket": socket,
 				"remote": MakeString(conn.RemoteAddr().String()),
@@ -2864,7 +2896,8 @@ func (ctx *Context) oakWSListen(args []Value) (Value, *runtimeError) {
 
 	host, okHost := args[0].(*StringValue)
 	pathVal, okPath := args[1].(*StringValue)
-	cb, okCb := args[2].(FnValue)
+	cb := args[2]
+	okCb := ctx.isCallableValue(cb)
 	if !okHost || !okPath || !okCb {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("Mismatched types in call ws_listen(%s, %s, %s)", args[0], args[1], args[2]),
@@ -2875,7 +2908,7 @@ func (ctx *Context) oakWSListen(args []Value) (Value, *runtimeError) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, err2 := ctx.EvalFnValue(cb, false, errObj(msg))
+		_, err2 := ctx.EvalFnValueAsync(cb, false, errObj(msg))
 		if err2 != nil {
 			ctx.eng.reportErr(err2)
 		}
@@ -2901,7 +2934,7 @@ func (ctx *Context) oakWSListen(args []Value) (Value, *runtimeError) {
 		ctx.Lock()
 		defer ctx.Unlock()
 
-		_, cbErr := ctx.EvalFnValue(cb, false, ObjectValue{
+		_, cbErr := ctx.EvalFnValueAsync(cb, false, ObjectValue{
 			"type":   AtomValue("connect"),
 			"socket": socket,
 			"req": ObjectValue{

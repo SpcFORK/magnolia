@@ -37,6 +37,31 @@ func expectProgramToError(t *testing.T, program string) {
 	}
 }
 
+func expectProgramToReturnBytecode(t *testing.T, program string, expected Value) {
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+	val, err := ctx.EvalBytecode(strings.NewReader(program))
+	if err != nil {
+		t.Errorf("Did not expect bytecode program to exit with error: %s", err.Error())
+	}
+	if val == nil {
+		t.Errorf("Return value of bytecode program should not be nil")
+	} else if !val.Eq(expected) {
+		t.Errorf("Expected and returned bytecode values don't match: %s != %s",
+			strconv.Quote(expected.String()),
+			strconv.Quote(val.String()))
+	}
+}
+
+func expectProgramToErrorBytecode(t *testing.T, program string) {
+	ctx := NewContext("/tmp")
+	ctx.LoadBuiltins()
+	_, err := ctx.EvalBytecode(strings.NewReader(program))
+	if err == nil {
+		t.Errorf("Expected bytecode program to exit with an error")
+	}
+}
+
 func TestEvalEmptyProgram(t *testing.T) {
 	expectProgramToReturn(t, "", null)
 	expectProgramToReturn(t, "   \n", null)
@@ -111,6 +136,33 @@ func TestAtomLiteral(t *testing.T) {
 	for _, atomName := range atomNames {
 		expectProgramToReturn(t, ":"+atomName, AtomValue(atomName))
 	}
+}
+
+func TestBytecodeStringBuiltinAtomParity(t *testing.T) {
+	program := "string(:windows)"
+	expectProgramToReturn(t, program, MakeString("windows"))
+	expectProgramToReturnBytecode(t, program, MakeString("windows"))
+}
+
+func TestBytecodeClosureWildcardBranchParity(t *testing.T) {
+	program := `
+		fn callMaybe(cb) if cb {
+			? -> 'null'
+			_ -> cb()
+		}
+
+		callMaybe(fn {
+			'ok'
+		})
+	`
+	expectProgramToReturn(t, program, MakeString("ok"))
+	expectProgramToReturnBytecode(t, program, MakeString("ok"))
+}
+
+func TestBytecodePropertyAccessErrorParity(t *testing.T) {
+	program := "x := 0\nx.type"
+	expectProgramToError(t, program)
+	expectProgramToErrorBytecode(t, program)
 }
 
 func TestKeywordLikeAtomLiteral(t *testing.T) {
@@ -2047,6 +2099,41 @@ func TestImportSupportsAlternativeModuleExtensions(t *testing.T) {
 	)
 	if val == nil || !val.Eq(expected) {
 		t.Fatalf("Expected %s, got %v", expected, val)
+	}
+}
+
+func TestImportResolvesNestedRelativePathsFromImporterFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	appDir := filepath.Join(tmpDir, "app")
+	nestedDir := filepath.Join(appDir, "nested")
+
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("Could not create nested directory: %s", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(appDir, "main.oak"), []byte("value := import('./nested/choose').value"), 0o644); err != nil {
+		t.Fatalf("Could not write main module: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "choose.oak"), []byte("value := import('./leaf').value"), 0o644); err != nil {
+		t.Fatalf("Could not write nested chooser module: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "leaf.oak"), []byte("value := 10"), 0o644); err != nil {
+		t.Fatalf("Could not write nested leaf module: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "leaf.oak"), []byte("value := 99"), 0o644); err != nil {
+		t.Fatalf("Could not write root leaf module: %s", err)
+	}
+
+	ctx := NewContext(appDir)
+	ctx.LoadBuiltins()
+
+	val, err := ctx.Eval(strings.NewReader(`import('main').value`))
+	if err != nil {
+		t.Fatalf("Did not expect program to exit with error: %s", err.Error())
+	}
+
+	if val == nil || !val.Eq(IntValue(10)) {
+		t.Fatalf("Expected 10 from nested leaf import, got %v", val)
 	}
 }
 
