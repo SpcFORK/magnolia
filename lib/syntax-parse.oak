@@ -600,12 +600,45 @@ fn Parser(tokens) {
 							val: parsed
 						}
 					}
-					_ -> if parsed := int(tok.val) {
-						? -> error(format('Could not parse integer number {{0}}', tok.val), tok.pos)
-						_ -> {
-							type: :int
-							tok: tok
-							val: parsed
+					_ -> if {
+						tok.val.(0) = '0' & (tok.val.(1) = 'x' | tok.val.(1) = 'X') -> {
+							parsed := fromHex(slice(tok.val, 2))
+							if parsed {
+								? -> error(format('Could not parse hex number {{0}}', tok.val), tok.pos)
+								_ -> {
+									type: :int
+									tok: tok
+									val: parsed
+								}
+							}
+						}
+						tok.val.(0) = '0' & (tok.val.(1) = 'b' | tok.val.(1) = 'B') -> {
+							digits := slice(tok.val, 2)
+							fn parseBin(i, acc) if i {
+								len(digits) -> acc
+								_ -> if c := digits.(i) {
+									'0' -> parseBin(i + 1, acc * 2)
+									'1' -> parseBin(i + 1, acc * 2 + 1)
+									_ -> ?
+								}
+							}
+							parsed := parseBin(0, 0)
+							if parsed {
+								? -> error(format('Could not parse binary number {{0}}', tok.val), tok.pos)
+								_ -> {
+									type: :int
+									tok: tok
+									val: parsed
+								}
+							}
+						}
+						_ -> if parsed := int(tok.val) {
+							? -> error(format('Could not parse integer number {{0}}', tok.val), tok.pos)
+							_ -> {
+								type: :int
+								tok: tok
+								val: parsed
+							}
 						}
 					}
 				}

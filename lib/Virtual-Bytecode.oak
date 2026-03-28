@@ -12,6 +12,7 @@ std := import('std')
 	append: append
 	merge: merge
 	contains?: contains?
+	range: stdRange
 } := std
 
 syntax := import('syntax')
@@ -34,7 +35,11 @@ CONST_FLOAT := 2
 I32_SIGN := 2147483648
 I32_WRAP := 4294967296
 
-fn rangeN(n) [0] |> take(if n < 0 { true -> 0, _ -> n })
+// rangeN(n) returns [0, 1, 2, ..., n-1]
+fn rangeN(n) if n <= 0 {
+	true -> []
+	_ -> stdRange(0, n)
+}
 
 fn bytesFromString(s) {
 	rangeN(len(s)) |> map(fn(i) codepoint(s.(i)) & 0xFF)
@@ -215,12 +220,16 @@ fn normalizeChunk(raw) {
 		_ -> decodeFunctionTableBytes(raw.fntable |> default(raw.functionTable |> default('')))
 	}
 
+	// For wasm-vm chunks, raw.topLevelNames is absent but c.locals holds
+	// the ordered list of top-level local names produced by the compiler.
+	topLevelNames := raw.topLevelNames |> default(raw.locals |> default([]))
+
 	{
 		mode: mode
 		code: code
 		constants: constants
 		functions: functions
-		topLevelNames: raw.topLevelNames |> default([])
+		topLevelNames: topLevelNames
 		metadata: raw.metadata |> default({})
 	}
 }
@@ -338,7 +347,7 @@ fn defaultOpcodes(mode) if mode {
 		SCOPE_POP: 51
 		CALL_SPREAD: ?
 		IMPORT_DYN: ?
-		UPVAL_BY_NAME: false
+		UPVAL_BY_NAME: true
 	}
 }
 
@@ -889,12 +898,12 @@ fn runChunk(rawChunk, opts) {
 	op := defaultOpcodes(chunk.mode)
 	opts := opts |> default({})
 	globals := opts.globals |> default({})
+	importFn := opts.importFn |> default(?)
 
-	topCount := if chunk.mode = MODE_GO {
-		true -> if len(chunk.topLevelNames) < 256 {
-			true -> 256
-			_ -> len(chunk.topLevelNames)
-		}
+	// Always allocate at least 256 top-level slots so slot-indexed
+	// LOAD_LOCAL / STORE_LOCAL in WASM chunks work without overflow.
+	topCount := if len(chunk.topLevelNames) < 256 {
+		true -> 256
 		_ -> len(chunk.topLevelNames)
 	}
 	topLocals := rangeN(topCount) |> map(fn(_) ?)
@@ -913,6 +922,7 @@ fn runChunk(rawChunk, opts) {
 		topLocals: topLocals
 		topScope: topScope
 		globals: globals
+		importFn: importFn
 		finished: false
 		result: ?
 	}
@@ -1267,18 +1277,22 @@ fn runChunk(rawChunk, opts) {
 						stackPush(vm, callBuiltin(bi, args))
 					}
 					opcode = op.IMPORT -> {
-						if chunk.mode = MODE_GO {
-							true -> {
-								idx := fetchU16(vm)
-								_name := string(constValueAt(vm, idx) |> default(''))
-								stackPush(vm, ?)
-							}
-							_ -> stackPush(vm, ?)
+						// OP_IMPORT always has a u16 constant-pool index in both modes.
+						idx := fetchU16(vm)
+						name := string(constValueAt(vm, idx) |> default(''))
+						result := if vm.importFn != ? {
+							true -> vm.importFn(name)
+							_ -> vm.globals.(name) |> default(?)
 						}
+						stackPush(vm, result)
 					}
 					opcode = op.IMPORT_DYN -> {
-						_name := string(stackPop(vm) |> default(''))
-						stackPush(vm, ?)
+						name := string(stackPop(vm) |> default(''))
+						result := if vm.importFn != ? {
+							true -> vm.importFn(name)
+							_ -> vm.globals.(name) |> default(?)
+						}
+						stackPush(vm, result)
 					}
 					opcode = op.SCOPE_PUSH -> ?
 					opcode = op.SCOPE_POP -> ?
@@ -1328,6 +1342,10 @@ fn compileSource(source) {
 }
 
 fn runSource(source, opts) {
+	opts := opts |> default({})
+	if opts.importFn = ? {
+		true -> opts.importFn <- defaultImportFn
+	}
 	compiled := compileSource(source)
 	if type(compiled) = :object & compiled.type = :error {
 		true -> compiled
@@ -1336,6 +1354,23 @@ fn runSource(source, opts) {
 }
 
 run := runSource
+
+// Pre-import modules once at module load time so that bytecode programs
+// executed via runSource can resolve import() calls.
+_defaultImportModules := {
+	std: import('std')
+	str: import('str')
+	math: import('math')
+	fmt: import('fmt')
+	syntax: import('syntax')
+}
+
+fn makeDefaultImportFn() {
+	mods := _defaultImportModules
+	fn(name) mods.(name) |> default(?)
+}
+
+defaultImportFn := makeDefaultImportFn()
 
 {
 	MODE_WASM: MODE_WASM

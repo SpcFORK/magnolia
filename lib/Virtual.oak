@@ -29,6 +29,7 @@ syntax := import('syntax')
 } := import('fmt')
 fs := import('fs')
 syntax := import('syntax')
+vbc := import('Virtual-Bytecode')
 
 // VirtualMachine holds the execution state for running Oak code
 cs VirtualMachine {
@@ -325,7 +326,7 @@ cs VirtualMachine {
 		// evaluates an AST
 		eval: runAst
 
-		// run a complete program
+		// run a complete program via AST interpreter
 		run: fn(source, scope) {
 			parsed := parseSource(source)
 			if type(parsed) = :object & parsed.type = :error {
@@ -333,6 +334,18 @@ cs VirtualMachine {
 				_ -> runAst(parsed, scope)
 			}
 		}
+
+		// compile source code to a bytecode chunk
+		compileToBytecode: fn(source) vbc.compileSource(source)
+
+		// compile an AST to a bytecode chunk
+		compileAstToBytecode: fn(ast) vbc.compileAst(ast)
+
+		// run a pre-compiled bytecode chunk
+		runChunk: fn(chunk, opts) vbc.runChunk(chunk, opts)
+
+		// compile and run source via bytecode VM
+		runBytecode: fn(source, opts) vbc.run(source, opts)
 	}
 }
 
@@ -478,6 +491,12 @@ cs VirtualContext(initialScope) {
 		vm.evalAst(vm.expand(nodes), localScope)
 	}
 
+	// bytecode compilation and execution
+	ctx.compileToBytecode := fn(code) vm.compileToBytecode(code)
+	ctx.compileAstToBytecode := fn(ast) vm.compileAstToBytecode(ast)
+	ctx.runChunk := fn(chunk, opts) vm.runChunk(chunk, opts)
+	ctx.executeBytecode := fn(program, opts) vm.runBytecode(program, opts)
+
 	ctx
 }
 
@@ -600,4 +619,13 @@ fn createVirtualFSWithFS(basePath, patterns) {
 	createVirtualContext: createVirtualContext
 	createVirtualFS: createVirtualFS
 	createVirtualFSWithFS: createVirtualFSWithFS
+
+	// bytecode utilities from Virtual-Bytecode
+	compileSource: vbc.compileSource
+	compileAst: vbc.compileAst
+	runChunk: vbc.runChunk
+	runBytecode: vbc.run
+	normalizeChunk: vbc.normalizeChunk
+	MODE_WASM: vbc.MODE_WASM
+	MODE_GO: vbc.MODE_GO
 }

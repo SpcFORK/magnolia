@@ -464,7 +464,16 @@ fn compileNode(c, node) if node {
 
 		:object -> {
 			node.entries |> each(fn(entry) {
-				compileNode(c, entry.key)
+				// Identifier keys in object literals are always string keys,
+				// not variable references. Matches Go tree-walker behavior.
+				if entry.key.type = :identifier {
+					true -> {
+						idx := addString(c, entry.key.val)
+						emitByte(c, OP_CONST_STRING)
+						emitU16(c, idx)
+					}
+					_ -> compileNode(c, entry.key)
+				}
 				compileNode(c, entry.val)
 			})
 			emitByte(c, OP_MAKE_OBJECT)

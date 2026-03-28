@@ -110,7 +110,7 @@ magnolia help
 
 ## What's New in Magnolia
 
-Magnolia extends Oak with powerful new features for modern development:
+Magnolia extends Oak with a broad set of features spanning GUI, audio, networking, concurrency, compilation targets, and systems programming. Below is a tour of the major additions.
 
 ### Latest platform updates (March 2026)
 
@@ -119,8 +119,12 @@ Magnolia extends Oak with powerful new features for modern development:
 - Window state now exposes Vulkan runtime handles/selection details via `window.vulkanSurface`, `window.vulkanPhysicalDevice`, and `window.vulkanQueueFamily`.
 - Win32 class registration uses a null background brush (`hbrBackground = 0`) to reduce background flash between presents.
 - GUI frame scheduling now supports `maxFrameDtMs` clamping and urgent redraw triggering for resize-related Windows messages.
+- New **Virtual-Bytecode** module: a self-hosted stack-based bytecode VM that can compile and execute Oak source code at runtime (both Go and WASM chunk formats).
+- New **math-base** module: dependency-breaking math primitives (`Pi`, `E`, `sqrt`, `abs`, `sign`) for sub-module use.
 
-See [docs/gui-native-win.md](docs/gui-native-win.md) and [docs/gui.md](docs/gui.md) for API details.
+See [docs/gui-native-win.md](docs/gui-native-win.md), [docs/gui.md](docs/gui.md), and [docs/Virtual-Bytecode.md](docs/Virtual-Bytecode.md) for API details.
+
+---
 
 ### 🎨 Enhanced Error Display
 
@@ -144,47 +148,108 @@ Beautiful, color-coded error messages with source code context to help you quick
 ╰───────────────────────────────────────────────────────────
 ```
 
-See [error-display.md](docs/error-display.md) for more details.
+See [docs/error-display.md](docs/error-display.md) for more details.
 
-### 🔧 Transpile Middleware
+---
 
-A plugin architecture for AST transformations during the build process. Write custom transpilers to transform your code at compile-time:
+### 🖼️ Cross-Platform GUI
+
+A full GUI middleware for Windows (Win32/GDI/OpenGL/Vulkan), Linux (X11), and the web (Canvas/WebGL). Create windows, draw 2D shapes, handle input events, render text with custom fonts, and run CPU shaders — all from Oak.
 
 ```js
-build := import('build')
-transpile := build.transpile
+gui := import('GUI')
 
-// Create custom transpiler
-myTranspiler := transpile.createTranspiler(fn(node) {
-    // Transform AST nodes
-    node
+window := gui.createWindow('My App', 800, 600)
+gui.onFrame(window, fn {
+    gui.fillRect(window, 10, 10, 200, 100, gui.rgb(60, 120, 220))
+    gui.drawText(window, 20, 40, 'Hello Magnolia!', gui.rgb(255, 255, 255))
 })
+gui.run(window)
+```
 
-build.run({
-    entry: 'main.oak'
-    transpilers: [myTranspiler]
+Highlights:
+- **2D primitives**: rectangles, circles, polygons, bezier curves, ellipses, arcs, stars, rings, capsules, rounded rects, arrows, spirals
+- **Camera systems**: world-to-screen mapping for scrolling/zooming
+- **Virtual resolution**: render at a logical size and scale to the physical window (`fit`, `fill`, `stretch`, `pixelPerfect`)
+- **CPU shader engine**: per-pixel fragment shaders with noise (Perlin, fBm), SDFs, HSL/HSV color, easing functions, multi-pass composition, and GLSL/HLSL codegen
+- **Presenter backends**: GDI, DirectDraw, OpenGL, Vulkan (Windows); X11 (Linux); Canvas/WebGL (web)
+- **Font & text**: TTF metrics, cached font handles, text extent measurement
+
+```js
+sh := import('gui-shader')
+gui := import('GUI')
+
+// Rainbow shader
+rainbow := sh.Shader(fn(x, y, w, h, t, _) {
+    sh.hsl2rgb(sh.fract(t * 0.1 + float(x) / float(w)), 1.0, 0.5)
+}, { resolution: 4 })
+
+gui.shaderRender(window, rainbow, 0, 0, 320, 240)
+```
+
+See [docs/gui.md](docs/gui.md), [docs/gui-2d.md](docs/gui-2d.md), [docs/gui-shader.md](docs/gui-shader.md), and [docs/gui-resolution.md](docs/gui-resolution.md).
+
+---
+
+### 🔊 Audio Processing
+
+Full-featured audio with PCM sample handling, WAV encoding, oscillators, DSP transforms, ADSR envelopes, and FFT spectral analysis.
+
+```js
+audio := import('audio')
+
+// Generate a 440 Hz sine wave, write as WAV
+samples := audio.sine(440, 44100, 2.0)
+data := audio.wav(samples, 44100, 1, 16)
+writeFile('tone.wav', data)
+```
+
+- WAV encoding: 8/16/32-bit, mono/stereo, configurable sample rates (CD 44.1 kHz, DVD 48 kHz, HD 96 kHz)
+- DSP: window functions (Hann, Hamming), FIR convolution, filter kernel generation
+- FFT/IFFT: radix-2 Cooley-Tukey, magnitude/phase extraction
+- ADSR envelope shaping for synthesized sounds
+
+See [docs/audio.md](docs/audio.md), [docs/audio-wav.md](docs/audio-wav.md), [docs/audio-dsp.md](docs/audio-dsp.md), and [docs/audio-fft.md](docs/audio-fft.md).
+
+---
+
+### 🌐 Networking Stack
+
+A complete networking toolkit: HTTP servers with routing, WebSockets, raw TCP sockets, email (SMTP/IMAP), peer-to-peer relay mesh, and local-network game discovery.
+
+```js
+// HTTP server
+http := import('http')
+server := http.Server()
+server.route('/api/:resource', fn(params) fn(req, end) {
+    end({ status: 200, body: 'Resource: ' + params.resource })
+})
+server.start(8080)
+```
+
+```js
+// P2P mesh relay
+p2p := import('p2p')
+host := p2p.Host('0.0.0.0:9411', '/mesh', fn(evt) println(evt))
+peer := p2p.join('ws://localhost:9411/mesh', 'alice', fn(evt) {
+    if evt.type { :ready -> peer.broadcast({ msg: 'hello everyone' }) }
 })
 ```
 
-### 📁 Virtual File System
+- **HTTP**: URL routing with path parameters, static file serving, URL encoding/decoding
+- **WebSocket**: client and server helpers, message opcodes, bidirectional communication
+- **TCP Sockets**: raw TCP/TLS streams, SNI support, certificate verification
+- **SMTP / IMAP**: email sending and mailbox reading with STARTTLS
+- **P2P**: relay-based mesh with peer discovery, direct/broadcast messaging, channels
+- **WLAN**: local-network game beacon scanning, subnet peer sweep
 
-An in-memory file system that can be embedded in packed binaries, enabling true cross-platform deployment:
+See [docs/http.md](docs/http.md), [docs/websocket.md](docs/websocket.md), [docs/p2p.md](docs/p2p.md), and [docs/wlan.md](docs/wlan.md).
 
-```js
-Virtual := import('Virtual')
+---
 
-vfs := Virtual.createVirtualFS({
-    'config.json': '{"version": "1.0"}'
-    'data/test.txt': 'test data'
-})
+### 🧵 Thread Library & Async Event Bus
 
-content := vfs.readFile('config.json')
-vfs.writeFile('output.txt', 'Hello World')
-```
-
-### 🧵 Thread Library
-
-High-level utilities for concurrent and parallel programming, including mutexes, semaphores, wait groups, and thread pools:
+High-level concurrency primitives: mutexes, semaphores, wait groups, thread pools, and a publish/subscribe event bus.
 
 ```js
 thread := import('thread')
@@ -205,6 +270,157 @@ pool.submit(fn() {
 })
 ```
 
+```js
+// Async event bus
+bus := import('async-event-bus')
+eb := bus.create()
+eb.on('player:join', fn(payload, _) println('joined: ' + payload.name))
+eb.emit('player:join', { name: 'Alice' })
+```
+
+See [docs/thread.md](docs/thread.md) and [docs/async-event-bus.md](docs/async-event-bus.md).
+
+---
+
+### 🔧 Transpile Middleware & AST Macros
+
+A plugin architecture for AST transformations during the build process, plus first-class AST macros for compile-time metaprogramming.
+
+```js
+build := import('build')
+transpile := build.transpile
+
+// Create custom transpiler
+myTranspiler := transpile.createTranspiler(fn(node) {
+    // Transform AST nodes
+    node
+})
+
+build.run({
+    entry: 'main.oak'
+    transpilers: [myTranspiler]
+})
+```
+
+```js
+syntax := import('syntax')
+
+// Define macro expanders
+myMacro := syntax.Macro(fn(node) {
+    // Transform AST nodes at parse time
+    node
+})
+ast := syntax.parseWithMacros('(my-macro 1 2 3)', [myMacro])
+```
+
+See [docs/transpile.md](docs/transpile.md) and [docs/syntax.md](docs/syntax.md).
+
+---
+
+### 📁 Virtual File System & Packed Binaries
+
+An in-memory file system that can be embedded in packed binaries for single-file deployment.
+
+```js
+Virtual := import('Virtual')
+
+vfs := Virtual.createVirtualFS({
+    'config.json': '{"version": "1.0"}'
+    'data/test.txt': 'test data'
+})
+
+content := vfs.readFile('config.json')
+vfs.writeFile('output.txt', 'Hello World')
+```
+
+The build system can embed a VFS directory into a compiled bundle, so your program ships with all its assets in one file. See [docs/virtual-fs.md](docs/virtual-fs.md) and [docs/pack.md](docs/pack.md).
+
+---
+
+### 🖥️ Virtual Bytecode VM
+
+A self-hosted stack-based bytecode VM that compiles and executes Oak source code at runtime — enabling dynamic code evaluation, rule engines, and sandboxed execution without shelling out.
+
+```js
+vbc := import('Virtual-Bytecode')
+
+result := vbc.run('fn fib(n) if n < 2 { true -> n, _ -> fib(n - 1) + fib(n - 2) }; fib(10)')
+println(result) // => 55
+
+// Or compile once, run many times
+chunk := vbc.compileSource('x * x + 1')
+vbc.runChunk(chunk, { globals: { x: 7 } }) // => 50
+```
+
+- 52-opcode instruction set (matches `bytecode.go` and `wasm-vm.oak`)
+- Dual-mode: auto-detects Go-compiled or WASM-compiled chunks
+- Custom global bindings and import resolvers
+- Closures, tail calls, destructuring, pattern matching, rest args
+
+See [docs/Virtual-Bytecode.md](docs/Virtual-Bytecode.md), [docs/Virtual.md](docs/Virtual.md), and [docs/wasm-vm.md](docs/wasm-vm.md).
+
+---
+
+### 🗜️ Compression & Serialization
+
+Lossless compression codecs and compact binary serialization.
+
+```js
+compression := import('compression')
+compressed := compression.huffmanCompress('hello world hello world')
+original := compression.huffmanDecompress(compressed)
+
+msgpack := import('msgpack')
+packed := msgpack.serializeSafe({ name: 'alice', scores: [98, 87, 95] })
+```
+
+- **RLE**: run-length encoding for simple repeated patterns
+- **Huffman**: frequency-optimized variable-length bit packing
+- **LZW**: dictionary-based compression for repeated phrases
+- **MessagePack**: compact binary serialization (smaller/faster than JSON)
+
+See [docs/compression.md](docs/compression.md) and [docs/msgpack.md](docs/msgpack.md).
+
+---
+
+### 🖼️ Image & Video
+
+BMP image encoding and frame-based video containers for pixel-stream pipelines.
+
+```js
+bmp := import('bmp')
+pixels := [255, 0, 0, 0, 255, 0, 0, 0, 255] // 3 RGB pixels
+data := bmp(3, 1, pixels)
+writeFile('rgb.bmp', data)
+```
+
+- **BMP**: 24-bit image encoding with automatic row padding
+- **ICO**: Windows icon (.ico) file generation
+- **Video**: frame containers with per-frame pixel buffers (width, height, channels)
+
+See [docs/bmp.md](docs/bmp.md), [docs/ico.md](docs/ico.md), and [docs/video.md](docs/video.md).
+
+---
+
+### 🔐 Crypto & Data Protection
+
+Cryptographic primitives and data integrity helpers.
+
+```js
+crypto := import('crypto')
+
+id := crypto.uuid()          // RFC 4122 v4
+hash := crypto.sha256('data')
+safe := crypto.randomBytes(32)
+```
+
+- **Crypto**: UUID v4, SHA-256, cryptographically secure random bytes/ints, constant-time comparison, session tokens
+- **Data protection**: parity checks, XOR/additive checksums, CRC16-CCITT, CRC32, Hamming distance, LDPC syndrome validation
+
+See [docs/crypto.md](docs/crypto.md) and [docs/dataprot.md](docs/dataprot.md).
+
+---
+
 ### 🎮 GPU Computing
 
 Low-level helpers for GPU interop with CUDA and OpenCL support:
@@ -222,6 +438,33 @@ gpu.call(cudaInit, 0)
 // Or OpenCL
 clGetPlatforms := gpu.opencl('clGetPlatformIDs')
 ```
+
+See [docs/gpu.md](docs/gpu.md) and [docs/gpus.md](docs/gpus.md).
+
+---
+
+### 📐 Math Extensions
+
+Extended math libraries for geometry, statistics, and foundational primitives.
+
+```js
+geo := import('math-geo')
+stats := import('math-stats')
+
+geo.hypot(0, 0, 3, 4)       // => 5 (Euclidean distance)
+geo.bearing(0, 0, 1, 1)     // angle in radians
+
+stats.mean([1, 2, 3, 4, 5]) // => 3
+stats.stddev([2, 4, 4, 4, 5, 5, 7, 9]) // standard deviation
+```
+
+- **math-geo**: Euclidean distance, coordinate scaling, polar-to-Cartesian, bearing/orientation
+- **math-stats**: mean, median, standard deviation, sum, product, clamp, min/max aggregation
+- **math-base**: dependency-free core (`Pi`, `E`, `sqrt`, `abs`, `sign`) used by sub-modules
+
+See [docs/math.md](docs/math.md), [docs/math-geo.md](docs/math-geo.md), [docs/math-stats.md](docs/math-stats.md), and [docs/math-base.md](docs/math-base.md).
+
+---
 
 ### 🔩 Go Runtime and System Interop
 
@@ -241,6 +484,8 @@ println(evt.data)
 ```
 
 See [docs/go.md](docs/go.md) for complete usage and safety notes.
+
+---
 
 ### ⚙️ Code Generation and Runtime Evaluation
 
@@ -262,25 +507,47 @@ code := generator('string')
 fn := codegen.eval(code)
 ```
 
-### ✨ AST Macros and Metaprogramming
+See [docs/runtime-codegen.md](docs/runtime-codegen.md).
 
-The syntax library now supports AST macros for powerful compile-time code transformations:
+---
+
+### 🌍 Multi-Target Compilation
+
+Magnolia programs can be compiled to multiple targets from a single codebase:
+
+```sh
+# Native Oak bundle
+magnolia build --entry src/main.oak --output dist/bundle.oak
+
+# JavaScript (browser / Node.js / Deno)
+magnolia build --entry src/app.oak --output dist/bundle.js --web
+
+# WebAssembly
+magnolia build --entry src/main.oak --output dist/program.wat --wasm
+```
+
+The build system supports module bundling, dependency resolution, tree-shaking, code minification, and virtual filesystem embedding. See [docs/build.md](docs/build.md) and [docs/wasm.md](docs/wasm.md).
+
+---
+
+### 🖥️ Platform-Native Bindings
+
+Direct access to platform APIs for systems programming:
+
+- **Windows**: kernel32, ntdll, user32, gdi32, psapi DLL exports; virtual memory (mmap/munmap/mprotect); registry access; GUI integration; WLAN scanning
+- **Linux**: libc, libdl, libX11 symbol resolution; process helpers (getpid, sysconf); X11 windowing; dynamic library loading (dlopen/dlsym/dlclose)
 
 ```js
-syntax := import('syntax')
+// Windows
+win := import('windows')
+hModule := win.kernel32('GetModuleHandleW', 0)
 
-// Define macro expanders
-myMacro := syntax.Macro(fn(node) {
-    // Transform AST nodes
-    node
-})
-
-// Parse code with macro expansion
-ast := syntax.parseWithMacros('(my-macro 1 2 3)', [myMacro])
-
-// Recursively expand macros in AST
-expanded := syntax.expandMacros(ast, [myMacro])
+// Linux
+linux := import('Linux')
+pid := linux.getpid()
 ```
+
+See [docs/windows.md](docs/windows.md) and [docs/linux.md](docs/linux.md).
 
 ## Overview
 
@@ -463,20 +730,24 @@ readFile('./path', fn(file) {
 For a more detailed description of the language, see the [work-in-progress language spec](docs/spec.md).
 
 For Magnolia-specific features, see:
-- [GUI middleware documentation](docs/gui.md)
-- [Virtual File System documentation](docs/virtual-fs.md)
-- [Transpile Middleware documentation](docs/transpile.md)
-- [Code Generation documentation](docs/runtime-codegen.md)
-- [Go Runtime and System Interop documentation](docs/go.md)
-- [System interop wrappers (`sys`) documentation](docs/sys.md)
-- [Bitwise and pointer helper documentation](docs/bitwise.md)
-- [Data protection helper documentation](docs/dataprot.md)
-- [Classes (`cs`) documentation](docs/cs.md)
-- [Syntax and Macros documentation](docs/syntax.md)
-- [Multi-backend GPU helpers (`gpus`) documentation](docs/gpus.md)
-- [Video processing library](docs/video.md)
-- [Advanced Build Features](docs/build.md)
-- [String manipulation library](docs/str.md)
+- [GUI middleware](docs/gui.md) · [2D drawing](docs/gui-2d.md) · [Shaders](docs/gui-shader.md) · [Resolution scaling](docs/gui-resolution.md) · [Events](docs/gui-events.md)
+- [Audio](docs/audio.md) · [WAV encoding](docs/audio-wav.md) · [DSP](docs/audio-dsp.md) · [FFT](docs/audio-fft.md)
+- [HTTP server](docs/http.md) · [WebSockets](docs/websocket.md) · [TCP sockets](docs/socket.md) · [P2P mesh](docs/p2p.md)
+- [SMTP](docs/smtp.md) · [IMAP](docs/imap.md) · [WLAN discovery](docs/wlan.md)
+- [Compression (RLE/Huffman/LZW)](docs/compression.md) · [MessagePack](docs/msgpack.md)
+- [BMP images](docs/bmp.md) · [ICO icons](docs/ico.md) · [Video frames](docs/video.md)
+- [Crypto (UUID, SHA-256, random)](docs/crypto.md) · [Data protection (CRC, checksums)](docs/dataprot.md)
+- [Virtual Bytecode VM](docs/Virtual-Bytecode.md) · [Virtual interpreter](docs/Virtual.md) · [VirtualToken constructors](docs/VirtualToken.md)
+- [Virtual File System](docs/virtual-fs.md) · [Pack/bundle](docs/pack.md)
+- [Build system](docs/build.md) · [WASM target](docs/wasm.md) · [WASM VM](docs/wasm-vm.md)
+- [Thread library](docs/thread.md) · [Async event bus](docs/async-event-bus.md)
+- [Transpile middleware](docs/transpile.md) · [Syntax and macros](docs/syntax.md)
+- [Code generation](docs/runtime-codegen.md) · [Go runtime interop](docs/go.md) · [System interop (`sys`)](docs/sys.md)
+- [GPU](docs/gpu.md) · [Multi-backend GPU helpers (`gpus`)](docs/gpus.md)
+- [Math](docs/math.md) · [Geometry](docs/math-geo.md) · [Statistics](docs/math-stats.md) · [Math base](docs/math-base.md)
+- [Bitwise and pointer helpers](docs/bitwise.md) · [Classes (`cs`)](docs/cs.md) · [String manipulation](docs/str.md)
+- [Windows platform](docs/windows.md) · [Linux platform](docs/linux.md)
+- [Error display](docs/error-display.md) · [Debug helpers](docs/debug.md) · [JSON](docs/json.md) · [DateTime](docs/datetime.md)
 - Example programs in [samples/](samples/) including GUI, threading, transpilation, VFS, and pointer/bitwise examples
 
 ### Builds and deployment
