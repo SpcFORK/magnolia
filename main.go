@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+func cutArg(index int) {
+	os.Args = append(os.Args[:index], os.Args[index+1:]...)
+}
+
 func main() {
 	if runPackFile() {
 		return
@@ -12,17 +16,23 @@ func main() {
 
 	if len(os.Args) > 1 {
 		arg := os.Args[1]
+		argsLen := len(os.Args)
 
-		if arg == "--bytecode" && len(os.Args) > 2 {
-			os.Args = append(os.Args[:1], os.Args[2:]...)
-			runFileBytecode(os.Args[1])
-			return
-		}
-
-		if arg == "--binary" && len(os.Args) > 2 {
-			os.Args = append(os.Args[:1], os.Args[2:]...)
-			runFileBinary(os.Args[1])
-			return
+		if argsLen > 2 {
+			switch arg {
+			case "--normal", "-n":
+				cutArg(1)
+				runFile(os.Args[1])
+				return
+			case "--bytecode", "-b":
+				cutArg(1)
+				runFileBytecode(os.Args[1])
+				return
+			case "--executable", "-x":
+				cutArg(1)
+				runFileBinary(os.Args[1])
+				return
+			}
 		}
 
 		if isCommand := performCommandIfExists(arg); !isCommand {
