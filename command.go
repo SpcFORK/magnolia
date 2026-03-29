@@ -151,6 +151,36 @@ func runFileBytecode(filePath string) {
 	runFileWithMode(filePath, true)
 }
 
+func runFileBinary(filePath string) {
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		fmt.Printf("Could not resolve %s: %s\n", filePath, err)
+		os.Exit(1)
+	}
+
+	data, err := os.ReadFile(absFilePath)
+	if err != nil {
+		fmt.Printf("Could not read %s: %s\n", filePath, err)
+		os.Exit(1)
+	}
+
+	chunk, err := loadBytecodeChunk(data)
+	if err != nil {
+		fmt.Printf("Could not load %s: %s\n", filePath, err)
+		os.Exit(1)
+	}
+
+	ctx := NewContext(filepath.Dir(absFilePath))
+	ctx.currentFile = absFilePath
+	defer ctx.Wait()
+	ctx.LoadBuiltins()
+
+	if _, err = ctx.EvalBytecodeChunk(chunk); err != nil {
+		DisplayError(err, DefaultErrorConfig())
+		os.Exit(1)
+	}
+}
+
 func runFileWithMode(filePath string, bytecodeMode bool) {
 	absFilePath, err := filepath.Abs(filePath)
 	if err != nil {

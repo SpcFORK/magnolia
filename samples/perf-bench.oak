@@ -1,0 +1,349 @@
+// Language Performance Benchmark
+// Tests core language primitives: arithmetic, recursion, iteration,
+// string ops, list ops, closures, and object access.
+//
+// Each section is routed to its fastest execution engine using
+// bytecode() and interpreter() builtins based on measured results.
+//
+// Run:
+//   magnolia samples/perf-bench.oak
+//   magnolia --bytecode samples/perf-bench.oak
+
+std := import('std')
+{
+	println: println
+	range: range
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	append: append
+	slice: slice
+} := std
+{ printf: printf } := import('fmt')
+{ sort: sort } := import('sort')
+
+// ── helpers ──────────────────────────────────────────────────
+
+results := []
+
+fn timeNs(label, fnRun) {
+	start := nanotime()
+	result := fnRun()
+	elapsed := nanotime() - start
+	ms := elapsed / 1000000
+	printf('  {{ 0 }}: {{ 1 }} ns  ({{ 2 }} ms)', label, elapsed, ms)
+	results << { name: label, ns: elapsed, ms: ms }
+	[result, elapsed]
+}
+
+fn repeat(s, n) {
+	fn sub(i, acc) if i {
+		n -> acc
+		_ -> sub(i + 1, acc + s)
+	}
+	sub(0, '')
+}
+
+fn divider(title) {
+	println('')
+	println('── ' + title + ' ──')
+}
+
+fn padRight(s, w) {
+	fn sub(cur) if len(cur) < w {
+		true -> sub(cur + ' ')
+		_ -> cur
+	}
+	sub(s)
+}
+
+fn padLeft(s, w) {
+	fn sub(cur) if len(cur) < w {
+		true -> sub(' ' + cur)
+		_ -> cur
+	}
+	sub(s)
+}
+
+// ── 1. Arithmetic ────────────────────────────────────────────
+
+divider('1. Arithmetic (200k iterations)')
+
+[arithResult, _] := timeNs('int arithmetic (200k)', fn() {
+	with bytecode([200000]) fn(n) {
+		fn sub(i, acc) if i {
+			n -> acc
+			_ -> sub(i + 1, acc + i * 3 - i / 2 + 7)
+		}
+		sub(0, 0)
+	}
+})
+printf('    result = {{ 0 }}', arithResult)
+
+[floatResult, _] := timeNs('float arithmetic (200k)', fn() {
+	with bytecode([200000]) fn(n) {
+		fn sub(i, acc) if i {
+			n -> acc
+			_ -> sub(i + 1, acc + (i * 3.14) - (i / 2.72) + 1.618)
+		}
+		sub(0, 0.0)
+	}
+})
+printf('    result = {{ 0 }}', floatResult)
+
+// ── 2. Recursive Fibonacci ───────────────────────────────────
+
+divider('2. Recursive Fibonacci')
+
+timeNs('fib(20) naive', fn() {
+	with bytecode([20]) fn(n) {
+		fn fibN(x) if x <= 1 {
+			true -> x
+			_ -> fibN(x - 1) + fibN(x - 2)
+		}
+		fibN(n)
+	}
+})
+
+timeNs('fib(1000) tail-recursive', fn() {
+	with bytecode([1000]) fn(n) {
+		fn sub(i, a, b) if i {
+			0 -> a
+			_ -> sub(i - 1, b, a + b)
+		}
+		sub(n, 0, 1)
+	}
+})
+
+// ── 3. List Construction & Iteration ─────────────────────────
+
+divider('3. List Operations')
+
+N_LIST := 2000
+
+timeNs('build list (2k push)', fn() {
+	with bytecode([N_LIST]) fn(limit) {
+		xs := []
+		fn sub(i) if i {
+			limit -> xs
+			_ -> {
+				xs << i
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+})
+
+bigList := range(10000)
+
+timeNs('map (10k)', fn() {
+	with interpreter([bigList]) fn(xs) xs |> map(fn(x) x * 2 + 1)
+})
+
+timeNs('filter (10k)', fn() {
+	with interpreter([bigList]) fn(xs) xs |> filter(fn(x) x % 3 = 0)
+})
+
+timeNs('reduce sum (10k)', fn() {
+	with interpreter([bigList]) fn(xs) xs |> reduce(0, fn(a, b) a + b)
+})
+
+// ── 4. String Operations ─────────────────────────────────────
+
+divider('4. String Operations')
+
+timeNs('string concat (2k)', fn() {
+	with bytecode([2000]) fn(limit) {
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + 'ab')
+		}
+		sub(0, '')
+	}
+})
+
+longStr := repeat('abcdefghij', 500)
+
+timeNs('len (5k-char string)', fn() len(longStr))
+
+timeNs('string slice (5k)', fn() {
+	with bytecode([longStr, 500]) fn(s, limit) {
+		fn sub(i) if i {
+			limit -> ?
+			_ -> {
+				s |> slice(i, i + 10)
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+})
+
+// ── 5. Object / Map Access ───────────────────────────────────
+
+divider('5. Object Access')
+
+timeNs('object build (3k keys)', fn() {
+	with bytecode([3000]) fn(limit) {
+		obj := {}
+		fn sub(i) if i {
+			limit -> obj
+			_ -> {
+				obj.(string(i)) := i * 2
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+})
+
+obj3k := {}
+range(3000) |> each(fn(i) obj3k.(string(i)) := i)
+
+timeNs('object read (3k keys)', fn() {
+	with bytecode([obj3k, 3000]) fn(obj, limit) {
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + obj.(string(i)))
+		}
+		sub(0, 0)
+	}
+})
+
+// ── 6. Closures & Higher-Order Functions ─────────────────────
+
+divider('6. Closures & Higher-Order')
+
+timeNs('closure create+call (10k)', fn() {
+	with bytecode([10000]) fn(limit) {
+		fn mkAdd(x) fn(y) x + y
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> {
+				add := mkAdd(i)
+				sub(i + 1, acc + add(i))
+			}
+		}
+		sub(0, 0)
+	}
+})
+
+timeNs('compose chain (10k)', fn() {
+	with bytecode([10000]) fn(limit) {
+		fn comp(f, g) fn(x) f(g(x))
+		double := fn(x) x * 2
+		inc := fn(x) x + 1
+		dblInc := comp(double, inc)
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + dblInc(i))
+		}
+		sub(0, 0)
+	}
+})
+
+// ── 7. Sorting ───────────────────────────────────────────────
+
+divider('7. Sorting')
+
+unsorted := range(2000) |> map(fn(_) int(rand() * 10000))
+
+timeNs('sort 2k random ints', fn() {
+	with bytecode([unsorted]) fn(xs) sort(xs)
+})
+
+// ── 8. Pattern Matching ──────────────────────────────────────
+
+divider('8. Pattern Matching (20k)')
+
+timeNs('fizzbuzz classify (20k)', fn() {
+	with bytecode([20000]) fn(limit) {
+		fn cls(n) if n % 15 {
+			0 -> :fizzbuzz
+			_ -> if n % 3 {
+				0 -> :fizz
+				_ -> if n % 5 {
+					0 -> :buzz
+					_ -> n
+				}
+			}
+		}
+		fn sub(i, fb, f, b) if i {
+			limit -> [fb, f, b]
+			_ -> if cls(i) {
+				:fizzbuzz -> sub(i + 1, fb + 1, f, b)
+				:fizz -> sub(i + 1, fb, f + 1, b)
+				:buzz -> sub(i + 1, fb, f, b + 1)
+				_ -> sub(i + 1, fb, f, b)
+			}
+		}
+		sub(1, 0, 0, 0)
+	}
+})
+
+// ── 9. Sieve of Eratosthenes ────────────────────────────────
+
+divider('9. Sieve of Eratosthenes (limit 10k)')
+
+[primes, _] := timeNs('sieve (10k)', fn() {
+	with interpreter([10000]) fn(limit) {
+		flags := range(limit) |> map(fn(_) true)
+		flags.0 := false
+		flags.1 := false
+
+		fn outer(i) if i * i < limit {
+			true -> {
+				if flags.(i) {
+					true -> {
+						fn inner(j) if j < limit {
+							true -> {
+								flags.(j) := false
+								inner(j + i)
+							}
+							_ -> ?
+						}
+						inner(i * i)
+					}
+					_ -> ?
+				}
+				outer(i + 1)
+			}
+			_ -> ?
+		}
+		outer(2)
+
+		primes := []
+		fn collect(i) if i < limit {
+			true -> {
+				if flags.(i) {
+					true -> primes << i
+					_ -> ?
+				}
+				collect(i + 1)
+			}
+			_ -> ?
+		}
+		collect(0)
+		primes
+	}
+})
+printf('    primes found: {{ 0 }}', len(primes))
+
+// ── Summary ──────────────────────────────────────────────────
+
+divider('Summary')
+
+// print a results table
+hdr := '│ ' + padRight('Test', 30) + ' │ ' + padLeft('ms', 10) + ' │'
+sep := '├' + repeat('─', 32) + '┼' + repeat('─', 12) + '┤'
+println('┌' + repeat('─', 32) + '┬' + repeat('─', 12) + '┐')
+println(hdr)
+println(sep)
+results |> each(fn(r) {
+	println('│ ' + padRight(r.name, 30) + ' │ ' + padLeft(string(r.ms), 10) + ' │')
+})
+println('└' + repeat('─', 32) + '┴' + repeat('─', 12) + '┘')
+println('')
+println('All benchmarks completed.')

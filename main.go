@@ -1,6 +1,9 @@
 package main
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 func main() {
 	if runPackFile() {
@@ -10,16 +13,25 @@ func main() {
 	if len(os.Args) > 1 {
 		arg := os.Args[1]
 
-		// --bytecode flag: run next arg as file in bytecode VM mode
 		if arg == "--bytecode" && len(os.Args) > 2 {
-			// Remove --bytecode from os.Args so args() returns clean arguments
 			os.Args = append(os.Args[:1], os.Args[2:]...)
 			runFileBytecode(os.Args[1])
 			return
 		}
 
+		if arg == "--binary" && len(os.Args) > 2 {
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+			runFileBinary(os.Args[1])
+			return
+		}
+
 		if isCommand := performCommandIfExists(arg); !isCommand {
-			runFile(arg)
+			switch {
+			case strings.HasSuffix(arg, ".mb"), strings.HasSuffix(arg, ".mgb"), strings.HasSuffix(arg, ".magb"):
+				runFileBinary(arg)
+			default:
+				runFile(arg)
+			}
 		}
 		return
 	}

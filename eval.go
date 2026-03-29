@@ -396,6 +396,64 @@ func newScopeN(parent *scope, n int) scope {
 	}
 }
 
+// newScopeFast creates a scope without a mutex for single-threaded hot paths.
+// Use only in function call paths where concurrent access is not expected.
+func newScopeFast(parent *scope, n int) scope {
+	return scope{
+		parent: parent,
+		vars:   make(map[string]Value, n),
+	}
+}
+
+// bridgeVmScope converts a bytecode vmScope chain into a tree-walker scope,
+// parented under the Context's top-level scope (which contains builtins and imports).
+// This enables interpreter() to tree-walk closures originally compiled for the bytecode VM.
+func (c *Context) bridgeVmScope(vs *vmScope) scope {
+	sc := newScopeN(&c.scope, 16)
+	for s := vs; s != nil; s = s.parent {
+		for i, name := range s.names {
+			if name != "" && i < len(s.values) && s.values[i] != nil {
+				if _, ok := sc.vars[name]; !ok {
+					sc.vars[name] = s.values[i]
+				}
+			}
+		}
+	}
+	return sc
+}
+
+// bridgeToVmScope converts a tree-walker scope into a vmScope chain,
+// enabling bytecode() to resolve upvalues from the enclosing interpreter scope.
+func bridgeToVmScope(sc *scope) *vmScope {
+	if sc == nil {
+		return nil
+	}
+	// Flatten the scope chain into a single vmScope with all visible names
+	var names []string
+	var values []Value
+	seen := make(map[string]bool)
+	for s := sc; s != nil; s = s.parent {
+		if s.mu != nil {
+			s.mu.RLock()
+		}
+		for k, v := range s.vars {
+			if !seen[k] {
+				seen[k] = true
+				names = append(names, k)
+				values = append(values, v)
+			}
+		}
+		if s.mu != nil {
+			s.mu.RUnlock()
+		}
+	}
+	return &vmScope{
+		names:  names,
+		values: values,
+		parent: nil,
+	}
+}
+
 func (sc *scope) lockRef() *sync.RWMutex {
 	if sc.mu == nil {
 		sc.mu = muPool.Get().(*sync.RWMutex)
@@ -416,11 +474,17 @@ func (sc *scope) snapshotVars() map[string]Value {
 }
 
 func (sc *scope) get(name string) (Value, *runtimeError) {
-	sc.mu.RLock()
-	v, ok := sc.vars[name]
-	sc.mu.RUnlock()
-	if ok {
-		return v, nil
+	if sc.mu != nil {
+		sc.mu.RLock()
+		v, ok := sc.vars[name]
+		sc.mu.RUnlock()
+		if ok {
+			return v, nil
+		}
+	} else {
+		if v, ok := sc.vars[name]; ok {
+			return v, nil
+		}
 	}
 	if sc.parent != nil {
 		return sc.parent.get(name)
@@ -429,19 +493,30 @@ func (sc *scope) get(name string) (Value, *runtimeError) {
 }
 
 func (sc *scope) put(name string, v Value) {
-	sc.mu.Lock()
-	sc.vars[name] = v
-	sc.mu.Unlock()
+	if sc.mu != nil {
+		sc.mu.Lock()
+		sc.vars[name] = v
+		sc.mu.Unlock()
+	} else {
+		sc.vars[name] = v
+	}
 }
 
 func (sc *scope) update(name string, v Value) *runtimeError {
-	sc.mu.Lock()
-	if _, ok := sc.vars[name]; ok {
-		sc.vars[name] = v
+	if sc.mu != nil {
+		sc.mu.Lock()
+		if _, ok := sc.vars[name]; ok {
+			sc.vars[name] = v
+			sc.mu.Unlock()
+			return nil
+		}
 		sc.mu.Unlock()
-		return nil
+	} else {
+		if _, ok := sc.vars[name]; ok {
+			sc.vars[name] = v
+			return nil
+		}
 	}
-	sc.mu.Unlock()
 	if sc.parent != nil {
 		return sc.parent.update(name, v)
 	}
@@ -457,6 +532,8 @@ type engine struct {
 	asyncEvalLock sync.Mutex
 	// interpreter event loop waitgroup
 	sync.WaitGroup
+	// set to true when go() builtin is first used; scopes skip mutexes until then
+	concurrent bool
 	// for deduplicating imports
 	importMap  map[string]scope
 	importLock sync.RWMutex
@@ -473,6 +550,9 @@ type engine struct {
 	nextChanID int64
 	// log async error streams through this
 	reportErr func(error)
+	// bytecode() builtin: cache compiled chunks keyed by *fnNode pointer
+	bytecodeCache     map[*fnNode]*bytecodeChunk
+	bytecodeCacheLock sync.RWMutex
 }
 
 type Context struct {
@@ -504,11 +584,12 @@ func normalizeRootPath(rootPath string) string {
 
 func NewContext(rootPath string) Context {
 	eng := engine{
-		importMap: map[string]scope{},
-		fileMap:   map[uintptr]*os.File{},
-		nameRefs:  map[uintptr]*StringValue{},
-		namePtrs:  map[string]uintptr{},
-		chanMap:   map[int64]chan Value{},
+		importMap:     map[string]scope{},
+		fileMap:       map[uintptr]*os.File{},
+		nameRefs:      map[uintptr]*StringValue{},
+		namePtrs:      map[string]uintptr{},
+		chanMap:       map[int64]chan Value{},
+		bytecodeCache: map[*fnNode]*bytecodeChunk{},
 		reportErr: func(err error) {
 			fmt.Println(err)
 		},
@@ -655,6 +736,19 @@ func (c *Context) EvalBytecode(programReader io.Reader) (Value, error) {
 	return val, runtimeErr
 }
 
+// EvalBytecodeChunk runs a pre-compiled bytecodeChunk (e.g. loaded from a .mgb file).
+func (c *Context) EvalBytecodeChunk(chunk *bytecodeChunk) (Value, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	vm := newVM(chunk, c)
+	val, runtimeErr := vm.run()
+	if runtimeErr == nil {
+		return val, nil
+	}
+	return val, runtimeErr
+}
+
 func normalizeCallArgs(paramCount int, args []Value) []Value {
 	if len(args) >= paramCount {
 		return args
@@ -674,7 +768,7 @@ func bindCallScope(parent *scope, params []string, restArg string, args []Value)
 	if restArg != "" {
 		n++
 	}
-	callScope := newScopeN(parent, n)
+	callScope := newScopeFast(parent, n)
 
 	for i, argName := range params {
 		if argName != "" {
@@ -839,8 +933,18 @@ func (c *Context) evalFnCall(maybeFn Value, thunkable bool, args []Value) (Value
 		return fn.fn(args)
 	} else if class, ok := maybeFn.(ClassValue); ok {
 		return c.constructClassValue(class, args...)
-	} else if cv, ok := maybeFn.(*closureVal); ok && cv.call != nil {
-		return cv.call(args)
+	} else if cv, ok := maybeFn.(*closureVal); ok {
+		if cv.call != nil {
+			return cv.call(args)
+		}
+		// closureVal with preserved AST: convert to FnValue and tree-walk
+		if cv.defn != nil {
+			fn := FnValue{
+				defn:  cv.defn,
+				scope: c.bridgeVmScope(cv.parentScope),
+			}
+			return c.evalFnCall(fn, thunkable, args)
+		}
 	}
 
 	return nil, &runtimeError{
@@ -1532,6 +1636,72 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return BoolValue(!leftComputed.Eq(rightComputed)), nil
 		}
 
+		// Fast path: int op int (dominant case in arithmetic-heavy code)
+		if leftInt, ok := leftComputed.(IntValue); ok {
+			if rightInt, ok := rightComputed.(IntValue); ok {
+				switch n.op {
+				case plus:
+					return IntValue(leftInt + rightInt), nil
+				case minus:
+					return IntValue(leftInt - rightInt), nil
+				case times:
+					return IntValue(leftInt * rightInt), nil
+				case less:
+					return BoolValue(leftInt < rightInt), nil
+				case greater:
+					return BoolValue(leftInt > rightInt), nil
+				case leq:
+					return BoolValue(leftInt <= rightInt), nil
+				case geq:
+					return BoolValue(leftInt >= rightInt), nil
+				case modulus:
+					if rightInt == 0 {
+						return nil, &runtimeError{reason: "Division by zero", pos: n.pos()}
+					}
+					return IntValue(leftInt % rightInt), nil
+				default:
+					val, err := intBinaryOp(n.op, leftInt, rightInt)
+					if err != nil {
+						err.pos = n.pos()
+					}
+					return val, err
+				}
+			}
+		}
+
+		// Fast path: float op float
+		if leftFloat, ok := leftComputed.(FloatValue); ok {
+			if rightFloat, ok := rightComputed.(FloatValue); ok {
+				switch n.op {
+				case plus:
+					return FloatValue(leftFloat + rightFloat), nil
+				case minus:
+					return FloatValue(leftFloat - rightFloat), nil
+				case times:
+					return FloatValue(leftFloat * rightFloat), nil
+				case divide:
+					if rightFloat == 0 {
+						return nil, &runtimeError{reason: "Division by zero", pos: n.pos()}
+					}
+					return FloatValue(leftFloat / rightFloat), nil
+				case less:
+					return BoolValue(leftFloat < rightFloat), nil
+				case greater:
+					return BoolValue(leftFloat > rightFloat), nil
+				case leq:
+					return BoolValue(leftFloat <= rightFloat), nil
+				case geq:
+					return BoolValue(leftFloat >= rightFloat), nil
+				default:
+					val, err := floatBinaryOp(n.op, leftFloat, rightFloat)
+					if err != nil {
+						err.pos = n.pos()
+					}
+					return val, err
+				}
+			}
+		}
+
 		switch left := leftComputed.(type) {
 		case IntValue:
 			// if the right side is a pointer we can perform pointer arithmetic or
@@ -1728,7 +1898,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		if fn, isFn := maybeFn.(FnValue); isFn && n.restArg == nil &&
 			fn.defn.restArg == "" && len(n.args) == len(fn.defn.args) {
 			nParams := len(fn.defn.args)
-			fnScope := newScopeN(&fn.scope, nParams)
+			fnScope := newScopeFast(&fn.scope, nParams)
 			for i, argNode := range n.args {
 				argVal, err := c.evalExpr(argNode, sc)
 				if err != nil {

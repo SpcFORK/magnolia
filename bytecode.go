@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ type funcTemplate struct {
 	name       string // function name (may be empty)
 	hasRestArg bool
 	localNames []string // name for each local slot (for scope chain construction)
+	defn       *fnNode  // preserved AST for interpreter() engine switching
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +138,219 @@ type bytecodeChunk struct {
 	functions     []funcTemplate
 	topLevelNames []string // local slot names for top-level code
 	sourceMap     []sourceMapEntry
+}
+
+// ---------------------------------------------------------------------------
+// .mgb binary format loader
+// ---------------------------------------------------------------------------
+
+const mgbMagic = "MGbc"
+const mgbVersion = 2
+
+// loadBytecodeChunk deserializes a .mgb binary file into a bytecodeChunk.
+// Format: "MGbc" <version:u16LE> <bcSection> <cpSection> <ftSection>
+// Each section: <length:u32LE> <data:N bytes>
+func loadBytecodeChunk(data []byte) (*bytecodeChunk, error) {
+	if len(data) < 6 {
+		return nil, fmt.Errorf("mgb: file too short")
+	}
+	if string(data[0:4]) != mgbMagic {
+		return nil, fmt.Errorf("mgb: invalid magic (expected %q)", mgbMagic)
+	}
+	version := uint16(data[4]) | uint16(data[5])<<8
+	if version != mgbVersion {
+		return nil, fmt.Errorf("mgb: unsupported version %d", version)
+	}
+
+	off := 6
+
+	// --- Bytecode section ---
+	if off+4 > len(data) {
+		return nil, fmt.Errorf("mgb: truncated bytecode section header")
+	}
+	bcLen := int(u32le(data, off))
+	off += 4
+	if off+bcLen > len(data) {
+		return nil, fmt.Errorf("mgb: truncated bytecode section")
+	}
+	code := make([]byte, bcLen)
+	copy(code, data[off:off+bcLen])
+	off += bcLen
+
+	// --- Constant pool section ---
+	if off+4 > len(data) {
+		return nil, fmt.Errorf("mgb: truncated constant pool section header")
+	}
+	cpLen := int(u32le(data, off))
+	off += 4
+	cpEnd := off + cpLen
+	if cpEnd > len(data) {
+		return nil, fmt.Errorf("mgb: truncated constant pool section")
+	}
+	constants, err := deserializeConstantPool(data[off:cpEnd])
+	if err != nil {
+		return nil, err
+	}
+	off = cpEnd
+
+	// --- Function table section ---
+	if off+4 > len(data) {
+		return nil, fmt.Errorf("mgb: truncated function table section header")
+	}
+	ftLen := int(u32le(data, off))
+	off += 4
+	ftEnd := off + ftLen
+	if ftEnd > len(data) {
+		return nil, fmt.Errorf("mgb: truncated function table section")
+	}
+	functions, err := deserializeFunctionTable(data[off:ftEnd])
+	if err != nil {
+		return nil, err
+	}
+	off = ftEnd
+
+	// --- Top-level names section ---
+	var topLevelNames []string
+	if off+4 <= len(data) {
+		tlLen := int(u32le(data, off))
+		off += 4
+		tlEnd := off + tlLen
+		if tlEnd > len(data) {
+			return nil, fmt.Errorf("mgb: truncated top-level names section")
+		}
+		topLevelNames, err = deserializeNameList(data[off:tlEnd])
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &bytecodeChunk{
+		code:          code,
+		constants:     constants,
+		functions:     functions,
+		topLevelNames: topLevelNames,
+	}, nil
+}
+
+func u32le(data []byte, off int) uint32 {
+	return uint32(data[off]) | uint32(data[off+1])<<8 | uint32(data[off+2])<<16 | uint32(data[off+3])<<24
+}
+
+func deserializeConstantPool(data []byte) ([]constEntry, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("mgb: constant pool too short")
+	}
+	count := int(u32le(data, 0))
+	off := 4
+	entries := make([]constEntry, 0, count)
+
+	for i := 0; i < count; i++ {
+		if off >= len(data) {
+			return nil, fmt.Errorf("mgb: constant pool truncated at entry %d", i)
+		}
+		kind := constKind(data[off])
+		off++
+
+		if off+4 > len(data) {
+			return nil, fmt.Errorf("mgb: constant pool truncated at entry %d length", i)
+		}
+		slen := int(u32le(data, off))
+		off += 4
+
+		if off+slen > len(data) {
+			return nil, fmt.Errorf("mgb: constant pool truncated at entry %d data", i)
+		}
+		raw := string(data[off : off+slen])
+		off += slen
+
+		switch kind {
+		case constString, constAtom:
+			entries = append(entries, constEntry{kind: kind, str: raw})
+		case constFloat:
+			f, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return nil, fmt.Errorf("mgb: bad float constant %q: %w", raw, err)
+			}
+			entries = append(entries, constEntry{kind: kind, f: f})
+		default:
+			return nil, fmt.Errorf("mgb: unknown constant kind %d", kind)
+		}
+	}
+	return entries, nil
+}
+
+func deserializeFunctionTable(data []byte) ([]funcTemplate, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("mgb: function table too short")
+	}
+	count := int(u32le(data, 0))
+	off := 4
+	fns := make([]funcTemplate, 0, count)
+
+	for i := 0; i < count; i++ {
+		if off+9 > len(data) {
+			return nil, fmt.Errorf("mgb: function table truncated at entry %d", i)
+		}
+		offset := int(u32le(data, off))
+		off += 4
+		arity := int(uint16(data[off]) | uint16(data[off+1])<<8)
+		off += 2
+		localCount := int(uint16(data[off]) | uint16(data[off+1])<<8)
+		off += 2
+		hasRestArg := data[off] != 0
+		off++
+
+		// Read local names
+		var localNames []string
+		if off+2 <= len(data) {
+			nameCount := int(uint16(data[off]) | uint16(data[off+1])<<8)
+			off += 2
+			localNames = make([]string, 0, nameCount)
+			for j := 0; j < nameCount; j++ {
+				if off+2 > len(data) {
+					return nil, fmt.Errorf("mgb: function %d local name %d truncated", i, j)
+				}
+				nl := int(uint16(data[off]) | uint16(data[off+1])<<8)
+				off += 2
+				if off+nl > len(data) {
+					return nil, fmt.Errorf("mgb: function %d local name %d data truncated", i, j)
+				}
+				localNames = append(localNames, string(data[off:off+nl]))
+				off += nl
+			}
+		}
+
+		fns = append(fns, funcTemplate{
+			offset:     offset,
+			arity:      arity,
+			localCount: localCount,
+			hasRestArg: hasRestArg,
+			localNames: localNames,
+		})
+	}
+	return fns, nil
+}
+
+func deserializeNameList(data []byte) ([]string, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("mgb: name list too short")
+	}
+	count := int(u32le(data, 0))
+	off := 4
+	names := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		if off+2 > len(data) {
+			return nil, fmt.Errorf("mgb: name list truncated at entry %d", i)
+		}
+		nl := int(uint16(data[off]) | uint16(data[off+1])<<8)
+		off += 2
+		if off+nl > len(data) {
+			return nil, fmt.Errorf("mgb: name list data truncated at entry %d", i)
+		}
+		names = append(names, string(data[off:off+nl]))
+		off += nl
+	}
+	return names, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +541,10 @@ func (co *compiler) resolveUpvalue(name string) bool {
 // ---------------------------------------------------------------------------
 
 func (co *compiler) compileNode(node astNode) {
+	co.compileNodeTail(node, false)
+}
+
+func (co *compiler) compileNodeTail(node astNode, isTail bool) {
 	if node == nil {
 		co.emitOp(opConstNull)
 		return
@@ -427,12 +646,20 @@ func (co *compiler) compileNode(node astNode) {
 					co.compileNode(call.restArg)
 					arity++
 				}
-				co.emitOp(opCall)
+				if isTail && len(co.parentLocals) > 0 && call.restArg == nil {
+					co.emitOp(opTailCall)
+				} else {
+					co.emitOp(opCall)
+				}
 				co.emit(byte(arity & 0xFF))
 			} else {
 				co.compileNode(n.right)
 				co.compileNode(n.left)
-				co.emitOp(opCall)
+				if isTail && len(co.parentLocals) > 0 {
+					co.emitOp(opTailCall)
+				} else {
+					co.emitOp(opCall)
+				}
 				co.emit(1)
 			}
 			return
@@ -519,15 +746,18 @@ func (co *compiler) compileNode(node astNode) {
 			co.emitOp(opConstNull)
 		} else {
 			for i, expr := range n.exprs {
-				co.compileNode(expr)
-				if i < len(n.exprs)-1 {
+				isLast := i == len(n.exprs)-1
+				if isLast {
+					co.compileNodeTail(expr, isTail)
+				} else {
+					co.compileNode(expr)
 					co.emitOp(opPop)
 				}
 			}
 		}
 
 	case ifExprNode:
-		co.compileIf(n)
+		co.compileIfTail(n, isTail)
 
 	case fnNode:
 		co.compileFunction(&n)
@@ -538,7 +768,7 @@ func (co *compiler) compileNode(node astNode) {
 		co.compileClass(n)
 
 	case fnCallNode:
-		co.compileFnCall(n)
+		co.compileFnCallTail(n, isTail)
 
 	default:
 		co.emitOp(opConstNull)
@@ -628,6 +858,10 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 
 // compileIf compiles an if-expression (pattern matching).
 func (co *compiler) compileIf(n ifExprNode) {
+	co.compileIfTail(n, false)
+}
+
+func (co *compiler) compileIfTail(n ifExprNode, isTail bool) {
 	co.compileNode(n.cond)
 	var endJumps []int
 
@@ -635,7 +869,7 @@ func (co *compiler) compileIf(n ifExprNode) {
 		if _, isEmpty := br.target.(emptyNode); isEmpty {
 			// Default/wildcard branch: pop condition, execute body
 			co.emitOp(opPop)
-			co.compileNode(br.body)
+			co.compileNodeTail(br.body, isTail)
 		} else {
 			// Duplicate condition, compile target, compare
 			co.emitOp(opDup)
@@ -647,7 +881,7 @@ func (co *compiler) compileIf(n ifExprNode) {
 			co.emitI32(0)
 			// Match: pop condition, execute body, jump to end
 			co.emitOp(opPop)
-			co.compileNode(br.body)
+			co.compileNodeTail(br.body, isTail)
 			co.emitOp(opJump)
 			endJumpOffset := co.offset()
 			co.emitI32(0)
@@ -700,7 +934,8 @@ func (co *compiler) compileFunction(n *fnNode) {
 	}
 
 	// Compile body (may register inner function templates!)
-	co.compileNode(n.body)
+	// Mark body as tail position so recursive calls emit opTailCall
+	co.compileNodeTail(n.body, true)
 	co.emitOp(opReturn)
 
 	fnBodyEnd := co.offset()
@@ -726,6 +961,7 @@ func (co *compiler) compileFunction(n *fnNode) {
 		name:       n.name,
 		hasRestArg: n.restArg != "",
 		localNames: localNamesCopy,
+		defn:       n,
 	})
 
 	// Emit CLOSURE in outer code
@@ -754,6 +990,10 @@ func (co *compiler) compileClass(n classNode) {
 
 // compileFnCall compiles a function call.
 func (co *compiler) compileFnCall(n fnCallNode) {
+	co.compileFnCallTail(n, false)
+}
+
+func (co *compiler) compileFnCallTail(n fnCallNode, isTail bool) {
 	// Check for import() calls
 	if ident, ok := n.fn.(identifierNode); ok && ident.payload == "import" && len(n.args) == 1 && n.restArg == nil {
 		if strArg, ok := n.args[0].(stringNode); ok {
@@ -801,6 +1041,8 @@ func (co *compiler) compileFnCall(n fnCallNode) {
 	if n.restArg != nil {
 		arity++
 		co.emitOp(opCallSpread)
+	} else if isTail && len(co.parentLocals) > 0 {
+		co.emitOp(opTailCall)
 	} else {
 		co.emitOp(opCall)
 	}
@@ -941,6 +1183,7 @@ type closureVal struct {
 	fnIdx       int
 	parentScope *vmScope                                  // captured scope (shared reference, not a copy)
 	call        func(args []Value) (Value, *runtimeError) // set for interop with tree-walker
+	defn        *fnNode                                   // preserved AST for interpreter() engine switching
 }
 
 // callFrame represents a single function call on the call stack.
@@ -954,12 +1197,14 @@ type callFrame struct {
 
 // VM is the bytecode virtual machine.
 type VM struct {
-	chunk  *bytecodeChunk
-	pc     int
-	stack  []Value
-	sp     int // stack pointer (next free slot)
-	frames []callFrame
-	ctx    *Context // for built-in function dispatch + imports
+	chunk      *bytecodeChunk
+	pc         int
+	stack      []Value
+	sp         int // stack pointer (next free slot)
+	frames     []callFrame
+	ctx        *Context // for built-in function dispatch + imports
+	initLocals []Value  // pre-populated local slot values (for bytecode() builtin)
+	outerScope *vmScope // enclosing scope for upvalue resolution in bytecode() builtin
 }
 
 func newVM(chunk *bytecodeChunk, ctx *Context) *VM {
@@ -971,6 +1216,42 @@ func newVM(chunk *bytecodeChunk, ctx *Context) *VM {
 		frames: make([]callFrame, 0, 64),
 		ctx:    ctx,
 	}
+}
+
+// vmPool recycles VM structs to reduce allocations for bytecode() calls.
+var vmPool = sync.Pool{
+	New: func() interface{} {
+		return &VM{
+			stack:  make([]Value, 1024),
+			frames: make([]callFrame, 0, 64),
+		}
+	},
+}
+
+// acquireVM gets a VM from the pool and initializes it for the given chunk.
+func acquireVM(chunk *bytecodeChunk, ctx *Context) *VM {
+	vm := vmPool.Get().(*VM)
+	vm.chunk = chunk
+	vm.pc = 0
+	vm.sp = 0
+	vm.frames = vm.frames[:0]
+	vm.ctx = ctx
+	vm.initLocals = nil
+	vm.outerScope = nil
+	return vm
+}
+
+// releaseVM returns a VM to the pool after clearing references.
+func releaseVM(vm *VM) {
+	// Clear stack references to avoid holding onto GC-pinned values
+	for i := 0; i < vm.sp; i++ {
+		vm.stack[i] = nil
+	}
+	vm.chunk = nil
+	vm.ctx = nil
+	vm.initLocals = nil
+	vm.outerScope = nil
+	vmPool.Put(vm)
 }
 
 func (vm *VM) push(v Value) {
@@ -1083,8 +1364,10 @@ func (vm *VM) wrapClosureForInterop(cv *closureVal) BuiltinFnValue {
 	return BuiltinFnValue{
 		name: chunk.functions[cv.fnIdx].name,
 		fn: func(args []Value) (Value, *runtimeError) {
-			child := newVM(chunk, ctx)
-			return child.callClosure(cv, args)
+			child := acquireVM(chunk, ctx)
+			result, err := child.callClosure(cv, args)
+			releaseVM(child)
+			return result, err
 		},
 	}
 }
@@ -1149,15 +1432,19 @@ func (vm *VM) interopValue(v Value) Value {
 
 // ensureClosureCallable populates the call field on a closureVal so that
 // the tree-walking interpreter can invoke it through evalFnCall.
+// A dedicated child VM is allocated per closure to avoid pool Get/Put overhead
+// on every callback invocation (e.g., 10k map iterations).
 func (vm *VM) ensureClosureCallable(cv *closureVal) {
 	if cv.call != nil {
 		return
 	}
 	chunk := vm.chunk
 	ctx := vm.ctx
+	childVM := newVM(chunk, ctx)
 	cv.call = func(args []Value) (Value, *runtimeError) {
-		child := newVM(chunk, ctx)
-		return child.callClosure(cv, args)
+		childVM.sp = 0
+		childVM.frames = childVM.frames[:0]
+		return childVM.callClosure(cv, args)
 	}
 }
 
@@ -1168,21 +1455,36 @@ func (vm *VM) ensureClosureCallable(cv *closureVal) {
 func (vm *VM) run() (Value, *runtimeError) {
 	code := vm.chunk.code
 
-	// Top-level local slots
-	topLocalCount := len(vm.chunk.topLevelNames)
-	if topLocalCount < 256 {
-		topLocalCount = 256 // ensure enough slots for forward-declared locals
-	}
-	topLocals := make([]Value, topLocalCount)
-	for i := range topLocals {
-		topLocals[i] = null
-	}
+	// Skip expensive top-level allocation when we're already inside a frame
+	// (e.g., callClosure for callback dispatch). The frame has its own locals
+	// and scope, so topLocals/topScope are never accessed.
+	var topLocals []Value
+	var topScope *vmScope
 
-	// Build top-level scope
-	topScope := &vmScope{
-		names:  vm.chunk.topLevelNames,
-		values: topLocals,
-		parent: nil,
+	if len(vm.frames) == 0 {
+		// Top-level execution — allocate locals
+		topLocalCount := len(vm.chunk.topLevelNames)
+		if topLocalCount < 256 {
+			topLocalCount = 256 // ensure enough slots for forward-declared locals
+		}
+		topLocals = make([]Value, topLocalCount)
+		for i := range topLocals {
+			topLocals[i] = null
+		}
+
+		// Apply pre-populated initial locals (from bytecode() builtin)
+		for i, v := range vm.initLocals {
+			if i < len(topLocals) {
+				topLocals[i] = v
+			}
+		}
+
+		// Build top-level scope
+		topScope = &vmScope{
+			names:  vm.chunk.topLevelNames,
+			values: topLocals,
+			parent: vm.outerScope,
+		}
 	}
 
 	for {
@@ -1335,16 +1637,34 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opAdd:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(IntValue(li + ri))
+					break
+				}
+			}
 			vm.push(vmAdd(left, right))
 
 		case opSub:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(IntValue(li - ri))
+					break
+				}
+			}
 			vm.push(vmSub(left, right))
 
 		case opMul:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(IntValue(li * ri))
+					break
+				}
+			}
 			vm.push(vmMul(left, right))
 
 		case opDiv:
@@ -1523,6 +1843,13 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opEq:
 			right := vm.pop()
 			left := vm.pop()
+			// Fast path for int comparison (dominant case in pattern matching)
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(BoolValue(li == ri))
+					break
+				}
+			}
 			vm.push(BoolValue(left.Eq(right)))
 
 		case opNeq:
@@ -1538,21 +1865,45 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opGt:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(BoolValue(li > ri))
+					break
+				}
+			}
 			vm.push(vmGt(left, right))
 
 		case opLt:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(BoolValue(li < ri))
+					break
+				}
+			}
 			vm.push(vmLt(left, right))
 
 		case opGeq:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(BoolValue(li >= ri))
+					break
+				}
+			}
 			vm.push(vmGeq(left, right))
 
 		case opLeq:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(BoolValue(li <= ri))
+					break
+				}
+			}
 			vm.push(vmLeq(left, right))
 
 		case opNot:
@@ -1629,7 +1980,8 @@ func (vm *VM) run() (Value, *runtimeError) {
 			// This allows closures to see updates made after the closure is created
 			// (e.g., named functions storing themselves in the outer scope).
 			curScope := vm.currentScope(topScope)
-			vm.push(&closureVal{fnIdx: fnIdx, parentScope: curScope})
+			ft := &vm.chunk.functions[fnIdx]
+			vm.push(&closureVal{fnIdx: fnIdx, parentScope: curScope, defn: ft.defn})
 
 		case opCall:
 			arity := int(vm.fetchU8())
@@ -1830,34 +2182,60 @@ func (vm *VM) run() (Value, *runtimeError) {
 				// Reuse the current frame for tail calls
 				frame := vm.currentFrame()
 				if frame != nil {
-					locals := make([]Value, ft.localCount)
-					for i := range locals {
-						locals[i] = null
-					}
-					paramCount := ft.arity
-					for i := 0; i < paramCount && i < len(args); i++ {
-						locals[i] = args[i]
-					}
-					if ft.hasRestArg && paramCount < len(locals) {
-						var restList ListValue
-						if len(args) > paramCount {
-							restList = ListValue(args[paramCount:])
-						} else {
-							restList = ListValue{}
+					// Fast path: self-recursion — reuse locals array
+					if fn.fnIdx == frame.fnIdx && len(frame.locals) >= ft.localCount {
+						locals := frame.locals
+						paramCount := ft.arity
+						for i := 0; i < paramCount && i < len(args); i++ {
+							locals[i] = args[i]
 						}
-						locals[paramCount] = &restList
-					}
+						// Zero remaining locals beyond params
+						for i := paramCount; i < ft.localCount; i++ {
+							locals[i] = null
+						}
+						if ft.hasRestArg && paramCount < len(locals) {
+							var restList ListValue
+							if len(args) > paramCount {
+								restList = ListValue(args[paramCount:])
+							} else {
+								restList = ListValue{}
+							}
+							locals[paramCount] = &restList
+						}
+						frame.scope.values = locals
+						frame.scope.parent = fn.parentScope
+						vm.pc = ft.offset
+					} else {
+						// Different function or different local count — allocate new
+						locals := make([]Value, ft.localCount)
+						for i := range locals {
+							locals[i] = null
+						}
+						paramCount := ft.arity
+						for i := 0; i < paramCount && i < len(args); i++ {
+							locals[i] = args[i]
+						}
+						if ft.hasRestArg && paramCount < len(locals) {
+							var restList ListValue
+							if len(args) > paramCount {
+								restList = ListValue(args[paramCount:])
+							} else {
+								restList = ListValue{}
+							}
+							locals[paramCount] = &restList
+						}
 
-					scope := &vmScope{
-						names:  ft.localNames,
-						values: locals,
-						parent: fn.parentScope,
-					}
+						scope := &vmScope{
+							names:  ft.localNames,
+							values: locals,
+							parent: fn.parentScope,
+						}
 
-					frame.locals = locals
-					frame.scope = scope
-					frame.fnIdx = fn.fnIdx
-					vm.pc = ft.offset
+						frame.locals = locals
+						frame.scope = scope
+						frame.fnIdx = fn.fnIdx
+						vm.pc = ft.offset
+					}
 				} else {
 					// Tail call at top level — same as regular call
 					locals := make([]Value, ft.localCount)
@@ -2544,24 +2922,15 @@ func vmConcat(left, right Value) Value {
 		}
 	case *StringValue:
 		if rv, ok := right.(*StringValue); ok {
-			result := make([]byte, len(*lv)+len(*rv))
-			copy(result, *lv)
-			copy(result[len(*lv):], *rv)
-			sv := StringValue(result)
-			return &sv
+			*lv = append(*lv, *rv...)
+			return lv
 		}
 		if rv, ok := right.(IntValue); ok {
-			result := make([]byte, len(*lv)+1)
-			copy(result, *lv)
-			result[len(*lv)] = byte(rv)
-			sv := StringValue(result)
-			return &sv
+			*lv = append(*lv, byte(rv))
+			return lv
 		}
 	case *ListValue:
-		newList := make([]Value, len(*lv)+1)
-		copy(newList, *lv)
-		newList[len(*lv)] = right
-		*lv = ListValue(newList)
+		*lv = append(*lv, right)
 		return lv
 	}
 	return null

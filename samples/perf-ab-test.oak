@@ -1,0 +1,765 @@
+// A/B Engine Test Harness
+// Tests every benchmark with BOTH bytecode() and interpreter() wrappers,
+// plus a raw (no-wrapper) baseline, repeated N times for statistical accuracy.
+//
+// Run in BOTH modes to get the full picture:
+//   magnolia samples/perf-ab-test.oak
+//   magnolia --bytecode samples/perf-ab-test.oak
+
+std := import('std')
+{
+	println: println
+	range: range
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	append: append
+	slice: slice
+} := std
+{ printf: printf } := import('fmt')
+{ sort: sort } := import('sort')
+
+// ── helpers ──────────────────────────────────────────────────
+
+RUNS := 5
+
+fn repeat(s, n) {
+	fn sub(i, acc) if i {
+		n -> acc
+		_ -> sub(i + 1, acc + s)
+	}
+	sub(0, '')
+}
+
+fn median(xs) {
+	sorted := sort(xs)
+	n := len(sorted)
+	if n % 2 {
+		0 -> (sorted.(n / 2 - 1) + sorted.(n / 2)) / 2
+		_ -> sorted.(int(n / 2))
+	}
+}
+
+fn minVal(xs) {
+	xs |> reduce(xs.0, fn(a, b) if a < b { true -> a, _ -> b })
+}
+
+fn timeNsMulti(label, fnRun) {
+	times := []
+	fn runN(i) if i {
+		RUNS -> ?
+		_ -> {
+			start := nanotime()
+			fnRun()
+			elapsed := nanotime() - start
+			times << elapsed
+			runN(i + 1)
+		}
+	}
+	runN(0)
+	med := median(times)
+	best := minVal(times)
+	ms := med / 1000000
+	bestMs := best / 1000000
+	{ label: label, median: med, best: best, ms: ms, bestMs: bestMs }
+}
+
+fn padRight(s, w) {
+	fn sub(cur) if len(cur) < w {
+		true -> sub(cur + ' ')
+		_ -> cur
+	}
+	sub(s)
+}
+
+fn padLeft(s, w) {
+	fn sub(cur) if len(cur) < w {
+		true -> sub(' ' + cur)
+		_ -> cur
+	}
+	sub(s)
+}
+
+results := []
+
+fn runTest(name, rawFn, bcFn, interpFn) {
+	println('')
+	println('  Testing: ' + name)
+	rRaw := timeNsMulti('raw', rawFn)
+	rBC := timeNsMulti('bytecode', bcFn)
+	rInt := timeNsMulti('interp', interpFn)
+
+	// Determine winner by median
+	bestTime := rRaw.median
+	winner := 'raw'
+	if rBC.median < bestTime {
+		true -> {
+			bestTime <- rBC.median
+			winner <- 'bytecode'
+		}
+		_ -> ?
+	}
+	if rInt.median < bestTime {
+		true -> {
+			bestTime <- rInt.median
+			winner <- 'interp'
+		}
+		_ -> ?
+	}
+
+	printf('    raw:      {{ 0 }} ms (best {{ 1 }} ms)', rRaw.ms, rRaw.bestMs)
+	printf('    bytecode: {{ 0 }} ms (best {{ 1 }} ms)', rBC.ms, rBC.bestMs)
+	printf('    interp:   {{ 0 }} ms (best {{ 1 }} ms)', rInt.ms, rInt.bestMs)
+	printf('    WINNER:   {{ 0 }}', winner)
+
+	results << {
+		name: name
+		raw: rRaw.ms
+		bc: rBC.ms
+		interp: rInt.ms
+		winner: winner
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BENCHMARKS
+// ═══════════════════════════════════════════════════════════════
+
+println('═══ A/B Engine Test (' + string(RUNS) + ' runs each, median) ═══')
+
+// ── 1. Int Arithmetic (200k) ──────────────────────────────────
+
+fn _arithBody(n) {
+	fn sub(i, acc) if i {
+		n -> acc
+		_ -> sub(i + 1, acc + i * 3 - i / 2 + 7)
+	}
+	sub(0, 0)
+}
+
+runTest(
+	'int arithmetic (200k)'
+	fn() _arithBody(200000)
+	fn() with bytecode([200000]) fn(n) {
+		fn sub(i, acc) if i {
+			n -> acc
+			_ -> sub(i + 1, acc + i * 3 - i / 2 + 7)
+		}
+		sub(0, 0)
+	}
+	fn() with interpreter([200000]) fn(n) {
+		fn sub(i, acc) if i {
+			n -> acc
+			_ -> sub(i + 1, acc + i * 3 - i / 2 + 7)
+		}
+		sub(0, 0)
+	}
+)
+
+// ── 2. Float Arithmetic (200k) ────────────────────────────────
+
+runTest(
+	'float arithmetic (200k)'
+	fn() {
+		fn sub(i, acc) if i {
+			200000 -> acc
+			_ -> sub(i + 1, acc + (i * 3.14) - (i / 2.72) + 1.618)
+		}
+		sub(0, 0.0)
+	}
+	fn() with bytecode([200000]) fn(n) {
+		fn sub(i, acc) if i {
+			n -> acc
+			_ -> sub(i + 1, acc + (i * 3.14) - (i / 2.72) + 1.618)
+		}
+		sub(0, 0.0)
+	}
+	fn() with interpreter([200000]) fn(n) {
+		fn sub(i, acc) if i {
+			n -> acc
+			_ -> sub(i + 1, acc + (i * 3.14) - (i / 2.72) + 1.618)
+		}
+		sub(0, 0.0)
+	}
+)
+
+// ── 3. Fib(20) Naive ─────────────────────────────────────────
+
+runTest(
+	'fib(20) naive'
+	fn() {
+		fn fibN(x) if x <= 1 {
+			true -> x
+			_ -> fibN(x - 1) + fibN(x - 2)
+		}
+		fibN(20)
+	}
+	fn() with bytecode([20]) fn(n) {
+		fn fibN(x) if x <= 1 {
+			true -> x
+			_ -> fibN(x - 1) + fibN(x - 2)
+		}
+		fibN(n)
+	}
+	fn() with interpreter([20]) fn(n) {
+		fn fibN(x) if x <= 1 {
+			true -> x
+			_ -> fibN(x - 1) + fibN(x - 2)
+		}
+		fibN(n)
+	}
+)
+
+// ── 4. Fib(1000) Tail-Recursive ──────────────────────────────
+
+runTest(
+	'fib(1000) tail-recursive'
+	fn() {
+		fn sub(i, a, b) if i {
+			0 -> a
+			_ -> sub(i - 1, b, a + b)
+		}
+		sub(1000, 0, 1)
+	}
+	fn() with bytecode([1000]) fn(n) {
+		fn sub(i, a, b) if i {
+			0 -> a
+			_ -> sub(i - 1, b, a + b)
+		}
+		sub(n, 0, 1)
+	}
+	fn() with interpreter([1000]) fn(n) {
+		fn sub(i, a, b) if i {
+			0 -> a
+			_ -> sub(i - 1, b, a + b)
+		}
+		sub(n, 0, 1)
+	}
+)
+
+// ── 5. Build List (2k) ──────────────────────────────────────
+
+runTest(
+	'build list (2k push)'
+	fn() {
+		xs := []
+		fn sub(i) if i {
+			2000 -> xs
+			_ -> {
+				xs << i
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	fn() with bytecode([2000]) fn(limit) {
+		xs := []
+		fn sub(i) if i {
+			limit -> xs
+			_ -> {
+				xs << i
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	fn() with interpreter([2000]) fn(limit) {
+		xs := []
+		fn sub(i) if i {
+			limit -> xs
+			_ -> {
+				xs << i
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+)
+
+// ── 6. Map (10k) ─────────────────────────────────────────────
+
+bigList := range(10000)
+
+runTest(
+	'map (10k)'
+	fn() bigList |> map(fn(x) x * 2 + 1)
+	fn() with bytecode([bigList]) fn(xs) xs |> map(fn(x) x * 2 + 1)
+	fn() with interpreter([bigList]) fn(xs) xs |> map(fn(x) x * 2 + 1)
+)
+
+// ── 7. Filter (10k) ──────────────────────────────────────────
+
+runTest(
+	'filter (10k)'
+	fn() bigList |> filter(fn(x) x % 3 = 0)
+	fn() with bytecode([bigList]) fn(xs) xs |> filter(fn(x) x % 3 = 0)
+	fn() with interpreter([bigList]) fn(xs) xs |> filter(fn(x) x % 3 = 0)
+)
+
+// ── 8. Reduce Sum (10k) ─────────────────────────────────────
+
+runTest(
+	'reduce sum (10k)'
+	fn() bigList |> reduce(0, fn(a, b) a + b)
+	fn() with bytecode([bigList]) fn(xs) xs |> reduce(0, fn(a, b) a + b)
+	fn() with interpreter([bigList]) fn(xs) xs |> reduce(0, fn(a, b) a + b)
+)
+
+// ── 9. String Concat (2k) ───────────────────────────────────
+
+runTest(
+	'string concat (2k)'
+	fn() {
+		fn sub(i, acc) if i {
+			2000 -> acc
+			_ -> sub(i + 1, acc + 'ab')
+		}
+		sub(0, '')
+	}
+	fn() with bytecode([2000]) fn(limit) {
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + 'ab')
+		}
+		sub(0, '')
+	}
+	fn() with interpreter([2000]) fn(limit) {
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + 'ab')
+		}
+		sub(0, '')
+	}
+)
+
+// ── 10. String Slice (500 iter on 5k-char) ──────────────────
+
+longStr := repeat('abcdefghij', 500)
+
+runTest(
+	'string slice (5k)'
+	fn() {
+		fn sub(i) if i {
+			500 -> ?
+			_ -> {
+				longStr |> slice(i, i + 10)
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	fn() with bytecode([longStr, 500]) fn(s, limit) {
+		fn sub(i) if i {
+			limit -> ?
+			_ -> {
+				s |> slice(i, i + 10)
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	fn() with interpreter([longStr, 500]) fn(s, limit) {
+		fn sub(i) if i {
+			limit -> ?
+			_ -> {
+				s |> slice(i, i + 10)
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+)
+
+// ── 11. Object Build (3k) ───────────────────────────────────
+
+runTest(
+	'object build (3k keys)'
+	fn() {
+		obj := {}
+		fn sub(i) if i {
+			3000 -> obj
+			_ -> {
+				obj.(string(i)) := i * 2
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	fn() with bytecode([3000]) fn(limit) {
+		obj := {}
+		fn sub(i) if i {
+			limit -> obj
+			_ -> {
+				obj.(string(i)) := i * 2
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	fn() with interpreter([3000]) fn(limit) {
+		obj := {}
+		fn sub(i) if i {
+			limit -> obj
+			_ -> {
+				obj.(string(i)) := i * 2
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+)
+
+// ── 12. Object Read (3k) ────────────────────────────────────
+
+obj3k := {}
+range(3000) |> each(fn(i) obj3k.(string(i)) := i)
+
+runTest(
+	'object read (3k keys)'
+	fn() {
+		fn sub(i, acc) if i {
+			3000 -> acc
+			_ -> sub(i + 1, acc + obj3k.(string(i)))
+		}
+		sub(0, 0)
+	}
+	fn() with bytecode([obj3k, 3000]) fn(obj, limit) {
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + obj.(string(i)))
+		}
+		sub(0, 0)
+	}
+	fn() with interpreter([obj3k, 3000]) fn(obj, limit) {
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + obj.(string(i)))
+		}
+		sub(0, 0)
+	}
+)
+
+// ── 13. Closure Create+Call (10k) ────────────────────────────
+
+runTest(
+	'closure create+call (10k)'
+	fn() {
+		fn mkAdd(x) fn(y) x + y
+		fn sub(i, acc) if i {
+			10000 -> acc
+			_ -> {
+				add := mkAdd(i)
+				sub(i + 1, acc + add(i))
+			}
+		}
+		sub(0, 0)
+	}
+	fn() with bytecode([10000]) fn(limit) {
+		fn mkAdd(x) fn(y) x + y
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> {
+				add := mkAdd(i)
+				sub(i + 1, acc + add(i))
+			}
+		}
+		sub(0, 0)
+	}
+	fn() with interpreter([10000]) fn(limit) {
+		fn mkAdd(x) fn(y) x + y
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> {
+				add := mkAdd(i)
+				sub(i + 1, acc + add(i))
+			}
+		}
+		sub(0, 0)
+	}
+)
+
+// ── 14. Compose Chain (10k) ─────────────────────────────────
+
+runTest(
+	'compose chain (10k)'
+	fn() {
+		fn comp(f, g) fn(x) f(g(x))
+		double := fn(x) x * 2
+		inc := fn(x) x + 1
+		dblInc := comp(double, inc)
+		fn sub(i, acc) if i {
+			10000 -> acc
+			_ -> sub(i + 1, acc + dblInc(i))
+		}
+		sub(0, 0)
+	}
+	fn() with bytecode([10000]) fn(limit) {
+		fn comp(f, g) fn(x) f(g(x))
+		double := fn(x) x * 2
+		inc := fn(x) x + 1
+		dblInc := comp(double, inc)
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + dblInc(i))
+		}
+		sub(0, 0)
+	}
+	fn() with interpreter([10000]) fn(limit) {
+		fn comp(f, g) fn(x) f(g(x))
+		double := fn(x) x * 2
+		inc := fn(x) x + 1
+		dblInc := comp(double, inc)
+		fn sub(i, acc) if i {
+			limit -> acc
+			_ -> sub(i + 1, acc + dblInc(i))
+		}
+		sub(0, 0)
+	}
+)
+
+// ── 15. Sort (2k) ───────────────────────────────────────────
+
+unsorted := range(2000) |> map(fn(_) int(rand() * 10000))
+
+runTest(
+	'sort 2k random ints'
+	fn() sort(unsorted)
+	fn() with bytecode([unsorted]) fn(xs) sort(xs)
+	fn() with interpreter([unsorted]) fn(xs) sort(xs)
+)
+
+// ── 16. FizzBuzz Pattern Match (20k) ────────────────────────
+
+runTest(
+	'fizzbuzz classify (20k)'
+	fn() {
+		fn cls(n) if n % 15 {
+			0 -> :fizzbuzz
+			_ -> if n % 3 {
+				0 -> :fizz
+				_ -> if n % 5 {
+					0 -> :buzz
+					_ -> n
+				}
+			}
+		}
+		fn sub(i, fb, f, b) if i {
+			20000 -> [fb, f, b]
+			_ -> if cls(i) {
+				:fizzbuzz -> sub(i + 1, fb + 1, f, b)
+				:fizz -> sub(i + 1, fb, f + 1, b)
+				:buzz -> sub(i + 1, fb, f, b + 1)
+				_ -> sub(i + 1, fb, f, b)
+			}
+		}
+		sub(1, 0, 0, 0)
+	}
+	fn() with bytecode([20000]) fn(limit) {
+		fn cls(n) if n % 15 {
+			0 -> :fizzbuzz
+			_ -> if n % 3 {
+				0 -> :fizz
+				_ -> if n % 5 {
+					0 -> :buzz
+					_ -> n
+				}
+			}
+		}
+		fn sub(i, fb, f, b) if i {
+			limit -> [fb, f, b]
+			_ -> if cls(i) {
+				:fizzbuzz -> sub(i + 1, fb + 1, f, b)
+				:fizz -> sub(i + 1, fb, f + 1, b)
+				:buzz -> sub(i + 1, fb, f, b + 1)
+				_ -> sub(i + 1, fb, f, b)
+			}
+		}
+		sub(1, 0, 0, 0)
+	}
+	fn() with interpreter([20000]) fn(limit) {
+		fn cls(n) if n % 15 {
+			0 -> :fizzbuzz
+			_ -> if n % 3 {
+				0 -> :fizz
+				_ -> if n % 5 {
+					0 -> :buzz
+					_ -> n
+				}
+			}
+		}
+		fn sub(i, fb, f, b) if i {
+			limit -> [fb, f, b]
+			_ -> if cls(i) {
+				:fizzbuzz -> sub(i + 1, fb + 1, f, b)
+				:fizz -> sub(i + 1, fb, f + 1, b)
+				:buzz -> sub(i + 1, fb, f, b + 1)
+				_ -> sub(i + 1, fb, f, b)
+			}
+		}
+		sub(1, 0, 0, 0)
+	}
+)
+
+// ── 17. Sieve of Eratosthenes (10k) ─────────────────────────
+
+fn _sieveBody(limit) {
+	flags := range(limit) |> map(fn(_) true)
+	flags.0 := false
+	flags.1 := false
+
+	fn outer(i) if i * i < limit {
+		true -> {
+			if flags.(i) {
+				true -> {
+					fn inner(j) if j < limit {
+						true -> {
+							flags.(j) := false
+							inner(j + i)
+						}
+						_ -> ?
+					}
+					inner(i * i)
+				}
+				_ -> ?
+			}
+			outer(i + 1)
+		}
+		_ -> ?
+	}
+	outer(2)
+
+	primes := []
+	fn collect(i) if i < limit {
+		true -> {
+			if flags.(i) {
+				true -> primes << i
+				_ -> ?
+			}
+			collect(i + 1)
+		}
+		_ -> ?
+	}
+	collect(0)
+	primes
+}
+
+runTest(
+	'sieve (10k)'
+	fn() _sieveBody(10000)
+	fn() with bytecode([10000]) fn(limit) {
+		flags := range(limit) |> map(fn(_) true)
+		flags.0 := false
+		flags.1 := false
+
+		fn outer(i) if i * i < limit {
+			true -> {
+				if flags.(i) {
+					true -> {
+						fn inner(j) if j < limit {
+							true -> {
+								flags.(j) := false
+								inner(j + i)
+							}
+							_ -> ?
+						}
+						inner(i * i)
+					}
+					_ -> ?
+				}
+				outer(i + 1)
+			}
+			_ -> ?
+		}
+		outer(2)
+
+		primes := []
+		fn collect(i) if i < limit {
+			true -> {
+				if flags.(i) {
+					true -> primes << i
+					_ -> ?
+				}
+				collect(i + 1)
+			}
+			_ -> ?
+		}
+		collect(0)
+		primes
+	}
+	fn() with interpreter([10000]) fn(limit) {
+		flags := range(limit) |> map(fn(_) true)
+		flags.0 := false
+		flags.1 := false
+
+		fn outer(i) if i * i < limit {
+			true -> {
+				if flags.(i) {
+					true -> {
+						fn inner(j) if j < limit {
+							true -> {
+								flags.(j) := false
+								inner(j + i)
+							}
+							_ -> ?
+						}
+						inner(i * i)
+					}
+					_ -> ?
+				}
+				outer(i + 1)
+			}
+			_ -> ?
+		}
+		outer(2)
+
+		primes := []
+		fn collect(i) if i < limit {
+			true -> {
+				if flags.(i) {
+					true -> primes << i
+					_ -> ?
+				}
+				collect(i + 1)
+			}
+			_ -> ?
+		}
+		collect(0)
+		primes
+	}
+)
+
+// ═══════════════════════════════════════════════════════════════
+// RESULTS TABLE
+// ═══════════════════════════════════════════════════════════════
+
+println('')
+println('═══ RESULTS (median ms, ' + string(RUNS) + ' runs) ═══')
+println('')
+
+hdr := '│ ' + padRight('Test', 28) + ' │ ' + padLeft('raw', 9) + ' │ ' + padLeft('bytecode', 9) + ' │ ' + padLeft('interp', 9) + ' │ ' + padLeft('WINNER', 10) + ' │'
+sep := '├' + repeat('─', 30) + '┼' + repeat('─', 11) + '┼' + repeat('─', 11) + '┼' + repeat('─', 11) + '┼' + repeat('─', 12) + '┤'
+println('┌' + repeat('─', 30) + '┬' + repeat('─', 11) + '┬' + repeat('─', 11) + '┬' + repeat('─', 11) + '┬' + repeat('─', 12) + '┐')
+println(hdr)
+println(sep)
+results |> each(fn(r) {
+	println('│ ' + padRight(r.name, 28) + ' │ ' + padLeft(string(r.raw), 9) + ' │ ' + padLeft(string(r.bc), 9) + ' │ ' + padLeft(string(r.interp), 9) + ' │ ' + padLeft(r.winner, 10) + ' │')
+})
+println('└' + repeat('─', 30) + '┴' + repeat('─', 11) + '┴' + repeat('─', 11) + '┴' + repeat('─', 11) + '┴' + repeat('─', 12) + '┘')
+
+// Summary counts
+bcWins := 0
+intWins := 0
+rawWins := 0
+results |> each(fn(r) if r.winner {
+	'bytecode' -> bcWins <- bcWins + 1
+	'interp' -> intWins <- intWins + 1
+	'raw' -> rawWins <- rawWins + 1
+	_ -> ?
+})
+println('')
+printf('  bytecode wins: {{ 0 }}', bcWins)
+printf('  interp wins:   {{ 0 }}', intWins)
+printf('  raw wins:      {{ 0 }}', rawWins)
+println('')
+println('Done.')

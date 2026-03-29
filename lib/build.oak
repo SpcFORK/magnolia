@@ -14,6 +14,7 @@ keys := std.keys
 
 str := import('str')
 join := str.join
+replace := str.replace
 startsWith? := str.startsWith?
 
 sort := import('sort')
@@ -33,7 +34,7 @@ dir := path.dir
 resolve := path.resolve
 
 json := import('json')
-encodeJSON := json.encode
+encodeJSON := json.serialize
 
 syntax := import('syntax')
 bundleUtils := import('bundle-utils')
@@ -61,6 +62,13 @@ Abort := fn(msg) {
 Entry := ?
 Web? := false
 Wasm? := false
+Ast? := false
+Bin? := false
+Doc? := false
+Ts? := false
+Lua? := false
+Java? := false
+Target := 'oak'
 Output := ?
 Includes := []
 IncludeVFS := ?
@@ -80,6 +88,13 @@ fn applyConfig(config) {
 		Entry: Entry
 		Web?: Web?
 		Wasm?: Wasm?
+		Ast?: Ast?
+		Bin?: Bin?
+		Doc?: Doc?
+		Ts?: Ts?
+		Lua?: Lua?
+		Java?: Java?
+		Target: Target
 		Output: Output
 		Includes: Includes
 		IncludeVFS: IncludeVFS
@@ -103,6 +118,13 @@ fn applyConfig(config) {
 	Entry <- state.Entry
 	Web? <- state.Web?
 	Wasm? <- state.Wasm?
+	Ast? <- state.Ast?
+	Bin? <- state.Bin?
+	Doc? <- state.Doc?
+	Ts? <- state.Ts?
+	Lua? <- state.Lua?
+	Java? <- state.Java?
+	Target <- state.Target
 	Output <- state.Output
 	Includes <- state.Includes
 	IncludeVFS <- state.IncludeVFS
@@ -191,7 +213,7 @@ fn addImportsFromSource(path, file) {
 // Notably, the identifier "import" is always translated to the bundler builtin
 // "__oak_module_import", which in every runtime runs custom logic to search
 // bundled modules before falling back to native import().
-fn formatIdent(name, key) buildIdent.formatIdent(Web?, name, key)
+fn formatIdent(name, key) buildIdent.formatIdent(Web? | Ts?, name, key)
 
 fn wrapModule(block) buildAst.wrapModule(block)
 
@@ -201,7 +223,7 @@ fn wrapBundle(modules, entryModuleName) {
 	buildAst.wrapBundle(modules, entryModuleName, Includes, ImportCallNode)
 }
 
-fn analyzeNode(node) buildAnalyze.analyzeNode(node, Web?)
+fn analyzeNode(node) buildAnalyze.analyzeNode(node, Web? | Ts?)
 
 // renderOakNodes renders Oak AST nodes to Oak program text
 fn renderOakBundle(bundleNode) {
@@ -222,9 +244,516 @@ fn renderWasmBundle(bundleNode) {
 	)
 }
 
+// renderAstBundle serializes the bundled AST as JSON
+fn renderAstBundle(bundleNode) {
+	encodeJSON(bundleNode)
+}
+
+// renderBinBundle serializes the bundled AST to a compact bytecode binary.
+// The preamble (from runtime-native.oak) is compiled into the bytecode so
+// the .mgb file is self-contained.
+fn renderBinBundle(bundleNode) {
+	vm := import('wasm-vm')
+
+	// Parse the runtime preamble and create a combined block
+	preambleAST := syntax.parse(OakNativeRuntime)
+	combinedExprs := []
+	preambleAST |> each(fn(node) combinedExprs << node)
+	if bundleNode.type {
+		:block -> bundleNode.exprs |> each(fn(node) combinedExprs << node)
+		_ -> combinedExprs << bundleNode
+	}
+	combinedNode := {
+		type: :block
+		tok: bundleNode.tok
+		exprs: combinedExprs
+		decls: []
+	}
+
+	compiler := vm.compileProgram(combinedNode)
+
+	bcStr := vm.serializeBytecodeToString(compiler)
+	cpStr := vm.serializeConstantPool(compiler)
+	ftStr := vm.serializeFunctionTable(compiler)
+	tlStr := vm.serializeTopLevelNames(compiler)
+
+	// Binary format: MGbc <version:u16> <sections>
+	// Each section: <len:u32> <data>
+	fn u16le(n) char(n & 0xFF) << char((n >> 8) & 0xFF)
+	fn u32le(n) char(n & 0xFF) << char((n >> 8) & 0xFF) << char((n >> 16) & 0xFF) << char((n >> 24) & 0xFF)
+
+	header := 'MGbc' << u16le(2)
+	bcSection := u32le(len(bcStr)) << bcStr
+	cpSection := u32le(len(cpStr)) << cpStr
+	ftSection := u32le(len(ftStr)) << ftStr
+	tlSection := u32le(len(tlStr)) << tlStr
+
+	header << bcSection << cpSection << ftSection << tlSection
+}
+
+// renderDocBundle generates Markdown documentation from the bundled AST
+fn renderDocBundle(bundleNode) {
+	output := '# API Documentation\n\n'
+	output <- output << '_Auto-generated from Magnolia source._\n\n'
+	output <- output << '---\n\n'
+
+	fn docNode(node, depth) if node.type {
+		:block -> {
+			node.exprs |> each(fn(expr) docNode(expr, depth))
+		}
+		:assignment -> if node.local? {
+			true -> if node.right.type {
+				:function -> {
+					name := node.left.val
+					args := node.right.args |> map(fn(a) a) |> join(', ')
+					restArg := node.right.restArg
+					sig := if restArg {
+						?, '' -> name << '(' << args << ')'
+						_ -> name << '(' << args << (if len(node.right.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
+					}
+					output <- output << string(depth) << '### `' << sig << '`\n\n'
+				}
+				_ -> {
+					output <- output << string(depth) << '- `' << node.left.val << '` — constant\n'
+				}
+			}
+		}
+		:function -> if node.name != '' {
+			true -> {
+				args := node.args |> map(fn(a) a) |> join(', ')
+				restArg := node.restArg
+				sig := if restArg {
+					?, '' -> node.name << '(' << args << ')'
+					_ -> node.name << '(' << args << (if len(node.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
+				}
+				output <- output << '### `' << sig << '`\n\n'
+			}
+		}
+		:fnCall -> if node.function.type = :identifier & node.function.val = '__oak_modularize' {
+			true -> {
+				moduleName := node.args.0.val
+				output <- output << '## Module: `' << moduleName << '`\n\n'
+				// The second arg is a function whose body contains module declarations
+				if node.args.1.type = :function {
+					true -> docNode(node.args.1.body, '')
+				}
+			}
+		}
+	}
+
+	docNode(bundleNode, '')
+	output
+}
+
+// renderTsBundle produces TypeScript output (JS with type annotations)
+fn renderTsBundle(bundleNode) {
+	// TypeScript target uses the JS renderer as base, then wraps with TS header
+	jsOutput := buildRender.renderJSBundle(bundleNode, VFSFiles, encodeJSON, OakJSRuntime, fn(name, key) buildIdent.formatIdent(true, name, key), clone)
+
+	tsHeader := '// @ts-nocheck — Oak-generated TypeScript bundle\n'
+	tsHeader << '// Type stubs for Oak runtime\n'
+	tsHeader << 'declare type OakVal = any;\n'
+	tsHeader << 'declare type OakFn = (...args: OakVal[]) => OakVal;\n'
+	tsHeader << 'declare type OakList = OakVal[];\n'
+	tsHeader << 'declare type OakObject = Record<string, OakVal>;\n\n'
+	tsHeader << jsOutput
+}
+
+// renderLuaBundle transpiles bundled Oak AST to Lua 5.4
+fn renderLuaBundle(bundleNode) {
+	luaReserved := ['and', 'break', 'do', 'else', 'elseif', 'end', 'false'
+		'for', 'function', 'goto', 'if', 'in', 'local', 'nil', 'not', 'or'
+		'repeat', 'return', 'then', 'true', 'until', 'while']
+
+	fn luaIdent(name) {
+		clean := name |> clone()
+		clean <- clean |> replace('?', '_qm') |> replace('!', '_exclam')
+		luaReserved |> each(fn(kw) if clean = kw {
+			true -> clean <- '__oak_lua_' << clean
+		})
+		if clean = 'import' -> clean <- '__oak_module_import'
+		clean
+	}
+
+	output := '-- oak build --lua\n'
+	output <- output << '-- Magnolia/Oak to Lua transpiled bundle\n\n'
+
+	// Lua runtime preamble
+	output <- output << 'local __Oak_Modules = {}\n'
+	output <- output << 'local __Oak_Import_Aliases = nil\n\n'
+
+	output <- output << 'local function __oak_eq(a, b)\n'
+	output <- output << '  if type(a) ~= type(b) then return false end\n'
+	output <- output << '  if type(a) == "table" then\n'
+	output <- output << '    for k, v in pairs(a) do\n'
+	output <- output << '      if not __oak_eq(v, b[k]) then return false end\n'
+	output <- output << '    end\n'
+	output <- output << '    for k, v in pairs(b) do\n'
+	output <- output << '      if a[k] == nil then return false end\n'
+	output <- output << '    end\n'
+	output <- output << '    return true\n'
+	output <- output << '  end\n'
+	output <- output << '  return a == b\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_push(tbl, val)\n'
+	output <- output << '  tbl[#tbl + 1] = val\n'
+	output <- output << '  return tbl\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_acc(obj, key)\n'
+	output <- output << '  if obj == nil then return nil end\n'
+	output <- output << '  return obj[key]\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __as_oak_string(v)\n'
+	output <- output << '  if type(v) == "number" then return tostring(v) end\n'
+	output <- output << '  if v == nil then return "" end\n'
+	output <- output << '  return tostring(v)\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_and(a, b)\n'
+	output <- output << '  if a == false then return false end\n'
+	output <- output << '  return b\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_or(a, b)\n'
+	output <- output << '  if a == true then return true end\n'
+	output <- output << '  return b\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_xor(a, b)\n'
+	output <- output << '  if type(a) == "boolean" and type(b) == "boolean" then\n'
+	output <- output << '    return a ~= b\n'
+	output <- output << '  end\n'
+	output <- output << '  return a ~ b\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_modularize(name, factory)\n'
+	output <- output << '  __Oak_Modules[name] = factory\n'
+	output <- output << 'end\n\n'
+
+	output <- output << 'local function __oak_module_import(name)\n'
+	output <- output << '  local m = __Oak_Modules[name]\n'
+	output <- output << '  if m == nil then\n'
+	output <- output << '    if __Oak_Import_Aliases and __Oak_Import_Aliases[name] then\n'
+	output <- output << '      m = __Oak_Modules[__Oak_Import_Aliases[name]]\n'
+	output <- output << '    end\n'
+	output <- output << '  end\n'
+	output <- output << '  if m == nil then return nil end\n'
+	output <- output << '  if type(m) == "function" then\n'
+	output <- output << '    local result = m()\n'
+	output <- output << '    __Oak_Modules[name] = result\n'
+	output <- output << '    return result\n'
+	output <- output << '  end\n'
+	output <- output << '  return m\n'
+	output <- output << 'end\n\n'
+
+	// Render the AST to Lua
+	fn renderNode(node) if node.type {
+		:null -> 'nil'
+		:empty -> 'nil'
+		:string -> '\'' << node.val |> map(fn(c) if c {
+			'\\' -> '\\\\'
+			'\'' -> '\\\''
+			'\n' -> '\\n'
+			'\r' -> '\\r'
+			'\t' -> '\\t'
+			_ -> c
+		}) << '\''
+		:int, :float, :bool -> string(node.val)
+		:identifier -> luaIdent(node.val)
+		:atom -> '\'' << node.val << '\''
+		:list -> '{' << node.elems |> map(renderNode) |> join(', ') << '}'
+		:object -> '{' << node.entries |> map(fn(entry) {
+			{ key: k, val: v } := entry
+			if k.type {
+				:identifier -> '[\"' << k.val << '\"]=' << renderNode(v)
+				:string -> '[\"' << k.val << '\"]=' << renderNode(v)
+				:int -> '[' << string(k.val) << ']=' << renderNode(v)
+				_ -> '[' << renderNode(k) << ']=' << renderNode(v)
+			}
+		}) |> join(', ') << '}'
+		:unary -> if node.op {
+			:minus -> '(-' << renderNode(node.right) << ')'
+			:exclam -> '(not ' << renderNode(node.right) << ')'
+		}
+		:binary -> if node.op {
+			:plus -> '__as_oak_string(' << renderNode(node.left) << ' + ' << renderNode(node.right) << ')'
+			:minus -> '(' << renderNode(node.left) << ' - ' << renderNode(node.right) << ')'
+			:times -> '(' << renderNode(node.left) << ' * ' << renderNode(node.right) << ')'
+			:divide -> '(' << renderNode(node.left) << ' / ' << renderNode(node.right) << ')'
+			:modulus -> '(' << renderNode(node.left) << ' % ' << renderNode(node.right) << ')'
+			:rshift -> '(' << renderNode(node.left) << ' >> ' << renderNode(node.right) << ')'
+			:and -> '__oak_and(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:xor -> '__oak_xor(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:or -> '__oak_or(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:eq -> '__oak_eq(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:neq -> '(not __oak_eq(' << renderNode(node.left) << ', ' << renderNode(node.right) << '))'
+			:greater -> '(' << renderNode(node.left) << ' > ' << renderNode(node.right) << ')'
+			:less -> '(' << renderNode(node.left) << ' < ' << renderNode(node.right) << ')'
+			:geq -> '(' << renderNode(node.left) << ' >= ' << renderNode(node.right) << ')'
+			:leq -> '(' << renderNode(node.left) << ' <= ' << renderNode(node.right) << ')'
+			:pushArrow -> '__oak_push(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+		}
+		:assignment -> luaIdent(node.left.val) << ' = ' << renderNode(node.right)
+		:propertyAccess -> if node.right.type {
+			:identifier -> renderNode(node.left) << '["' << node.right.val << '"]'
+			_ -> '__oak_acc(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+		}
+		:ifExpr -> '(function()\n' << {
+			result := ''
+			node.branches |> each(fn(br, i) {
+				prefix := if i { 0 -> 'if ', _ -> 'elseif ' }
+				if br.target.type = :empty {
+					true -> result <- result << 'else return ' << renderNode(br.body) << '\n'
+					_ -> result <- result << prefix << '__oak_eq(__oak_cond, ' << renderNode(br.target) << ') then return ' << renderNode(br.body) << '\n'
+				}
+			})
+			'local __oak_cond = ' << renderNode(node.cond) << '\n' << result << 'end\nend)()\n'
+		}
+		:block -> '(function()\n' << {
+			result := ''
+			lastIdx := len(node.exprs) - 1
+			node.exprs |> each(fn(expr, i) {
+				if i = lastIdx {
+					true -> result <- result << 'return ' << renderNode(expr) << '\n'
+					_ -> result <- result << renderNode(expr) << '\n'
+				}
+			})
+			result
+		} << 'end)()\n'
+		:function -> {
+			args := node.args |> map(luaIdent) |> join(', ')
+			'function(' << args << ')\n' << {
+				if node.body.type = :block {
+					true -> {
+						result := ''
+						lastIdx := len(node.body.exprs) - 1
+						node.body.exprs |> each(fn(expr, i) {
+							if i = lastIdx {
+								true -> result <- result << 'return ' << renderNode(expr) << '\n'
+								_ -> result <- result << renderNode(expr) << '\n'
+							}
+						})
+						result
+					}
+					_ -> 'return ' << renderNode(node.body) << '\n'
+				}
+			} << 'end'
+		}
+		:fnCall -> renderNode(node.function) << '(' << node.args |> map(renderNode) |> join(', ') << ')'
+	}
+
+	output <- output << renderNode(bundleNode) << '\n'
+	output
+}
+
+// renderJavaBundle transpiles bundled Oak AST to Java 17+
+fn renderJavaBundle(bundleNode) {
+	javaReserved := ['abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch'
+		'char', 'class', 'const', 'continue', 'default', 'do', 'double', 'else'
+		'enum', 'extends', 'final', 'finally', 'float', 'for', 'goto', 'if'
+		'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native'
+		'new', 'package', 'private', 'protected', 'public', 'return', 'short'
+		'static', 'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw'
+		'throws', 'transient', 'try', 'void', 'volatile', 'while', 'var', 'yield'
+		'record', 'sealed', 'permits', 'non-sealed']
+
+	fn javaIdent(name) {
+		clean := name |> clone()
+		clean <- clean |> replace('?', '_qm') |> replace('!', '_exclam')
+		javaReserved |> each(fn(kw) if clean = kw {
+			true -> clean <- '__oak_java_' << clean
+		})
+		if clean = 'import' -> clean <- '__oak_module_import'
+		clean
+	}
+
+	fn javaStr(s) {
+		'"' << s |> map(fn(c) if c {
+			'\\' -> '\\\\'
+			'"' -> '\\"'
+			'\n' -> '\\n'
+			'\r' -> '\\r'
+			'\t' -> '\\t'
+			_ -> c
+		}) << '"'
+	}
+
+	output := '// oak build --java\n'
+	output <- output << '// Magnolia/Oak to Java transpiled bundle\n'
+	output <- output << 'import java.util.*;\n'
+	output <- output << 'import java.util.function.*;\n\n'
+
+	output <- output << '@SuppressWarnings("unchecked")\n'
+	output <- output << 'public class OakBundle {\n\n'
+
+	// Oak runtime helpers as static methods
+	output <- output << '  static final Map<String, Object> __Oak_Modules = new HashMap<>();\n'
+	output <- output << '  static Map<String, String> __Oak_Import_Aliases = null;\n\n'
+
+	output <- output << '  static Object __oak_eq(Object a, Object b) {\n'
+	output <- output << '    if (a == null && b == null) return true;\n'
+	output <- output << '    if (a == null || b == null) return false;\n'
+	output <- output << '    if (a instanceof Map && b instanceof Map) {\n'
+	output <- output << '      Map<?,?> ma = (Map<?,?>) a, mb = (Map<?,?>) b;\n'
+	output <- output << '      if (ma.size() != mb.size()) return false;\n'
+	output <- output << '      for (var e : ma.entrySet())\n'
+	output <- output << '        if (!Boolean.TRUE.equals(__oak_eq(e.getValue(), mb.get(e.getKey())))) return false;\n'
+	output <- output << '      return true;\n'
+	output <- output << '    }\n'
+	output <- output << '    return a.equals(b);\n'
+	output <- output << '  }\n\n'
+
+	output <- output << '  static List<Object> __oak_push(List<Object> list, Object val) {\n'
+	output <- output << '    list.add(val); return list;\n'
+	output <- output << '  }\n\n'
+
+	output <- output << '  static Object __oak_acc(Object obj, Object key) {\n'
+	output <- output << '    if (obj == null) return null;\n'
+	output <- output << '    if (obj instanceof Map) return ((Map<?,?>) obj).get(key);\n'
+	output <- output << '    if (obj instanceof List && key instanceof Number)\n'
+	output <- output << '      return ((List<?>) obj).get(((Number) key).intValue());\n'
+	output <- output << '    return null;\n'
+	output <- output << '  }\n\n'
+
+	output <- output << '  static String __as_oak_string(Object v) {\n'
+	output <- output << '    if (v == null) return "";\n'
+	output <- output << '    return String.valueOf(v);\n'
+	output <- output << '  }\n\n'
+
+	output <- output << '  static void __oak_modularize(String name, Function<Void, Object> factory) {\n'
+	output <- output << '    __Oak_Modules.put(name, factory);\n'
+	output <- output << '  }\n\n'
+
+	output <- output << '  @SuppressWarnings("unchecked")\n'
+	output <- output << '  static Object __oak_module_import(String name) {\n'
+	output <- output << '    Object m = __Oak_Modules.get(name);\n'
+	output <- output << '    if (m == null && __Oak_Import_Aliases != null)\n'
+	output <- output << '      m = __Oak_Modules.get(__Oak_Import_Aliases.get(name));\n'
+	output <- output << '    if (m == null) return null;\n'
+	output <- output << '    if (m instanceof Function) {\n'
+	output <- output << '      Object result = ((Function<Void, Object>) m).apply(null);\n'
+	output <- output << '      __Oak_Modules.put(name, result);\n'
+	output <- output << '      return result;\n'
+	output <- output << '    }\n'
+	output <- output << '    return m;\n'
+	output <- output << '  }\n\n'
+
+	// Render the AST to Java
+	fn renderNode(node) if node.type {
+		:null -> 'null'
+		:empty -> 'null'
+		:string -> javaStr(node.val)
+		:int -> string(node.val)
+		:float -> string(node.val)
+		:bool -> string(node.val)
+		:identifier -> javaIdent(node.val)
+		:atom -> '"' << node.val << '"'
+		:list -> 'new ArrayList<>(Arrays.asList(' << node.elems |> map(renderNode) |> join(', ') << '))'
+		:object -> 'new HashMap<>(Map.of(' << node.entries |> map(fn(entry) {
+			{ key: k, val: v } := entry
+			if k.type {
+				:identifier, :string -> '"' << k.val << '", ' << renderNode(v)
+				:int -> 'String.valueOf(' << string(k.val) << '), ' << renderNode(v)
+				_ -> renderNode(k) << ', ' << renderNode(v)
+			}
+		}) |> join(', ') << '))'
+		:unary -> if node.op {
+			:minus -> '(-((Number) ' << renderNode(node.right) << ').doubleValue())'
+			:exclam -> '(!Boolean.TRUE.equals(' << renderNode(node.right) << '))'
+		}
+		:binary -> if node.op {
+			:plus -> '(__as_oak_string(' << renderNode(node.left) << ') + __as_oak_string(' << renderNode(node.right) << '))'
+			:minus -> '(((Number) ' << renderNode(node.left) << ').doubleValue() - ((Number) ' << renderNode(node.right) << ').doubleValue())'
+			:times -> '(((Number) ' << renderNode(node.left) << ').doubleValue() * ((Number) ' << renderNode(node.right) << ').doubleValue())'
+			:divide -> '(((Number) ' << renderNode(node.left) << ').doubleValue() / ((Number) ' << renderNode(node.right) << ').doubleValue())'
+			:modulus -> '(((Number) ' << renderNode(node.left) << ').doubleValue() % ((Number) ' << renderNode(node.right) << ').doubleValue())'
+			:and -> '(Boolean.TRUE.equals(' << renderNode(node.left) << ') ? ' << renderNode(node.right) << ' : false)'
+			:or -> '(Boolean.TRUE.equals(' << renderNode(node.left) << ') ? true : ' << renderNode(node.right) << ')'
+			:eq -> '__oak_eq(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:neq -> '(!Boolean.TRUE.equals(__oak_eq(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')))'
+			:greater -> '(((Comparable) ' << renderNode(node.left) << ').compareTo(' << renderNode(node.right) << ') > 0)'
+			:less -> '(((Comparable) ' << renderNode(node.left) << ').compareTo(' << renderNode(node.right) << ') < 0)'
+			:geq -> '(((Comparable) ' << renderNode(node.left) << ').compareTo(' << renderNode(node.right) << ') >= 0)'
+			:leq -> '(((Comparable) ' << renderNode(node.left) << ').compareTo(' << renderNode(node.right) << ') <= 0)'
+			:pushArrow -> '__oak_push((List<Object>) ' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+		}
+		:assignment -> javaIdent(node.left.val) << ' = ' << renderNode(node.right)
+		:propertyAccess -> if node.right.type {
+			:identifier -> '__oak_acc(' << renderNode(node.left) << ', "' << node.right.val << '")'
+			_ -> '__oak_acc(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+		}
+		:ifExpr -> '((Function<Void, Object>) (__oak_v) -> {\n' << {
+			result := ''
+			node.branches |> each(fn(br, i) {
+				prefix := if i { 0 -> 'if ', _ -> 'else if ' }
+				if br.target.type = :empty {
+					true -> result <- result << 'else { return ' << renderNode(br.body) << '; }\n'
+					_ -> result <- result << prefix << '(Boolean.TRUE.equals(__oak_eq(__oak_cond, ' << renderNode(br.target) << '))) { return ' << renderNode(br.body) << '; }\n'
+				}
+			})
+			'Object __oak_cond = ' << renderNode(node.cond) << ';\n' << result << 'return null;\n'
+		} << '}).apply(null)'
+		:block -> '((Function<Void, Object>) (__oak_v) -> {\n' << {
+			result := ''
+			lastIdx := len(node.exprs) - 1
+			node.exprs |> each(fn(expr, i) {
+				if i = lastIdx {
+					true -> result <- result << 'return (Object) (' << renderNode(expr) << ');\n'
+					_ -> result <- result << renderNode(expr) << ';\n'
+				}
+			})
+			result
+		} << '}).apply(null)'
+		:function -> {
+			args := node.args
+			// Java lambdas with multiple statements need Function interface
+			'(Function<Object[], Object>) (__oak_args) -> {\n' << {
+				// Destructure args
+				argBindings := args |> map(fn(a, i) 'Object ' << javaIdent(a) << ' = __oak_args.length > ' << string(i) << ' ? __oak_args[' << string(i) << '] : null;\n') |> join('')
+				argBindings << if node.body.type = :block {
+					true -> {
+						result := ''
+						lastIdx := len(node.body.exprs) - 1
+						node.body.exprs |> each(fn(expr, i) {
+							if i = lastIdx {
+								true -> result <- result << 'return (Object) (' << renderNode(expr) << ');\n'
+								_ -> result <- result << renderNode(expr) << ';\n'
+							}
+						})
+						result
+					}
+					_ -> 'return (Object) (' << renderNode(node.body) << ');\n'
+				}
+			} << '}'
+		}
+		:fnCall -> '((Function<Object[], Object>) ' << renderNode(node.function) << ').apply(new Object[]{' << node.args |> map(renderNode) |> join(', ') << '})'
+	}
+
+	output <- output << '  public static void main(String[] args) {\n'
+	output <- output << '    ' << renderNode(bundleNode) << ';\n'
+	output <- output << '  }\n'
+	output <- output << '}\n'
+	output
+}
+
 // renderBundle transforms a bundle's AST nodes to compiled program text
 fn renderBundle(bundleNode) {
-	buildRender.renderBundle(bundleNode, Web?, Wasm?, renderOakBundle, renderJSBundle, renderWasmBundle)
+	buildRender.renderBundle(
+		bundleNode
+		Target
+		renderOakBundle
+		renderJSBundle
+		renderWasmBundle
+		renderAstBundle
+		renderBinBundle
+		renderDocBundle
+		renderTsBundle
+		renderLuaBundle
+		renderJavaBundle
+	)
 }
 
 fn run(config) {
@@ -238,7 +767,7 @@ fn run(config) {
 	Log(format('[oak build] Bundling with entrypoint {{0}}', Entry))
 	Log(format('[oak build] AbsoluteEntry = {{0}}', AbsoluteEntry))
 	Includes |> with each() fn(spec) if ___runtime_lib?(spec.name) {
-		true -> if Web? -> addImportsFromSource(spec.name, ___runtime_lib(spec.name))
+		true -> if Web? | Ts? -> addImportsFromSource(spec.name, ___runtime_lib(spec.name))
 		_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path)
 	}
 	Log('[oak build] About to import entry file...')

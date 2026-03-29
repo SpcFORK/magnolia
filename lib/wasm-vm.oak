@@ -859,6 +859,7 @@ fn serializeConstantPool(c) {
 // serializeFunctionTable produces a binary string of function templates.
 // Format: [count:u32] then for each:
 //   [offset:u32][arity:u16][localCount:u16][hasRestArg:u8]
+//   [nameCount:u16] then for each name: [len:u16][data]
 fn serializeFunctionTable(c) {
 	result := ''
 	count := len(c.functions)
@@ -885,8 +886,44 @@ fn serializeFunctionTable(c) {
 			char(lc & 0xFF) <<
 			char((lc >> 8) & 0xFF)
 		result <- result << char(if ft.hasRestArg { true -> 1, _ -> 0 })
+		// Serialize localNames
+		names := if ft.localNames { ? -> [], _ -> ft.localNames }
+		nc := len(names)
+		result <- result <<
+			char(nc & 0xFF) <<
+			char((nc >> 8) & 0xFF)
+		names |> each(fn(name) {
+			n := if name { ? -> '', _ -> string(name) }
+			nl := len(n)
+			result <- result <<
+				char(nl & 0xFF) <<
+				char((nl >> 8) & 0xFF) <<
+				n
+		})
 	})
 
+	result
+}
+
+// serializeTopLevelNames produces a binary string of top-level local names.
+// Format: [count:u32] then for each: [len:u16][data]
+fn serializeTopLevelNames(c) {
+	result := ''
+	names := c.locals
+	count := len(names)
+	result <- result <<
+		char(count & 0xFF) <<
+		char((count >> 8) & 0xFF) <<
+		char((count >> 16) & 0xFF) <<
+		char((count >> 24) & 0xFF)
+	names |> each(fn(name) {
+		n := if name { ? -> '', _ -> string(name) }
+		nl := len(n)
+		result <- result <<
+			char(nl & 0xFF) <<
+			char((nl >> 8) & 0xFF) <<
+			n
+	})
 	result
 }
 
@@ -1058,5 +1095,6 @@ fn disassemble(c) {
 	serializeBytecodeToString: serializeBytecodeToString
 	serializeConstantPool: serializeConstantPool
 	serializeFunctionTable: serializeFunctionTable
+	serializeTopLevelNames: serializeTopLevelNames
 	disassemble: disassemble
 }

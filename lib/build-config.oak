@@ -17,13 +17,35 @@ fn configure(config, state, parseIncludes, statFile, resolve, collectVFSFiles, t
 	state.Entry <- config.entry
 	state.Web? <- config.web? = true
 	state.Wasm? <- config.wasm? = true
+	state.Ast? <- config.ast? = true
+	state.Bin? <- config.bin? = true
+	state.Doc? <- config.doc? = true
+	state.Ts? <- config.ts? = true
+	state.Lua? <- config.lua? = true
+	state.Java? <- config.java? = true
 	state.Output <- config.output
 	state.Includes <- parseIncludes(config.includes)
 	state.IncludeVFS <- config.includeVFS
 
 	requireOpt('entry', state.Entry, state.Abort, format)
 	requireOpt('output', state.Output, state.Abort, format)
-	if state.Web? & state.Wasm? -> state.Abort('[oak build] --web and --wasm are mutually exclusive build targets.')
+
+	// Compute target — exactly one target flag allowed
+	targetFlags := []
+	if state.Web? -> targetFlags <- targetFlags << 'web'
+	if state.Wasm? -> targetFlags <- targetFlags << 'wasm'
+	if state.Ast? -> targetFlags <- targetFlags << 'ast'
+	if state.Bin? -> targetFlags <- targetFlags << 'bin'
+	if state.Doc? -> targetFlags <- targetFlags << 'doc'
+	if state.Ts? -> targetFlags <- targetFlags << 'ts'
+	if state.Lua? -> targetFlags <- targetFlags << 'lua'
+	if state.Java? -> targetFlags <- targetFlags << 'java'
+	if len(targetFlags) > 1 -> state.Abort('[oak build] Only one target flag may be specified at a time (--web, --wasm, --ast, --bin, --doc, --ts, --lua, --java).')
+	state.Target <- if len(targetFlags) {
+		0 -> 'oak'
+		_ -> targetFlags.0
+	}
+
 	if statFile(state.Entry) = ? -> state.Abort(format('[oak build] {{0}} does not exist.', state.Entry))
 
 	state.AbsoluteEntry <- resolve(state.Entry)

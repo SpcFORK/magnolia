@@ -157,6 +157,10 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("___runtime_proc", c.rtProc)
 	c.LoadFunc("___runtime_go_version", c.rtGoVersion)
 	c.LoadFunc("___runtime_sys_info", c.rtSysInfo)
+
+	// execution mode switching
+	c.LoadFunc("bytecode", c.oakBytecodeCall)
+	c.LoadFunc("interpreter", c.oakInterpreterCall)
 }
 
 func errObj(message string) ObjectValue {
@@ -3291,4 +3295,185 @@ func (c *Context) rtSysInfo(_ []Value) (Value, *runtimeError) {
 		"arch": MakeString(runtime.GOARCH),
 		"cpus": IntValue(runtime.NumCPU()),
 	}, nil
+}
+
+// oakBytecodeCall implements the bytecode() builtin.
+// Usage: with bytecode([arg1, arg2]) fn(arg1, arg2) { body }
+// Compiles the given function body to bytecode and executes it via the VM.
+// Compiled chunks are cached per *fnNode so repeated calls skip recompilation.
+// VM structs are pooled to reduce allocation overhead.
+func (c *Context) oakBytecodeCall(args []Value) (Value, *runtimeError) {
+	if len(args) < 2 {
+		return nil, &runtimeError{
+			reason: "bytecode() requires 2 arguments: argument list and function",
+		}
+	}
+
+	argList, ok := args[0].(*ListValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("first argument to bytecode() must be a list, got %s", args[0]),
+		}
+	}
+	fnArgs := []Value(*argList)
+
+	fn := args[1]
+
+	switch f := fn.(type) {
+	case FnValue:
+		// Look up or compile the chunk for this function definition
+		chunk := c.getOrCompileChunk(f.defn)
+
+		// Build initial locals: bind named params, then rest arg
+		initVals := normalizeCallArgs(len(f.defn.args), fnArgs)
+		if f.defn.restArg != "" {
+			var restList ListValue
+			if len(fnArgs) > len(f.defn.args) {
+				restList = ListValue(fnArgs[len(f.defn.args):])
+			} else {
+				restList = ListValue{}
+			}
+			initVals = append(initVals[:len(f.defn.args)], &restList)
+		}
+
+		vm := acquireVM(chunk, c)
+		vm.initLocals = initVals
+		// Bridge the enclosing tree-walker scope so upvalues (map, filter, etc.) resolve
+		vm.outerScope = bridgeToVmScope(&f.scope)
+		result, err := vm.run()
+		releaseVM(vm)
+		return result, err
+
+	case *closureVal:
+		// If the closureVal has a preserved AST, compile via cache and run
+		// in a pooled VM for consistent performance in both execution modes.
+		if f.defn != nil {
+			chunk := c.getOrCompileChunk(f.defn)
+			initVals := normalizeCallArgs(len(f.defn.args), fnArgs)
+			if f.defn.restArg != "" {
+				var restList ListValue
+				if len(fnArgs) > len(f.defn.args) {
+					restList = ListValue(fnArgs[len(f.defn.args):])
+				} else {
+					restList = ListValue{}
+				}
+				initVals = append(initVals[:len(f.defn.args)], &restList)
+			}
+			vm := acquireVM(chunk, c)
+			vm.initLocals = initVals
+			// Use the closureVal's captured scope for upvalue resolution
+			vm.outerScope = f.parentScope
+			result, err := vm.run()
+			releaseVM(vm)
+			return result, err
+		}
+		if f.call != nil {
+			return f.call(fnArgs)
+		}
+		return c.evalFnCall(fn, false, fnArgs)
+
+	case BuiltinFnValue:
+		return f.fn(fnArgs)
+
+	default:
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("second argument to bytecode() must be a function, got %s", fn),
+		}
+	}
+}
+
+// getOrCompileChunk returns a cached bytecodeChunk for the given fnNode,
+// compiling it on the first call and caching for subsequent calls.
+func (c *Context) getOrCompileChunk(defn *fnNode) *bytecodeChunk {
+	eng := c.eng
+
+	eng.bytecodeCacheLock.RLock()
+	chunk, ok := eng.bytecodeCache[defn]
+	eng.bytecodeCacheLock.RUnlock()
+	if ok {
+		return chunk
+	}
+
+	// Compile
+	co := newCompiler()
+	// Push a sentinel parent scope so the compiler knows this is a function body,
+	// not top-level code. Without this, unknown identifiers (imports, builtins)
+	// would be forward-declared as locals (loading null) instead of emitting
+	// LOAD_UPVAL to search the enclosing scope chain at runtime.
+	co.parentLocals = append(co.parentLocals, []string{"_outer_"})
+	for _, paramName := range defn.args {
+		co.declareLocal(paramName)
+	}
+	if defn.restArg != "" {
+		co.declareLocal(defn.restArg)
+	}
+	co.compileNodeTail(defn.body, true)
+	co.emitOp(opHalt)
+
+	topNames := make([]string, len(co.locals))
+	copy(topNames, co.locals)
+
+	chunk = &bytecodeChunk{
+		code:          co.code,
+		constants:     co.constants,
+		functions:     co.functions,
+		topLevelNames: topNames,
+		sourceMap:     co.sourceMap,
+	}
+
+	eng.bytecodeCacheLock.Lock()
+	eng.bytecodeCache[defn] = chunk
+	eng.bytecodeCacheLock.Unlock()
+
+	return chunk
+}
+
+// oakInterpreterCall implements the interpreter() builtin.
+// Usage: with interpreter([arg1, arg2]) fn(arg1, arg2) { body }
+// Evaluates the given function using the tree-walking interpreter with TCO.
+// When called in --bytecode mode, closureVals with preserved AST are converted
+// to FnValues so the body is genuinely tree-walked instead of dispatched back
+// to the bytecode VM.
+func (c *Context) oakInterpreterCall(args []Value) (Value, *runtimeError) {
+	if len(args) < 2 {
+		return nil, &runtimeError{
+			reason: "interpreter() requires 2 arguments: argument list and function",
+		}
+	}
+
+	argList, ok := args[0].(*ListValue)
+	if !ok {
+		return nil, &runtimeError{
+			reason: fmt.Sprintf("first argument to interpreter() must be a list, got %s", args[0]),
+		}
+	}
+	fnArgs := []Value(*argList)
+
+	fn := args[1]
+
+	// If fn is a bytecode closureVal with preserved AST, convert to FnValue
+	// so evalFnCall tree-walks the body instead of calling cv.call() (bytecode).
+	if cv, ok := fn.(*closureVal); ok && cv.defn != nil {
+		fn = FnValue{
+			defn:  cv.defn,
+			scope: c.bridgeVmScope(cv.parentScope),
+		}
+	}
+
+	// Use thunkable=true to enable tail-call optimization
+	v, err := c.evalFnCall(fn, true, fnArgs)
+	if err != nil {
+		return nil, err
+	}
+	// Unwrap thunks for TCO
+	for {
+		thunk, isThunk := v.(thunkValue)
+		if !isThunk {
+			return v, nil
+		}
+		v, err = c.evalExprWithOpt(thunk.defn.body, thunk.scope, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 }
