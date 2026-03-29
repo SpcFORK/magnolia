@@ -3,11 +3,59 @@
     <em><b>⠀Magnolia</b></em>⠀🌸
 </h1>
 
-is an expressive, dynamically typed programming language based on [Oak](https://oaklang.org/). It extends Oak with powerful new features including a transpile middleware system, virtual file system, advanced threading utilities, and GPU computing support, while maintaining the simplicity and elegance of the original language.
+**Magnolia** is an expressive, dynamically typed programming language based on [Oak](https://oaklang.org/). It extends Oak with a cross-platform GUI system, audio/DSP processing, full networking stack, concurrency primitives, multi-target compilation (JS, WASM, Lua, TypeScript), GPU interop, AST macros, a self-hosted bytecode VM, and 140+ standard library modules — while keeping the simplicity and elegance of the original language.
 
-Here's an example Magnolia program.
+> **Highlights:** 3.7x faster bytecode VM · Cross-platform GUI (Win32/X11/WebGL) with Vulkan · CPU shader engine · P2P mesh networking · Thread pools & async event bus · 8 compilation targets · Self-hosted bytecode VM · 67 sample programs
+
+---
+
+## Table of Contents
+
+- [At a Glance](#at-a-glance)
+- [Getting Started](#getting-started)
+  - [Install](#install)
+  - [Quick Start](#quick-start)
+  - [CLI Reference](#cli-reference)
+- [Language Overview](#language-overview)
+  - [Types](#types)
+  - [Functions](#functions)
+  - [Operators](#operators)
+  - [Control Flow](#control-flow)
+  - [Classes](#classes)
+  - [Async Sugar (`with`)](#async-sugar-with)
+- [Features](#features)
+  - [Cross-Platform GUI](#-cross-platform-gui)
+  - [Audio Processing](#-audio-processing)
+  - [Networking Stack](#-networking-stack)
+  - [Concurrency](#-thread-library--async-event-bus)
+  - [Build System & Multi-Target Compilation](#-build-system--multi-target-compilation)
+  - [Virtual Machines & Runtime Codegen](#-virtual-bytecode-vm)
+  - [Transpile Middleware & AST Macros](#-transpile-middleware--ast-macros)
+  - [Virtual File System & Packed Binaries](#-virtual-file-system--packed-binaries)
+  - [Compression & Serialization](#-compression--serialization)
+  - [Image & Video](#-image--video)
+  - [Crypto & Data Protection](#-crypto--data-protection)
+  - [GPU Computing](#-gpu-computing)
+  - [Math Extensions](#-math-extensions)
+  - [Platform-Native Bindings](#-platform-native-bindings)
+  - [Go Runtime & System Interop](#-go-runtime-and-system-interop)
+  - [Enhanced Error Display](#-enhanced-error-display)
+  - [Code Generation & Runtime Evaluation](#-code-generation-and-runtime-evaluation)
+- [Performance & Benchmarks](#performance--benchmarks)
+- [Samples](#samples)
+- [Editor Support](#editor-support)
+- [Project Structure](#project-structure)
+- [Development](#development)
+- [Testing](#testing)
+- [Documentation Index](#documentation-index)
+- [Known Limitations](#known-limitations)
+
+---
+
+## At a Glance
 
 ```js
+// FizzBuzz with pattern matching
 std := import('std')
 
 fn fizzbuzz(n) if [n % 3, n % 5] {
@@ -22,9 +70,8 @@ std.range(1, 101) |> std.each(fn(n) {
 })
 ```
 
-Magnolia has good support for asynchronous I/O. Here's how you read a file and print it.
-
 ```js
+// Async file I/O
 std := import('std')
 fs := import('fs')
 
@@ -34,9 +81,8 @@ with fs.readFile('./file.txt') fn(file) if file {
 }
 ```
 
-Magnolia also has a pragmatic standard library that comes built into the interpreter executable. For example, there's a built-in HTTP server and router in the `http` library.
-
 ```js
+// HTTP server with routing
 std := import('std')
 fmt := import('fmt')
 http := import('http')
@@ -55,102 +101,220 @@ with server.route('/hello/:name') fn(params) {
 server.start(9999)
 ```
 
-## Install
+---
 
-Magnolia is currently installed from source.
+## Getting Started
 
-On Unix-like systems, build with Make:
+### Install
 
+Magnolia is installed from source. You need [Go](https://go.dev/) 1.26+.
+
+**Unix / macOS:**
 ```sh
 make install
 ```
 
-On Windows, use the provided build script:
-
+**Windows:**
 ```bat
 build.bat
 ```
 
-Or build directly with Go on any platform:
-
+**Any platform (direct):**
 ```sh
 go build .
 ```
 
-You can also run without installing:
-
+**Run without installing:**
 ```sh
 go run . <file-or-command>
 ```
 
-### Command name note
+> **Note:** `go build .` produces `magnolia` (or `magnolia.exe`). `make install` installs as `oak`. Use whichever name matches your setup.
 
-Depending on how you build/install Magnolia, the executable may be named either `magnolia` or `oak`:
-
-- `go build .` in this repository typically produces `magnolia`/`magnolia.exe`
-- `make install` installs the binary as `oak`
-
-In examples below, use whichever name matches your local install.
-
-### Quick start
+### Quick Start
 
 ```sh
-# Start REPL
-magnolia repl
-
-# Run a file
-magnolia samples/hello.oak
-
-# Evaluate a one-liner
-magnolia eval "1 + 2 * 3"
-
-# Show CLI help
-magnolia help
+magnolia repl                    # Interactive REPL
+magnolia samples/hello.oak       # Run a file
+magnolia eval "1 + 2 * 3"       # Evaluate an expression
+magnolia help                    # Show CLI help
 ```
 
-## What's New in Magnolia
+### CLI Reference
 
-Magnolia extends Oak with a broad set of features spanning GUI, audio, networking, concurrency, compilation targets, and systems programming. Below is a tour of the major additions.
+| Command | Description |
+|---------|-------------|
+| `magnolia <file>` | Run a Magnolia/Oak source file (tree-walking interpreter) |
+| `magnolia --bytecode <file>` | Run with the bytecode VM (up to 7x faster) |
+| `magnolia --executable <file>` | Run a packed binary bundle (`.mb`/`.mgb`/`.magb`) |
+| `magnolia repl` | Start the interactive REPL |
+| `magnolia eval "<expr>"` | Evaluate a single expression |
+| `magnolia pipe` | Read and evaluate from stdin |
+| `magnolia build --entry <file> --output <file>` | Bundle/compile a program |
+| `magnolia fmt --fix <files>` | Format source files |
+| `magnolia cat <files>` | Concatenate and print files |
+| `magnolia pack <file>` | Create a packed self-extracting binary |
+| `magnolia help` | Show help text |
+| `magnolia version` | Print version info |
 
-### Latest platform updates (March 2026)
+**Execution mode flags:**
 
-- Windows GUI 2D includes Vulkan support, while default `auto` prioritizes stable presenters `opengl -> ddraw -> gdi` (`vulkanAuto` enables Vulkan in auto mode).
-- Vulkan bootstrap on Windows now validates core instance extensions (`VK_KHR_surface`, `VK_KHR_win32_surface`), creates a Win32 surface, and selects a queue family that supports both graphics and present.
-- Window state now exposes Vulkan runtime handles/selection details via `window.vulkanSurface`, `window.vulkanPhysicalDevice`, and `window.vulkanQueueFamily`.
-- Win32 class registration uses a null background brush (`hbrBackground = 0`) to reduce background flash between presents.
-- GUI frame scheduling now supports `maxFrameDtMs` clamping and urgent redraw triggering for resize-related Windows messages.
-- New **Virtual-Bytecode** module: a self-hosted stack-based bytecode VM that can compile and execute Oak source code at runtime (both Go and WASM chunk formats).
-- New **math-base** module: dependency-breaking math primitives (`Pi`, `E`, `sqrt`, `abs`, `sign`) for sub-module use.
-
-See [docs/gui-native-win.md](docs/gui-native-win.md), [docs/gui.md](docs/gui.md), and [docs/Virtual-Bytecode.md](docs/Virtual-Bytecode.md) for API details.
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--normal` | `-n` | Force tree-walking interpreter |
+| `--bytecode` | `-b` | Force bytecode VM |
+| `--executable` | `-x` | Run packed binary |
 
 ---
 
-### 🎨 Enhanced Error Display
+## Language Overview
 
-Beautiful, color-coded error messages with source code context to help you quickly identify and fix issues:
+### Types
 
+Magnolia has 8 primitive and 3 complex types:
+
+```js
+?        // null, also "()"
+_        // "empty" value, equal to anything
+1, 2, 3  // integers (64-bit)
+3.14     // floats (64-bit)
+true     // booleans
+'hello'  // strings (mutable byte arrays)
+:error   // atoms (immutable interned strings)
+pointer(0) // pointers
+
+[1, :number]    // list (vector-backed)
+{ a: 'hello' }  // object (hash map)
+fn(a, b) a + b  // function (closure)
 ```
-╭─ Runtime Error ───────────────────────────────────────────
-│
-│ File: test.oak
-│ Position: [4:8]
-│
-│ Division by zero
-│
-│ Context:
-│    2 │ x := 10
-│    3 │ y := 20
-│    4 │ z := x / 0
-│      │        ^
-│    5 │ 
-│    6 │ println(z)
-╰───────────────────────────────────────────────────────────
+
+Notable details:
+- No implicit type casting, except ints cast up to floats in arithmetic
+- Strings are mutable byte arrays (like Lua) — use atoms for immutable strings
+- Lists use vector backing — append and index are O(1), clone is O(n)
+- Equality on lists and objects is deep equality; no identity equality exists
+
+### Functions
+
+Define functions with `fn`. Name is optional; `()` can be omitted when there are no arguments:
+
+```js
+fn double(n) 2 * n
+fn speak {
+    println('Hello!')
+}
 ```
 
-See [docs/error-display.md](docs/error-display.md) for more details.
+### Operators
+
+**Assignment:**
+
+```js
+a := 1              // local assignment (creates new binding)
+[b, c] := [2, 3]    // destructuring assignment
+```
+
+**Nonlocal assignment** — walks up scopes to update an existing binding:
+
+```js
+n := 10
+{
+    n <- 30          // updates n in the outer scope
+}
+n // 30
+```
+
+**Arithmetic:** `+`, `-`, `*`, `/`, `%`, `**` (exponentiation)
+
+**Bitwise:** `&` (AND), `|` (OR), `^` (XOR), `~` (NOT), `<<` (left shift), `>>` (right shift)
+
+**Push** (`<<` in list/string context) — mutates and returns:
+
+```js
+list := [1, 2, 3]
+list << 4 << 5 // [1, 2, 3, 4, 5]
+```
+
+**Pipe** (`|>`) — passes the left value as the first argument to the right:
+
+```js
+range(10) |> filter(prime?) |> each(println)
+10 |> add(20) |> add(3) // 33
+```
+
+### Control Flow
+
+Magnolia's `if` is a pattern-matching expression, not a boolean test:
+
+```js
+fn pluralize(word, count) if count {
+    1 -> word
+    2 -> 'a pair of ' + word
+    _ -> word + 's'
+}
+```
+
+Combined with safe tail recursion, this makes Magnolia Turing-complete.
+
+### Classes
+
+The `cs` keyword provides syntactic sugar for constructor functions:
+
+```js
+cs Pair(left, right) {
+    {
+        left: left
+        right: right
+    }
+}
+Pair(1, 2).right // 2
+
+cs Counter(start) {
+    {
+        value: start
+        add: fn(delta) start + delta
+    }
+}
+Counter(4).add(3) // 7
+
+// Variadic parameters
+cs Bag(items...,) {
+    items
+}
+len(Bag(1, 2, 3)) // 3
+
+// Assignment-only body — methods target instance fields
+cs LocalCounter {
+    a := 2
+    set := fn {
+        a <- 3
+    }
+}
+```
+
+Key features: constructor sugar, parameter capture, closure over state, variadic support, assignment-only bodies. Under the hood, classes are just functions that return objects.
+
+### Async Sugar (`with`)
+
+The `with` expression places the trailing callback as the last argument:
+
+```js
+with readFile('./path') fn(file) {
+    println(file)
+}
+// desugars to:
+readFile('./path', fn(file) {
+    println(file)
+})
+```
+
+For the full language specification, see [docs/spec.md](docs/spec.md).
 
 ---
+
+## Features
+
+Magnolia extends Oak with a broad set of capabilities spanning GUI, audio, networking, concurrency, compilation targets, and systems programming.
 
 ### 🖼️ Cross-Platform GUI
 

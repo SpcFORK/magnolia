@@ -10,7 +10,7 @@ run:
 
 # run the autoformatter (from system Oak)
 fmt:
-	oak fmt --changes --fix
+	magnolia fmt --changes --fix
 f: fmt
 
 # run Go tests
