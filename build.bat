@@ -1,7 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "LOGO_PNG=./SushaLogo.png"
+@REM set "LOGO_PNG=./Magnolia.jpg"
+set "LOGO_PNG=./Magnolia2.png"
+
 set "ICON_PATH=./build/magnolia.ico"
 set "SYSO_FILE=./magnolia.syso"
 
