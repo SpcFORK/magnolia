@@ -675,22 +675,30 @@ See [docs/runtime-codegen.md](docs/runtime-codegen.md).
 
 ---
 
-### 🌍 Multi-Target Compilation
+### 🌍 Build System & Multi-Target Compilation
 
-Magnolia programs can be compiled to multiple targets from a single codebase:
+Magnolia's build system bundles multi-file programs into single deployable artifacts, with **8 compilation targets**:
+
+| Target | Flag | Description |
+|--------|------|-------------|
+| Oak native | *(default)* | Bundled `.oak` source |
+| JavaScript | `--web` | Browser / Node.js / Deno |
+| WebAssembly | `--wasm` | `.wat` text format or embedded bytecode VM |
+| JSON AST | `--ast` | Serialized AST representation |
+| Bytecode binary | `--bin` | Pre-compiled bytecode bundle |
+| Documentation | `--doc` | Generated docs |
+| TypeScript | `--ts` | TypeScript output |
+| Lua | `--lua` | Lua transpilation |
 
 ```sh
-# Native Oak bundle
-magnolia build --entry src/main.oak --output dist/bundle.oak
-
-# JavaScript (browser / Node.js / Deno)
-magnolia build --entry src/app.oak --output dist/bundle.js --web
-
-# WebAssembly
-magnolia build --entry src/main.oak --output dist/program.wat --wasm
+magnolia build --entry src/main.oak --output dist/bundle.oak         # Native
+magnolia build --entry src/app.oak --output dist/bundle.js --web     # JavaScript
+magnolia build --entry src/main.oak --output dist/program.wat --wasm # WebAssembly
 ```
 
-The build system supports module bundling, dependency resolution, tree-shaking, code minification, and virtual filesystem embedding. See [docs/build.md](docs/build.md) and [docs/wasm.md](docs/wasm.md).
+Features: module bundling, dependency resolution, tree-shaking, code minification, virtual filesystem embedding, and transpile middleware hooks.
+
+See [docs/build.md](docs/build.md) and [docs/wasm.md](docs/wasm.md).
 
 ---
 
@@ -713,286 +721,270 @@ pid := linux.getpid()
 
 See [docs/windows.md](docs/windows.md) and [docs/linux.md](docs/linux.md).
 
-## Overview
+### 🎨 Enhanced Error Display
 
-Magnolia has 8 primitive and 3 complex types.
+Beautiful, color-coded error messages with source code context:
 
-```js
-?        // null, also "()"
-_        // "empty" value, equal to anything
-1, 2, 3  // integers
-3.14     // floats
-true     // booleans
-'hello'  // strings
-:error   // atoms
-pointer(0) // pointers
-
-[1, :number]    // list
-{ a: 'hello' }  // objects
-fn(a, b) a + b  // functions
+```
+╭─ Runtime Error ───────────────────────────────────────────
+│
+│ File: test.oak
+│ Position: [4:8]
+│
+│ Division by zero
+│
+│ Context:
+│    2 │ x := 10
+│    3 │ y := 20
+│    4 │ z := x / 0
+│      │        ^
+│    5 │ 
+│    6 │ println(z)
+╰───────────────────────────────────────────────────────────
 ```
 
-These types mostly behave as you'd expect. Some notable details:
+See [docs/error-display.md](docs/error-display.md).
 
-- There is no implicit type casting between any types, except during arithmetic operations when ints may be cast up to floats.
-- Both ints and floats are full 64-bit.
-- Strings are mutable byte arrays, also used for arbitrary data storage in memory, like in Lua. For immutable strings, use atoms.
-- Lists are backed by a vector data structure -- appending and indexing is cheap, but cloning is not
-- For lists and objects, equality is defined as deep equality. There is no identity equality in Magnolia.
+---
 
-We define a function in Magnolia with the `fn` keyword. A name is optional, and if given, will define that function in that scope. If there are no arguments, the `()` may be omitted.
+## Performance & Benchmarks
 
-```js
-fn double(n) 2 * n
-fn speak {
-    println('Hello!')
-}
+Magnolia offers three execution modes with different performance profiles:
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Tree-walking interpreter | `--normal` / `-n` | Default. AST-walking evaluator |
+| Bytecode VM | `--bytecode` / `-b` | 52-opcode stack-based VM, significantly faster |
+| Packed binary | `--executable` / `-x` | Pre-compiled bytecode bundles |
+
+### Benchmark Results
+
+A/B engine test across 17 workloads (median of 5 runs, tree-walking mode with `bytecode()` / `interpreter()` engine-switching builtins):
+
+| Benchmark | Tree-walk (ms) | Bytecode (ms) | Speedup |
+|-----------|----------------|---------------|---------|
+| int arithmetic (200k) | 210.3 | 36.8 | **5.7x** |
+| float arithmetic (200k) | 270.5 | 50.1 | **5.4x** |
+| fib(20) naive | 13.1 | 4.1 | **3.2x** |
+| closure create+call (10k) | 21.4 | 4.5 | **4.8x** |
+| compose chain (10k) | 22.8 | 5.6 | **4.1x** |
+| fizzbuzz classify (20k) | 40.8 | 11.1 | **3.7x** |
+| sieve of Eratosthenes (10k) | 56.5 | 28.8 | **2.0x** |
+| map (10k) | 20.2 | 16.6 | 1.2x |
+| filter (10k) | 23.9 | 21.1 | 1.1x |
+| sort 2k random ints | 84.4 | 73.4 | 1.2x |
+| string concat (2k) | 3.1 | 2.0 | 1.5x |
+| object build (3k keys) | 5.0 | 1.0 | **5.0x** |
+| object read (3k keys) | 4.0 | 1.0 | **4.0x** |
+
+**Bytecode VM wins 15 of 17 benchmarks**, with up to **5.7x speedup** on arithmetic-heavy workloads and **3–5x** on function call / object access patterns.
+
+### Optimizations Implemented
+
+1. **Constant folding** — arithmetic, string concat, boolean logic, and equality on literals resolved at compile time.
+2. **Memory allocation audit** — pprof-guided pass yielding **2.4x speedup** on fib(20). Key wins: `sync.Pool` for scope mutexes, pre-sized scope maps, direct fn-call fast path, index-based tokenizer.
+3. **Bytecode VM** — 52-opcode stack-based VM with closures, destructuring, pattern matching, pipes, and upvalue mutation. **3.7x speedup** on fib(30), **1.9x** on loop-heavy workloads.
+
+### Optimization Roadmap
+
+- Register-based bytecode VM (cut push/pop overhead)
+- NaN-boxing / tagged-pointer value representation
+- Inline caching for property access
+- Escape analysis and stack allocation
+- Lazy / copy-on-write strings and lists
+- Parallel GC or arenas for short-lived scopes
+- JIT compilation of hot bytecode paths
+- SIMD-accelerated string / list builtins
+
+---
+
+## Samples
+
+The [samples/](samples/) directory contains **67 example programs** covering the full breadth of Magnolia's capabilities:
+
+| Category | Examples |
+|----------|----------|
+| **Core language** | `hello.oak`, `fizzbuzz.oak`, `fib.oak`, `tailcall.oak` |
+| **GUI & Graphics** | `gui-sample.oak`, `gui-2d.oak`, `gui-3d.oak`, `gui-fonts.oak`, `gui-game.oak`, `gui-graphing.oak`, `gui-lighting.oak` |
+| **GUI Forms** | `gui-form-login.oak`, `gui-form-settings.oak`, `gui-form-wizard.oak`, `gui-form-dashboard.oak` |
+| **Audio & Video** | `audio-demo.oak`, `gui-audio.oak` |
+| **Networking** | `fileserver.oak`, `p2p.oak`, `p2p-cli.oak`, `listen-multiport.oak` |
+| **Concurrency** | `thread-examples.oak` |
+| **Virtual FS** | `vfs-example.oak`, `vfs-bundle-example.oak` |
+| **Windows native** | `windows-2d-layer-hotload.oak`, `windows-d3d9.oak`, `windows-dll-bindings.oak`, `windows-registry.oak`, +11 more |
+| **Linux native** | `linux-draw.oak`, `linux-interop.oak`, `linux-window.oak` |
+| **Data & utilities** | `json-examples.oak`, `crypto-uuid.oak`, `datetime-examples.oak`, `compression-benchmark.oak`, `sort-examples.oak` |
+| **Performance** | `perf-ab-test.oak`, `perf-bench.oak` |
+| **Misc** | `transpile-examples.oak`, `pointers-bits.oak`, `go-interop.oak`, `shell-example.oak`, `md-parser.oak` |
+
+---
+
+## Editor Support
+
+| Editor | Plugin | Location |
+|--------|--------|----------|
+| **VS Code** | Oak/Magnolia syntax highlighting | [tools/oak-vscode/](tools/oak-vscode/) (also available as [oak-vscode.zip](tools/oak-vscode.zip)) |
+| **Vim** | Syntax file | [tools/oak.vim](tools/oak.vim) |
+
+---
+
+## Project Structure
+
+```
+magnolia/
+├── *.go                  # Interpreter core (tokenizer, parser, evaluator, bytecode VM)
+├── cmd/                  # Built-in CLI commands (build, fmt, help, pack, shell, etc.)
+├── lib/                  # Standard library (~144 modules)
+│   ├── GUI.oak           #   GUI entry point
+│   ├── gui-*.oak         #   GUI subsystems (2D, shaders, fonts, events, native backends)
+│   ├── audio*.oak        #   Audio processing (PCM, WAV, DSP, FFT)
+│   ├── http.oak          #   HTTP server & routing
+│   ├── websocket.oak     #   WebSocket support
+│   ├── thread.oak        #   Concurrency primitives
+│   ├── build*.oak        #   Build system & bundler
+│   ├── syntax*.oak       #   Parsing, macros, AST transforms
+│   ├── windows*.oak      #   Windows platform bindings
+│   ├── Linux*.oak        #   Linux platform bindings
+│   └── ...               #   crypto, compression, math, etc.
+├── docs/                 # Comprehensive documentation (~107 files)
+├── samples/              # Example programs (~67 files)
+├── test/                 # Unit & generative tests (~50 test files)
+├── tools/                # Editor plugins (VS Code, Vim)
+├── www/                  # Website source
+├── build/                # Build output
+├── Makefile              # Unix build/test/install targets
+└── build.bat             # Windows build script
 ```
 
-Besides the normal set of arithmetic operators, Magnolia has a few strange operators.
-
-- The **assignment operator** `:=` binds values on the right side to names on the left, potentially by destructuring an object or list. For example:
-
-    ```js
-    a := 1              // a is 1
-    [b, c] := [2, 3]    // b is 2, c is 3
-    d := double(a)      // d is 2
-    ```
-- The **nonlocal assignment operator** `<-` binds values on the right side to names on the left, but only when those variables already exist. If the variable doesn't exist in the current scope, the operator ascends up parent scopes until it reaches the global scope to find the last scope where that name was bound.
-
-    ```js
-    n := 10
-    m := 20
-    {
-        n <- 30
-        m := 40
-    }
-    n // 30
-    m // 20
-    ```
-- **Arithmetic operators**: `+`, `-`, `*`, `/`, `%` for basic math, and `**` for exponentiation.
-
-    ```js
-    2 + 3       // 5
-    10 / 3      // 3.333...
-    2 ** 8      // 256 (2 to the power of 8)
-    ```
-
-- **Bitwise operators** for low-level bit manipulation: `&` (AND), `|` (OR), `^` (XOR), `~` (NOT), `<<` (left shift), and `>>` (right shift).
-
-    ```js
-    0xFF & 0x0F        // 15
-    0x01 | 0x02        // 3
-    5 ^ 3              // 6
-    ~10                // -11
-    4 << 2             // 16 (multiply by 2^2)
-    16 >> 2            // 4 (divide by 2^2)
-    ```
-
-- The **push operator** `<<` (in list/string context) pushes values onto the end of a string or a list, mutating it, and returns the changed string or list.
-
-    ```js
-    str := 'Hello '
-    str << 'World!' // 'Hello World!'
-
-    list := [1, 2, 3]
-    list << 4
-    list << 5 << 6 // [1, 2, 3, 4, 5, 6]
-    ```
-- The **pipe operator** `|>` takes a value on the left and makes it the first argument to a function call on the right.
-
-    ```js
-    // print 2n for every prime n in range [0, 10)
-    range(10) |> filter(prime?) |>
-        each(double) |> each(println)
-
-    // adding numbers
-    fn add(a, b) a + b
-    10 |> add(20) |> add(3) // 33
-    ```
-
-Magnolia uses one main construct for control flow -- the `if` match expression. Unlike a traditional `if` expression, which can only test for truthy and falsy values, Magnolia's `if` acts like a sophisticated switch-case, comparing values until the right match is reached.
-
-```js
-fn pluralize(word, count) if count {
-    1 -> word
-    2 -> 'a pair of ' + word
-    _ -> word + 's'
-}
-```
-
-This match expression, combined with safe tail recursion, makes Magnolia Turing-complete.
-
-Magnolia also provides **class syntax sugar** for creating constructor functions with the `cs` keyword. Classes are syntactic sugar that make it easier to create objects with shared state and methods.
-
-```js
-// Class without parameters
-cs Empty {
-    {}
-}
-type(Empty()) // :object
-
-// Class constructor parameters are captured in body
-cs Pair(left, right) {
-    {
-        left: left
-        right: right
-    }
-}
-Pair(1, 2).right // 2
-
-// Class methods can close over constructor state
-cs Counter(start) {
-    {
-        value: start
-        add: fn(delta) start + delta
-    }
-}
-Counter(4).add(3) // 7
-
-// Classes support variadic parameters
-cs Bag(items...,) {
-    items
-}
-len(Bag(1, 2, 3)) // 3
-
-// Assignment-only class bodies build instance fields directly
-cs LocalCounter {
-    a := 2
-    set := fn {
-        a <- 3
-    }
-}
-counter := LocalCounter()
-counter.set()
-counter.a // 3
-```
-
-Key features of classes:
-- **Constructor sugar**: Classes without parameters act as simple constructor functions that return objects
-- **Parameter capture**: Constructor parameters are available in the class body and can be used to initialize object properties
-- **Closure over state**: Methods defined in the class body can close over constructor parameters
-- **Variadic support**: Classes support variadic parameters using the `...` syntax
-- **Assignment-only sugar**: In assignment-only class bodies, method reads/writes target the constructed instance fields
-- **Return value**: Classes with an empty block body (`{}`) return `?` (null), while classes with an object expression return that object
-
-Under the hood, classes are simply functions that return objects, but the `cs` syntax provides a cleaner way to define object constructors with shared behavior.
-
-Lastly, because callback-based asynchronous concurrency is common in Magnolia, there's special syntax sugar, the `with` expression, to help. The `with` syntax sugar de-sugars like this.
-
-```js
-with readFile('./path') fn(file) {
-    println(file)
-}
-
-// desugars to
-readFile('./path', fn(file) {
-    println(file)
-})
-```
-
-For a more detailed description of the language, see the [work-in-progress language spec](docs/spec.md).
-
-For Magnolia-specific features, see:
-- [GUI middleware](docs/gui.md) · [2D drawing](docs/gui-2d.md) · [Shaders](docs/gui-shader.md) · [Resolution scaling](docs/gui-resolution.md) · [Events](docs/gui-events.md)
-- [Audio](docs/audio.md) · [WAV encoding](docs/audio-wav.md) · [DSP](docs/audio-dsp.md) · [FFT](docs/audio-fft.md)
-- [HTTP server](docs/http.md) · [WebSockets](docs/websocket.md) · [TCP sockets](docs/socket.md) · [P2P mesh](docs/p2p.md)
-- [SMTP](docs/smtp.md) · [IMAP](docs/imap.md) · [WLAN discovery](docs/wlan.md)
-- [Compression (RLE/Huffman/LZW)](docs/compression.md) · [MessagePack](docs/msgpack.md)
-- [BMP images](docs/bmp.md) · [ICO icons](docs/ico.md) · [Video frames](docs/video.md)
-- [Crypto (UUID, SHA-256, random)](docs/crypto.md) · [Data protection (CRC, checksums)](docs/dataprot.md)
-- [Virtual Bytecode VM](docs/Virtual-Bytecode.md) · [Virtual interpreter](docs/Virtual.md) · [VirtualToken constructors](docs/VirtualToken.md)
-- [Virtual File System](docs/virtual-fs.md) · [Pack/bundle](docs/pack.md)
-- [Build system](docs/build.md) · [WASM target](docs/wasm.md) · [WASM VM](docs/wasm-vm.md)
-- [Thread library](docs/thread.md) · [Async event bus](docs/async-event-bus.md)
-- [Transpile middleware](docs/transpile.md) · [Syntax and macros](docs/syntax.md)
-- [Code generation](docs/runtime-codegen.md) · [Go runtime interop](docs/go.md) · [System interop (`sys`)](docs/sys.md)
-- [GPU](docs/gpu.md) · [Multi-backend GPU helpers (`gpus`)](docs/gpus.md)
-- [Math](docs/math.md) · [Geometry](docs/math-geo.md) · [Statistics](docs/math-stats.md) · [Math base](docs/math-base.md)
-- [Bitwise and pointer helpers](docs/bitwise.md) · [Classes (`cs`)](docs/cs.md) · [String manipulation](docs/str.md)
-- [Windows platform](docs/windows.md) · [Linux platform](docs/linux.md)
-- [Error display](docs/error-display.md) · [Debug helpers](docs/debug.md) · [JSON](docs/json.md) · [DateTime](docs/datetime.md)
-- Example programs in [samples/](samples/) including GUI, threading, transpilation, VFS, and pointer/bitwise examples
-
-### Builds and deployment
-
-While the Magnolia interpreter can run programs and modules directly from source code on the file system, Magnolia also offers a build tool, `build`, which can _bundle_ a Magnolia program distributed across many files into a single "bundle" source file. The same command can also cross-compile Magnolia bundles into JavaScript bundles, to run in the browser or in JavaScript environments like Node.js and Deno. This allows Magnolia programs to be deployed and distributed as single-file programs, both on the server and in the browser.
-
-To build a new bundle, we can simply pass an "entrypoint" to the program.
-
-```sh
-magnolia build --entry src/main.oak --output dist/bundle.oak
-```
-
-Compiling to JavaScript works similarly, but with the `--web` flag, which turns on JavaScript cross-compilation.
-
-```sh
-magnolia build --entry src/app.js.oak --output dist/bundle.js --web
-```
-
-The bundler and compiler are built on top of past work with the [September](https://github.com/thesephist/september) toolchain for Ink, but slightly re-architected to support bundling and multiple compilation targets. In the future, the goal of `build` is to become a lightly optimizing compiler and potentially help yield a `compile` command that could package the interpreter and a Magnolia bundle into a single executable binary. For more information, see `magnolia help build` (or `oak help build`, depending on your install name).
-
-### Performance
-
-Magnolia inherits Oak's performance characteristics. As of September 2021, Oak is about 5-6x slower than Python 3.9 on pure function call and number-crunching overhead (assessed by a basic `fib(30)` benchmark). These are worst-case estimates — the language's simpler data structures narrow the gap on realistic programs. Being as fast as Python and Ruby is a good long-term goal.
-
-Runtime performance is not the primary concern today; correctness and a pleasant developer experience come first. That said, significant work has already landed, and there's a clear roadmap ahead.
-
-#### Done
-
-1. ~~Constant folding and propagation on the AST.~~ **Implemented** — constant arithmetic, string concatenation, boolean logic, unary operations, and equality comparisons on literals are resolved at compile time.
-2. ~~Memory allocation audit and optimization pass.~~ **Implemented** — pprof-guided pass yielding a **2.4x speedup** on fib(20) (35.9ms → 14.6ms) and ~6.6% fewer heap allocations. Key wins: `sync.Pool` for scope mutexes, pre-sized scope maps (`newScopeN`), direct fn-call fast path (no args slice / thunk wrapping for the common case), index-based tokenizer (no per-token `[]rune` allocator), and parser capacity hints.
-3. ~~Bytecode VM.~~ **Implemented** — 52-opcode stack-based VM accessible via `--bytecode`. Supports closures, recursion, destructuring, pattern matching, pipes, and upvalue mutation. **3.7x speedup** on fib(30), **1.9x** on loop-heavy workloads vs. the tree-walking interpreter.
-
-#### TODO
-
-6. **Register-based bytecode VM** — introduce a register-based design to cut push/pop overhead side-by-side with the stack-based dispatch and enable easier peephole optimizations and more.
-11. **SIMD-accelerated string / list builtins** — use platform SIMD intrinsics for `find`, `map`, `filter`, and bulk string operations on contiguous memory.
-10. **JIT compilation of hot bytecode paths** — profile the bytecode VM at runtime, identify hot traces, and compile them to native machine code via a lightweight JIT backend.
-9. **Parallel GC or arenas for short-lived scopes** — reduce stop-the-world GC pauses by giving hot inner loops their own allocation arena that can be freed in bulk.
-7. **Escape analysis and stack allocation** — identify closures and objects that don't outlive their creating scope and allocate them on the stack instead of the heap.
-8. **Lazy / copy-on-write strings and lists** — defer cloning until mutation, reducing allocation pressure for pipe-heavy functional code.
-4. **Inline caching for property access** — cache the offset of frequently accessed object keys so repeated lookups (e.g., `obj.x` inside a loop) skip the map hash.
-5. **NaN-boxing or tagged-pointer value representation** — pack small ints, bools, and atoms into a single 64-bit word to eliminate per-value heap allocations and improve cache locality.
+---
 
 ## Development
 
-Magnolia (ab)uses GNU Make to run development workflows and tasks.
+### Build & Test Commands
 
-- `make run` compiles and runs the Magnolia binary, which opens an interactive REPL
-- `make fmt` or `make f` runs the formatter over files with unstaged changes (currently via `oak fmt --changes --fix` for compatibility)
-- `make tests` or `make t` runs the Go test suite for the Magnolia language and interpreter
-- `make test-oak` or `make tk` runs the Magnolia test suite, which tests the standard libraries
-- `make test-bundle` runs the Magnolia test suite, bundled via the `build` command
-- `make test-js` runs the Magnolia test suite on Node.js, compiled with the `--web` target
-- `make build` generates release builds of Magnolia for various operating systems; `make build-<OS>` builds for a specific OS
-- `make install` installs the interpreter on your `$GOPATH` as `oak`, and re-installs the Vim syntax file
-- `make site` builds a Magnolia bundle for the website, and `make site-w` does it on every file save
-- `make site-gen` rebuilds the statically generated parts of the Magnolia website, like the standard library documentation
+**Unix (Make):**
 
-On Windows, if `-race` commands fail in local development due to CGO/toolchain constraints, use non-race alternatives:
+| Command | Description |
+|---------|-------------|
+| `make run` | Build and start the REPL |
+| `make tests` / `make t` | Run Go test suite |
+| `make test-oak` / `make tk` | Run Magnolia standard library tests |
+| `make test-bundle` | Test via the build/bundle system |
+| `make test-js` | Run tests compiled to JavaScript (Node.js) |
+| `make test-wasm` | Run WebAssembly target tests |
+| `make test-pack` | Test pack functionality |
+| `make build` | Cross-platform release builds |
+| `make build-linux` / `make build-darwin` / `make build-windows` | OS-specific builds |
+| `make fmt` / `make f` | Format files with unstaged changes |
+| `make install` | Install as `oak` + Vim syntax file |
+| `make site` | Build website bundle |
+| `make site-gen` | Rebuild static site docs |
 
-- `go test .`
-- `go run . test/main.oak`
+**Windows:**
 
-To try Magnolia by building from source, clone the repository and run `make install` (or simply `go build .`).
+If `-race` commands fail due to CGO/toolchain constraints, use non-race alternatives:
+
+```sh
+go test .
+go run . test/main.oak
+```
+
+---
+
+## Testing
+
+Magnolia has two kinds of tests:
+
+- **Unit tests** — assertion-based tests built on the `libtest` library, plus Go-level tests in `eval_test.go`. Run with `make tests` (Go) and `magnolia test/main.oak` (Magnolia).
+- **Generative / fuzz tests** — procedurally generated inputs validating parsers, date/time algorithms, and other complex behaviors. Located in `test/generative/`.
+
+Both sets run entirely in "userland" without invoking the interpreter separately.
+
+---
+
+## Documentation Index
+
+Comprehensive docs for every module live in [docs/](docs/):
+
+<details>
+<summary><strong>GUI & Graphics</strong> (29 docs)</summary>
+
+[gui.md](docs/gui.md) · [gui-2d.md](docs/gui-2d.md) · [gui-3dmath.md](docs/gui-3dmath.md) · [gui-color.md](docs/gui-color.md) · [gui-common.md](docs/gui-common.md) · [gui-draw.md](docs/gui-draw.md) · [gui-events.md](docs/gui-events.md) · [gui-fonts.md](docs/gui-fonts.md) · [gui-form.md](docs/gui-form.md) · [gui-graph.md](docs/gui-graph.md) · [gui-lighting.md](docs/gui-lighting.md) · [gui-loop.md](docs/gui-loop.md) · [gui-mesh.md](docs/gui-mesh.md) · [gui-raster.md](docs/gui-raster.md) · [gui-render.md](docs/gui-render.md) · [gui-resolution.md](docs/gui-resolution.md) · [gui-shader.md](docs/gui-shader.md) · [gui-shader-codegen.md](docs/gui-shader-codegen.md) · [gui-shader-color.md](docs/gui-shader-color.md) · [gui-shader-math.md](docs/gui-shader-math.md) · [gui-shader-noise.md](docs/gui-shader-noise.md) · [gui-shader-sdf.md](docs/gui-shader-sdf.md) · [gui-video.md](docs/gui-video.md) · [gui-web.md](docs/gui-web.md) · [gui-native-win.md](docs/gui-native-win.md) · [gui-native-win-vulkan.md](docs/gui-native-win-vulkan.md) · [gui-native-win-opengl.md](docs/gui-native-win-opengl.md) · [gui-native-win-ddraw.md](docs/gui-native-win-ddraw.md) · [gui-native-linux.md](docs/gui-native-linux.md)
+
+</details>
+
+<details>
+<summary><strong>Audio</strong> (5 docs)</summary>
+
+[audio.md](docs/audio.md) · [audio-wav.md](docs/audio-wav.md) · [audio-dsp.md](docs/audio-dsp.md) · [audio-fft.md](docs/audio-fft.md) · [audio-complex.md](docs/audio-complex.md)
+
+</details>
+
+<details>
+<summary><strong>Networking</strong> (7 docs)</summary>
+
+[http.md](docs/http.md) · [websocket.md](docs/websocket.md) · [socket.md](docs/socket.md) · [p2p.md](docs/p2p.md) · [smtp.md](docs/smtp.md) · [imap.md](docs/imap.md) · [wlan.md](docs/wlan.md)
+
+</details>
+
+<details>
+<summary><strong>Build System & Targets</strong> (15 docs)</summary>
+
+[build.md](docs/build.md) · [build-analyze.md](docs/build-analyze.md) · [build-ast.md](docs/build-ast.md) · [build-config.md](docs/build-config.md) · [build-ident.md](docs/build-ident.md) · [build-imports.md](docs/build-imports.md) · [build-includes.md](docs/build-includes.md) · [build-render.md](docs/build-render.md) · [build-render-node.md](docs/build-render-node.md) · [bundle-ast.md](docs/bundle-ast.md) · [bundle-utils.md](docs/bundle-utils.md) · [target-ast.md](docs/target-ast.md) · [target-bin.md](docs/target-bin.md) · [target-doc.md](docs/target-doc.md) · [target-lua.md](docs/target-lua.md)
+
+</details>
+
+<details>
+<summary><strong>Virtual Machines & Code Gen</strong> (7 docs)</summary>
+
+[Virtual-Bytecode.md](docs/Virtual-Bytecode.md) · [Virtual.md](docs/Virtual.md) · [VirtualToken.md](docs/VirtualToken.md) · [wasm-vm.md](docs/wasm-vm.md) · [wasm.md](docs/wasm.md) · [runtime-codegen.md](docs/runtime-codegen.md) · [engine-switching.md](docs/engine-switching.md)
+
+</details>
+
+<details>
+<summary><strong>Concurrency & Events</strong> (2 docs)</summary>
+
+[thread.md](docs/thread.md) · [async-event-bus.md](docs/async-event-bus.md)
+
+</details>
+
+<details>
+<summary><strong>Syntax & Macros</strong> (7 docs)</summary>
+
+[syntax.md](docs/syntax.md) · [syntax-parse.md](docs/syntax-parse.md) · [syntax-print.md](docs/syntax-print.md) · [syntax-tokenize.md](docs/syntax-tokenize.md) · [syntax-macros.md](docs/syntax-macros.md) · [ast-analyze.md](docs/ast-analyze.md) · [ast-transform.md](docs/ast-transform.md)
+
+</details>
+
+<details>
+<summary><strong>Platform & System</strong> (20 docs)</summary>
+
+[windows.md](docs/windows.md) · [windows-constants.md](docs/windows-constants.md) · [windows-core.md](docs/windows-core.md) · [windows-flags.md](docs/windows-flags.md) · [windows-fonts.md](docs/windows-fonts.md) · [windows-gdi.md](docs/windows-gdi.md) · [windows-kernel.md](docs/windows-kernel.md) · [windows-loader.md](docs/windows-loader.md) · [windows-net.md](docs/windows-net.md) · [windows-registry.md](docs/windows-registry.md) · [windows-windowing.md](docs/windows-windowing.md) · [linux.md](docs/linux.md) · [linux-constants.md](docs/linux-constants.md) · [linux-core.md](docs/linux-core.md) · [linux-fonts.md](docs/linux-fonts.md) · [linux-libc.md](docs/linux-libc.md) · [linux-loader.md](docs/linux-loader.md) · [linux-windowing.md](docs/linux-windowing.md) · [gpu.md](docs/gpu.md) · [gpus.md](docs/gpus.md) · [go.md](docs/go.md) · [sys.md](docs/sys.md)
+
+</details>
+
+<details>
+<summary><strong>Data, Crypto & Utilities</strong> (15 docs)</summary>
+
+[compression.md](docs/compression.md) · [compression-huffman.md](docs/compression-huffman.md) · [compression-lzw.md](docs/compression-lzw.md) · [compression-rle.md](docs/compression-rle.md) · [msgpack.md](docs/msgpack.md) · [json.md](docs/json.md) · [crypto.md](docs/crypto.md) · [dataprot.md](docs/dataprot.md) · [bmp.md](docs/bmp.md) · [ico.md](docs/ico.md) · [video.md](docs/video.md) · [datetime.md](docs/datetime.md) · [math.md](docs/math.md) · [math-geo.md](docs/math-geo.md) · [math-stats.md](docs/math-stats.md) · [math-base.md](docs/math-base.md)
+
+</details>
+
+<details>
+<summary><strong>Core Language & Misc</strong> (12 docs)</summary>
+
+[spec.md](docs/spec.md) · [cs.md](docs/cs.md) · [str.md](docs/str.md) · [fmt.md](docs/fmt.md) · [fs.md](docs/fs.md) · [path.md](docs/path.md) · [cli.md](docs/cli.md) · [debug.md](docs/debug.md) · [error-display.md](docs/error-display.md) · [bitwise.md](docs/bitwise.md) · [transpile.md](docs/transpile.md) · [virtual-fs.md](docs/virtual-fs.md) · [pack.md](docs/pack.md)
+
+</details>
+
+---
 
 ## Known Limitations
 
 Magnolia is under active development. Some features are experimental or have known limitations:
 
-- **Virtual (self-hosting) interpreter**: The Virtual library provides a self-hosted Oak interpreter written in Magnolia itself, enabling dynamic code evaluation at runtime. This feature is still being stabilized and may not support all language features yet.
+- **Virtual (self-hosting) interpreter**: The Virtual library provides a self-hosted Oak interpreter written in Magnolia itself. Still being stabilized — may not support all language features yet.
+- **Channel operations**: Low-level channel primitives for async communication are under development. Some edge cases in async patterns may not be fully supported.
+- **Class inheritance**: Classes with constructors and static members are supported; multiple inheritance syntax is still being refined.
+- **Memory operations**: Low-level `memread`/`memwrite` primitives are exposed for systems programming but require careful usage.
 
-- **Channel operations and async communication**: Low-level channel primitives for asynchronous communication are under development. Some edge cases in async patterns may not be fully supported.
-
-- **Class inheritance**: While classes with constructors and static members are supported, multiple inheritance syntax is still being refined.
-
-- **Memory operations**: Low-level memory read/write primitives (`memread`, `memwrite`) are exposed for systems programming but require careful usage.
-
-For the latest updates and progress on these features, please check the [GitHub issues](https://github.com/SpcFORK/magnolia/issues) and [documentation](docs/).
-
-## Unit and generative tests
-
-The Magnolia repository has two kinds of tests: unit tests and generative/fuzz tests. **Unit tests** are just what they sound like -- tests validated with assertions -- and are built on the `libtest` Magnolia library with the exception of Go tests in `eval_test.go`. **Generative tests** include fuzz tests, and are tests that run some pre-defined behavior of functions through a much larger body of procedurally generated inputs, for validating behavior that's difficult to validate manually like correctness of parsers and `libdatetime`'s date/time conversion algorithms.
-
-Both sets of tests are written and run entirely in the "userland" of Magnolia, without invoking the interpreter separately. Unit tests live in `./test` and are run with `./test/main.oak`; generative tests are in `test/generative`, and can be run manually.
+For the latest updates, check the [GitHub issues](https://github.com/SpcFORK/magnolia/issues) and [documentation](docs/).
