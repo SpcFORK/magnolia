@@ -1,9 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
-@REM set "LOGO_PNG=./Magnolia.jpg"
-set "LOGO_PNG=./Magnolia2.png"
+set "LOGO_1=./Magnolia.jpg"
+set "LOGO_2=./Magnolia2.png"
 
+set "ICON_1=./build/magnolia1.ico"
+set "ICON_2=./build/magnolia2.ico"
 set "ICON_PATH=./build/magnolia.ico"
 set "SYSO_FILE=./magnolia.syso"
 
@@ -47,20 +49,91 @@ if defined _ORIG_GOARCH (
     set "GOARCH="
 )
 
-if not exist "%LOGO_PNG%" (
-    echo Icon source not found: %LOGO_PNG%
-    exit /b 1
-)
-
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 "Compress-Archive -Path './build/magnolia' -DestinationPath './build/magnolia.zip' -Force"
 if errorlevel 1 exit /b 1
 
-echo Creating icon from %LOGO_PNG%...
+if exist "%LOGO_1%" (
+    call :make_ico "%LOGO_1%" "%ICON_1%"
+    if errorlevel 1 exit /b 1
+)
+if exist "%LOGO_2%" (
+    call :make_ico "%LOGO_2%" "%ICON_2%"
+    if errorlevel 1 exit /b 1
+)
+
+if not exist "%ICON_1%" if not exist "%ICON_2%" (
+    echo No icon source images found.
+    exit /b 1
+)
+
+if exist "%SYSO_FILE%" del "%SYSO_FILE%"
+
+where rsrc >nul 2>&1
+if errorlevel 1 (
+    echo Installing rsrc tool...
+    go install github.com/akavel/rsrc@latest
+    if errorlevel 1 exit /b 1
+)
+
+echo Embedding icon resource...
+if exist "%ICON_2%" (
+    rsrc -ico "%ICON_2%" -o "%SYSO_FILE%"
+) else (
+    rsrc -ico "%ICON_1%" -o "%SYSO_FILE%"
+)
+if errorlevel 1 exit /b 1
+
+echo Building EXE target...
+set "GOOS=windows"
+set "GOARCH=amd64"
+go build -o ./build/magnolia.exe
+if errorlevel 1 (
+    if exist "%SYSO_FILE%" del "%SYSO_FILE%"
+    exit /b 1
+)
+
+if defined _ORIG_GOOS (
+    set "GOOS=%_ORIG_GOOS%"
+) else (
+    set "GOOS="
+)
+
+if defined _ORIG_GOARCH (
+    set "GOARCH=%_ORIG_GOARCH%"
+) else (
+    set "GOARCH="
+)
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+"Compress-Archive -Path './build/magnolia.exe' -DestinationPath './build/magnolia-exe.zip' -Force"
+if errorlevel 1 exit /b 1
+
+if exist "%SYSO_FILE%" del "%SYSO_FILE%"
+
+echo Build complete!
+echo   ELF: ./build/magnolia
+echo   EXE: ./build/magnolia.exe
+if exist "%ICON_1%" echo   ICO: %ICON_1%
+if exist "%ICON_2%" echo   ICO: %ICON_2%
+
+set "DO_WSL_INSTALL=0"
+if "%1"=="--wsl" set "DO_WSL_INSTALL=1"
+if "%DO_WSL_INSTALL%"=="1" (
+    echo Installing to /usr/local/bin via WSL...
+    wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia; mv ./build/magnolia /usr/local/bin"
+)
+
+goto :eof
+
+:make_ico
+set "_SRC=%~1"
+set "_DST=%~2"
+echo Creating icon from %_SRC% -^> %_DST%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 "Add-Type -AssemblyName System.Drawing; ^
-$pngPath = '%LOGO_PNG%'; ^
-$icoPath = '%ICON_PATH%'; ^
+$pngPath = '%_SRC%'; ^
+$icoPath = '%_DST%'; ^
 $src = [System.Drawing.Image]::FromFile($pngPath); ^
 try { ^
     $bmp = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb); ^
@@ -114,55 +187,4 @@ try { ^
     $src.Dispose(); ^
 }"
 if errorlevel 1 exit /b 1
-
-if exist "%SYSO_FILE%" del "%SYSO_FILE%"
-
-where rsrc >nul 2>&1
-if errorlevel 1 (
-    echo Installing rsrc tool...
-    go install github.com/akavel/rsrc@latest
-    if errorlevel 1 exit /b 1
-)
-
-echo Embedding icon resource...
-rsrc -ico "%ICON_PATH%" -o "%SYSO_FILE%"
-if errorlevel 1 exit /b 1
-
-echo Building EXE target...
-set "GOOS=windows"
-set "GOARCH=amd64"
-go build -o ./build/magnolia.exe
-if errorlevel 1 (
-    if exist "%SYSO_FILE%" del "%SYSO_FILE%"
-    exit /b 1
-)
-
-if defined _ORIG_GOOS (
-    set "GOOS=%_ORIG_GOOS%"
-) else (
-    set "GOOS="
-)
-
-if defined _ORIG_GOARCH (
-    set "GOARCH=%_ORIG_GOARCH%"
-) else (
-    set "GOARCH="
-)
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-"Compress-Archive -Path './build/magnolia.exe' -DestinationPath './build/magnolia-exe.zip' -Force"
-if errorlevel 1 exit /b 1
-
-if exist "%SYSO_FILE%" del "%SYSO_FILE%"
-
-echo Build complete!
-echo   ELF: ./build/magnolia
-echo   EXE: ./build/magnolia.exe
-echo   ICO: ./build/magnolia.ico
-
-set "DO_WSL_INSTALL=0"
-if "%1"=="--wsl" set "DO_WSL_INSTALL=1"
-if "%DO_WSL_INSTALL%"=="1" (
-    echo Installing to /usr/local/bin via WSL...
-    wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia; mv ./build/magnolia /usr/local/bin"
-)
+goto :eof
