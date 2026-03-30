@@ -1,0 +1,1164 @@
+// gui-engine-swap.oak — Harsh GUI stress-test for bytecode / interpreter engine swapping.
+//
+// Runs a real-time particle simulation with multiple subsystems, each routed
+// to the fastest engine via bytecode() / interpreter().  Displays live timing
+// bars, FPS counters, a collision heatmap, and frame-time sparkline.
+//
+// Subsystems:
+//   1. Particle physics    — tight arithmetic loop   → bytecode()
+//   2. Collision grid      — object build + lookup    → bytecode()
+//   3. Color blending      — map pipeline             → interpreter()
+//   4. Trail history       — list push + slice        → bytecode()
+//   5. Avg speed           — reduce over 600 items    → interpreter()
+//   6. Proximity repulsion — N*k neighbor scan        → bytecode()
+//   7. Vortex field        — center swirl + map       → interpreter()
+//   8. Energy stats        — KE accumulation loop     → bytecode()
+//   9. Draw calls          — raw rendering (baseline)
+//
+// Controls:
+//   SPACE  — pause / resume simulation
+//   R      — reset particles to initial positions
+//   +/-    — add / remove 50 particles live
+//   C      — chaos burst  (3× gravity for 2 s)
+//   L      — toggle log overlay
+//   P      — run parity check (results in log)
+//   ESC    — close window
+//
+// Run:
+//   magnolia samples/gui-engine-swap.oak
+//   magnolia --bytecode samples/gui-engine-swap.oak
+
+std := import('std')
+{
+	println: println
+	string: string
+	range: range
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	slice: slice
+	append: append
+} := std
+{ printf: printf } := import('fmt')
+
+gui := import('GUI')
+
+_scriptT0 := nanotime()
+
+// ═══════════════════════════════════════════════════════════════
+// LOGGING
+// ═══════════════════════════════════════════════════════════════
+
+fn initLogState() {
+	entries: []
+	index: 0
+	startNs: nanotime()
+	showOverlay: false
+	maxEntries: 40
+}
+
+fn pushLog(logState, level, message) {
+	elapsedMs := int(float(nanotime() - logState.startNs) / 1000000.0)
+	logState.index <- logState.index + 1
+	line := '[' + string(elapsedMs) + 'ms] #' + string(logState.index) + ' ' + level + ' ' + message
+	logState.entries <- logState.entries << line
+	if len(logState.entries) > logState.maxEntries ->
+		logState.entries <- slice(logState.entries, len(logState.entries) - logState.maxEntries)
+	println(line)
+}
+
+fn drawLogOverlay(window, logState) if logState.showOverlay {
+	true -> {
+		entries := logState.entries
+		n := len(entries)
+		if n > 0 -> {
+			ovH := n * 14 + 24
+			gui.fillRect(window, 4, WIN_H - ovH - 4, SIM_W - 8, ovH, gui.rgba(0, 0, 0, 0.82, BG))
+			gui.drawText(window, 10, WIN_H - ovH, 'LOG (L to hide)', gui.rgb(180, 180, 200))
+			fn drawLine(i) if i >= n {
+				true -> ?
+				_ -> {
+					gui.drawText(window, 10, WIN_H - ovH + 16 + i * 14, entries.(i), DIM)
+					drawLine(i + 1)
+				}
+			}
+			drawLine(0)
+		}
+	}
+	_ -> 0
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════
+
+PARTICLE_COUNT := 600
+TRAIL_LEN := 8
+GRID_CELLS := 20
+WELL_COUNT := 4
+SIM_W := 790
+WIN_W := 1100
+WIN_H := 960
+BG := gui.rgb(6, 8, 16)
+HUD_BG := gui.rgba(10, 14, 28, 0.85, BG)
+WHITE := gui.rgb(240, 240, 250)
+DIM := gui.rgb(100, 110, 130)
+ACCENT := gui.rgb(80, 200, 255)
+WARN := gui.rgb(255, 100, 80)
+GOOD := gui.rgb(80, 255, 140)
+GRID_HOT := gui.rgba(255, 60, 30, 0.5, BG)
+GRID_WARM := gui.rgba(180, 120, 40, 0.35, BG)
+GRID_COOL := gui.rgba(30, 50, 80, 0.15, BG)
+BAR_H := 10
+BAR_MAX_W := 160
+SPARK_LEN := 90
+EMA_ALPHA := 0.15
+
+PI := 3.14159265358979
+TWO_PI := PI * 2
+BEAM_RADIUS := 90
+CHAOS_DURATION := 2.0
+
+// ═══════════════════════════════════════════════════════════════
+// EMA SMOOTHING — stops HUD timing bars from flickering
+// ═══════════════════════════════════════════════════════════════
+
+fn emaUpdate(prev, cur, alpha) prev * (1.0 - alpha) + float(cur) * alpha
+
+fn initTimings() {
+	physics: 0.0, collision: 0.0, color: 0.0, trail: 0.0
+	avgSpeed: 0.0, repulse: 0.0, vortex: 0.0, energy: 0.0
+	drawTrails: 0.0, drawParticles: 0.0, drawWells: 0.0, drawHeatmap: 0.0
+	drawBeams: 0.0
+	total: 0.0
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FRAME-TIME SPARKLINE HISTORY
+// ═══════════════════════════════════════════════════════════════
+
+fn initSparkline() {
+	fn build(i, acc) if i >= SPARK_LEN {
+		true -> acc
+		_ -> build(i + 1, acc << 0.0)
+	}
+	build(0, [])
+}
+
+fn pushSpark(history, val) with bytecode([history, val, SPARK_LEN]) fn(h, v, maxLen) {
+	h << v
+	if len(h) > maxLen -> slice(h, len(h) - maxLen)
+	h
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PARTICLE STATE
+// ═══════════════════════════════════════════════════════════════
+
+fn makeParticle(i, w, h) {
+	fi := float(i)
+	angle := fi * 2.399
+	radius := 60.0 + fi * 0.8
+	{
+		x: float(w) / 2.0 + cos(angle) * radius * 0.3
+		y: float(h) / 2.0 + sin(angle) * radius * 0.2
+		vx: cos(fi * 0.7) * 40.0
+		vy: sin(fi * 1.1) * 40.0
+		hue: fi / float(PARTICLE_COUNT)
+		trail: []
+		alive: true
+	}
+}
+
+fn initParticles(n, w, h) {
+	fn build(i, acc) if i >= n {
+		true -> acc
+		_ -> build(i + 1, acc << makeParticle(i, w, h))
+	}
+	build(0, [])
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GRAVITY WELLS (move slowly in circles)
+// ═══════════════════════════════════════════════════════════════
+
+fn initWells(n, w, h) {
+	fn build(i, acc) if i >= n {
+		true -> acc
+		_ -> {
+			fi := float(i)
+			build(i + 1, acc << {
+				cx: float(w) * (0.25 + fi * 0.2)
+				cy: float(h) * (0.3 + fi * 0.15)
+				mass: 8000.0 + fi * 4000.0
+				orbitR: 80.0 + fi * 40.0
+				orbitSpeed: 0.3 + fi * 0.15
+				phase: fi * 1.57
+			})
+		}
+	}
+	build(0, [])
+}
+
+fn updateWellPositions(wells, t, w, h) with bytecode([wells, t, w, h]) fn(ws, t, w, h) {
+	fn sub(i) if i >= len(ws) {
+		true -> ws
+		_ -> {
+			well := ws.(i)
+			well.cx <- float(w) * 0.5 + cos(t * well.orbitSpeed + well.phase) * well.orbitR
+			well.cy <- float(h) * 0.5 + sin(t * well.orbitSpeed * 0.7 + well.phase) * well.orbitR * 0.6
+			sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 1 — Particle physics (bytecode: tight arithmetic)
+// ═══════════════════════════════════════════════════════════════
+
+fn physicsStep(particles, wells, dt, w, h) with bytecode([particles, wells, dt, w, h]) fn(ps, ws, dt, w, h) {
+	wf := float(w)
+	hf := float(h)
+	nWells := len(ws)
+	damping := 0.995
+	fn sub(i) if i >= len(ps) {
+		true -> ps
+		_ -> {
+			p := ps.(i)
+			fn addGravity(j, ax, ay) if j >= nWells {
+				true -> {
+					p.vx <- (p.vx + ax * dt) * damping
+					p.vy <- (p.vy + ay * dt) * damping
+					p.x <- p.x + p.vx * dt
+					p.y <- p.y + p.vy * dt
+					if p.x < 0 -> p.x <- p.x + wf
+					if p.x >= wf -> p.x <- p.x - wf
+					if p.y < 0 -> p.y <- p.y + hf
+					if p.y >= hf -> p.y <- p.y - hf
+				}
+				_ -> {
+					well := ws.(j)
+					dx := well.cx - p.x
+					dy := well.cy - p.y
+					distSq := dx * dx + dy * dy + 100.0
+					force := well.mass / distSq
+					dist := pow(distSq, 0.5)
+					addGravity(j + 1, ax + force * dx / dist, ay + force * dy / dist)
+				}
+			}
+			addGravity(0, 0.0, 0.0)
+			sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 2 — Collision grid (bytecode: object build + lookup)
+// ═══════════════════════════════════════════════════════════════
+
+fn buildCollisionGrid(particles, cellW, cellH) with bytecode([particles, cellW, cellH]) fn(ps, cw, ch) {
+	grid := {}
+	fn sub(i) if i >= len(ps) {
+		true -> grid
+		_ -> {
+			p := ps.(i)
+			gx := int(p.x / float(cw))
+			gy := int(p.y / float(ch))
+			key := string(gx) + ':' + string(gy)
+			if grid.(key) = ? -> grid.(key) := 0
+			grid.(key) <- grid.(key) + 1
+			sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+fn countHotCells(grid, threshold) with bytecode([grid, threshold]) fn(g, th) {
+	ks := keys(g)
+	fn sub(i, count) if i >= len(ks) {
+		true -> count
+		_ -> {
+			k := ks.(i)
+			sub(i + 1, if g.(k) >= th { true -> count + 1, _ -> count })
+		}
+	}
+	sub(0, 0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 3 — Color blending (interpreter: map + reduce)
+// ═══════════════════════════════════════════════════════════════
+
+fn blendParticleColors(particles, t) with interpreter([particles, t, TWO_PI]) fn(ps, t, twoPi) {
+	ps |> map(fn(p) {
+		hue := p.hue + t * 0.1
+		r := int(128.0 + sin(hue * twoPi) * 127.0)
+		g := int(128.0 + sin(hue * twoPi + 2.094) * 127.0)
+		b := int(128.0 + sin(hue * twoPi + 4.189) * 127.0)
+		speed := pow(p.vx * p.vx + p.vy * p.vy, 0.5)
+		brightness := if speed > 200.0 {
+			true -> 1.0
+			_ -> 0.3 + speed / 300.0
+		}
+		gui.rgb(
+			int(float(r) * brightness)
+			int(float(g) * brightness)
+			int(float(b) * brightness)
+		)
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 4 — Trail history (bytecode: list push + slice)
+// ═══════════════════════════════════════════════════════════════
+
+fn updateTrails(particles) with bytecode([particles, TRAIL_LEN]) fn(ps, maxLen) {
+	fn sub(i) if i >= len(ps) {
+		true -> ps
+		_ -> {
+			p := ps.(i)
+			p.trail <- p.trail << { x: p.x, y: p.y }
+			if len(p.trail) > maxLen ->
+				p.trail <- slice(p.trail, len(p.trail) - maxLen)
+			sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 5 — Avg speed (interpreter: reduce over N particles)
+// ═══════════════════════════════════════════════════════════════
+
+fn avgSpeed(particles) with interpreter([particles]) fn(ps) {
+	n := len(ps)
+	total := ps |> reduce(0.0, fn(acc, p) acc + pow(p.vx * p.vx + p.vy * p.vy, 0.5))
+	if n > 0 { true -> total / float(n), _ -> 0.0 }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 6 — Proximity repulsion (bytecode: N*k neighbor scan)
+//   Every 3rd particle checks the next 8 for close proximity and
+//   pushes them apart. Adds an extra harsh O(N*stride) arithmetic pass.
+// ═══════════════════════════════════════════════════════════════
+
+fn proximityRepulse(particles, dt) with bytecode([particles, dt]) fn(ps, dt) {
+	n := len(ps)
+	stride := 3
+	reach := 8
+	repelForce := 600.0
+	minDist := 12.0
+	fn outer(i) if i >= n {
+		true -> ps
+		_ -> {
+			pa := ps.(i)
+			fn inner(j) if j >= i + reach | j >= n {
+				true -> ?
+				_ -> {
+					pb := ps.(j)
+					dx := pa.x - pb.x
+					dy := pa.y - pb.y
+					distSq := dx * dx + dy * dy + 1.0
+					if distSq < minDist * minDist -> {
+						dist := pow(distSq, 0.5)
+						nx := dx / dist
+						ny := dy / dist
+						push := repelForce * dt / dist
+						pa.vx <- pa.vx + nx * push
+						pa.vy <- pa.vy + ny * push
+						pb.vx <- pb.vx - nx * push
+						pb.vy <- pb.vy - ny * push
+					}
+					inner(j + 1)
+				}
+			}
+			inner(i + 1)
+			outer(i + stride)
+		}
+	}
+	outer(0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 7 — Vortex field (interpreter: map-based vector math)
+//   Applies a swirling tangential force from the simulation center.
+//   Strength oscillates over time for visual variety.
+// ═══════════════════════════════════════════════════════════════
+
+fn applyVortex(particles, t, w, h, dt) with interpreter([particles, t, w, h, dt]) fn(ps, t, w, h, dt) {
+	cx := float(w) * 0.5
+	cy := float(h) * 0.5
+	strength := 120.0 + sin(t * 0.4) * 60.0
+	ps |> map(fn(p) {
+		dx := p.x - cx
+		dy := p.y - cy
+		dist := pow(dx * dx + dy * dy + 1.0, 0.5)
+		factor := strength / (dist + 40.0) * dt
+		p.vx <- p.vx - dy / dist * factor
+		p.vy <- p.vy + dx / dist * factor
+		p
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUBSYSTEM 8 — Energy statistics (bytecode: tight accumulation)
+//   Computes total kinetic energy and max single-particle speed
+//   across all N particles. Pure arithmetic accumulation.
+// ═══════════════════════════════════════════════════════════════
+
+fn computeEnergy(particles) with bytecode([particles]) fn(ps) {
+	n := len(ps)
+	fn sub(i, ke, maxSpd) if i >= n {
+		true -> { kinetic: ke, maxSpeed: maxSpd }
+		_ -> {
+			p := ps.(i)
+			spd := p.vx * p.vx + p.vy * p.vy
+			s := pow(spd, 0.5)
+			sub(i + 1, ke + spd * 0.5, if s > maxSpd { true -> s, _ -> maxSpd })
+		}
+	}
+	sub(0, 0.0, 0.0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PARITY CHECKS — verify bytecode/interpreter produce same results
+//   Runs both engines on identical input and compares outputs.
+//   Logs PASS/FAIL for each check. Invoked with P key.
+// ═══════════════════════════════════════════════════════════════
+
+fn runParityChecks(logState) {
+	pushLog(logState, 'PARITY', '--- begin parity checks ---')
+	passCount := 0
+	failCount := 0
+
+	fn check(name, expected, actual, tolerance) {
+		diff := expected - actual
+		if diff < 0 -> diff <- 0.0 - diff
+		if diff <= tolerance {
+			true -> {
+				pushLog(logState, 'PASS', name + ': bc=' + string(int(expected * 1000.0) / 1000) + ' int=' + string(int(actual * 1000.0) / 1000))
+				passCount <- passCount + 1
+			}
+			_ -> {
+				pushLog(logState, 'FAIL', name + ': bc=' + string(int(expected * 1000.0) / 1000) + ' int=' + string(int(actual * 1000.0) / 1000) + ' diff=' + string(int(diff * 1000.0) / 1000))
+				failCount <- failCount + 1
+			}
+		}
+	}
+
+	// 1. Energy accumulation: bytecode vs interpreter
+	testParticles := initParticles(20, SIM_W, WIN_H)
+	bcEnergy := with bytecode([testParticles]) fn(ps) {
+		n := len(ps)
+		fn sub(i, ke) if i >= n {
+			true -> ke
+			_ -> { p := ps.(i), sub(i + 1, ke + (p.vx * p.vx + p.vy * p.vy) * 0.5) }
+		}
+		sub(0, 0.0)
+	}
+	intEnergy := with interpreter([testParticles]) fn(ps) {
+		ps |> reduce(0.0, fn(acc, p) acc + (p.vx * p.vx + p.vy * p.vy) * 0.5)
+	}
+	check('Energy accumulation', bcEnergy, intEnergy, 0.01)
+
+	// 2. Avg speed: bytecode vs interpreter
+	bcAvg := with bytecode([testParticles]) fn(ps) {
+		n := len(ps)
+		fn sub(i, total) if i >= n {
+			true -> total / float(n)
+			_ -> { p := ps.(i), sub(i + 1, total + pow(p.vx * p.vx + p.vy * p.vy, 0.5)) }
+		}
+		sub(0, 0.0)
+	}
+	intAvg := with interpreter([testParticles]) fn(ps) {
+		n := len(ps)
+		total := ps |> reduce(0.0, fn(acc, p) acc + pow(p.vx * p.vx + p.vy * p.vy, 0.5))
+		total / float(n)
+	}
+	check('Avg speed', bcAvg, intAvg, 0.01)
+
+	// 3. Grid cell count: bytecode vs interpreter
+	testCW := 39
+	testCH := 36
+	bcGrid := with bytecode([testParticles, testCW, testCH]) fn(ps, cw, ch) {
+		grid := {}
+		fn sub(i) if i >= len(ps) {
+			true -> grid
+			_ -> {
+				p := ps.(i)
+				gx := int(p.x / float(cw))
+				gy := int(p.y / float(ch))
+				key := string(gx) + ':' + string(gy)
+				if grid.(key) = ? -> grid.(key) := 0
+				grid.(key) <- grid.(key) + 1
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	intGridCells := with interpreter([testParticles, testCW, testCH]) fn(ps, cw, ch) {
+		grid := {}
+		ps |> each(fn(p) {
+			gx := int(p.x / float(cw))
+			gy := int(p.y / float(ch))
+			key := string(gx) + ':' + string(gy)
+			if grid.(key) = ? -> grid.(key) := 0
+			grid.(key) <- grid.(key) + 1
+		})
+		float(len(keys(grid)))
+	}
+	bcGridCells := float(len(keys(bcGrid)))
+	check('Grid cell count', bcGridCells, intGridCells, 0.0)
+
+	// 4. Vortex: verify tangential force direction parity
+	bcVortex := with bytecode([500.0, 400.0, 395.0, 480.0, 0.016]) fn(cx, cy, px, py, dt) {
+		dx := px - cx
+		dy := py - cy
+		dist := pow(dx * dx + dy * dy + 1.0, 0.5)
+		strength := 150.0
+		factor := strength / (dist + 40.0) * dt
+		0.0 - dy / dist * factor
+	}
+	intVortex := with interpreter([500.0, 400.0, 395.0, 480.0, 0.016]) fn(cx, cy, px, py, dt) {
+		dx := px - cx
+		dy := py - cy
+		dist := pow(dx * dx + dy * dy + 1.0, 0.5)
+		strength := 150.0
+		factor := strength / (dist + 40.0) * dt
+		0.0 - dy / dist * factor
+	}
+	check('Vortex X force', bcVortex, intVortex, 0.001)
+
+	// 5. sin/cos precision
+	bcSinCos := with bytecode([1.2345]) fn(x) sin(x) * sin(x) + cos(x) * cos(x)
+	intSinCos := with interpreter([1.2345]) fn(x) sin(x) * sin(x) + cos(x) * cos(x)
+	check('sin^2+cos^2=1', bcSinCos, intSinCos, 0.0001)
+
+	// 6. pow() fractional exponent chain
+	bcPow := with bytecode([7.5, 0.333, 2.5]) fn(base, exp1, exp2) pow(pow(base, exp1), exp2)
+	intPow := with interpreter([7.5, 0.333, 2.5]) fn(base, exp1, exp2) pow(pow(base, exp1), exp2)
+	check('pow chain', bcPow, intPow, 0.0001)
+
+	// 7. Nested arithmetic: compound expression
+	bcNested := with bytecode([123.456, 78.9, 3.0]) fn(a, b, c) (a * b - c) / (a + b + c) * (a - b)
+	intNested := with interpreter([123.456, 78.9, 3.0]) fn(a, b, c) (a * b - c) / (a + b + c) * (a - b)
+	check('Nested arith', bcNested, intNested, 0.001)
+
+	// 8. int/float round trip
+	bcIntFloat := with bytecode([3.7, 8.2]) fn(a, b) float(int(a * b * 100.0)) / 100.0
+	intIntFloat := with interpreter([3.7, 8.2]) fn(a, b) float(int(a * b * 100.0)) / 100.0
+	check('int/float round', bcIntFloat, intIntFloat, 0.01)
+
+	// 9. Negative number arithmetic
+	bcNeg := with bytecode([0.0 - 42.5, 0.0 - 17.3]) fn(a, b) a * b + a / b - (a + b) * (a - b)
+	intNeg := with interpreter([0.0 - 42.5, 0.0 - 17.3]) fn(a, b) a * b + a / b - (a + b) * (a - b)
+	check('Negative arith', bcNeg, intNeg, 0.001)
+
+	// 10. Multiplication/division chain (accumulated error)
+	bcChain := with bytecode([1.0]) fn(x) {
+		fn sub(i, acc) if i >= 50 {
+			true -> acc
+			_ -> sub(i + 1, acc * 1.01 / 1.01 * 0.99 / 0.99)
+		}
+		sub(0, x)
+	}
+	intChain := with interpreter([1.0]) fn(x) {
+		fn sub(i, acc) if i >= 50 {
+			true -> acc
+			_ -> sub(i + 1, acc * 1.01 / 1.01 * 0.99 / 0.99)
+		}
+		sub(0, x)
+	}
+	check('Mul/div chain x50', bcChain, intChain, 0.0001)
+
+	// 11. Recursive sum of squares
+	bcSumSq := with bytecode([30]) fn(n) {
+		fn sub(i, acc) if i >= n {
+			true -> acc
+			_ -> sub(i + 1, acc + float(i) * float(i))
+		}
+		sub(0, 0.0)
+	}
+	intSumSq := with interpreter([30]) fn(n) {
+		fn sub(i, acc) if i >= n {
+			true -> acc
+			_ -> sub(i + 1, acc + float(i) * float(i))
+		}
+		sub(0, 0.0)
+	}
+	check('Sum of squares', bcSumSq, intSumSq, 0.0)
+
+	// 12. Trig chain: sin(cos(sin(x))) * cos(sin(cos(x)))
+	bcTrig := with bytecode([2.718]) fn(x) sin(cos(sin(x))) * cos(sin(cos(x)))
+	intTrig := with interpreter([2.718]) fn(x) sin(cos(sin(x))) * cos(sin(cos(x)))
+	check('Trig chain', bcTrig, intTrig, 0.0001)
+
+	// 13. Gravity force at distance (real physics formula)
+	bcGrav := with bytecode([100.0, 200.0, 150.0, 250.0, 8000.0]) fn(px, py, wx, wy, mass) {
+		dx := wx - px
+		dy := wy - py
+		distSq := dx * dx + dy * dy + 100.0
+		dist := pow(distSq, 0.5)
+		force := mass / distSq
+		force * dx / dist + force * dy / dist
+	}
+	intGrav := with interpreter([100.0, 200.0, 150.0, 250.0, 8000.0]) fn(px, py, wx, wy, mass) {
+		dx := wx - px
+		dy := wy - py
+		distSq := dx * dx + dy * dy + 100.0
+		dist := pow(distSq, 0.5)
+		force := mass / distSq
+		force * dx / dist + force * dy / dist
+	}
+	check('Gravity force', bcGrav, intGrav, 0.001)
+
+	// 14. Color blend formula (hue→RGB)
+	bcColor := with bytecode([0.6, 1.5, 6.28318]) fn(hue, t, twoPi) {
+		h := hue + t * 0.1
+		r := 128.0 + sin(h * twoPi) * 127.0
+		g := 128.0 + sin(h * twoPi + 2.094) * 127.0
+		b := 128.0 + sin(h * twoPi + 4.189) * 127.0
+		r + g + b
+	}
+	intColor := with interpreter([0.6, 1.5, 6.28318]) fn(hue, t, twoPi) {
+		h := hue + t * 0.1
+		r := 128.0 + sin(h * twoPi) * 127.0
+		g := 128.0 + sin(h * twoPi + 2.094) * 127.0
+		b := 128.0 + sin(h * twoPi + 4.189) * 127.0
+		r + g + b
+	}
+	check('Color blend RGB', bcColor, intColor, 0.01)
+
+	// Summary
+	pushLog(logState, 'PARITY', '--- done: ' + string(passCount) + ' pass, ' + string(failCount) + ' fail ---')
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RENDERING
+// ═══════════════════════════════════════════════════════════════
+
+fn drawBackground(window) {
+	gui.fillRect(window, 0, 0, WIN_W, WIN_H, BG)
+}
+
+fn drawVignette(window, w, h) {
+	fn strip(i) if i >= 5 {
+		true -> ?
+		_ -> {
+			alpha := 0.25 - float(i) * 0.04
+			col := gui.rgba(0, 0, 0, alpha, BG)
+			stripH := 6 + i * 5
+			gui.fillRect(window, 0, i * stripH, w, stripH, col)
+			gui.fillRect(window, 0, h - (i + 1) * stripH, w, stripH, col)
+			strip(i + 1)
+		}
+	}
+	strip(0)
+}
+
+fn drawWells(window, wells, t) {
+	with each(wells) fn(w_) {
+		cx := int(w_.cx)
+		cy := int(w_.cy)
+		r := int(pow(w_.mass / 1000.0, 0.5) * 2.0)
+		// Pulsing outer ring
+		pulse := 1.0 + sin(t * 2.5 + w_.phase) * 0.2
+		rOuter := int(float(r) * pulse)
+		gui.drawCircle2D(window, cx, cy, rOuter, gui.rgba(255, 50, 30, 0.2, BG), false)
+		gui.drawCircle2D(window, cx, cy, r, gui.rgba(255, 60, 40, 0.35, BG), false)
+		gui.drawCircle2D(window, cx, cy, int(r / 2), gui.rgba(255, 120, 80, 0.5, BG), false)
+		// Core dot
+		gui.fillRect(window, cx - 2, cy - 2, 5, 5, gui.rgb(255, 180, 100))
+	}
+}
+
+fn drawWellBeams(window, wells, particles) {
+	beamR2 := float(BEAM_RADIUS * BEAM_RADIUS)
+	with each(wells) fn(w_) {
+		wcx := w_.cx
+		wcy := w_.cy
+		fn sub(i) if i >= len(particles) {
+			true -> ?
+			_ -> {
+				p := particles.(i)
+				dx := p.x - wcx
+				dy := p.y - wcy
+				d2 := dx * dx + dy * dy
+				if d2 < beamR2 -> {
+					alpha := 1.0 - pow(d2, 0.5) / float(BEAM_RADIUS)
+					col := gui.rgba(255, 120, 60, alpha * 0.1, BG)
+					gui.drawLine(window, int(wcx), int(wcy), int(p.x), int(p.y), col)
+				}
+				sub(i + 12)
+			}
+		}
+		sub(0)
+	}
+}
+
+fn drawHeatmap(window, grid, cellW, cellH) {
+	ks := keys(grid)
+	with each(ks) fn(k) {
+		count := grid.(k)
+		// Parse "gx:gy" key
+		parts := k
+		fn findColon(ci) if ci >= len(parts) {
+			true -> ci
+			_ -> if parts.(ci) = ':' {
+				true -> ci
+				_ -> findColon(ci + 1)
+			}
+		}
+		colonIdx := findColon(0)
+		gxStr := slice(parts, 0, colonIdx)
+		gyStr := slice(parts, colonIdx + 1)
+		gx := int(gxStr)
+		gy := int(gyStr)
+		px := gx * cellW
+		py := gy * cellH
+		col := if count >= 8 {
+			true -> GRID_HOT
+			_ -> if count >= 4 {
+				true -> GRID_WARM
+				_ -> GRID_COOL
+			}
+		}
+		gui.fillRect(window, px, py, cellW, cellH, col)
+	}
+}
+
+fn drawTrails(window, particles, colors) {
+	nColors := len(colors)
+	with each(range(len(particles))) fn(i) if i < nColors {
+		true -> {
+			p := particles.(i)
+			col := colors.(i)
+			trail := p.trail
+			if trail = ? -> trail <- []
+			tLen := len(trail)
+			if tLen > 1 -> {
+				fn seg(j) if j < tLen - 1 {
+					true -> {
+						alpha := float(j) / float(tLen)
+						tc := gui.opacity(col, alpha * 0.4, BG)
+						x0 := int(trail.(j).x)
+						y0 := int(trail.(j).y)
+						x1 := int(trail.(j + 1).x)
+						y1 := int(trail.(j + 1).y)
+						dx := x1 - x0
+						if dx < 0 -> dx <- 0 - dx
+						dy := y1 - y0
+						if dy < 0 -> dy <- 0 - dy
+						if dx < 200 & dy < 200 ->
+							gui.drawLine(window, x0, y0, x1, y1, tc)
+						seg(j + 2)
+					}
+					_ -> ?
+				}
+				seg(0)
+			}
+		}
+		_ -> ?
+	}
+}
+
+fn drawParticles(window, particles, colors, energy) {
+	maxSpd := if energy.maxSpeed > 1.0 { true -> energy.maxSpeed, _ -> 1.0 }
+	nColors := len(colors)
+	with each(range(len(particles))) fn(i) if i < nColors {
+		true -> {
+			p := particles.(i)
+			col := colors.(i)
+			spd := pow(p.vx * p.vx + p.vy * p.vy, 0.5)
+			ratio := spd / maxSpd
+			sz := 2 + int(ratio * 3.0)
+			px := int(p.x) - int(sz / 2)
+			py := int(p.y) - int(sz / 2)
+			if ratio > 0.75 -> {
+				gsz := sz + 4
+				gui.fillRect(window, px - 2, py - 2, gsz, gsz, gui.rgba(255, 200, 100, 0.12, BG))
+			}
+			gui.fillRect(window, px, py, sz, sz, col)
+		}
+		_ -> ?
+	}
+}
+
+fn drawSparklineHist(window, history, x, y, w, h) if len(history) >= 2 {
+	true -> {
+		n := len(history)
+		// Find max for scaling
+		maxVal := with bytecode([history]) fn(hist) {
+		fn sub(i, mx) if i >= len(hist) {
+			true -> mx
+			_ -> {
+				v := hist.(i)
+				sub(i + 1, if v > mx { true -> v, _ -> mx })
+			}
+		}
+		sub(0, 0.001)
+	}
+	stepW := float(w) / float(n - 1)
+	gui.fillRect(window, x, y, w, h, gui.rgba(12, 16, 28, 0.8, BG))
+	fn seg(i) if i < n - 1 {
+		true -> {
+			v0 := history.(i) / maxVal
+			v1 := history.(i + 1) / maxVal
+			x0 := x + int(float(i) * stepW)
+			y0 := y + h - int(v0 * float(h))
+			x1 := x + int(float(i + 1) * stepW)
+			y1 := y + h - int(v1 * float(h))
+			col := if v1 > 0.7 { true -> WARN, _ -> if v1 > 0.4 { true -> ACCENT, _ -> GOOD } }
+			gui.drawLine(window, x0, y0, x1, y1, col)
+			seg(i + 1)
+		}
+		_ -> ?
+	}
+	seg(0)
+	// Latest ms label
+	latest := history.(n - 1)
+	latestMs := string(int(latest * 100.0) / 100)
+	gui.drawText(window, x + w + 4, y + h - 12, latestMs + ' ms', DIM)
+	}
+	_ -> 0
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HUD — Timing bars + stats + sparkline
+// ═══════════════════════════════════════════════════════════════
+
+fn drawTimingBar(window, label, engine, smoothMs, y) {
+	barW := int(smoothMs * 20.0)
+	if barW > BAR_MAX_W -> barW <- BAR_MAX_W
+	if barW < 1 -> barW <- 1
+	col := if smoothMs < 2.0 { true -> GOOD, _ -> if smoothMs < 8.0 { true -> ACCENT, _ -> WARN } }
+	gui.drawText(window, 810, y, label)
+	gui.drawText(window, 810, y + 14, engine, DIM)
+	gui.fillRect(window, 920, y + 2, barW, BAR_H, col)
+	msStr := string(int(smoothMs * 100.0) / 100)
+	gui.drawText(window, 920 + barW + 6, y, msStr + ' ms', DIM)
+}
+
+fn drawHUD(window, sm, stats, fps, paused, sparkHistory, energy, particleCount, chaosActive) {
+	gui.fillRect(window, 798, 0, WIN_W - 798, WIN_H, HUD_BG)
+	gui.drawLine(window, 798, 0, 798, WIN_H, gui.rgb(40, 50, 70))
+
+	gui.drawText(window, 810, 12, 'ENGINE SWAP STRESS TEST', WHITE)
+	gui.drawText(window, 810, 30, string(particleCount) + ' particles | ' + string(WELL_COUNT) + ' wells | ' + string(GRID_CELLS) + 'x' + string(GRID_CELLS) + ' grid', DIM)
+	fpsCol := if fps >= 55 { true -> GOOD, _ -> if fps >= 30 { true -> ACCENT, _ -> WARN } }
+	gui.drawText(window, 810, 48, string(fps) + ' FPS' + if paused { true -> '  [PAUSED]', _ -> '' } + if chaosActive { true -> '  CHAOS!', _ -> '' }, fpsCol)
+
+	// Subsystem bars (EMA-smoothed ms values)
+	y := 74
+	drawTimingBar(window, 'Physics', 'bytecode()', sm.physics, y)
+	y <- y + 36
+	drawTimingBar(window, 'Collision Grid', 'bytecode()', sm.collision, y)
+	y <- y + 36
+	drawTimingBar(window, 'Color Blend', 'interpreter()', sm.color, y)
+	y <- y + 36
+	drawTimingBar(window, 'Trail Update', 'bytecode()', sm.trail, y)
+	y <- y + 36
+	drawTimingBar(window, 'Avg Speed', 'interpreter()', sm.avgSpeed, y)
+	y <- y + 36
+	drawTimingBar(window, 'Repulsion', 'bytecode()', sm.repulse, y)
+	y <- y + 36
+	drawTimingBar(window, 'Draw Heatmap', 'raw', sm.drawHeatmap, y)
+	y <- y + 36
+	drawTimingBar(window, 'Draw Trails', 'raw', sm.drawTrails, y)
+	y <- y + 36
+	drawTimingBar(window, 'Draw Particles', 'raw', sm.drawParticles, y)
+	y <- y + 36
+	drawTimingBar(window, 'Draw Wells', 'raw', sm.drawWells, y)
+	y <- y + 36
+	drawTimingBar(window, 'Vortex Field', 'interpreter()', sm.vortex, y)
+	y <- y + 36
+	drawTimingBar(window, 'Energy Stats', 'bytecode()', sm.energy, y)
+	y <- y + 36
+	drawTimingBar(window, 'Well Beams', 'raw', sm.drawBeams, y)
+
+	// Frame-time sparkline
+	y <- y + 40
+	gui.drawLine(window, 810, y, WIN_W - 12, y, gui.rgb(40, 50, 70))
+	y <- y + 6
+	gui.drawText(window, 810, y, 'Frame time (total ms)', WHITE)
+	y <- y + 18
+	drawSparklineHist(window, sparkHistory, 810, y, 200, 48)
+
+	// Stats
+	y <- y + 60
+	gui.drawLine(window, 810, y, WIN_W - 12, y, gui.rgb(40, 50, 70))
+	y <- y + 10
+	gui.drawText(window, 810, y, 'Hot cells (>5): ' + string(stats.hotCells), ACCENT)
+	y <- y + 16
+	gui.drawText(window, 810, y, 'Avg speed: ' + string(int(stats.speed)), ACCENT)
+	y <- y + 16
+	gui.drawText(window, 810, y, 'Max speed: ' + string(int(energy.maxSpeed)), ACCENT)
+	y <- y + 16
+	gui.drawText(window, 810, y, 'Kinetic E: ' + string(int(energy.kinetic / 1000.0)) + 'k', ACCENT)
+	y <- y + 16
+	gui.drawText(window, 810, y, 'Trail segs: ~' + string(particleCount * TRAIL_LEN), DIM)
+
+	// Engine comparison
+	y <- y + 22
+	gui.drawLine(window, 810, y, WIN_W - 12, y, gui.rgb(40, 50, 70))
+	y <- y + 8
+	bcTotal := sm.physics + sm.collision + sm.trail + sm.repulse + sm.energy
+	intTotal := sm.color + sm.avgSpeed + sm.vortex
+	bcBar := int(bcTotal * 12.0)
+	if bcBar > BAR_MAX_W -> bcBar <- BAR_MAX_W
+	if bcBar < 1 -> bcBar <- 1
+	gui.drawText(window, 810, y, 'bytecode()  total', ACCENT)
+	gui.fillRect(window, 920, y + 2, bcBar, BAR_H, ACCENT)
+	gui.drawText(window, 920 + bcBar + 6, y, string(int(bcTotal * 100.0) / 100) + ' ms', DIM)
+	y <- y + 18
+	intBar := int(intTotal * 12.0)
+	if intBar > BAR_MAX_W -> intBar <- BAR_MAX_W
+	if intBar < 1 -> intBar <- 1
+	gui.drawText(window, 810, y, 'interp()    total', GOOD)
+	gui.fillRect(window, 920, y + 2, intBar, BAR_H, GOOD)
+	gui.drawText(window, 920 + intBar + 6, y, string(int(intTotal * 100.0) / 100) + ' ms', DIM)
+
+	// Legend
+	y <- y + 26
+	gui.drawLine(window, 810, y, WIN_W - 12, y, gui.rgb(40, 50, 70))
+	y <- y + 10
+	gui.fillRect(window, 810, y + 2, 10, 8, GOOD)
+	gui.drawText(window, 826, y, '< 2ms', DIM)
+	gui.fillRect(window, 876, y + 2, 10, 8, ACCENT)
+	gui.drawText(window, 892, y, '2-8ms', DIM)
+	gui.fillRect(window, 942, y + 2, 10, 8, WARN)
+	gui.drawText(window, 958, y, '> 8ms', DIM)
+
+	// Controls
+	y <- y + 22
+	gui.drawText(window, 810, y, 'SPC pause  R reset  +/- count', DIM)
+	y <- y + 14
+	gui.drawText(window, 810, y, 'C chaos  L log  P parity  ESC quit', DIM)
+
+	// Engine key
+	y <- y + 20
+	gui.drawText(window, 810, y, 'bytecode()    tight loops, arith', DIM)
+	y <- y + 14
+	gui.drawText(window, 810, y, 'interpreter() map/reduce/callbacks', DIM)
+	y <- y + 14
+	gui.drawText(window, 810, y, 'raw           no wrapper baseline', DIM)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════
+
+fn main() {
+	window := gui.createWindow('Engine Swap Stress Test', WIN_W, WIN_H, {
+		frameMs: 16
+		updateOnDispatch: false
+		icon: './build/magnolia.ico'
+		taskbarIcon: './build/magnolia.ico'
+		windowIcon: './build/magnolia.ico'
+	})
+
+	if window.type {
+		:error -> {
+			println('Failed to create window: ' + string(window))
+			1
+		}
+		_ -> {
+			particles := initParticles(PARTICLE_COUNT, SIM_W, WIN_H)
+			wells := initWells(WELL_COUNT, SIM_W, WIN_H)
+			t := 0.0
+			frameCount := 0
+			fpsAccNs := 0
+			fps := 0
+			paused := false
+			cellW := int(SIM_W / GRID_CELLS)
+			cellH := int(WIN_H / GRID_CELLS)
+
+			sm := initTimings()
+			stats := { hotCells: 0, speed: 0.0 }
+			energy := { kinetic: 0.0, maxSpeed: 0.0 }
+			sparkHistory := initSparkline()
+			grid := {}
+			chaosUntil := 0.0
+			logState := initLogState()
+
+			pushLog(logState, 'INFO', 'init: ' + string(PARTICLE_COUNT) + ' particles, ' + string(WELL_COUNT) + ' wells')
+			pushLog(logState, 'INFO', 'startup: ' + string(int(float(nanotime() - _scriptT0) / 1000000.0)) + 'ms from script start')
+			parityDone := false
+
+			gui.show(window)
+
+			// Keyboard controls
+			gui.onKeyDownEvent(window, fn(key, _evt) {
+				if key = gui.FORM_VK_ESCAPE -> gui.close(window)
+				// SPACE = 0x20
+				if key = 32 -> paused <- !paused
+				// R = 0x52
+				if key = 82 -> {
+					particles <- initParticles(PARTICLE_COUNT, SIM_W, WIN_H)
+					t <- 0.0
+					chaosUntil <- 0.0
+				}
+				// C = 0x43 — chaos burst
+				if key = 67 -> {
+					chaosUntil <- t + CHAOS_DURATION
+					pushLog(logState, 'EVENT', 'chaos burst activated (3x gravity for ' + string(CHAOS_DURATION) + 's)')
+				}
+				// L = 0x4C — toggle log overlay
+				if key = 76 -> logState.showOverlay <- !logState.showOverlay
+				// P = 0x50 — run parity checks
+				if key = 80 -> runParityChecks(logState)
+				// + (=) = 187 / numpad+ = 107 — add 50 particles
+				if key = 187 | key = 107 -> {
+					base := len(particles)
+					fn addBatch(i, acc) if i >= 50 {
+						true -> acc
+						_ -> addBatch(i + 1, acc << makeParticle(base + i, SIM_W, WIN_H))
+					}
+					particles <- append(particles, addBatch(0, []))
+					pushLog(logState, 'EVENT', '+50 particles -> ' + string(len(particles)))
+				}
+				// - = 189 / numpad- = 109 — remove 50 particles (min 50)
+				if key = 189 | key = 109 -> {
+					newLen := len(particles) - 50
+					if newLen < 50 -> newLen <- 50
+					particles <- slice(particles, 0, newLen)
+					pushLog(logState, 'EVENT', '-50 particles -> ' + string(len(particles)))
+				}
+			})
+
+			gui.run(window, ?, fn(win, dt) {
+				frameStart := nanotime()
+				t <- t + dt
+				frameCount <- frameCount + 1
+
+				fpsAccNs <- fpsAccNs + int(dt * 1000000000)
+				if fpsAccNs >= 1000000000 -> {
+					fps <- frameCount
+					frameCount <- 0
+					fpsAccNs <- fpsAccNs - 1000000000
+					// Log perf every second for first 8 entries, then every 5th second
+					if logState.index < 8 | int(t) % 5 = 0 -> {
+						bcMs := sm.physics + sm.collision + sm.trail + sm.repulse + sm.energy
+						intMs := sm.color + sm.avgSpeed + sm.vortex
+						pushLog(logState, 'PERF', 'fps=' + string(fps) + ' bc=' + string(int(bcMs * 100.0) / 100) + 'ms int=' + string(int(intMs * 100.0) / 100) + 'ms n=' + string(len(particles)))
+					}
+					// Run parity checks once after first FPS sample
+					if !parityDone -> {
+						parityDone <- true
+						runParityChecks(logState)
+					}
+				}
+
+				if !paused -> {
+					// Chaos mode: save masses, triple, then restore (avoids float drift)
+					chaosActive := t < chaosUntil
+					savedMasses := if chaosActive {
+						true -> wells |> map(fn(w_) w_.mass)
+						_ -> []
+					}
+					if chaosActive -> with each(wells) fn(w_) { w_.mass <- w_.mass * 3.0 }
+
+					// ── SUBSYSTEM 1: Physics (bytecode) ──
+					t0 := nanotime()
+					updateWellPositions(wells, t, SIM_W, WIN_H)
+					physicsStep(particles, wells, dt, SIM_W, WIN_H)
+					sm.physics <- emaUpdate(sm.physics, float(nanotime() - t0) / 1000000.0, EMA_ALPHA)
+
+					if chaosActive -> {
+						fn restore(i) if i >= len(wells) {
+							true -> ?
+							_ -> {
+								wells.(i).mass <- savedMasses.(i)
+								restore(i + 1)
+							}
+						}
+						restore(0)
+					}
+
+					// ── SUBSYSTEM 2: Collision grid (bytecode) ──
+					t1 := nanotime()
+					grid <- buildCollisionGrid(particles, cellW, cellH)
+					stats.hotCells <- countHotCells(grid, 5)
+					sm.collision <- emaUpdate(sm.collision, float(nanotime() - t1) / 1000000.0, EMA_ALPHA)
+
+					// ── SUBSYSTEM 4: Trail update (bytecode) ──
+					t3 := nanotime()
+					updateTrails(particles)
+					sm.trail <- emaUpdate(sm.trail, float(nanotime() - t3) / 1000000.0, EMA_ALPHA)
+
+					// ── SUBSYSTEM 6: Proximity repulsion (bytecode) ──
+					t6 := nanotime()
+					proximityRepulse(particles, dt)
+					sm.repulse <- emaUpdate(sm.repulse, float(nanotime() - t6) / 1000000.0, EMA_ALPHA)
+
+					// ── SUBSYSTEM 7: Vortex field (interpreter) ──
+					t7 := nanotime()
+					applyVortex(particles, t, SIM_W, WIN_H, dt)
+					sm.vortex <- emaUpdate(sm.vortex, float(nanotime() - t7) / 1000000.0, EMA_ALPHA)
+				}
+
+				// ── SUBSYSTEM 3: Color blending (interpreter) ──
+				t2 := nanotime()
+				colors := blendParticleColors(particles, t)
+				sm.color <- emaUpdate(sm.color, float(nanotime() - t2) / 1000000.0, EMA_ALPHA)
+
+				// ── SUBSYSTEM 5: Average speed (interpreter) ──
+				t4 := nanotime()
+				stats.speed <- avgSpeed(particles)
+				sm.avgSpeed <- emaUpdate(sm.avgSpeed, float(nanotime() - t4) / 1000000.0, EMA_ALPHA)
+
+				// ── SUBSYSTEM 8: Energy stats (bytecode) ──
+				t8 := nanotime()
+				energy <- computeEnergy(particles)
+				sm.energy <- emaUpdate(sm.energy, float(nanotime() - t8) / 1000000.0, EMA_ALPHA)
+
+				// ── RENDER ──
+				frame := gui.beginFrame(win)
+				if frame.type = :ok -> {
+					drawBackground(win)
+					drawVignette(win, SIM_W, WIN_H)
+
+					// Heatmap underlay
+					t5 := nanotime()
+					drawHeatmap(win, grid, cellW, cellH)
+					sm.drawHeatmap <- emaUpdate(sm.drawHeatmap, float(nanotime() - t5) / 1000000.0, EMA_ALPHA)
+
+					ta := nanotime()
+					drawWells(win, wells, t)
+					sm.drawWells <- emaUpdate(sm.drawWells, float(nanotime() - ta) / 1000000.0, EMA_ALPHA)
+
+					tBeams := nanotime()
+					drawWellBeams(win, wells, particles)
+					sm.drawBeams <- emaUpdate(sm.drawBeams, float(nanotime() - tBeams) / 1000000.0, EMA_ALPHA)
+
+					tb := nanotime()
+					drawTrails(win, particles, colors)
+					sm.drawTrails <- emaUpdate(sm.drawTrails, float(nanotime() - tb) / 1000000.0, EMA_ALPHA)
+
+					tc := nanotime()
+					drawParticles(win, particles, colors, energy)
+					sm.drawParticles <- emaUpdate(sm.drawParticles, float(nanotime() - tc) / 1000000.0, EMA_ALPHA)
+
+					// Total frame time
+					totalMs := float(nanotime() - frameStart) / 1000000.0
+					sm.total <- emaUpdate(sm.total, totalMs, EMA_ALPHA)
+					sparkHistory <- pushSpark(sparkHistory, totalMs)
+
+					drawHUD(win, sm, stats, fps, paused, sparkHistory, energy, len(particles), t < chaosUntil)
+					drawLogOverlay(win, logState)
+					gui.endFrame(win)
+				}
+				0
+			})
+
+			pushLog(logState, 'INFO', 'loop ended, shutting down')
+			gui.close(window)
+			0
+		}
+	}
+}
+
+main()
