@@ -35,6 +35,13 @@ guiShader := import('gui-shader')
 guiFonts := import('gui-fonts')
 guiVideo := import('gui-video')
 guiResolution := import('gui-resolution')
+guiCanvas := import('gui-canvas')
+guiClipboard := import('gui-clipboard')
+guiFiledrop := import('gui-filedrop')
+guiDialogs := import('gui-dialogs')
+guiMenus := import('gui-menus')
+guiTheme := import('gui-theme')
+guiSystray := import('gui-systray')
 _guiImportT4 := nanotime()
 
 // Module-import timing exposed for diagnostics.
@@ -269,6 +276,102 @@ fn lockResize(window, locked) if window.type {
 	_ -> window
 }
 
+fn setAlwaysOnTop(window, enabled) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.setAlwaysOnTop(window, _default(enabled, true))
+		_ -> window
+	}
+	_ -> window
+}
+
+fn setWindowOpacity(window, alpha) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.setWindowOpacity(window, alpha)
+		_ -> window
+	}
+	_ -> window
+}
+
+fn setWindowColorKey(window, colorKey) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.setWindowColorKey(window, colorKey)
+		_ -> window
+	}
+	_ -> window
+}
+
+fn removeLayeredStyle(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.removeLayeredStyle(window)
+		_ -> window
+	}
+	_ -> window
+}
+
+// ─── Multi-window ───────────────────────────────────────────────────────────
+fn registerWindow(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.registerWindow(window)
+		_ -> window
+	}
+	_ -> window
+}
+fn unregisterWindow(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.unregisterWindow(window)
+		_ -> window
+	}
+	_ -> window
+}
+fn allWindows() guiNativeWin.allWindows()
+fn pollAllWindows() guiNativeWin.pollAllWindows()
+fn closeAllWindows() guiNativeWin.closeAllWindows()
+fn anyWindowOpen?() guiNativeWin.anyWindowOpen?()
+
+// ─── Window snap / restore ──────────────────────────────────────────────────
+fn saveWindowState(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.saveWindowState(window)
+		_ -> ?
+	}
+	_ -> ?
+}
+fn restoreWindowState(window, state) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.restoreWindowState(window, state)
+		_ -> window
+	}
+	_ -> window
+}
+
+// ─── Single-instance enforcement ────────────────────────────────────────────
+fn acquireSingleInstance(name) guiNativeWin.acquireSingleInstance(name)
+fn releaseSingleInstance(inst) guiNativeWin.releaseSingleInstance(inst)
+
+// ─── Borderless window dragging ─────────────────────────────────────────────
+// Begin/update/end a client-area drag for borderless windows.
+fn beginDrag(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.beginDrag(window)
+		_ -> { active: false }
+	}
+	_ -> { active: false }
+}
+
+fn updateDrag(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.updateDrag(window)
+	}
+	_ -> ?
+}
+
+fn endDrag(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.endDrag(window)
+	}
+	_ -> ?
+}
+
 // ─── Virtual / design resolution ────────────────────────────────────────────
 // Set a fixed logical resolution.  All drawing happens in design coords;
 // the back-buffer is allocated at the logical size and scaled to the
@@ -416,6 +519,10 @@ FORM_WM_LBUTTONDOWN := guiEvents.FORM_WM_LBUTTONDOWN
 FORM_WM_LBUTTONUP := guiEvents.FORM_WM_LBUTTONUP
 FORM_WM_RBUTTONDOWN := guiEvents.FORM_WM_RBUTTONDOWN
 FORM_WM_RBUTTONUP := guiEvents.FORM_WM_RBUTTONUP
+FORM_WM_MBUTTONDOWN := guiEvents.FORM_WM_MBUTTONDOWN
+FORM_WM_MBUTTONUP := guiEvents.FORM_WM_MBUTTONUP
+FORM_WM_MOUSEWHEEL := guiEvents.FORM_WM_MOUSEWHEEL
+FORM_WM_LBUTTONDBLCLK := guiEvents.FORM_WM_LBUTTONDBLCLK
 FORM_WM_KEYDOWN := guiEvents.FORM_WM_KEYDOWN
 FORM_WM_KEYUP := guiEvents.FORM_WM_KEYUP
 FORM_WM_CHAR := guiEvents.FORM_WM_CHAR
@@ -429,7 +536,21 @@ GUI_WM_EXITSIZEMOVE := guiEvents.GUI_WM_EXITSIZEMOVE
 FORM_VK_BACK := guiEvents.FORM_VK_BACK
 FORM_VK_TAB := guiEvents.FORM_VK_TAB
 FORM_VK_RETURN := guiEvents.FORM_VK_RETURN
+FORM_VK_SHIFT := guiEvents.FORM_VK_SHIFT
+FORM_VK_CONTROL := guiEvents.FORM_VK_CONTROL
+FORM_VK_ALT := guiEvents.FORM_VK_ALT
 FORM_VK_ESCAPE := guiEvents.FORM_VK_ESCAPE
+MK_LBUTTON := guiEvents.MK_LBUTTON
+MK_RBUTTON := guiEvents.MK_RBUTTON
+MK_SHIFT := guiEvents.MK_SHIFT
+MK_CONTROL := guiEvents.MK_CONTROL
+MK_MBUTTON := guiEvents.MK_MBUTTON
+fn modShift?(wp) guiEvents.modShift?(wp)
+fn modCtrl?(wp) guiEvents.modCtrl?(wp)
+fn modAlt?(window) guiEvents.modAlt?(window)
+fn keyShiftDown?(window) guiEvents.keyShiftDown?(window)
+fn keyCtrlDown?(window) guiEvents.keyCtrlDown?(window)
+fn keyAltDown?(window) guiEvents.keyAltDown?(window)
 
 fn formInRect?(mx, my, rx, ry, rw, rh) guiEvents.formInRect?(mx, my, rx, ry, rw, rh)
 fn formMsgType(window) guiEvents.formMsgType(window)
@@ -443,10 +564,87 @@ fn onLButtonDown(window, handler) guiEvents.onLButtonDown(window, handler)
 fn onLButtonUp(window, handler) guiEvents.onLButtonUp(window, handler)
 fn onRButtonDown(window, handler) guiEvents.onRButtonDown(window, handler)
 fn onRButtonUp(window, handler) guiEvents.onRButtonUp(window, handler)
+fn onMButtonDown(window, handler) guiEvents.onMButtonDown(window, handler)
+fn onMButtonUp(window, handler) guiEvents.onMButtonUp(window, handler)
+fn onMouseWheel(window, handler) guiEvents.onMouseWheel(window, handler)
+fn onLButtonDblClk(window, handler) guiEvents.onLButtonDblClk(window, handler)
+fn enableMouseTracking(window) guiEvents.enableMouseTracking(window)
+fn onMouseHover(window, handler) guiEvents.onMouseHover(window, handler)
+fn onMouseLeave(window, handler) guiEvents.onMouseLeave(window, handler)
 fn onKeyDown(window, handler) guiEvents.onKeyDown(window, handler)
 fn onKeyUp(window, handler) guiEvents.onKeyUp(window, handler)
 fn onChar(window, handler) guiEvents.onChar(window, handler)
 fn onResize(window, handler) guiEvents.onResize(window, handler)
+fn onDpiChanged(window, handler) guiEvents.onDpiChanged(window, handler)
+
+// ─── DPI & Display Scaling ──────────────────────────────────────────────────
+fn setProcessDpiAwarenessContext(context) windows.setProcessDpiAwarenessContext(context)
+fn getDpiForWindow(hwnd) windows.getDpiForWindow(hwnd)
+fn getDpiForSystem() windows.getDpiForSystem()
+fn getDpiForMonitor(hMonitor, dpiType) windows.getDpiForMonitor(hMonitor, dpiType)
+fn monitorFromWindow(hwnd, flags) windows.monitorFromWindow(hwnd, flags)
+fn adjustWindowRectExForDpi(x, y, w, h, style, exStyle, dpi) windows.adjustWindowRectExForDpi(x, y, w, h, style, exStyle, dpi)
+fn enableNonClientDpiScaling(hwnd) windows.enableNonClientDpiScaling(hwnd)
+fn dpiScale(value, dpi) windows.dpiScale(value, dpi)
+fn dpiUnscale(value, dpi) windows.dpiUnscale(value, dpi)
+DPI_AWARENESS_CONTEXT_UNAWARE := windows.DPI_AWARENESS_CONTEXT_UNAWARE
+DPI_AWARENESS_CONTEXT_SYSTEM_AWARE := windows.DPI_AWARENESS_CONTEXT_SYSTEM_AWARE
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE := windows.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 := windows.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+
+// ─── Clipboard ──────────────────────────────────────────────────────────────
+fn clipboardGetText() guiClipboard.clipboardGetText()
+fn clipboardSetText(text) guiClipboard.clipboardSetText(text)
+fn clipboardHasText() guiClipboard.clipboardHasText()
+
+// ─── File Drop ──────────────────────────────────────────────────────────────
+fn enableFileDrop(window) guiFiledrop.enableFileDrop(window)
+fn disableFileDrop(window) guiFiledrop.disableFileDrop(window)
+fn onFileDrop(window, handler) guiFiledrop.onFileDrop(window, handler)
+
+// ─── Native Dialogs ─────────────────────────────────────────────────────────
+fn openFileDialog(options) guiDialogs.openFileDialog(options)
+fn saveFileDialog(options) guiDialogs.saveFileDialog(options)
+fn chooseColor(options) guiDialogs.chooseColor(options)
+fn chooseFont(options) guiDialogs.chooseFont(options)
+fn pickFolder(options) guiDialogs.pickFolder(options)
+
+// ─── Menus ─────────────────────────────────────────────────────────────────
+fn createMenu() guiMenus.createMenu()
+fn createPopupMenu() guiMenus.createPopupMenu()
+fn menuAppendItem(hMenu, id, label) guiMenus.appendItem(hMenu, id, label)
+fn menuAppendSeparator(hMenu) guiMenus.appendSeparator(hMenu)
+fn menuAppendSubmenu(hMenu, hSub, label) guiMenus.appendSubmenu(hMenu, hSub, label)
+fn setMenuBar(window, hMenu) guiMenus.setMenuBar(window, hMenu)
+fn removeMenuBar(window) guiMenus.removeMenuBar(window)
+fn destroyMenu(hMenu) guiMenus.destroyMenu(hMenu)
+fn showPopupMenu(window, hMenu, x, y) guiMenus.showPopupMenu(window, hMenu, x, y)
+fn onMenuCommand(window, handler) guiMenus.onMenuCommand(window, handler)
+fn buildMenu(spec) guiMenus.buildMenu(spec)
+fn createAcceleratorTable(entries) guiMenus.createAcceleratorTable(entries)
+fn destroyAcceleratorTable(hAccel) guiMenus.destroyAcceleratorTable(hAccel)
+fn installAccelerators(window, entries) guiMenus.installAccelerators(window, entries)
+
+// ─── System menu ────────────────────────────────────────────────────────────
+fn getSystemMenu(window, reset) guiMenus.getSystemMenu(window, reset)
+fn appendSystemMenuItem(window, id, label) guiMenus.appendSystemMenuItem(window, id, label)
+fn appendSystemMenuSeparator(window) guiMenus.appendSystemMenuSeparator(window)
+fn resetSystemMenu(window) guiMenus.resetSystemMenu(window)
+fn onSysCommand(window, handler) guiMenus.onSysCommand(window, handler)
+
+// ─── Theme / System Integration ────────────────────────────────────────────────
+fn isDarkMode?() guiTheme.isDarkMode?()
+fn isHighContrast?() guiTheme.isHighContrast?()
+fn accentColor() guiTheme.accentColor()
+
+// ─── System Tray ────────────────────────────────────────────────────────────
+fn addTrayIcon(window, id, tooltip, hIcon) guiSystray.addTrayIcon(window, id, tooltip, hIcon)
+fn removeTrayIcon(window, id) guiSystray.removeTrayIcon(window, id)
+fn updateTrayTooltip(window, id, tooltip) guiSystray.updateTrayTooltip(window, id, tooltip)
+fn showBalloonTip(window, id, title, message, iconFlag) guiSystray.showBalloonTip(window, id, title, message, iconFlag)
+fn onTrayEvent(window, handler) guiSystray.onTrayEvent(window, handler)
+fn minimizeToTray(window) guiSystray.minimizeToTray(window)
+fn restoreFromTray(window) guiSystray.restoreFromTray(window)
 
 fn formSetStatus(state, message, ok) guiForm.formSetStatus(state, message, ok)
 fn formPopChar(s) guiForm.formPopChar(s)
@@ -462,14 +660,55 @@ fn formToggleKeysByHit(state, mx, my, rects) guiForm.formToggleKeysByHit(state, 
 fn formSetKeyByHit(state, targetKey, mx, my, rects) guiForm.formSetKeyByHit(state, targetKey, mx, my, rects)
 fn formTruncateText(s, maxChars) guiForm.formTruncateText(s, maxChars)
 fn formIsPrintableChar?(code) guiForm.formIsPrintableChar?(code)
+
+// ─── Text selection helpers ─────────────────────────────────────────────────
+fn formSelectionState() guiForm.formSelectionState()
+fn formSelSetCursor(sel, pos, shifting) guiForm.formSelSetCursor(sel, pos, shifting)
+fn formSelMoveCursor(sel, text, dir, shifting) guiForm.formSelMoveCursor(sel, text, dir, shifting)
+fn formSelHome(sel, shifting) guiForm.formSelHome(sel, shifting)
+fn formSelEnd(sel, text, shifting) guiForm.formSelEnd(sel, text, shifting)
+fn formSelAll(sel, text) guiForm.formSelAll(sel, text)
+fn formSelRange(sel) guiForm.formSelRange(sel)
+fn formSelHasSelection?(sel) guiForm.formSelHasSelection?(sel)
+fn formSelSelectedText(sel, text) guiForm.formSelSelectedText(sel, text)
+fn formSelDeleteSelection(sel, text) guiForm.formSelDeleteSelection(sel, text)
+fn formSelInsertAtCursor(sel, text, insert) guiForm.formSelInsertAtCursor(sel, text, insert)
+fn formSelBackspace(sel, text) guiForm.formSelBackspace(sel, text)
+fn formSelClickPos(mx, fieldX, fieldPadding, text) guiForm.formSelClickPos(mx, fieldX, fieldPadding, text)
+fn formDrawFieldWithSel(window, x, y, w, h, text, placeholder, focused, sel, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor, selColor) guiForm.formDrawFieldWithSel(_formCtxCached, window, x, y, w, h, text, placeholder, focused, sel, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor, selColor)
+
+// ─── Undo / redo ────────────────────────────────────────────────────────────
+fn formUndoState(maxHistory) guiForm.formUndoState(maxHistory)
+fn formUndoPush(hist, text, sel) guiForm.formUndoPush(hist, text, sel)
+fn formUndo(hist, text, sel) guiForm.formUndo(hist, text, sel)
+fn formRedo(hist, text, sel) guiForm.formRedo(hist, text, sel)
+
 fn formAppendByFocus(state, focus, c, fieldSpecs, notesSpec) guiForm.formAppendByFocus(state, focus, c, fieldSpecs, notesSpec)
 fn formBackspaceByFocus(state, focus, fieldKeys, notesSpec) guiForm.formBackspaceByFocus(state, focus, fieldKeys, notesSpec)
+fn formCopyByFocus(state, focus, fieldKeys) guiForm.formCopyByFocus(state, focus, fieldKeys)
+fn formPasteByFocus(state, focus, fieldSpecs) guiForm.formPasteByFocus(state, focus, fieldSpecs)
+fn formCutByFocus(state, focus, fieldKeys) guiForm.formCutByFocus(state, focus, fieldKeys)
 fn formNotesAppendChar(lines, c) guiForm.formNotesAppendChar(lines, c)
 fn formNotesBackspace(lines) guiForm.formNotesBackspace(lines)
 fn formNotesNewLine(lines, maxLines) guiForm.formNotesNewLine(lines, maxLines)
 fn formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal) guiForm.formSliderValue(mx, sliderX, sliderW, handleW, minVal, maxVal)
 fn formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings) guiForm.formApplySliderDrag(state, dragKey, mx, sliderX, sliderW, handleW, minVal, maxVal, bindings)
 fn formNextField(current, order) guiForm.formNextField(current, order)
+fn formPrevField(current, order) guiForm.formPrevField(current, order)
+fn formFocusState(tabOrder) guiForm.formFocusState(tabOrder)
+fn formFocusNext(fs) guiForm.formFocusNext(fs)
+fn formFocusPrev(fs) guiForm.formFocusPrev(fs)
+fn formFocusSet(fs, key) guiForm.formFocusSet(fs, key)
+fn formFocusIs?(fs, key) guiForm.formFocusIs?(fs, key)
+fn formHandleTabKey(fs, shiftDown) guiForm.formHandleTabKey(fs, shiftDown)
+fn formIsActivateKey?(vk) guiForm.formIsActivateKey?(vk)
+fn formHandleKeyNav(fs, vk, shiftDown, widgetHandlers, options) guiForm.formHandleKeyNav(fs, vk, shiftDown, widgetHandlers, options)
+fn formCheckboxKeyToggle(checked, vk) guiForm.formCheckboxKeyToggle(checked, vk)
+fn formRadioKeySelect(current, vk, choices) guiForm.formRadioKeySelect(current, vk, choices)
+fn formSliderKeyAdjust(value, vk, minVal, maxVal, step) guiForm.formSliderKeyAdjust(value, vk, minVal, maxVal, step)
+fn formDropdownKeyNav(isOpen, selectedIdx, vk, itemCount) guiForm.formDropdownKeyNav(isOpen, selectedIdx, vk, itemCount)
+fn formTreeKeyNav(flatList, selectedIdx, vk) guiForm.formTreeKeyNav(flatList, selectedIdx, vk)
+fn formTableKeyNav(selectedRow, vk, rowCount, pageSize) guiForm.formTableKeyNav(selectedRow, vk, rowCount, pageSize)
 fn formMaskText(s) guiForm.formMaskText(s)
 
 _formCtxCached := {
@@ -479,6 +718,7 @@ _formCtxCached := {
 	drawText: drawText
 }
 fn formDrawBorder(window, x, y, w, h, color) guiForm.formDrawBorder(_formCtxCached, window, x, y, w, h, color)
+fn formDrawFocusRing(window, x, y, w, h, color, options) guiForm.formDrawFocusRing(_formCtxCached, window, x, y, w, h, color, options)
 fn formDrawField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) guiForm.formDrawField(_formCtxCached, window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor)
 fn formDrawPasswordField(window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) guiForm.formDrawPasswordField(_formCtxCached, window, x, y, w, h, text, placeholder, focused, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor)
 fn formDrawCheckbox(window, x, y, checked, label, fieldColor, borderColor, checkColor) guiForm.formDrawCheckbox(_formCtxCached, window, x, y, checked, label, fieldColor, borderColor, checkColor)
@@ -489,6 +729,44 @@ fn formDrawSlider(window, x, y, w, value, maxVal, trackColor, fillColor, thumbCo
 fn formDrawLabeledPercentSlider(window, x, labelY, sliderY, w, label, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, percentRectColor) guiForm.formDrawLabeledPercentSlider(_formCtxCached, window, x, labelY, sliderY, w, label, value, maxVal, trackColor, fillColor, thumbColor, thumbBorderColor, percentRectColor)
 fn formDrawNotes(window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor) guiForm.formDrawNotes(_formCtxCached, window, x, y, w, h, lines, focused, placeholder, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor)
 fn formDrawStatusBanner(window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor) guiForm.formDrawStatusBanner(_formCtxCached, window, x, y, w, h, message, ok, fieldColor, borderColor, successColor, errorColor)
+fn formDrawProgressBar(window, x, y, w, value, maxVal, trackColor, fillColor, borderColor, options) guiForm.formDrawProgressBar(_formCtxCached, window, x, y, w, value, maxVal, trackColor, fillColor, borderColor, options)
+fn formDrawTabStrip(window, x, y, tabs, activeIdx, bgColor, activeBgColor, borderColor, activeTextColor, inactiveTextColor, options) guiForm.formDrawTabStrip(_formCtxCached, window, x, y, tabs, activeIdx, bgColor, activeBgColor, borderColor, activeTextColor, inactiveTextColor, options)
+fn formHitTab(mx, my, x, y, tabs, options) guiForm.formHitTab(mx, my, x, y, tabs, options)
+fn formDrawDropdown(window, x, y, w, h, selectedLabel, open, fieldColor, fieldFocusColor, borderColor, arrowColor) guiForm.formDrawDropdown(_formCtxCached, window, x, y, w, h, selectedLabel, open, fieldColor, fieldFocusColor, borderColor, arrowColor)
+fn formDrawDropdownList(window, x, y, w, items, hoverIdx, itemHeight, listBgColor, hoverBgColor, borderColor) guiForm.formDrawDropdownList(_formCtxCached, window, x, y, w, items, hoverIdx, itemHeight, listBgColor, hoverBgColor, borderColor)
+fn formHitDropdownItem(mx, my, x, y, w, items, itemHeight) guiForm.formHitDropdownItem(mx, my, x, y, w, items, itemHeight)
+
+fn formTooltipState() guiForm.formTooltipState()
+fn formTooltipUpdate(state, mx, my, regionKey, text, delay) guiForm.formTooltipUpdate(state, mx, my, regionKey, text, delay)
+fn formTooltipHide(state) guiForm.formTooltipHide(state)
+fn formDrawTooltip(window, state, bgColor, borderColor, textColor, options) guiForm.formDrawTooltip(_formCtxCached, window, state, bgColor, borderColor, textColor, options)
+
+fn formDrawSpinner(window, x, y, w, h, value, focused, fieldColor, fieldFocusColor, borderColor, arrowColor, options) guiForm.formDrawSpinner(_formCtxCached, window, x, y, w, h, value, focused, fieldColor, fieldFocusColor, borderColor, arrowColor, options)
+fn formSpinnerHit(mx, my, x, y, w, h, options) guiForm.formSpinnerHit(mx, my, x, y, w, h, options)
+fn formSpinnerAdjust(value, direction, options) guiForm.formSpinnerAdjust(value, direction, options)
+
+fn formDrawScrollbar(window, x, y, w, h, scrollPos, contentSize, viewSize, trackColor, thumbColor, borderColor, options) guiForm.formDrawScrollbar(_formCtxCached, window, x, y, w, h, scrollPos, contentSize, viewSize, trackColor, thumbColor, borderColor, options)
+fn formScrollbarHit(mx, my, x, y, w, h, scrollPos, contentSize, viewSize, options) guiForm.formScrollbarHit(mx, my, x, y, w, h, scrollPos, contentSize, viewSize, options)
+
+fn formDrawTreeView(window, x, y, w, h, nodes, selectedIdx, scrollPos, bgColor, selectedBgColor, textColor, selectedTextColor, borderColor, options) guiForm.formDrawTreeView(_formCtxCached, window, x, y, w, h, nodes, selectedIdx, scrollPos, bgColor, selectedBgColor, textColor, selectedTextColor, borderColor, options)
+fn formTreeHitRow(mx, my, x, y, w, flat, scrollPos, options) guiForm.formTreeHitRow(mx, my, x, y, w, flat, scrollPos, options)
+fn formTreeToggle(flat, idx) guiForm.formTreeToggle(flat, idx)
+fn formTreeContentHeight(flat, options) guiForm.formTreeContentHeight(flat, options)
+
+// ─── Date picker ────────────────────────────────────────────────────────────
+fn formDatePickerState(year, month, day) guiForm.formDatePickerState(year, month, day)
+fn formDatePickerPrevMonth(state) guiForm.formDatePickerPrevMonth(state)
+fn formDatePickerNextMonth(state) guiForm.formDatePickerNextMonth(state)
+fn formDateLabel(state) guiForm.formDateLabel(state)
+fn formDrawDateField(window, x, y, w, h, state, fieldColor, fieldFocusColor, borderColor, arrowColor) guiForm.formDrawDateField(_formCtxCached, window, x, y, w, h, state, fieldColor, fieldFocusColor, borderColor, arrowColor)
+fn formDrawDateCalendar(window, x, y, state, bgColor, headerBgColor, selectedBgColor, todayBorderColor, textColor, selectedTextColor, headerTextColor, borderColor, options) guiForm.formDrawDateCalendar(_formCtxCached, window, x, y, state, bgColor, headerBgColor, selectedBgColor, todayBorderColor, textColor, selectedTextColor, headerTextColor, borderColor, options)
+fn formDateCalendarHit(mx, my, x, y, state, options) guiForm.formDateCalendarHit(mx, my, x, y, state, options)
+
+// ─── Table / data grid ──────────────────────────────────────────────────────
+fn formDrawTable(window, x, y, w, h, columns, rows, scrollPos, selectedRow, headerBgColor, rowBgColor, altRowBgColor, selectedBgColor, headerTextColor, textColor, selectedTextColor, borderColor, options) guiForm.formDrawTable(_formCtxCached, window, x, y, w, h, columns, rows, scrollPos, selectedRow, headerBgColor, rowBgColor, altRowBgColor, selectedBgColor, headerTextColor, textColor, selectedTextColor, borderColor, options)
+fn formTableHitRow(mx, my, x, y, w, columns, rows, scrollPos, options) guiForm.formTableHitRow(mx, my, x, y, w, columns, rows, scrollPos, options)
+fn formTableContentHeight(rows, options) guiForm.formTableContentHeight(rows, options)
+fn formTableHitColumn(mx, x, columns) guiForm.formTableHitColumn(mx, x, columns)
 
 fn Vec2(x, y) gui2d.Vec2(x, y)
 fn Vec4(x, y, w, h) gui2d.Vec4(x, y, w, h)
@@ -1049,3 +1327,22 @@ fn videoBufferDiff(bufA, bufB) guiVideo.bufferDiff(bufA, bufB)
 // Capture and export
 fn videoCaptureBuffer(buf) guiVideo.captureBuffer(buf)
 fn videoFrameToBmpPixels(frame) guiVideo.frameToBmpPixels(frame)
+
+// ─── Floating canvases ─────────────────────────────────────────────────────
+fn createCanvas(window, options) guiCanvas.create(window, options)
+fn beginCanvas(canvas) guiCanvas.beginCanvas(canvas)
+fn endCanvas(canvas) guiCanvas.endCanvas(canvas)
+fn moveCanvas(canvas, x, y) guiCanvas.move(canvas, x, y)
+fn resizeCanvas(canvas, w, h) guiCanvas.resize(canvas, w, h)
+fn setCanvasVisible(canvas, vis) guiCanvas.setVisible(canvas, vis)
+fn setCanvasZIndex(canvas, z) guiCanvas.setZIndex(canvas, z)
+fn setCanvasOpacity(canvas, alpha) guiCanvas.setOpacity(canvas, alpha)
+fn setCanvasTransparentColor(canvas, color) guiCanvas.setTransparentColor(canvas, color)
+fn destroyCanvas(canvas) guiCanvas.destroy(canvas)
+fn destroyAllCanvases(window) guiCanvas.destroyAll(window)
+fn isCanvas?(obj) guiCanvas.isCanvas?(obj)
+fn canvases(window) guiCanvas.canvases(window)
+fn canvasCount(window) guiCanvas.canvasCount(window)
+fn canvasAt(window, px, py) guiCanvas.canvasAt(window, px, py)
+fn canvasHitTest?(canvas, px, py) guiCanvas.hitTest?(canvas, px, py)
+fn canvasToLocal(canvas, px, py) guiCanvas.toLocal(canvas, px, py)

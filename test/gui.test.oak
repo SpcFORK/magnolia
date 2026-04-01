@@ -352,4 +352,105 @@ fn run(t) {
 			]
 		)
 	}
+
+	// ─── New input events: WM_ constants are defined ────────────────────
+	'WM_MOUSEWHEEL constant is 522' |> t.eq(gui.FORM_WM_MOUSEWHEEL, 522)
+	'WM_MBUTTONDOWN constant is 519' |> t.eq(gui.FORM_WM_MBUTTONDOWN, 519)
+	'WM_MBUTTONUP constant is 520' |> t.eq(gui.FORM_WM_MBUTTONUP, 520)
+	'WM_LBUTTONDBLCLK constant is 515' |> t.eq(gui.FORM_WM_LBUTTONDBLCLK, 515)
+
+	// ─── Event handler functions exist ──────────────────────────────────
+	'onMouseWheel handler is a function' |> t.eq(type(gui.onMouseWheel), :function)
+	'onMButtonDown handler is a function' |> t.eq(type(gui.onMButtonDown), :function)
+	'onMButtonUp handler is a function' |> t.eq(type(gui.onMButtonUp), :function)
+	'onLButtonDblClk handler is a function' |> t.eq(type(gui.onLButtonDblClk), :function)
+
+	// ─── Modifier key constants and helpers ─────────────────────────────
+	'VK_SHIFT constant is 16' |> t.eq(gui.FORM_VK_SHIFT, 16)
+	'VK_CONTROL constant is 17' |> t.eq(gui.FORM_VK_CONTROL, 17)
+	'VK_ALT constant is 18' |> t.eq(gui.FORM_VK_ALT, 18)
+	'MK_SHIFT flag is 4' |> t.eq(gui.MK_SHIFT, 4)
+	'MK_CONTROL flag is 8' |> t.eq(gui.MK_CONTROL, 8)
+	'MK_MBUTTON flag is 16' |> t.eq(gui.MK_MBUTTON, 16)
+
+	'modShift? detects MK_SHIFT in wParam' |> t.eq(
+		[gui.modShift?(4), gui.modShift?(0), gui.modShift?(12)]
+		[true, false, true]
+	)
+	'modCtrl? detects MK_CONTROL in wParam' |> t.eq(
+		[gui.modCtrl?(8), gui.modCtrl?(0), gui.modCtrl?(12)]
+		[true, false, true]
+	)
+
+	'keyShiftDown? is a function' |> t.eq(type(gui.keyShiftDown?), :function)
+	'keyCtrlDown? is a function' |> t.eq(type(gui.keyCtrlDown?), :function)
+	'keyAltDown? is a function' |> t.eq(type(gui.keyAltDown?), :function)
+
+	// ─── Clipboard API exists ───────────────────────────────────────────
+	'clipboardGetText is a function' |> t.eq(type(gui.clipboardGetText), :function)
+	'clipboardSetText is a function' |> t.eq(type(gui.clipboardSetText), :function)
+	'clipboardHasText is a function' |> t.eq(type(gui.clipboardHasText), :function)
+
+	// Clipboard round-trip test (Windows only)
+	'clipboard set/get round-trip on Windows' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				marker := 'magnolia-test-' + string(nanotime())
+				gui.clipboardSetText(marker)
+				got := gui.clipboardGetText()
+				got = marker
+			}
+			_ -> true
+		}
+		true
+	)
+
+	// ─── Clipboard form field helpers ───────────────────────────────────
+	'formCopyByFocus is a function' |> t.eq(type(gui.formCopyByFocus), :function)
+	'formPasteByFocus is a function' |> t.eq(type(gui.formPasteByFocus), :function)
+	'formCutByFocus is a function' |> t.eq(type(gui.formCutByFocus), :function)
+
+	'formCopyByFocus copies focused field to clipboard (Windows)' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				state := { name: 'hello-clipboard' }
+				gui.formCopyByFocus(state, :name, [:name])
+				got := gui.clipboardGetText()
+				got = 'hello-clipboard'
+			}
+			_ -> true
+		}
+		true
+	)
+
+	'formCutByFocus copies and clears focused field (Windows)' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				state := { email: 'cut-me' }
+				gui.formCutByFocus(state, :email, [:email])
+				got := gui.clipboardGetText()
+				(got = 'cut-me') & (state.email = '')
+			}
+			_ -> true
+		}
+		true
+	)
+
+	'formPasteByFocus pastes into focused field with limit (Windows)' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				gui.clipboardSetText('pasted')
+				state := { msg: 'hi' }
+				gui.formPasteByFocus(state, :msg, [{ key: :msg, max: 10 }])
+				state.msg = 'hipasted'
+			}
+			_ -> true
+		}
+		true
+	)
+
+	// ─── File drop API exists ───────────────────────────────────────────
+	'enableFileDrop is a function' |> t.eq(type(gui.enableFileDrop), :function)
+	'disableFileDrop is a function' |> t.eq(type(gui.disableFileDrop), :function)
+	'onFileDrop is a function' |> t.eq(type(gui.onFileDrop), :function)
 }

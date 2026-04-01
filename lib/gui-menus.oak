@@ -1,0 +1,284 @@
+// gui-menus provides Win32 menu bar and popup (context) menu support.
+
+std := import('std')
+windows := import('windows')
+{
+	readU32: readU32
+	writeU32: writeU32
+} := import('writes')
+
+// ─── Menu item flags ────────────────────────────────────────────────────────
+MF_STRING := 0
+MF_SEPARATOR := 2048
+MF_POPUP := 16
+MF_CHECKED := 8
+MF_UNCHECKED := 0
+MF_GRAYED := 1
+MF_ENABLED := 0
+MF_BYCOMMAND := 0
+MF_BYPOSITION := 1024
+
+// TrackPopupMenu flags
+TPM_LEFTBUTTON := 0
+TPM_RIGHTBUTTON := 2
+TPM_RETURNCMD := 256
+
+// ─── WM_COMMAND dispatch constant ───────────────────────────────────────────
+WM_COMMAND := 273
+
+// ─── Menu creation ──────────────────────────────────────────────────────────
+
+// createMenu() -> menu handle (int) or ?
+fn createMenu() {
+	res := windows.user32('CreateMenu')
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> res.r1
+		_ -> ?
+	}
+}
+
+// createPopupMenu() -> menu handle (int) or ?
+fn createPopupMenu() {
+	res := windows.user32('CreatePopupMenu')
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> res.r1
+		_ -> ?
+	}
+}
+
+// appendItem(hMenu, id, label) — add a text item with command id.
+fn appendItem(hMenu, id, label) {
+	wide := utf16(label) + char(0) + char(0)
+	windows.user32('AppendMenuW', hMenu, MF_STRING, id, addr(wide))
+}
+
+// appendSeparator(hMenu) — add a separator line.
+fn appendSeparator(hMenu) {
+	windows.user32('AppendMenuW', hMenu, MF_SEPARATOR, 0, 0)
+}
+
+// appendSubmenu(hMenu, hSubMenu, label) — add a submenu with text label.
+fn appendSubmenu(hMenu, hSubMenu, label) {
+	wide := utf16(label) + char(0) + char(0)
+	windows.user32('AppendMenuW', hMenu, MF_STRING | MF_POPUP, hSubMenu, addr(wide))
+}
+
+// setMenuBar(window, hMenu) — attach a menu bar to a window.
+fn setMenuBar(window, hMenu) {
+	res := windows.user32('SetMenu', window.hwnd, hMenu)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			window._menuBar <- hMenu
+			// Force the window to redraw the non-client area for the menu bar
+			windows.user32('DrawMenuBar', window.hwnd)
+			true
+		}
+		_ -> false
+	}
+}
+
+// removeMenuBar(window) — detach the menu bar from a window.
+fn removeMenuBar(window) {
+	res := windows.user32('SetMenu', window.hwnd, 0)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			window._menuBar <- ?
+			windows.user32('DrawMenuBar', window.hwnd)
+			true
+		}
+		_ -> false
+	}
+}
+
+// destroyMenu(hMenu) — free a menu handle.
+fn destroyMenu(hMenu) {
+	res := windows.user32('DestroyMenu', hMenu)
+	windows.callOk?(res) & res.r1 != 0
+}
+
+// ─── Context (popup) menu ────────────────────────────────────────────────────
+
+// showPopupMenu(window, hMenu, x, y) -> selected command id, or 0 if cancelled.
+// x, y are client coordinates; they are converted to screen coordinates internally.
+fn showPopupMenu(window, hMenu, x, y) {
+	// Convert client coords to screen coords via ClientToScreen
+	ptBuf := string(bits([0, 0, 0, 0, 0, 0, 0, 0]))
+	ptPtr := int(addr(ptBuf))
+	writeU32(ptPtr, x)
+	writeU32(ptPtr + 4, y)
+	windows.user32('ClientToScreen', window.hwnd, ptPtr)
+	screenX := readU32(ptPtr)
+	screenY := readU32(ptPtr + 4)
+	res := windows.user32('TrackPopupMenu', hMenu, TPM_LEFTBUTTON | TPM_RETURNCMD, screenX, screenY, 0, window.hwnd, 0)
+	if windows.callOk?(res) {
+		true -> res.r1
+		_ -> 0
+	}
+}
+
+// ─── WM_COMMAND event handler ────────────────────────────────────────────────
+
+// onMenuCommand(window, handler) — handler receives (commandId) when a menu
+// item is selected.
+fn onMenuCommand(window, handler) {
+	guiEvents := import('gui-events')
+	guiEvents.on(window, :dispatch, fn(_) if guiEvents.formMsgType(window) = WM_COMMAND -> {
+		wp := guiEvents.formMsgWParam(window)
+		// Low word of wParam is the menu item id
+		cmdId := wp & 65535
+		if cmdId > 0 -> handler(cmdId)
+	})
+}
+
+// ─── Convenience: build menus from a spec ────────────────────────────────────
+// buildMenu(spec) builds a complete menu from a declarative spec.
+// spec is a list of items:
+//   { label: 'File', items: [
+//       { id: 1, label: 'Open' }
+//       { separator: true }
+//       { id: 2, label: 'Exit' }
+//   ]}
+fn buildMenu(spec) {
+	menuBar := createMenu()
+	if menuBar = ? -> menuBar
+	std.each(spec, fn(top) {
+		sub := createPopupMenu()
+		if sub != ? -> {
+			std.each(top.items, fn(item) {
+				if item.separator {
+					true -> appendSeparator(sub)
+					_ -> appendItem(sub, item.id, item.label)
+				}
+			})
+			appendSubmenu(menuBar, sub, top.label)
+		}
+	})
+	menuBar
+}
+
+// ─── Keyboard accelerators ──────────────────────────────────────────────────
+// ACCEL struct: 6 bytes (fVirt: BYTE, pad: BYTE, key: WORD, cmd: WORD)
+// But Win32 expects ACCEL entries packed at 6-byte boundaries.
+
+FVIRTKEY := 1
+FSHIFT := 4
+FCONTROL := 8
+FALT := 16
+
+// createAcceleratorTable(entries) -> accelerator handle or ?
+// entries: list of { key, cmd, ctrl, shift, alt }
+// key: virtual key code (int)
+// cmd: command id (matches menu item id)
+fn createAcceleratorTable(entries) {
+	entrySize := 6
+	buf := _zeros(len(entries) * entrySize)
+	bufPtr := int(addr(buf))
+	fn writeEntry(i) if i < len(entries) {
+		true -> {
+			e := entries.(i)
+			off := bufPtr + i * entrySize
+			fVirt := FVIRTKEY
+			if e.ctrl = true -> fVirt <- fVirt | FCONTROL
+			if e.shift = true -> fVirt <- fVirt | FSHIFT
+			if e.alt = true -> fVirt <- fVirt | FALT
+			// fVirt (byte) at offset 0
+			memwrite(pointer(off), string(bits([fVirt & 255])))
+			// pad byte at offset 1
+			memwrite(pointer(off + 1), string(bits([0])))
+			// key (WORD) at offset 2
+			writeU32(off + 2, e.key & 65535)
+			// cmd (WORD) at offset 4
+			writeU32(off + 4, e.cmd & 65535)
+			writeEntry(i + 1)
+		}
+	}
+	writeEntry(0)
+	res := windows.user32('CreateAcceleratorTableW', bufPtr, len(entries))
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> res.r1
+		_ -> ?
+	}
+}
+
+// destroyAcceleratorTable(hAccel) — free an accelerator table handle.
+fn destroyAcceleratorTable(hAccel) {
+	res := windows.user32('DestroyAcceleratorTable', hAccel)
+	windows.callOk?(res) & res.r1 != 0
+}
+
+// translateAccelerator(window, hAccel) -> bool
+// Call inside the message loop BEFORE TranslateMessage/DispatchMessage.
+// Returns true if the message was an accelerator keystroke and was handled.
+fn translateAccelerator(window, hAccel) {
+	// Uses the window's cached message buffer directly
+	msgPtr := int(addr(window.msgBuf))
+	res := windows.user32('TranslateAcceleratorW', window.hwnd, hAccel, msgPtr)
+	if windows.callOk?(res) {
+		true -> res.r1 != 0
+		_ -> false
+	}
+}
+
+// installAccelerators(window, entries) -> { hAccel, destroy }
+// Convenience: creates accelerator table and hooks it into the poll loop.
+// Returns an object with the handle and a destroy() function.
+fn installAccelerators(window, entries) {
+	hAccel := createAcceleratorTable(entries)
+	if hAccel = ? -> { hAccel: ?, destroy: fn() ? }
+	// Store on window so pollWindowMessages can use it
+	window._hAccel <- hAccel
+	{
+		hAccel: hAccel
+		destroy: fn() {
+			destroyAcceleratorTable(hAccel)
+			window._hAccel <- ?
+		}
+	}
+}
+
+// ─── System menu customization ──────────────────────────────────────────────
+
+WM_SYSCOMMAND := 274
+
+// getSystemMenu(window, reset) -> system menu handle or ?
+// reset: true to reset to default, false to get a copy for modification.
+fn getSystemMenu(window, reset) {
+	bReset := if reset = true { true -> 1, _ -> 0 }
+	res := windows.user32('GetSystemMenu', window.hwnd, bReset)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> res.r1
+		_ -> ?
+	}
+}
+
+// appendSystemMenuItem(window, id, label) — add item to the system (title bar) menu.
+fn appendSystemMenuItem(window, id, label) {
+	hSysMenu := getSystemMenu(window, false)
+	if hSysMenu != ? -> {
+		wide := utf16(label) + char(0) + char(0)
+		windows.user32('AppendMenuW', hSysMenu, MF_STRING, id, addr(wide))
+	}
+}
+
+// appendSystemMenuSeparator(window) — add separator to system menu.
+fn appendSystemMenuSeparator(window) {
+	hSysMenu := getSystemMenu(window, false)
+	if hSysMenu != ? -> {
+		windows.user32('AppendMenuW', hSysMenu, MF_SEPARATOR, 0, 0)
+	}
+}
+
+// resetSystemMenu(window) — restore the system menu to its default state.
+fn resetSystemMenu(window) {
+	getSystemMenu(window, true)
+}
+
+// onSysCommand(window, handler) — handler receives (commandId) for custom system menu items.
+fn onSysCommand(window, handler) {
+	guiEvents := import('gui-events')
+	guiEvents.on(window, :dispatch, fn(_) if guiEvents.formMsgType(window) = WM_SYSCOMMAND -> {
+		wp := guiEvents.formMsgWParam(window)
+		cmdId := wp & 65520
+		handler(cmdId)
+	})
+}

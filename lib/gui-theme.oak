@@ -1,0 +1,76 @@
+// gui-theme provides system theme detection (dark mode, accent color) on Windows.
+
+windows := import('windows')
+{
+	readU32: readU32
+	writeU32: writeU32
+} := import('writes')
+
+fn _zeros(n) {
+	fn sub(i, acc) if i < n {
+		true -> sub(i + 1, acc << 0)
+		_ -> acc
+	}
+	string(bits(sub(0, [])))
+}
+
+// ─── Dark mode detection ─────────────────────────────────────────────────────
+// Reads the registry key that Windows 10/11 sets when the user chooses dark mode.
+// Returns true if dark mode is active, false otherwise.
+fn isDarkMode?() {
+	val := windows.regReadDword(
+		windows.HKEY_CURRENT_USER
+		'Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize'
+		'AppsUseLightTheme'
+	)
+	if val.type = :ok {
+		true -> val.value = 0
+		_ -> false
+	}
+}
+
+// ─── High-contrast detection ─────────────────────────────────────────────────
+// SPI_GETHIGHCONTRAST = 0x0042 (66), high contrast info struct:
+// cbSize(4), dwFlags(4), lpszDefaultScheme(ptr)
+// HCF_HIGHCONTRASTON = 1
+
+SPI_GETHIGHCONTRAST := 66
+HCF_HIGHCONTRASTON := 1
+
+fn isHighContrast?() {
+	ptrSize := windows.ptrSize()
+	structSize := if ptrSize { 8 -> 16, _ -> 12 }
+	buf := _zeros(structSize)
+	bufPtr := int(addr(buf))
+	writeU32(bufPtr, structSize)
+	res := windows.user32('SystemParametersInfoW', SPI_GETHIGHCONTRAST, structSize, bufPtr, 0)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			flags := readU32(bufPtr + 4)
+			(flags & HCF_HIGHCONTRASTON) > 0
+		}
+		_ -> false
+	}
+}
+
+// ─── Accent color ────────────────────────────────────────────────────────────
+// Reads the user's accent color from the DWM registry key.
+// Returns { r, g, b } or ? on failure.
+fn accentColor() {
+	val := windows.regReadDword(
+		windows.HKEY_CURRENT_USER
+		'Software\\Microsoft\\Windows\\DWM'
+		'AccentColor'
+	)
+	if val.type = :ok {
+		true -> {
+			v := val.value
+			{
+				r: v & 255
+				g: (v >> 8) & 255
+				b: (v >> 16) & 255
+			}
+		}
+		_ -> ?
+	}
+}

@@ -9,6 +9,7 @@ _probeCacheReady := false
 _probeCache := ?
 _probeDdrawTiming := 0.0
 _probeD3d9Timing := 0.0
+_probeD3d11Timing := 0.0
 _probeOpenGLTiming := 0.0
 _probeVulkanTiming := 0.0
 
@@ -75,6 +76,35 @@ fn _probeD3d9() {
 		}
 	}
 	_probeD3d9Timing <- probeTime() - start
+	result
+}
+
+fn _probeD3d11() {
+	start := probeTime()
+	loaded := windows.loadDll(windows.D3d11)
+	result := if loaded.type {
+		:ok -> {
+			hasCreate := windows.resolveInLoaded(windows.D3d11, 'D3D11CreateDeviceAndSwapChain').type = :ok
+			{
+				available: hasCreate
+				library: windows.D3d11
+				handle: loaded.handle
+				backend: if hasCreate {
+					true -> :d3d11
+					_ -> :gdi
+				}
+			}
+		}
+		_ -> {
+			{
+				available: false
+				library: windows.D3d11
+				backend: :gdi
+				detail: loaded
+			}
+		}
+	}
+	_probeD3d11Timing <- probeTime() - start
 	result
 }
 
@@ -179,6 +209,7 @@ fn pendingProbeSet() {
 		vulkan: _pendingProbe(windows.Vulkan1, :gdi)
 		ddraw: _pendingDdrawProbe()
 		d3d9: _pendingProbe(windows.D3d9, :cpu)
+		d3d11: _pendingProbe(windows.D3d11, :gdi)
 	}
 }
 
@@ -188,6 +219,7 @@ fn probeAllDlls() {
 		_ -> {
 			_probeDdrawTiming <- 0.0
 			_probeD3d9Timing <- 0.0
+			_probeD3d11Timing <- 0.0
 			_probeOpenGLTiming <- 0.0
 			_probeVulkanTiming <- 0.0
 			result := {
@@ -195,6 +227,7 @@ fn probeAllDlls() {
 				vulkan: _probeVulkan()
 				ddraw: _probeDdraw()
 				d3d9: _probeD3d9()
+				d3d11: _probeD3d11()
 			}
 			_probeCache <- result
 			_probeCacheReady <- true
@@ -209,6 +242,7 @@ fn probeAllDlls() {
 fn probe2DGraphicsStack() {
 	_probeDdrawTiming <- 0.0
 	_probeD3d9Timing <- 0.0
+	_probeD3d11Timing <- 0.0
 	_probeOpenGLTiming <- 0.0
 	_probeVulkanTiming <- 0.0
 
@@ -220,6 +254,7 @@ fn probe2DGraphicsStack() {
 			vulkan: vulkanProbe
 			ddraw: _pendingDdrawProbe()
 			d3d9: _probeD3d9()
+			d3d11: _pendingProbe(windows.D3d11, :gdi)
 		}
 		_ -> {
 			// Vulkan unavailable, try OpenGL
@@ -230,24 +265,40 @@ fn probe2DGraphicsStack() {
 					vulkan: _pendingProbe(windows.Vulkan1, :gdi)
 					ddraw: _pendingDdrawProbe()
 					d3d9: _probeD3d9()
+					d3d11: _pendingProbe(windows.D3d11, :gdi)
 				}
 				_ -> {
-					// OpenGL unavailable, try DDraw
-					ddrawProbe := _probeDdraw()
-					if ddrawProbe.available {
+					// OpenGL unavailable, try D3D11
+					d3d11Probe := _probeD3d11()
+					if d3d11Probe.available {
 						true -> {
 							opengl: _pendingProbe(windows.OpenGL32, :gdi)
 							vulkan: _pendingProbe(windows.Vulkan1, :gdi)
-							ddraw: ddrawProbe
+							ddraw: _pendingDdrawProbe()
 							d3d9: _probeD3d9()
+							d3d11: d3d11Probe
 						}
 						_ -> {
-							// DDraw unavailable, fall through to GDI
-							{
-								opengl: _pendingProbe(windows.OpenGL32, :gdi)
-								vulkan: _pendingProbe(windows.Vulkan1, :gdi)
-								ddraw: _pendingDdrawProbe()
-								d3d9: _probeD3d9()
+							// D3D11 unavailable, try DDraw
+							ddrawProbe := _probeDdraw()
+							if ddrawProbe.available {
+								true -> {
+									opengl: _pendingProbe(windows.OpenGL32, :gdi)
+									vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+									ddraw: ddrawProbe
+									d3d9: _probeD3d9()
+									d3d11: _pendingProbe(windows.D3d11, :gdi)
+								}
+								_ -> {
+									// DDraw unavailable, fall through to GDI
+									{
+										opengl: _pendingProbe(windows.OpenGL32, :gdi)
+										vulkan: _pendingProbe(windows.Vulkan1, :gdi)
+										ddraw: _pendingDdrawProbe()
+										d3d9: _probeD3d9()
+										d3d11: _pendingProbe(windows.D3d11, :gdi)
+									}
+								}
 							}
 						}
 					}
@@ -262,6 +313,7 @@ fn probe2DGraphicsStack() {
 fn probe2DGdiOnly() {
 	_probeDdrawTiming <- 0.0
 	_probeD3d9Timing <- 0.0
+	_probeD3d11Timing <- 0.0
 	_probeOpenGLTiming <- 0.0
 	_probeVulkanTiming <- 0.0
 
@@ -270,6 +322,7 @@ fn probe2DGdiOnly() {
 		vulkan: _pendingProbe(windows.Vulkan1, :gdi)
 		ddraw: _pendingDdrawProbe()
 		d3d9: _probeD3d9()
+		d3d11: _pendingProbe(windows.D3d11, :gdi)
 	}
 }
 
@@ -278,6 +331,7 @@ fn probe2DGdiOnly() {
 fn probeNoGpu() {
 	_probeDdrawTiming <- 0.0
 	_probeD3d9Timing <- 0.0
+	_probeD3d11Timing <- 0.0
 	_probeOpenGLTiming <- 0.0
 	_probeVulkanTiming <- 0.0
 
@@ -286,19 +340,23 @@ fn probeNoGpu() {
 		vulkan: _pendingProbe(windows.Vulkan1, :gdi)
 		ddraw: _pendingDdrawProbe()
 		d3d9: _pendingProbe(windows.D3d9, :cpu)
+		d3d11: _pendingProbe(windows.D3d11, :gdi)
 	}
 }
 
-fn select2DLayer(opts, opengl, ddraw, vulkan) {
+fn select2DLayer(opts, opengl, ddraw, vulkan, d3d11) {
 	requested := _default(opts.layer2D, _default(opts.layer2d, 'auto'))
 	if requested {
 		'vulkan' -> if vulkan.available {
 			true -> :vulkan
 			_ -> if opengl.available {
 				true -> :opengl
-				_ -> if ddraw.available {
-					true -> :ddraw
-					_ -> :gdi
+				_ -> if _default(d3d11.available, false) {
+					true -> :d3d11
+					_ -> if ddraw.available {
+						true -> :ddraw
+						_ -> :gdi
+					}
 				}
 			}
 		}
@@ -309,13 +367,20 @@ fn select2DLayer(opts, opengl, ddraw, vulkan) {
 				_ -> :gdi
 			}
 		}
+		'd3d11' -> if _default(d3d11.available, false) {
+			true -> :d3d11
+			_ -> if ddraw.available {
+				true -> :ddraw
+				_ -> :gdi
+			}
+		}
 		'ddraw' -> if ddraw.available {
 			true -> :ddraw
 			_ -> :gdi
 		}
-		// In 'auto' mode prefer DDraw/GDI: Vulkan/OpenGL require driver init
+		// In 'auto' mode prefer DDraw/GDI: Vulkan/OpenGL/D3D11 require driver init
 		// that can add slow probing / driver-init hangs.  Users can request
-		// 'vulkan'/'opengl' explicitly.
+		// 'vulkan'/'opengl'/'d3d11' explicitly.
 		'gdi' -> :gdi
 		_ -> if ddraw.available {
 			true -> :ddraw
@@ -328,6 +393,7 @@ fn getProbeTimings() {
 	{
 		ddraw: _probeDdrawTiming
 		d3d9: _probeD3d9Timing
+		d3d11: _probeD3d11Timing
 		opengl: _probeOpenGLTiming
 		vulkan: _probeVulkanTiming
 	}

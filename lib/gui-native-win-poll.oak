@@ -7,8 +7,20 @@ fn pollWindowMessages(window) {
 	if windows.callOk?(msg) {
 		true -> if msg.r1 > 0 {
 			true -> {
-				windows.translateMessage(addr(window.msgBuf))
-				windows.dispatchMessage(addr(window.msgBuf))
+				// If accelerator table is installed, try translating first.
+				// TranslateAcceleratorW converts keystrokes to WM_COMMAND and
+				// dispatches them, so skip normal translate+dispatch if it succeeds.
+				accelHandled := if window._hAccel != ? {
+					true -> {
+						aRes := windows.user32('TranslateAcceleratorW', window.hwnd, window._hAccel, int(addr(window.msgBuf)))
+						if windows.callOk?(aRes) { true -> aRes.r1 != 0, _ -> false }
+					}
+					_ -> false
+				}
+				if !accelHandled -> {
+					windows.translateMessage(addr(window.msgBuf))
+					windows.dispatchMessage(addr(window.msgBuf))
+				}
 				{ type: :dispatch, detail: msg }
 			}
 			_ -> { type: :idle, detail: msg }

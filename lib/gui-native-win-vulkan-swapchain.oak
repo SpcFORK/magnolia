@@ -388,7 +388,14 @@ fn createStagingBuffer(window) {
 	pd := window.vulkanPhysicalDevice
 	is64 := windows.ptrSize() = 8
 	ps := windows.ptrSize()
-	bufSize := window._vkSwapExtent.width * window._vkSwapExtent.height * 4
+	// When resolution scaling is active the GDI backbuffer is at design
+	// resolution, so the staging buffer must match dw×dh (not swapchain extent).
+	r := window._res
+	stagingW := if r != ? & r.dw > 0 { true -> r.dw, _ -> window._vkSwapExtent.width }
+	stagingH := if r != ? & r.dh > 0 { true -> r.dh, _ -> window._vkSwapExtent.height }
+	bufSize := stagingW * stagingH * 4
+	window._vkStagingW <- stagingW
+	window._vkStagingH <- stagingH
 
 	// VkBufferCreateInfo
 	bciSize := if is64 { true -> 56, _ -> 36 }
@@ -490,6 +497,140 @@ fn createStagingBuffer(window) {
 	}
 }
 
+// --- Intermediate image for resolution-scaled presentation ---
+// When the GDI backbuffer is at design resolution (dw×dh) but the
+// swapchain is at physical resolution (pw×ph), we upload pixels into
+// an intermediate VkImage at design resolution, then use vkCmdBlitImage
+// to scale into the swapchain image.
+
+{
+	VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO: VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+	VK_IMAGE_TYPE_2D: VK_IMAGE_TYPE_2D
+	VK_IMAGE_TILING_OPTIMAL: VK_IMAGE_TILING_OPTIMAL
+	VK_SAMPLE_COUNT_1_BIT: VK_SAMPLE_COUNT_1_BIT
+	VK_IMAGE_USAGE_TRANSFER_SRC_BIT: VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+	VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+} := import('gui-native-win-vulkan-constants')
+
+fn createScaleImage(window) {
+	dev := window.vulkanDevice
+	pd := window.vulkanPhysicalDevice
+	is64 := windows.ptrSize() = 8
+	ps := windows.ptrSize()
+	r := window._res
+	if r = ? {
+		true -> { type: :skipped, reason: 'no resolution scaling active' }
+		_ -> {
+			dw := r.dw
+			dh := r.dh
+			fmt := window._vkSurfaceFormat
+
+			// VkImageCreateInfo
+			iciSize := if is64 { true -> 88, _ -> 52 }
+			ici := bits(_vkZeros(iciSize))
+			ip := addr(ici)
+			windows.writeU32(ip, VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
+			if is64 {
+				true -> {
+					windows.writeU32(ip + 20, VK_IMAGE_TYPE_2D)
+					windows.writeU32(ip + 24, fmt)
+					windows.writeU32(ip + 28, dw)
+					windows.writeU32(ip + 32, dh)
+					windows.writeU32(ip + 36, 1)
+					windows.writeU32(ip + 40, 1)
+					windows.writeU32(ip + 44, 1)
+					windows.writeU32(ip + 48, VK_SAMPLE_COUNT_1_BIT)
+					windows.writeU32(ip + 52, VK_IMAGE_TILING_OPTIMAL)
+					windows.writeU32(ip + 56, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+					windows.writeU32(ip + 60, VK_SHARING_MODE_EXCLUSIVE)
+				}
+				_ -> {
+					windows.writeU32(ip + 12, VK_IMAGE_TYPE_2D)
+					windows.writeU32(ip + 16, fmt)
+					windows.writeU32(ip + 20, dw)
+					windows.writeU32(ip + 24, dh)
+					windows.writeU32(ip + 28, 1)
+					windows.writeU32(ip + 32, 1)
+					windows.writeU32(ip + 36, 1)
+					windows.writeU32(ip + 40, VK_SAMPLE_COUNT_1_BIT)
+					windows.writeU32(ip + 44, VK_IMAGE_TILING_OPTIMAL)
+					windows.writeU32(ip + 48, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+					windows.writeU32(ip + 52, VK_SHARING_MODE_EXCLUSIVE)
+				}
+			}
+
+			imgOut := bits(_vkZeros(ps))
+			res := windows.vulkan1('vkCreateImage', dev, ip, 0, addr(imgOut))
+			img := _readOutPointer(imgOut)
+			if _vkCallOk?(res) & img > 0 {
+				_ -> { type: :error, error: 'vkCreateImage failed for scale image', detail: res }
+				true -> {
+					memReqSize := if is64 { true -> 24, _ -> 12 }
+					memReq := bits(_vkZeros(memReqSize))
+					windows.vulkan1('vkGetImageMemoryRequirements', dev, img, addr(memReq))
+					mrp := addr(memReq)
+					reqSize := if is64 { true -> windows.readU64(mrp), _ -> windows.readU32(mrp) }
+					memTypeBits := if is64 {
+						true -> windows.readU32(mrp + 16)
+						_ -> windows.readU32(mrp + 8)
+					}
+
+					memType := _findMemoryType(pd, memTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+					if memType.found {
+						_ -> {
+							windows.vulkan1('vkDestroyImage', dev, img, 0)
+							{ type: :error, error: 'no suitable device-local memory for scale image' }
+						}
+						true -> {
+							maiSize := if is64 { true -> 32, _ -> 16 }
+							mai := bits(_vkZeros(maiSize))
+							maip := addr(mai)
+							windows.writeU32(maip, VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+							if is64 {
+								true -> {
+									windows.writeU64(maip + 16, reqSize)
+									windows.writeU32(maip + 24, memType.index)
+								}
+								_ -> {
+									windows.writeU32(maip + 8, reqSize)
+									windows.writeU32(maip + 12, memType.index)
+								}
+							}
+
+							memOut := bits(_vkZeros(ps))
+							res2 := windows.vulkan1('vkAllocateMemory', dev, maip, 0, addr(memOut))
+							mem := _readOutPointer(memOut)
+							if _vkCallOk?(res2) & mem > 0 {
+								_ -> {
+									windows.vulkan1('vkDestroyImage', dev, img, 0)
+									{ type: :error, error: 'vkAllocateMemory failed for scale image', detail: res2 }
+								}
+								true -> {
+									bindRes := windows.vulkan1('vkBindImageMemory', dev, img, mem, 0)
+									if _vkCallOk?(bindRes) {
+										_ -> {
+											windows.vulkan1('vkFreeMemory', dev, mem, 0)
+											windows.vulkan1('vkDestroyImage', dev, img, 0)
+											{ type: :error, error: 'vkBindImageMemory failed for scale image', detail: bindRes }
+										}
+										true -> {
+											window._vkScaleImage <- img
+											window._vkScaleImageMem <- mem
+											window._vkScaleImageW <- dw
+											window._vkScaleImageH <- dh
+											{ type: :ok, image: img, memory: mem, width: dw, height: dh }
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // --- Cleanup ---
 
 fn destroyVulkanSwapchain(window) if type(window.vulkanDevice) = :int & window.vulkanDevice > 0 {
@@ -497,6 +638,20 @@ fn destroyVulkanSwapchain(window) if type(window.vulkanDevice) = :int & window.v
 		dev := window.vulkanDevice
 
 		windows.vulkan1('vkDeviceWaitIdle', dev)
+
+		// Destroy scale image if present
+		if type(window._vkScaleImage) = :int & window._vkScaleImage > 0 {
+			true -> {
+				windows.vulkan1('vkDestroyImage', dev, window._vkScaleImage, 0)
+				window._vkScaleImage <- 0
+			}
+		}
+		if type(window._vkScaleImageMem) = :int & window._vkScaleImageMem > 0 {
+			true -> {
+				windows.vulkan1('vkFreeMemory', dev, window._vkScaleImageMem, 0)
+				window._vkScaleImageMem <- 0
+			}
+		}
 
 		if type(window._vkStagingMapped) = :int & window._vkStagingMapped > 0 {
 			true -> {
@@ -608,6 +763,20 @@ fn initVulkanSwapchain(window) {
 									bmi := bits({zeros(40, [])})
 									window._vkBmi <- bmi
 									window._vkBmiPtr <- addr(bmi)
+
+									// Create intermediate scale image for resolution scaling
+									if window._res != ? {
+										true -> {
+											scaleResult := createScaleImage(window)
+											if scaleResult.type != :ok & scaleResult.type != :skipped {
+												true -> {
+													// Non-fatal: Vulkan will decline to GDI when scaling is needed
+													window._vkScaleImage <- 0
+													window._vkScaleImageMem <- 0
+												}
+											}
+										}
+									}
 
 									window._vkSwapchainReady <- true
 									{ type: :ok }

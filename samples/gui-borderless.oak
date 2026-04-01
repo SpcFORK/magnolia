@@ -1,0 +1,137 @@
+// gui-borderless.oak
+// Demonstrates a borderless (top-barless) window with custom title bar.
+//
+// Features:
+//  - No OS title bar or window chrome (WS_POPUP style)
+//  - Custom-drawn title bar with close button
+//  - Client-area window dragging via beginDrag/updateDrag/endDrag
+//
+// Run: magnolia run samples/gui-borderless.oak
+
+{
+	println: println
+	string: string
+	int: int
+	float: float
+} := import('std')
+
+gui := import('GUI')
+
+// ─── Colours ───────────────────────────────────────────────────────────────
+
+C_BG := gui.rgb(22, 24, 30)
+C_TITLEBAR := gui.rgb(30, 32, 42)
+C_TITLEBAR_TEXT := gui.rgb(200, 210, 230)
+C_CLOSE_HOVER := gui.rgb(200, 50, 50)
+C_CLOSE_NORMAL := gui.rgb(120, 130, 150)
+C_BORDER := gui.rgb(60, 70, 90)
+C_CONTENT := gui.rgb(180, 190, 210)
+C_ACCENT := gui.rgb(80, 140, 255)
+
+// ─── Layout constants ──────────────────────────────────────────────────────
+
+WIN_W := 640
+WIN_H := 420
+TITLEBAR_H := 32
+CLOSE_SIZE := 16
+CLOSE_PAD := 8
+
+// ─── State ─────────────────────────────────────────────────────────────────
+
+state := {
+	hoverClose: false
+	dragging: false
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+fn inRect?(mx, my, x, y, w, h) mx >= x & mx < x + w & my >= y & my < y + h
+
+fn closeButtonX() WIN_W - CLOSE_SIZE - CLOSE_PAD
+fn closeButtonY() (TITLEBAR_H - CLOSE_SIZE) / 2
+
+// ─── Drawing ───────────────────────────────────────────────────────────────
+
+fn drawFrame(window) {
+	gui.beginFrame(window)
+
+	// Background
+	gui.fillRect(window, 0, 0, WIN_W, WIN_H, C_BG)
+
+	// Border (1px all around)
+	gui.drawLine(window, 0, 0, WIN_W - 1, 0, C_BORDER)
+	gui.drawLine(window, 0, WIN_H - 1, WIN_W - 1, WIN_H - 1, C_BORDER)
+	gui.drawLine(window, 0, 0, 0, WIN_H - 1, C_BORDER)
+	gui.drawLine(window, WIN_W - 1, 0, WIN_W - 1, WIN_H - 1, C_BORDER)
+
+	// Title bar background
+	gui.fillRect(window, 1, 1, WIN_W - 2, TITLEBAR_H - 1, C_TITLEBAR)
+
+	// Title text
+	gui.drawText(window, 12, 9, 'Borderless Window')
+
+	// Close button
+	cbx := closeButtonX()
+	cby := closeButtonY()
+	closeColor := if state.hoverClose { true -> C_CLOSE_HOVER, _ -> C_CLOSE_NORMAL }
+	// Draw X as two crossing lines
+	gui.drawLine(window, cbx, cby, cbx + CLOSE_SIZE, cby + CLOSE_SIZE, closeColor)
+	gui.drawLine(window, cbx + CLOSE_SIZE, cby, cbx, cby + CLOSE_SIZE, closeColor)
+
+	// Separator line below title bar
+	gui.drawLine(window, 1, TITLEBAR_H, WIN_W - 2, TITLEBAR_H, C_BORDER)
+
+	// Content area
+	gui.drawText(window, 20, TITLEBAR_H + 24, 'This window has no OS title bar.')
+	gui.drawText(window, 20, TITLEBAR_H + 48, 'Drag the title bar area to move it.')
+	gui.drawText(window, 20, TITLEBAR_H + 72, 'Click the X to close.')
+
+	// Accent stripe at bottom
+	gui.fillRect(window, 1, WIN_H - 4, WIN_W - 2, 3, C_ACCENT)
+
+	gui.endFrame(window)
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────
+
+fn main() {
+	window := gui.createWindow('Borderless Window', WIN_W, WIN_H, {
+		borderless: true
+		updateOnDispatch: true
+	})
+
+	if window.type != :ok -> {
+		println('Could not create window.')
+		println(string(window))
+		exit(1)
+	}
+
+	gui.show(window)
+
+	gui.onMouseMove(window, fn(mx, my) {
+		state.hoverClose <- inRect?(mx, my, closeButtonX(), closeButtonY(), CLOSE_SIZE, CLOSE_SIZE)
+		if state.dragging -> gui.updateDrag(window)
+	})
+
+	gui.onLButtonDown(window, fn(mx, my) {
+		if inRect?(mx, my, closeButtonX(), closeButtonY(), CLOSE_SIZE, CLOSE_SIZE) -> {
+			gui.close(window)
+		}
+		// Drag if clicking in the title bar (but not the close button)
+		if my < TITLEBAR_H & !inRect?(mx, my, closeButtonX(), closeButtonY(), CLOSE_SIZE, CLOSE_SIZE) -> {
+			gui.beginDrag(window)
+			state.dragging <- true
+		}
+	})
+
+	gui.onLButtonUp(window, fn(mx, my) {
+		if state.dragging -> {
+			gui.endDrag(window)
+			state.dragging <- false
+		}
+	})
+
+	gui.run(window, fn(step) drawFrame(window))
+}
+
+main()

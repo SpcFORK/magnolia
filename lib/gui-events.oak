@@ -117,6 +117,10 @@ FORM_WM_LBUTTONDOWN := 513
 FORM_WM_LBUTTONUP := 514
 FORM_WM_RBUTTONDOWN := 516
 FORM_WM_RBUTTONUP := 517
+FORM_WM_MBUTTONDOWN := 519
+FORM_WM_MBUTTONUP := 520
+FORM_WM_MOUSEWHEEL := 522
+FORM_WM_LBUTTONDBLCLK := 515
 FORM_WM_KEYDOWN := 256
 FORM_WM_KEYUP := 257
 FORM_WM_CHAR := 258
@@ -127,11 +131,52 @@ GUI_WM_SIZING := 532
 GUI_WM_WINDOWPOSCHANGED := 71
 GUI_WM_ENTERSIZEMOVE := 561
 GUI_WM_EXITSIZEMOVE := 562
+GUI_WM_MOUSEHOVER := 673
+GUI_WM_MOUSELEAVE := 675
+GUI_WM_DPICHANGED := 736
+
+// TRACKMOUSEEVENT flags
+TME_HOVER := 1
+TME_LEAVE := 2
+TME_SIZEOF := 24
 
 FORM_VK_BACK := 8
 FORM_VK_TAB := 9
 FORM_VK_RETURN := 13
+FORM_VK_SHIFT := 16
+FORM_VK_CONTROL := 17
+FORM_VK_ALT := 18
 FORM_VK_ESCAPE := 27
+
+// MK_ flags in wParam for mouse messages
+MK_LBUTTON := 1
+MK_RBUTTON := 2
+MK_SHIFT := 4
+MK_CONTROL := 8
+MK_MBUTTON := 16
+
+// Modifier state queries from mouse wParam (pass formMsgWParam(window) as wp)
+fn modShift?(wp) (wp & MK_SHIFT) > 0
+fn modCtrl?(wp) (wp & MK_CONTROL) > 0
+// For Alt, use GetKeyState since MK_ flags don't include Alt.
+fn modAlt?(window) {
+	res := windows.user32('GetKeyState', FORM_VK_ALT)
+	if windows.callOk?(res) {
+		true -> (res.r1 & 32768) > 0
+		_ -> false
+	}
+}
+
+// General keyboard modifier queries using GetKeyState (works in any context)
+fn keyShiftDown?(window) {
+	res := windows.user32('GetKeyState', FORM_VK_SHIFT)
+	if windows.callOk?(res) { true -> (res.r1 & 32768) > 0, _ -> false }
+}
+fn keyCtrlDown?(window) {
+	res := windows.user32('GetKeyState', FORM_VK_CONTROL)
+	if windows.callOk?(res) { true -> (res.r1 & 32768) > 0, _ -> false }
+}
+fn keyAltDown?(window) modAlt?(window)
 
 // ─── Win32 message buffer readers ───────────────────────────────────────────
 
@@ -306,6 +351,85 @@ fn onRButtonUp(window, handler) {
 	})
 }
 
+fn onMButtonDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MBUTTONDOWN -> {
+		lp := formMsgLParam(window)
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
+	})
+}
+
+fn onMButtonUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MBUTTONUP -> {
+		lp := formMsgLParam(window)
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
+	})
+}
+
+// WM_MOUSEWHEEL: wParam high word = wheel delta (signed, 120 per notch).
+// wParam low word = MK_ key flags. lParam = screen coords (not client).
+fn onMouseWheel(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MOUSEWHEEL -> {
+		wp := formMsgWParam(window)
+		// high word of wParam is a signed 16-bit delta
+		raw := (wp >> 16) & 65535
+		delta := if raw > 32767 { true -> raw - 65536, _ -> raw }
+		handler(delta)
+	})
+}
+
+fn onLButtonDblClk(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_LBUTTONDBLCLK -> {
+		lp := formMsgLParam(window)
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
+	})
+}
+
+// ─── Mouse hover / leave tracking ──────────────────────────────────────────
+// TrackMouseEvent must be called to opt-in to WM_MOUSEHOVER / WM_MOUSELEAVE.
+// We re-arm tracking on every WM_MOUSEMOVE so that hover/leave events keep
+// firing after each leave.
+
+fn _trackMouseEvent(window, flags) {
+	// TRACKMOUSEEVENT struct: cbSize (4), dwFlags (4), hwndTrack (ptr), dwHoverTime (4)
+	buf := string(bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+	bufPtr := int(addr(buf))
+	windows.writeU32(bufPtr, TME_SIZEOF)
+	windows.writeU32(bufPtr + 4, flags)
+	windows.writePtr(bufPtr + 8, window.hwnd)
+	windows.writeU32(bufPtr + 16, 400)
+	windows.user32('TrackMouseEvent', bufPtr)
+}
+
+fn enableMouseTracking(window) {
+	if window._mouseTrackingEnabled != true -> {
+		_trackMouseEvent(window, TME_HOVER | TME_LEAVE)
+		window._mouseTrackingEnabled <- true
+		// Re-arm tracking on every mouse move
+		on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_MOUSEMOVE -> {
+			_trackMouseEvent(window, TME_HOVER | TME_LEAVE)
+		})
+	}
+}
+
+fn onMouseHover(window, handler) {
+	enableMouseTracking(window)
+	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_MOUSEHOVER -> {
+		lp := formMsgLParam(window)
+		m := _mapMouseXY(window, formLoWord(lp), formHiWord(lp))
+		handler(m.x, m.y)
+	})
+}
+
+fn onMouseLeave(window, handler) {
+	enableMouseTracking(window)
+	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_MOUSELEAVE -> {
+		handler()
+	})
+}
+
 fn onKeyDown(window, handler) {
 	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYDOWN -> {
 		handler(formMsgWParam(window))
@@ -373,6 +497,34 @@ fn onResize(window, handler) {
 			}
 			_ -> handler(physW, physH)
 		}
+	})
+}
+
+// onDpiChanged(window, handler) — fires when the window moves to a monitor
+// with a different DPI. handler receives (newDpi, suggestedRect) where
+// suggestedRect is { left, top, right, bottom } from WM_DPICHANGED lParam.
+fn onDpiChanged(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = GUI_WM_DPICHANGED -> {
+		wp := formMsgWParam(window)
+		lp := formMsgLParam(window)
+		newDpi := formLoWord(wp)
+		// lParam is a pointer to a RECT with suggested window position.
+		// Read suggested rect from the pointer.
+		suggestedRect := {
+			left: windows._toI32(windows.readU32(lp))
+			top: windows._toI32(windows.readU32(lp + 4))
+			right: windows._toI32(windows.readU32(lp + 8))
+			bottom: windows._toI32(windows.readU32(lp + 12))
+		}
+		// Update window DPI field
+		window.dpi <- newDpi
+		// Resize window to the suggested rect from the OS
+		windows.user32('SetWindowPos', window.hwnd, 0
+			suggestedRect.left, suggestedRect.top
+			suggestedRect.right - suggestedRect.left
+			suggestedRect.bottom - suggestedRect.top
+			20)
+		handler(newDpi, suggestedRect)
 	})
 }
 

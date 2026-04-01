@@ -1,0 +1,126 @@
+// Test sample: new widgets (progress bar, tab strip, dropdown)
+// Opens a window showcasing the new form widgets.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+
+fn main() {
+	window := gui.createWindow('Widget Test', 600, 500, {
+		layer2D: 'auto'
+	})
+	if window.type != :ok -> {
+		println('Failed to create window: ' + string(window))
+		exit(1)
+	}
+
+	state := {
+		progress: 0
+		activeTab: 0
+		dropdownOpen: false
+		dropdownHover: -1
+		selectedItem: 0
+	}
+
+	tabs := ['General', 'Settings', 'About']
+	items := ['Apple', 'Banana', 'Cherry', 'Date', 'Elderberry']
+
+	gui.show(window)
+
+	gui.onLButtonDown(window, fn(mx, my) {
+		// Tab click
+		hitTab := gui.formHitTab(mx, my, 20, 70, tabs, ?)
+		if hitTab >= 0 -> state.activeTab <- hitTab
+
+		// Dropdown toggle
+		if gui.formInRect?(mx, my, 20, 260, 200, 28) {
+			true -> state.dropdownOpen <- !state.dropdownOpen
+			_ -> if state.dropdownOpen -> {
+				// Check dropdown list hit
+				hitItem := gui.formHitDropdownItem(mx, my, 20, 288, 200, items, 24)
+				if hitItem >= 0 {
+					true -> {
+						state.selectedItem <- hitItem
+						state.dropdownOpen <- false
+					}
+					_ -> state.dropdownOpen <- false
+				}
+			}
+		}
+	})
+
+	gui.onMouseMove(window, fn(mx, my) {
+		if state.dropdownOpen -> {
+			state.dropdownHover <- gui.formHitDropdownItem(mx, my, 20, 288, 200, items, 24)
+		}
+	})
+
+	fn draw(win) {
+		frame := gui.beginFrame(win)
+		if frame.type = :ok -> {
+			bg := gui.rgb(20, 25, 35)
+			white := gui.rgb(255, 255, 255)
+			trackBg := gui.rgb(40, 45, 60)
+			fillColor := gui.rgb(35, 122, 224)
+			borderC := gui.rgb(80, 90, 110)
+			tabBg := gui.rgb(35, 40, 55)
+			tabActive := gui.rgb(50, 65, 100)
+			dimText := gui.rgb(140, 140, 160)
+			hoverBg := gui.rgb(60, 70, 100)
+			fieldBg := gui.rgb(30, 35, 50)
+			fieldFocus := gui.rgb(40, 50, 70)
+
+			gui.fillRect(win, 0, 0, win.width, win.height, bg)
+			gui.drawText(win, 20, 24, 'Widget Test', white)
+
+			// Progress bar
+			gui.drawText(win, 20, 112, 'Progress Bar (' + string(state.progress) + '%):')
+			gui.formDrawProgressBar(win, 20, 132, 300, state.progress, 100, trackBg, fillColor, borderC, { showPercent: true })
+
+			// Indeterminate progress bar
+			gui.drawText(win, 20, 165, 'Indeterminate:')
+			gui.formDrawProgressBar(win, 20, 185, 300, 0, 100, trackBg, fillColor, borderC, { indeterminate: true, indeterminateOffset: state.progress * 3 })
+
+			// Tab strip
+			gui.drawText(win, 20, 50, 'Tabs:')
+			gui.formDrawTabStrip(win, 20, 70, tabs
+				state.activeTab
+				tabBg, tabActive, borderC
+				white, dimText
+				?)
+			gui.drawText(win, 20, 106, 'Active tab: ' + tabs.(state.activeTab))
+
+			// Dropdown
+			gui.drawText(win, 20, 230, 'Dropdown:')
+			selectedLabel := items.(state.selectedItem)
+			gui.formDrawDropdown(win, 20, 260, 200, 28, selectedLabel
+				state.dropdownOpen
+				fieldBg, fieldFocus, borderC, dimText)
+			if state.dropdownOpen -> {
+				gui.formDrawDropdownList(win, 20, 288, 200
+					items, state.dropdownHover
+					24, fieldBg, hoverBg, borderC)
+			}
+
+			gui.drawText(win, 20, 450, 'Close window to exit.', dimText)
+			gui.endFrame(win)
+		}
+	}
+
+	draw(window)
+	gui.run(window, ?, fn(win, dt) {
+		// Animate progress
+		state.progress <- (state.progress + 1) % 101
+		draw(win)
+	})
+	println('Widget test complete.')
+	gui.close(window)
+}
+
+main()

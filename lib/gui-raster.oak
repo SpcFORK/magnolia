@@ -52,6 +52,121 @@ fn _triArea2x(pa, pb, pc) {
 	if v < 0 { true -> 0 - v, _ -> v }
 }
 
+// Sutherland-Hodgman viewport polygon clipping
+// Clips a convex polygon (list of {x, y} vertices) against one axis-aligned edge.
+// getVal: fn(v) → coordinate on the clipping axis (x or y)
+// limit: the edge value
+// isMin: true = keep vertices where getVal(v) >= limit (left/top edge)
+//        false = keep vertices where getVal(v) <= limit (right/bottom edge)
+fn _clipPolyEdge(verts, n, getVal, limit, isMin) {
+	fn inside?(v) if isMin { true -> getVal(v) >= limit, _ -> getVal(v) <= limit }
+	fn intersect(s, p) {
+		sv := getVal(s)
+		pv := getVal(p)
+		if pv = sv {
+			true -> s
+			_ -> {
+				t := (limit - sv) / (pv - sv)
+				{ x: s.x + t * (p.x - s.x), y: s.y + t * (p.y - s.y) }
+			}
+		}
+	}
+	fn step(i, out, count, s) if i >= n {
+		true -> [out, count]
+		_ -> {
+			p := verts.(i)
+			if inside?(s) {
+				true -> if inside?(p) {
+					// Both inside: output p
+					true -> step(i + 1, out << p, count + 1, p)
+					// S inside, P outside: output intersection
+					_ -> step(i + 1, out << intersect(s, p), count + 1, p)
+				}
+				_ -> if inside?(p) {
+					// S outside, P inside: output intersection then p
+					true -> step(i + 1, out << intersect(s, p) << p, count + 2, p)
+					// Both outside: output nothing
+					_ -> step(i + 1, out, count, p)
+				}
+			}
+		}
+	}
+	if n < 1 {
+		true -> [[], 0]
+		_ -> step(0, [], 0, verts.(n - 1))
+	}
+}
+
+// Clip a polygon against all 4 viewport edges.  Returns [verts, count] or
+// [[], 0] when the polygon is fully outside.
+fn _clipPolyToViewport(window, verts, n) {
+	w := window.width
+	h := window.height
+	getX := fn(v) v.x
+	getY := fn(v) v.y
+	// Left edge: x >= 0
+	[v1, n1] := _clipPolyEdge(verts, n, getX, 0, true)
+	if n1 < 3 {
+		true -> [[], 0]
+		_ -> {
+			// Right edge: x <= w-1
+			[v2, n2] := _clipPolyEdge(v1, n1, getX, w - 1, false)
+			if n2 < 3 {
+				true -> [[], 0]
+				_ -> {
+					// Top edge: y >= 0
+					[v3, n3] := _clipPolyEdge(v2, n2, getY, 0, true)
+					if n3 < 3 {
+						true -> [[], 0]
+						_ -> {
+							// Bottom edge: y <= h-1
+							_clipPolyEdge(v3, n3, getY, h - 1, false)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// Clip a triangle to viewport and rasterize resulting sub-triangles via fan
+// triangulation.  If the triangle is fully inside, rasterizes directly (no
+// allocation).  Returns true if anything was drawn.
+fn _clipAndFillTriangle(deps, window, p0, p1, p2, color) {
+	// Fast path: if all 3 vertices are inside the viewport, skip clipping
+	w := window.width
+	h := window.height
+	allInside := p0.x >= 0 & p0.x < w & p0.y >= 0 & p0.y < h &
+		p1.x >= 0 & p1.x < w & p1.y >= 0 & p1.y < h &
+		p2.x >= 0 & p2.x < w & p2.y >= 0 & p2.y < h
+	if allInside {
+		true -> {
+			sorted := _sortTriByY(p0, p1, p2)
+			_fillScan(deps, window, int(sorted.0.y), int(sorted.2.y), sorted.0, sorted.1, sorted.2, color)
+			true
+		}
+		_ -> {
+			[clipped, cn] := _clipPolyToViewport(window, [p0, p1, p2], 3)
+			if cn < 3 {
+				true -> false
+				_ -> {
+					// Fan-triangulate clipped polygon from first vertex
+					pivot := clipped.0
+					fn _fanFill(i) if i >= cn {
+						true -> true
+						_ -> {
+							sorted := _sortTriByY(pivot, clipped.(i - 1), clipped.(i))
+							_fillScan(deps, window, int(sorted.0.y), int(sorted.2.y), sorted.0, sorted.1, sorted.2, color)
+							_fanFill(i + 1)
+						}
+					}
+					_fanFill(2)
+				}
+			}
+		}
+	}
+}
+
 fn _lerpX(pa, pb, y) if pb.y = pa.y {
 	true -> pa.x
 	_ -> pa.x + (y - pa.y) * (pb.x - pa.x) / (pb.y - pa.y)
@@ -158,16 +273,12 @@ fn _sortTriByY(p0, p1, p2) {
 }
 
 fn drawTriangleFilled(deps, window, p0, p1, p2, color, borderColor) {
-	sorted := _sortTriByY(p0, p1, p2)
-	a := sorted.0
-	b := sorted.1
-	c := sorted.2
-	_fillScan(deps, window, int(a.y), int(c.y), a, b, c, color)
+	_clipAndFillTriangle(deps, window, p0, p1, p2, color)
 	if borderColor != ? {
 		true -> {
-			deps.drawLine(window, int(a.x), int(a.y), int(b.x), int(b.y), borderColor)
-			deps.drawLine(window, int(b.x), int(b.y), int(c.x), int(c.y), borderColor)
-			deps.drawLine(window, int(c.x), int(c.y), int(a.x), int(a.y), borderColor)
+			deps.drawLine(window, int(p0.x), int(p0.y), int(p1.x), int(p1.y), borderColor)
+			deps.drawLine(window, int(p1.x), int(p1.y), int(p2.x), int(p2.y), borderColor)
+			deps.drawLine(window, int(p2.x), int(p2.y), int(p0.x), int(p0.y), borderColor)
 		}
 	}
 }

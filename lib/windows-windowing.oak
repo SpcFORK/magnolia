@@ -2,9 +2,13 @@
 
 sys := import('sys')
 {
+	readU32: readU32
 	writeU32: writeU32
 	writeU64: writeU64
 } := import('writes')
+
+// Convert unsigned 32-bit to signed 32-bit (two's complement).
+fn _toI32(u) if u >= 2147483648 { true -> u - 4294967296, _ -> u }
 {
 	Kernel32: Kernel32
 	User32: User32
@@ -12,6 +16,7 @@ sys := import('sys')
 {
 	CS_VREDRAW: CS_VREDRAW
 	CS_HREDRAW: CS_HREDRAW
+	CS_DBLCLKS: CS_DBLCLKS
 	WS_OVERLAPPEDWINDOW: WS_OVERLAPPEDWINDOW
 	WS_CLIPSIBLINGS: WS_CLIPSIBLINGS
 	WS_CLIPCHILDREN: WS_CLIPCHILDREN
@@ -90,6 +95,8 @@ fn noMessage?(res) {
 // Proc address caches for kernel32/user32 hot-path calls.
 _k32ProcCache := {}
 _u32ProcCache := {}
+_shcoreProcCache := {}
+_dwmapiProcCache := {}
 
 fn kernel32(symbol, args...) if _isWindowsPlatform {
 	true -> {
@@ -141,6 +148,58 @@ fn user32(symbol, args...) if _isWindowsPlatform {
 		}
 	}
 	_ -> _platformError('user32')
+}
+
+fn shcore(symbol, args...) if _isWindowsPlatform {
+	true -> {
+		a := _shcoreProcCache.(symbol)
+		if a {
+			? -> {
+				resolved := sys.resolve(Shcore, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_shcoreProcCache.(symbol) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(a, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
+	_ -> _platformError('shcore')
+}
+
+fn dwmapi(symbol, args...) if _isWindowsPlatform {
+	true -> {
+		a := _dwmapiProcCache.(symbol)
+		if a {
+			? -> {
+				resolved := sys.resolve(Dwmapi, symbol)
+				if resolved.type = :ok {
+					true -> {
+						_dwmapiProcCache.(symbol) <- resolved.proc
+						result := syscall(resolved.proc, args...)
+						if result.type = :success -> result.type <- :ok
+						result
+					}
+					_ -> resolved
+				}
+			}
+			_ -> {
+				result := syscall(a, args...)
+				if result.type = :success -> result.type <- :ok
+				result
+			}
+		}
+	}
+	_ -> _platformError('dwmapi')
 }
 
 fn moduleHandle(name) if isWindows?() {
@@ -375,7 +434,7 @@ fn registerWindowClassEx(className, iconHandle, smallIconHandle, cursorHandle, c
 			_rt3 := _windTime()
 
 			resolvedClassStyle := if classStyle {
-				? -> CS_HREDRAW | CS_VREDRAW
+				? -> CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS
 				_ -> classStyle
 			}
 			// Cache imageBase — never changes per process.
@@ -503,20 +562,41 @@ fn registerDefaultWindowClass(className) if isWindows?() {
 	_ -> _platformError('registerDefaultWindowClass')
 }
 
-fn createTopLevelWindow(className, title, width, height) if isWindows?() {
+fn createTopLevelWindow(className, title, width, height, style) if isWindows?() {
 	true -> {
 		// Use cached imageBase when available to avoid redundant GetModuleHandleW call.
 		base := if _cachedImageBase {
 			? -> imageBase()
 			_ -> _cachedImageBase
 		}
+		resolvedStyle := if style {
+			? -> WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+			_ -> style | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+		}
+		// CW_USEDEFAULT only works for overlapped windows.
+		// For popup/borderless windows, center on the primary monitor.
+		useDefault := style = ?
+		posX := if useDefault {
+			true -> CW_USEDEFAULT
+			_ -> {
+				sw := sys.valueOr(getSystemMetrics(0), width)
+				int((sw - width) / 2)
+			}
+		}
+		posY := if useDefault {
+			true -> CW_USEDEFAULT
+			_ -> {
+				sh := sys.valueOr(getSystemMetrics(1), height)
+				int((sh - height) / 2)
+			}
+		}
 		createWindowEx(
 			0
 			className
 			title
-			WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
-			CW_USEDEFAULT
-			CW_USEDEFAULT
+			resolvedStyle
+			posX
+			posY
 			width
 			height
 			0
@@ -557,3 +637,200 @@ fn setWindowText(hwnd, text) if isWindows?() {
 	true -> user32('SetWindowTextW', hwnd, wstr(text))
 	_ -> _platformError('setWindowText')
 }
+
+// Retrieves the cursor position in screen coordinates.
+// Returns {type: :ok, x: int, y: int} or {type: :error, ...}.
+fn getCursorPos() if isWindows?() {
+	true -> {
+		// POINT struct: 8 bytes (two 32-bit LONGs: x, y)
+		pointBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+		res := user32('GetCursorPos', addr(pointBuf))
+		if callOk?(res) & res.r1 > 0 {
+			true -> {
+				{
+					type: :ok
+					x: _toI32(readU32(addr(pointBuf) + 0))
+					y: _toI32(readU32(addr(pointBuf) + 4))
+				}
+			}
+			_ -> { type: :error, error: 'GetCursorPos failed', detail: res }
+		}
+	}
+	_ -> _platformError('getCursorPos')
+}
+
+// Retrieves the bounding rectangle of a window in screen coordinates.
+// Returns {type: :ok, left: int, top: int, right: int, bottom: int} or error.
+fn getWindowRect(hwnd) if isWindows?() {
+	true -> {
+		// RECT struct: 16 bytes (four 32-bit LONGs: left, top, right, bottom)
+		rectBuf := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+		res := user32('GetWindowRect', hwnd, addr(rectBuf))
+		if callOk?(res) & res.r1 > 0 {
+			true -> {
+				{
+					type: :ok
+					left: _toI32(readU32(addr(rectBuf) + 0))
+					top: _toI32(readU32(addr(rectBuf) + 4))
+					right: _toI32(readU32(addr(rectBuf) + 8))
+					bottom: _toI32(readU32(addr(rectBuf) + 12))
+				}
+			}
+			_ -> { type: :error, error: 'GetWindowRect failed', detail: res }
+		}
+	}
+	_ -> _platformError('getWindowRect')
+}
+
+// WINDOWPLACEMENT struct: 44 bytes
+//   0  UINT  length
+//   4  UINT  flags
+//   8  UINT  showCmd
+//   12 POINT ptMinPosition (8 bytes)
+//   20 POINT ptMaxPosition (8 bytes)
+//   28 RECT  rcNormalPosition (16 bytes)
+fn getWindowPlacement(hwnd) if isWindows?() {
+	true -> {
+		buf := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+		writeU32(addr(buf), 44)
+		res := user32('GetWindowPlacement', hwnd, addr(buf))
+		if callOk?(res) & res.r1 != 0 {
+			true -> {
+				{
+					showCmd: readU32(addr(buf) + 8)
+					normalLeft: _toI32(readU32(addr(buf) + 28))
+					normalTop: _toI32(readU32(addr(buf) + 32))
+					normalRight: _toI32(readU32(addr(buf) + 36))
+					normalBottom: _toI32(readU32(addr(buf) + 40))
+				}
+			}
+			_ -> ?
+		}
+	}
+	_ -> _platformError('getWindowPlacement')
+}
+
+// ─── DPI Awareness ───────────────────────────────────────────────────────────
+
+// DPI_AWARENESS_CONTEXT values (pointer-sized pseudo handles)
+// -1 = UNAWARE, -2 = SYSTEM_AWARE, -3 = PER_MONITOR_AWARE, -4 = PER_MONITOR_AWARE_V2
+DPI_AWARENESS_CONTEXT_UNAWARE := -1
+DPI_AWARENESS_CONTEXT_SYSTEM_AWARE := -2
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE := -3
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 := -4
+
+// MONITOR_DPI_TYPE for GetDpiForMonitor
+MDT_EFFECTIVE_DPI := 0
+MDT_ANGULAR_DPI := 1
+MDT_RAW_DPI := 2
+
+// setProcessDpiAwarenessContext(context)
+// Call before creating any windows.
+// context: one of DPI_AWARENESS_CONTEXT_* values above.
+// Returns true on success, false on failure.
+fn setProcessDpiAwarenessContext(context) if isWindows?() {
+	true -> {
+		res := user32('SetProcessDpiAwarenessContext', context)
+		callOk?(res) & res.r1 != 0
+	}
+	_ -> false
+}
+
+// getDpiForWindow(hwnd) -> DPI value (96 = 100%, 120 = 125%, 144 = 150%, etc.)
+// Requires Windows 10 1607+.
+fn getDpiForWindow(hwnd) if isWindows?() {
+	true -> {
+		res := user32('GetDpiForWindow', hwnd)
+		if callOk?(res) & res.r1 > 0 {
+			true -> res.r1
+			_ -> 96
+		}
+	}
+	_ -> 96
+}
+
+// getDpiForSystem() -> system DPI (typically 96 for no scaling).
+fn getDpiForSystem() if isWindows?() {
+	true -> {
+		res := user32('GetDpiForSystem')
+		if callOk?(res) & res.r1 > 0 {
+			true -> res.r1
+			_ -> 96
+		}
+	}
+	_ -> 96
+}
+
+// getDpiForMonitor(hMonitor, dpiType) -> { dpiX, dpiY }
+// dpiType: MDT_EFFECTIVE_DPI (0), MDT_ANGULAR_DPI (1), or MDT_RAW_DPI (2).
+fn getDpiForMonitor(hMonitor, dpiType) if isWindows?() {
+	true -> {
+		dpiXBuf := bits([0, 0, 0, 0])
+		dpiYBuf := bits([0, 0, 0, 0])
+		res := shcore('GetDpiForMonitor', hMonitor, _default(dpiType, 0), addr(dpiXBuf), addr(dpiYBuf))
+		if callOk?(res) & res.r1 = 0 {
+			true -> {
+				dpiX: readU32(addr(dpiXBuf))
+				dpiY: readU32(addr(dpiYBuf))
+			}
+			_ -> { dpiX: 96, dpiY: 96 }
+		}
+	}
+	_ -> { dpiX: 96, dpiY: 96 }
+}
+
+// monitorFromWindow(hwnd, flags) -> HMONITOR handle.
+// flags: 0=MONITOR_DEFAULTTONULL, 1=MONITOR_DEFAULTTOPRIMARY, 2=MONITOR_DEFAULTTONEAREST
+MONITOR_DEFAULTTONULL := 0
+MONITOR_DEFAULTTOPRIMARY := 1
+MONITOR_DEFAULTTONEAREST := 2
+fn monitorFromWindow(hwnd, flags) if isWindows?() {
+	true -> {
+		res := user32('MonitorFromWindow', hwnd, _default(flags, 2))
+		if callOk?(res) {
+			true -> res.r1
+			_ -> 0
+		}
+	}
+	_ -> 0
+}
+
+// adjustWindowRectExForDpi(x, y, w, h, style, exStyle, dpi)
+// Adjusts a client-area rectangle for window chrome at a specific DPI.
+fn adjustWindowRectExForDpi(x, y, w, h, style, exStyle, dpi) if isWindows?() {
+	true -> {
+		rectBuf := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+		writeI32(addr(rectBuf), x)
+		writeI32(addr(rectBuf) + 4, y)
+		writeI32(addr(rectBuf) + 8, x + w)
+		writeI32(addr(rectBuf) + 12, y + h)
+		res := user32('AdjustWindowRectExForDpi', addr(rectBuf), style, 0, exStyle, dpi)
+		if callOk?(res) & res.r1 != 0 {
+			true -> {
+				{
+					left: _toI32(readU32(addr(rectBuf)))
+					top: _toI32(readU32(addr(rectBuf) + 4))
+					right: _toI32(readU32(addr(rectBuf) + 8))
+					bottom: _toI32(readU32(addr(rectBuf) + 12))
+				}
+			}
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
+// enableNonClientDpiScaling(hwnd) — call inside WM_NCCREATE for child windows.
+fn enableNonClientDpiScaling(hwnd) if isWindows?() {
+	true -> {
+		res := user32('EnableNonClientDpiScaling', hwnd)
+		callOk?(res) & res.r1 != 0
+	}
+	_ -> false
+}
+
+// dpiScale(value, dpi) — scale a design-coordinate value from 96 DPI to target DPI.
+fn dpiScale(value, dpi) int(value * dpi / 96)
+
+// dpiUnscale(value, dpi) — convert physical coordinate back to 96 DPI design space.
+fn dpiUnscale(value, dpi) int(value * 96 / dpi)

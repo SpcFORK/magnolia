@@ -1,0 +1,72 @@
+// gui-filedrop handles Win32 file-drop event handling (WM_DROPFILES).
+
+std := import('std')
+windows := import('windows')
+{
+	readU32: readU32
+} := import('writes')
+
+WM_DROPFILES := 563
+
+// Enable drag-and-drop on a window. Must be called after window creation.
+fn enableFileDrop(window) {
+	if window.type = :ok & window.hwnd != ? -> {
+		windows.shell32('DragAcceptFiles', window.hwnd, 1)
+	}
+}
+
+// Disable drag-and-drop on a window.
+fn disableFileDrop(window) {
+	if window.type = :ok & window.hwnd != ? -> {
+		windows.shell32('DragAcceptFiles', window.hwnd, 0)
+	}
+}
+
+// Read a null-terminated UTF-16LE string from an address.
+fn _readUtf16Str(addr) {
+	fn sub(i, out) {
+		lo := bits(memread(pointer(addr + i), 1)).(0)
+		hi := bits(memread(pointer(addr + i + 1), 1)).(0)
+		cp := lo + hi * 256
+		if cp = 0 {
+			true -> out
+			_ -> sub(i + 2, out + char(cp))
+		}
+	}
+	sub(0, '')
+}
+
+// Subscribe to file-drop events. handler receives (files) — a list of paths.
+fn onFileDrop(window, handler) {
+	guiEvents := import('gui-events')
+	guiEvents.on(window, :dispatch, fn(_) if guiEvents.formMsgType(window) = WM_DROPFILES -> {
+		hDrop := guiEvents.formMsgWParam(window)
+		// Query file count: DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0)
+		countRes := windows.shell32('DragQueryFileW', hDrop, 4294967295, 0, 0)
+		count := if windows.callOk?(countRes) { true -> countRes.r1, _ -> 0 }
+		// Build file list
+		fn gatherFiles(i, acc) if i < count {
+			true -> {
+				// Query required buffer size: DragQueryFileW(hDrop, i, NULL, 0)
+				sizeRes := windows.shell32('DragQueryFileW', hDrop, i, 0, 0)
+				needed := if windows.callOk?(sizeRes) { true -> sizeRes.r1, _ -> 0 }
+				if needed > 0 {
+					true -> {
+						// Allocate buffer: (needed+1) * 2 bytes for UTF-16 + null
+						bufSize := (needed + 1) * 2
+						buf := string(bits(std.repeat([0], bufSize)))
+						bufPtr := addr(buf)
+						windows.shell32('DragQueryFileW', hDrop, i, bufPtr, needed + 1)
+						path := _readUtf16Str(int(bufPtr))
+						gatherFiles(i + 1, acc << path)
+					}
+					_ -> gatherFiles(i + 1, acc)
+				}
+			}
+			_ -> acc
+		}
+		files := gatherFiles(0, [])
+		windows.shell32('DragFinish', hDrop)
+		handler(files)
+	})
+}

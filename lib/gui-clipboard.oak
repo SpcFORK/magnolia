@@ -1,0 +1,97 @@
+// gui-clipboard provides Win32 clipboard read/write for text (CF_UNICODETEXT).
+
+windows := import('windows')
+{
+	readU32: readU32
+	writeU32: writeU32
+} := import('writes')
+
+CF_UNICODETEXT := 13
+GMEM_MOVEABLE := 2
+
+// Read a null-terminated UTF-16LE string from an address.
+fn _readUtf16Str(addr) {
+	fn sub(i, out) {
+		lo := bits(memread(pointer(addr + i), 1)).(0)
+		hi := bits(memread(pointer(addr + i + 1), 1)).(0)
+		cp := lo + hi * 256
+		if cp = 0 {
+			true -> out
+			_ -> sub(i + 2, out + char(cp))
+		}
+	}
+	sub(0, '')
+}
+
+// clipboardGetText() -> string | ? — reads Unicode text from the clipboard.
+fn clipboardGetText() {
+	opened := windows.user32('OpenClipboard', 0)
+	if windows.callOk?(opened) & opened.r1 != 0 {
+		true -> {
+			hData := windows.user32('GetClipboardData', CF_UNICODETEXT)
+			result := if windows.callOk?(hData) & hData.r1 != 0 {
+				true -> {
+					ptr := windows.kernel32('GlobalLock', hData.r1)
+					if windows.callOk?(ptr) & ptr.r1 != 0 {
+						true -> {
+							text := _readUtf16Str(ptr.r1)
+							windows.kernel32('GlobalUnlock', hData.r1)
+							text
+						}
+						_ -> ?
+					}
+				}
+				_ -> ?
+			}
+			windows.user32('CloseClipboard')
+			result
+		}
+		_ -> ?
+	}
+}
+
+// clipboardSetText(text) -> true | false — writes Unicode text to the clipboard.
+fn clipboardSetText(text) {
+	if type(text) != :string -> text <- string(text)
+	wide := utf16(text)
+	// wide is a raw byte string of UTF-16LE.  Add two null bytes for terminator.
+	byteLen := len(wide) + 2
+	hMem := windows.kernel32('GlobalAlloc', GMEM_MOVEABLE, byteLen)
+	if windows.callOk?(hMem) & hMem.r1 != 0 {
+		true -> {
+			ptr := windows.kernel32('GlobalLock', hMem.r1)
+			if windows.callOk?(ptr) & ptr.r1 != 0 {
+				true -> {
+					// Copy wide string bytes into the global memory block.
+					memwrite(pointer(ptr.r1), wide + char(0) + char(0))
+					windows.kernel32('GlobalUnlock', hMem.r1)
+
+					opened := windows.user32('OpenClipboard', 0)
+					if windows.callOk?(opened) & opened.r1 != 0 {
+						true -> {
+							windows.user32('EmptyClipboard')
+							res := windows.user32('SetClipboardData', CF_UNICODETEXT, hMem.r1)
+							windows.user32('CloseClipboard')
+							windows.callOk?(res) & res.r1 != 0
+						}
+						_ -> {
+							windows.kernel32('GlobalFree', hMem.r1)
+							false
+						}
+					}
+				}
+				_ -> {
+					windows.kernel32('GlobalFree', hMem.r1)
+					false
+				}
+			}
+		}
+		_ -> false
+	}
+}
+
+// clipboardHasText() -> bool — checks if the clipboard currently contains text.
+fn clipboardHasText() {
+	res := windows.user32('IsClipboardFormatAvailable', CF_UNICODETEXT)
+	windows.callOk?(res) & res.r1 != 0
+}

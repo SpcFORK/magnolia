@@ -1,0 +1,102 @@
+// Test sample: menus (menu bar + context/popup menu)
+// Opens a window with a menu bar and right-click context menu.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+
+CMD_OPEN := 1
+CMD_SAVE := 2
+CMD_EXIT := 3
+CMD_ABOUT := 4
+CMD_CTX_COPY := 10
+CMD_CTX_PASTE := 11
+
+fn main() {
+	window := gui.createWindow('Menus Test', 500, 350, {
+		layer2D: 'auto'
+	})
+	if window.type != :ok -> {
+		println('Failed to create window: ' + string(window))
+		exit(1)
+	}
+
+	state := { lastCmd: 'None' }
+
+	// Build menu bar from spec
+	menuBar := gui.buildMenu([
+		{
+			label: 'File'
+			items: [
+				{ id: CMD_OPEN, label: 'Open' }
+				{ id: CMD_SAVE, label: 'Save' }
+				{ separator: true }
+				{ id: CMD_EXIT, label: 'Exit' }
+			]
+		}
+		{
+			label: 'Help'
+			items: [
+				{ id: CMD_ABOUT, label: 'About' }
+			]
+		}
+	])
+	gui.setMenuBar(window, menuBar)
+
+	// Build right-click context menu
+	ctxMenu := gui.createPopupMenu()
+	gui.menuAppendItem(ctxMenu, CMD_CTX_COPY, 'Copy')
+	gui.menuAppendItem(ctxMenu, CMD_CTX_PASTE, 'Paste')
+
+	gui.show(window)
+
+	// Handle menu commands
+	gui.onMenuCommand(window, fn(cmdId) {
+		printf('Menu command: {{ 0 }}\n', cmdId)
+		if cmdId {
+			1 -> state.lastCmd <- 'Open'
+			2 -> state.lastCmd <- 'Save'
+			3 -> {
+				gui.close(window)
+				exit(0)
+			}
+			4 -> state.lastCmd <- 'About'
+			10 -> state.lastCmd <- 'Copy (context)'
+			11 -> state.lastCmd <- 'Paste (context)'
+		}
+	})
+
+	// Show context menu on right-click
+	gui.onRButtonUp(window, fn(mx, my) {
+		chosen := gui.showPopupMenu(window, ctxMenu, mx, my)
+		printf('Popup returned: {{ 0 }}\n', chosen)
+	})
+
+	fn draw(win) {
+		frame := gui.beginFrame(win)
+		if frame.type = :ok -> {
+			bg := gui.rgb(20, 25, 35)
+			white := gui.rgb(255, 255, 255)
+			gui.fillRect(win, 0, 0, win.width, win.height, bg)
+			gui.drawText(win, 20, 24, 'Menus Test (menu bar + right-click context menu)', white)
+			gui.drawText(win, 20, 60, 'Last command: ' + state.lastCmd, gui.rgb(180, 220, 255))
+			gui.drawText(win, 20, 100, 'Try File > Open/Save/Exit, Help > About', gui.rgb(140, 140, 160))
+			gui.drawText(win, 20, 124, 'Right-click for context menu (Copy/Paste)', gui.rgb(140, 140, 160))
+			gui.endFrame(win)
+		}
+	}
+
+	draw(window)
+	gui.run(window, ?, fn(win, _dt) draw(win))
+	gui.destroyMenu(ctxMenu)
+	println('Menus test complete.')
+	gui.close(window)
+}
+
+main()

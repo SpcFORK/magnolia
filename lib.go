@@ -271,6 +271,9 @@ var libp2p string
 //go:embed lib/gui-common.oak
 var libguicommon string
 
+//go:embed lib/gui-dialogs.oak
+var libguidialogs string
+
 //go:embed lib/win-common.oak
 var libwincommon string
 
@@ -285,6 +288,24 @@ var libguirender string
 
 //go:embed lib/gui-resolution.oak
 var libguiresolution string
+
+//go:embed lib/gui-canvas.oak
+var libguicanvas string
+
+//go:embed lib/gui-clipboard.oak
+var libguiclipboard string
+
+//go:embed lib/gui-filedrop.oak
+var libguifiledrop string
+
+//go:embed lib/gui-menus.oak
+var libguimenus string
+
+//go:embed lib/gui-theme.oak
+var libguitheme string
+
+//go:embed lib/gui-systray.oak
+var libguisystray string
 
 //go:embed lib/gui-3dmath.oak
 var libgui3dmath string
@@ -318,6 +339,9 @@ var libguinativewinclose string
 
 //go:embed lib/gui-native-win-ddraw.oak
 var libguinativewinddraw string
+
+//go:embed lib/gui-native-win-d3d11.oak
+var libguinatived3d11 string
 
 //go:embed lib/gui-native-win-vulkan.oak
 var libguinativewinvulkan string
@@ -529,6 +553,7 @@ var stdlibs = map[string]string{
 	"gui-native-win-poll":             libguinativewinpoll,
 	"gui-native-win-close":            libguinativewinclose,
 	"gui-native-win-ddraw":            libguinativewinddraw,
+	"gui-native-win-d3d11":            libguinatived3d11,
 	"gui-native-win-vulkan":           libguinativewinvulkan,
 	"gui-native-win-vulkan-constants": libguinativewinvulkanconstants,
 	"gui-native-win-vulkan-init":      libguinativewinvulkaninit,
@@ -537,7 +562,14 @@ var stdlibs = map[string]string{
 	"gui-native-win-opengl":           libguinativewinopengl,
 	"gui-native-win-probe":            libguinativewinprobe,
 	"gui-native-linux":                libguinativelinux,
+	"gui-canvas":                      libguicanvas,
+	"gui-clipboard":                   libguiclipboard,
+	"gui-filedrop":                    libguifiledrop,
+	"gui-menus":                       libguimenus,
+	"gui-theme":                       libguitheme,
+	"gui-systray":                     libguisystray,
 	"gui-draw":                        libguidraw,
+	"gui-dialogs":                     libguidialogs,
 	"gui-2d":                          libgui2d,
 	"gui-color":                       libguicolor,
 	"gui-events":                      libguievents,

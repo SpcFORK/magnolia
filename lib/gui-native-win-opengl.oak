@@ -1,6 +1,7 @@
 // gui-native-win-opengl contains OpenGL 2D layer bootstrap helpers for Win32 windows.
 
 windows := import('windows')
+{ _default: _default } := import('gui-common')
 
 PFD_DRAW_TO_WINDOW := 4
 PFD_SUPPORT_OPENGL := 32
@@ -11,10 +12,37 @@ GL_COLOR_BUFFER_BIT := 16384
 GL_BGRA_EXT := 32993
 GL_UNSIGNED_BYTE := 5121
 GL_UNPACK_ALIGNMENT := 3317
+GL_RGBA8 := 32856
+GL_RENDERBUFFER := 36161
+GL_READ_FRAMEBUFFER := 36008
+GL_DRAW_FRAMEBUFFER := 36009
+GL_COLOR_ATTACHMENT0 := 36064
+GL_NEAREST := 9728
+GL_LINEAR := 9729
 
 // DIB constants
 DIB_RGB_COLORS := 0
 BI_RGB := 0
+
+// --- GL extension proc resolution cache ---
+_glProcs := {}
+
+fn _glGetProc(name) if _glProcs.(name) != ? {
+	true -> _glProcs.(name)
+	_ -> {
+		cname := windows.cstr(name)
+		res := windows.opengl32('wglGetProcAddress', addr(cname))
+		if windows.callOk?(res) & res.r1 > 0 {
+			true -> {
+				_glProcs.(name) <- res.r1
+				res.r1
+			}
+			_ -> 0
+		}
+	}
+}
+
+fn _glCall(proc, args...) windows.call(proc, args...)
 
 fn _initOpenGLWithContext(window, hdcHandle, chosen) {
 	ctx := windows.opengl32('wglCreateContext', hdcHandle)
@@ -116,8 +144,10 @@ fn initOpenGL2DLayer(window) {
 // then uploads to the OpenGL context via glDrawPixels and calls SwapBuffers.
 
 fn _ensureGlPixelBuffer(window) {
-	w := window.width
-	h := window.height
+	// Buffer must fit the larger of design or physical resolution
+	r := window._res
+	w := if r != ? { true -> if r.dw > window.width { true -> r.dw, _ -> window.width }, _ -> window.width }
+	h := if r != ? { true -> if r.dh > window.height { true -> r.dh, _ -> window.height }, _ -> window.height }
 	needed := w * h * 4
 	if type(window._glPixelBuf) = :int & window._glPixelBuf > 0 & window._glPixelBufSize = needed {
 		true -> window._glPixelBuf
@@ -158,53 +188,200 @@ fn _ensureGlBmiHeader(window) {
 	}
 }
 
-fn presentFrameOpenGL(window) if window._res != ? {
-	// When resolution scaling is active, GL needs float functions (glPixelZoom,
-	// glClearColor) which can't be called through Oak's integer-only syscall
-	// bridge.  Decline so endFrame falls back to the GDI StretchBlt path.
-	true -> { presented: false, error: 'GL presenter defers to GDI for resolution scaling' }
-	_ -> {
-		hdc := window.frameTargetHdc
-		ctx := window.openglContext
-		w := window.width
-		h := window.height
+// --- FBO management for resolution-scaled GL present ---
+// Uses glBlitFramebuffer (all integer args) to scale from design resolution
+// to physical window size, avoiding the float-only glPixelZoom.
 
-		if !(ctx > 0 & hdc > 0) {
-			true -> { presented: false, error: 'no GL context or DC' }
-			_ -> {
-				mk := windows.opengl32('wglMakeCurrent', hdc, ctx)
-				if !(windows.callOk?(mk) & mk.r1 > 0) {
-					true -> { presented: false, error: 'wglMakeCurrent failed', detail: mk }
-					_ -> {
-						pixelBuf := _ensureGlPixelBuffer(window)
-						if pixelBuf = 0 {
-							true -> {
-								windows.opengl32('wglMakeCurrent', 0, 0)
-								{ presented: false, error: 'pixel buffer allocation failed' }
+fn _ensureGlFbo(window, dw, dh) {
+	if type(window._glFbo) = :int & window._glFbo > 0 & window._glFboW = dw & window._glFboH = dh {
+		true -> true
+		_ -> {
+			glGenFramebuffers := _glGetProc('glGenFramebuffers')
+			glBindFramebuffer := _glGetProc('glBindFramebuffer')
+			glGenRenderbuffers := _glGetProc('glGenRenderbuffers')
+			glBindRenderbuffer := _glGetProc('glBindRenderbuffer')
+			glRenderbufferStorage := _glGetProc('glRenderbufferStorage')
+			glFramebufferRenderbuffer := _glGetProc('glFramebufferRenderbuffer')
+
+			if glGenFramebuffers = 0 | glBindFramebuffer = 0 | glGenRenderbuffers = 0 | glBindRenderbuffer = 0 | glRenderbufferStorage = 0 | glFramebufferRenderbuffer = 0 {
+				true -> false
+				_ -> {
+					// Clean up previous FBO if size changed
+					if type(window._glFbo) = :int & window._glFbo > 0 {
+						true -> {
+							glDeleteFramebuffers := _glGetProc('glDeleteFramebuffers')
+							glDeleteRenderbuffers := _glGetProc('glDeleteRenderbuffers')
+							if glDeleteFramebuffers > 0 {
+								true -> {
+									fboArr := bits([window._glFbo & 255, (window._glFbo >> 8) & 255, (window._glFbo >> 16) & 255, (window._glFbo >> 24) & 255])
+									_glCall(glDeleteFramebuffers, 1, addr(fboArr))
+								}
 							}
-							_ -> {
-								bmiPtr := _ensureGlBmiHeader(window)
-								windows.writeU32(bmiPtr + 0, 40)
-								windows.writeU32(bmiPtr + 4, w)
-								windows.writeU32(bmiPtr + 8, h)
-								windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
-								windows.writeU32(bmiPtr + 16, BI_RGB)
-
-								windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, pixelBuf, bmiPtr, DIB_RGB_COLORS)
-
-								windows.opengl32('glViewport', 0, 0, w, h)
-								windows.opengl32('glPixelStorei', GL_UNPACK_ALIGNMENT, 4)
-								windows.opengl32('glClear', GL_COLOR_BUFFER_BIT)
-								windows.opengl32('glRasterPos2i', -1, -1)
-								windows.opengl32('glDrawPixels', w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixelBuf)
-
-								windows.gdi32('SwapBuffers', hdc)
-								windows.opengl32('wglMakeCurrent', 0, 0)
-
-								{ presented: true }
+							if glDeleteRenderbuffers > 0 & type(window._glRbo) = :int & window._glRbo > 0 {
+								true -> {
+									rboArr := bits([window._glRbo & 255, (window._glRbo >> 8) & 255, (window._glRbo >> 16) & 255, (window._glRbo >> 24) & 255])
+									_glCall(glDeleteRenderbuffers, 1, addr(rboArr))
+								}
 							}
 						}
 					}
+
+					// Create FBO
+					fboOut := bits([0, 0, 0, 0])
+					_glCall(glGenFramebuffers, 1, addr(fboOut))
+					fbo := windows.readU32(addr(fboOut))
+					if fbo = 0 {
+						true -> false
+						_ -> {
+							// Create renderbuffer at design resolution
+							rboOut := bits([0, 0, 0, 0])
+							_glCall(glGenRenderbuffers, 1, addr(rboOut))
+							rbo := windows.readU32(addr(rboOut))
+							if rbo = 0 {
+								true -> false
+								_ -> {
+									_glCall(glBindRenderbuffer, GL_RENDERBUFFER, rbo)
+									_glCall(glRenderbufferStorage, GL_RENDERBUFFER, GL_RGBA8, dw, dh)
+									_glCall(glBindFramebuffer, GL_DRAW_FRAMEBUFFER, fbo)
+									_glCall(glFramebufferRenderbuffer, GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo)
+									_glCall(glBindFramebuffer, GL_DRAW_FRAMEBUFFER, 0)
+									_glCall(glBindRenderbuffer, GL_RENDERBUFFER, 0)
+									window._glFbo <- fbo
+									window._glRbo <- rbo
+									window._glFboW <- dw
+									window._glFboH <- dh
+									true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _presentGlScaled(window, hdc, ctx, r) {
+	dw := r.dw
+	dh := r.dh
+	pw := _default(r.pw, window.width)
+	ph := _default(r.ph, window.height)
+	sx := _default(r.sx, 1.0)
+	sy := _default(r.sy, 1.0)
+	ox := _default(r.ox, 0)
+	oy := _default(r.oy, 0)
+	dstW := int(float(dw) * sx)
+	dstH := int(float(dh) * sy)
+
+	pixelBuf := _ensureGlPixelBuffer(window)
+	if pixelBuf = 0 {
+		true -> { presented: false, error: 'pixel buffer allocation failed' }
+		_ -> {
+			bmiPtr := _ensureGlBmiHeader(window)
+			windows.writeU32(bmiPtr + 0, 40)
+			windows.writeU32(bmiPtr + 4, dw)
+			windows.writeU32(bmiPtr + 8, dh)
+			windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
+			windows.writeU32(bmiPtr + 16, BI_RGB)
+
+			// Read design-resolution backbuffer
+			windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, dh, pixelBuf, bmiPtr, DIB_RGB_COLORS)
+
+			glBindFramebuffer := _glGetProc('glBindFramebuffer')
+			glBlitFramebuffer := _glGetProc('glBlitFramebuffer')
+
+			// Draw design-resolution pixels into the FBO
+			_glCall(glBindFramebuffer, GL_DRAW_FRAMEBUFFER, window._glFbo)
+			windows.opengl32('glViewport', 0, 0, dw, dh)
+			windows.opengl32('glPixelStorei', GL_UNPACK_ALIGNMENT, 4)
+			windows.opengl32('glRasterPos2i', -1, -1)
+			windows.opengl32('glDrawPixels', dw, dh, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixelBuf)
+
+			// Blit from FBO to default framebuffer with scaling
+			_glCall(glBindFramebuffer, GL_READ_FRAMEBUFFER, window._glFbo)
+			_glCall(glBindFramebuffer, GL_DRAW_FRAMEBUFFER, 0)
+
+			// Clear the default framebuffer (black letterbox bars)
+			windows.opengl32('glViewport', 0, 0, pw, ph)
+			windows.opengl32('glClear', GL_COLOR_BUFFER_BIT)
+
+			// Filter: pixel-perfect uses NEAREST, smooth uses LINEAR
+			filter := if _default(r.pp, false) {
+				true -> GL_NEAREST
+				_ -> GL_LINEAR
+			}
+			// glBlitFramebuffer: src and dst rects, all integer args
+			// Note: GL Y is bottom-up, so we flip destination Y
+			_glCall(glBlitFramebuffer,
+				0, 0, dw, dh,
+				ox, ph - oy - dstH, ox + dstW, ph - oy,
+				GL_COLOR_BUFFER_BIT, filter)
+
+			_glCall(glBindFramebuffer, GL_READ_FRAMEBUFFER, 0)
+
+			windows.gdi32('SwapBuffers', hdc)
+
+			{ presented: true }
+		}
+	}
+}
+
+fn presentFrameOpenGL(window) {
+	hdc := window.frameTargetHdc
+	ctx := window.openglContext
+	r := window._res
+
+	if !(ctx > 0 & hdc > 0) {
+		true -> { presented: false, error: 'no GL context or DC' }
+		_ -> {
+			mk := windows.opengl32('wglMakeCurrent', hdc, ctx)
+			if !(windows.callOk?(mk) & mk.r1 > 0) {
+				true -> { presented: false, error: 'wglMakeCurrent failed', detail: mk }
+				_ -> {
+					result := if r != ? {
+						// Resolution scaling via FBO + glBlitFramebuffer
+						true -> {
+							fboReady := _ensureGlFbo(window, r.dw, r.dh)
+							if fboReady {
+								true -> _presentGlScaled(window, hdc, ctx, r)
+								_ -> {
+									// FBO not available (GL < 3.0) — decline to GDI
+									{ presented: false, error: 'GL FBO extensions not available for resolution scaling' }
+								}
+							}
+						}
+						// No resolution scaling — direct pixel transfer (original path)
+						_ -> {
+							w := window.width
+							h := window.height
+							pixelBuf := _ensureGlPixelBuffer(window)
+							if pixelBuf = 0 {
+								true -> { presented: false, error: 'pixel buffer allocation failed' }
+								_ -> {
+									bmiPtr := _ensureGlBmiHeader(window)
+									windows.writeU32(bmiPtr + 0, 40)
+									windows.writeU32(bmiPtr + 4, w)
+									windows.writeU32(bmiPtr + 8, h)
+									windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
+									windows.writeU32(bmiPtr + 16, BI_RGB)
+
+									windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, pixelBuf, bmiPtr, DIB_RGB_COLORS)
+
+									windows.opengl32('glViewport', 0, 0, w, h)
+									windows.opengl32('glPixelStorei', GL_UNPACK_ALIGNMENT, 4)
+									windows.opengl32('glClear', GL_COLOR_BUFFER_BIT)
+									windows.opengl32('glRasterPos2i', -1, -1)
+									windows.opengl32('glDrawPixels', w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixelBuf)
+
+									windows.gdi32('SwapBuffers', hdc)
+
+									{ presented: true }
+								}
+							}
+						}
+					}
+					windows.opengl32('wglMakeCurrent', 0, 0)
+					result
 				}
 			}
 		}
@@ -217,6 +394,29 @@ fn releaseGlPixelBuffer(window) {
 			windows.virtualFree(window._glPixelBuf, 0, windows.MEM_RELEASE)
 			window._glPixelBuf <- 0
 			window._glPixelBufSize <- 0
+		}
+	}
+	// Clean up FBO and renderbuffer if they exist
+	if type(window._glFbo) = :int & window._glFbo > 0 {
+		true -> {
+			glDeleteFramebuffers := _glGetProc('glDeleteFramebuffers')
+			glDeleteRenderbuffers := _glGetProc('glDeleteRenderbuffers')
+			if glDeleteFramebuffers > 0 {
+				true -> {
+					fboArr := bits([window._glFbo & 255, (window._glFbo >> 8) & 255, (window._glFbo >> 16) & 255, (window._glFbo >> 24) & 255])
+					_glCall(glDeleteFramebuffers, 1, addr(fboArr))
+				}
+			}
+			if glDeleteRenderbuffers > 0 & type(window._glRbo) = :int & window._glRbo > 0 {
+				true -> {
+					rboArr := bits([window._glRbo & 255, (window._glRbo >> 8) & 255, (window._glRbo >> 16) & 255, (window._glRbo >> 24) & 255])
+					_glCall(glDeleteRenderbuffers, 1, addr(rboArr))
+				}
+			}
+			window._glFbo <- 0
+			window._glRbo <- 0
+			window._glFboW <- 0
+			window._glFboH <- 0
 		}
 	}
 }

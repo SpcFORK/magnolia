@@ -1,0 +1,328 @@
+// gui-dialogs provides Win32 common dialog wrappers (file open/save, folder picker,
+// color chooser, font chooser).
+
+std := import('std')
+windows := import('windows')
+{
+	readU32: readU32
+	writeU32: writeU32
+	readU64: readU64
+	writeU64: writeU64
+} := import('writes')
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+_ptrSize := windows.ptrSize()
+
+fn _writePtr(address, value) windows.writePtr(address, value)
+
+// Read a null-terminated UTF-16LE string from an address, stopping at first null.
+fn _readUtf16Str(addr) {
+	fn sub(i, out) {
+		lo := bits(memread(pointer(addr + i), 1)).(0)
+		hi := bits(memread(pointer(addr + i + 1), 1)).(0)
+		cp := lo + hi * 256
+		if cp = 0 {
+			true -> out
+			_ -> sub(i + 2, out + char(cp))
+		}
+	}
+	sub(0, '')
+}
+
+fn _zeros(n) {
+	fn sub(i, acc) if i < n {
+		true -> sub(i + 1, acc << 0)
+		_ -> acc
+	}
+	string(bits(sub(0, [])))
+}
+
+// ─── File Open / Save ───────────────────────────────────────────────────────
+// OPENFILENAMEW layout (64-bit):
+//   0  : lStructSize   (DWORD)
+//   4  : hwndOwner     (HWND)    — ptr at offset 8 on x64
+//   +p : hInstance     (ptr)
+//   +p : lpstrFilter   (ptr)
+//   +p : lpstrCustomFilter (ptr)
+//   etc.
+// Because of alignment, the exact layout varies. We'll use the flat Win32
+// structure offsets for x64 (the common case).
+
+// OPENFILENAMEW size on x64 is 152 bytes; on x86 it's 76.
+// Offsets (64-bit):
+//   0   DWORD  lStructSize
+//   8   HWND   hwndOwner
+//   16  HINSTANCE hInstance
+//   24  LPCWSTR lpstrFilter
+//   32  LPWSTR  lpstrCustomFilter
+//   40  DWORD   nMaxCustFilter
+//   44  DWORD   nFilterIndex
+//   48  LPWSTR  lpstrFile
+//   56  DWORD   nMaxFile
+//   60  (pad)
+//   64  LPWSTR  lpstrFileTitle
+//   72  DWORD   nMaxFileTitle
+//   76  (pad)
+//   80  LPCWSTR lpstrInitialDir
+//   88  LPCWSTR lpstrTitle
+//   96  DWORD   Flags
+//   ...remaining fields rarely needed
+
+OFN_SIZE := if _ptrSize { 8 -> 152, _ -> 76 }
+OFN_FILEBUFSIZE := 520
+OFN_PATHMUSTEXIST := 2048
+OFN_FILEMUSTEXIST := 4096
+OFN_OVERWRITEPROMPT := 2
+OFN_NOCHANGEDIR := 8
+OFN_EXPLORER := 524288
+
+fn _buildFilter(filter) {
+	// filter = 'Text Files (*.txt)|*.txt|All Files (*.*)|*.*'
+	// Each pair separated by |, internal separators are null chars in UTF-16.
+	if filter = ? | filter = '' {
+		true -> {
+			// Default: All Files
+			wide := utf16('All Files') + char(0) + char(0) + utf16('*.*') + char(0) + char(0) + char(0) + char(0)
+			wide
+		}
+		_ -> {
+			parts := std.split(filter, '|')
+			fn build(i, acc) if i + 1 < len(parts) {
+				true -> {
+					label := parts.(i)
+					pattern := parts.(i + 1)
+					build(i + 2, acc + utf16(label) + char(0) + char(0) + utf16(pattern) + char(0) + char(0))
+				}
+				_ -> acc + char(0) + char(0)
+			}
+			build(0, '')
+		}
+	}
+}
+
+fn _fileDialog(hwnd, title, filter, flags, apiName) {
+	buf := _zeros(OFN_SIZE)
+	fileBuf := _zeros(OFN_FILEBUFSIZE * 2)
+	filterWide := _buildFilter(filter)
+	titleWide := if title != ? { true -> utf16(title) + char(0) + char(0), _ -> ? }
+
+	bufPtr := int(addr(buf))
+	fileBufPtr := int(addr(fileBuf))
+	filterPtr := int(addr(filterWide))
+
+	// lStructSize
+	writeU32(bufPtr, OFN_SIZE)
+	// hwndOwner
+	if hwnd != ? & hwnd != 0 -> _writePtr(bufPtr + 8, hwnd)
+	// lpstrFilter
+	_writePtr(bufPtr + 24, filterPtr)
+	// lpstrFile
+	_writePtr(bufPtr + 48, fileBufPtr)
+	// nMaxFile
+	writeU32(bufPtr + 56, OFN_FILEBUFSIZE)
+	// lpstrTitle
+	if titleWide != ? -> _writePtr(bufPtr + 88, int(addr(titleWide)))
+	// Flags
+	writeU32(bufPtr + 96, flags)
+
+	res := windows.comdlg32(apiName, bufPtr)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			path := _readUtf16Str(fileBufPtr)
+			{ type: :ok, path: path }
+		}
+		_ -> { type: :cancel }
+	}
+}
+
+// openFileDialog(options) -> { type: :ok, path: '...' } | { type: :cancel }
+// options: { hwnd, title, filter }
+// filter format: 'Label|pattern|Label2|pattern2'  e.g. 'Text Files|*.txt|All Files|*.*'
+fn openFileDialog(options) {
+	opts := if options { ? -> {}, _ -> options }
+	hwnd := opts.hwnd
+	title := opts.title
+	filter := opts.filter
+	flags := OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER
+	_fileDialog(hwnd, title, filter, flags, 'GetOpenFileNameW')
+}
+
+// saveFileDialog(options) -> { type: :ok, path: '...' } | { type: :cancel }
+fn saveFileDialog(options) {
+	opts := if options { ? -> {}, _ -> options }
+	hwnd := opts.hwnd
+	title := opts.title
+	filter := opts.filter
+	flags := OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_EXPLORER
+	_fileDialog(hwnd, title, filter, flags, 'GetSaveFileNameW')
+}
+
+// ─── Color Chooser ──────────────────────────────────────────────────────────
+// CHOOSECOLORW on x64: 72 bytes
+//   0   DWORD  lStructSize
+//   8   HWND   hwndOwner
+//   16  HINSTANCE hInstance
+//   24  COLORREF rgbResult
+//   28  (pad)
+//   32  COLORREF* lpCustColors (16 COLORREFs = 64 bytes)
+//   40  DWORD  Flags
+//   ...
+
+CC_SIZE := if _ptrSize { 8 -> 72, _ -> 36 }
+CC_RGBINIT := 1
+CC_FULLOPEN := 2
+
+// chooseColor(options) -> { type: :ok, color: int } | { type: :cancel }
+// options: { hwnd, initialColor }
+// color is a COLORREF (0x00BBGGRR)
+fn chooseColor(options) {
+	opts := if options { ? -> {}, _ -> options }
+	hwnd := opts.hwnd
+	initialColor := if opts.initialColor { ? -> 0, _ -> opts.initialColor }
+
+	buf := _zeros(CC_SIZE)
+	// 16 custom colors (64 bytes)
+	customColors := _zeros(64)
+
+	bufPtr := int(addr(buf))
+	writeU32(bufPtr, CC_SIZE)
+	if hwnd != ? & hwnd != 0 -> _writePtr(bufPtr + 8, hwnd)
+	writeU32(bufPtr + 24, initialColor)
+	_writePtr(bufPtr + 32, int(addr(customColors)))
+	writeU32(bufPtr + 40, CC_RGBINIT | CC_FULLOPEN)
+
+	res := windows.comdlg32('ChooseColorW', bufPtr)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			color := readU32(bufPtr + 24)
+			{ type: :ok, color: color }
+		}
+		_ -> { type: :cancel }
+	}
+}
+
+// ─── Folder Picker ──────────────────────────────────────────────────────────
+// Uses SHBrowseForFolderW + SHGetPathFromIDListW
+// BROWSEINFOW on x64: 64 bytes
+//   0   HWND   hwndOwner
+//   8   PCIDLIST_ABSOLUTE pidlRoot
+//   16  LPWSTR pszDisplayName
+//   24  LPCWSTR lpszTitle
+//   32  UINT   ulFlags
+//   36  (pad)
+//   40  BFFCALLBACK lpfn
+//   48  LPARAM lParam
+//   56  int    iImage
+
+BI_SIZE := if _ptrSize { 8 -> 64, _ -> 32 }
+BIF_RETURNONLYFSDIRS := 1
+BIF_NEWDIALOGSTYLE := 64
+
+fn pickFolder(options) {
+	opts := if options { ? -> {}, _ -> options }
+	hwnd := opts.hwnd
+	title := opts.title
+
+	buf := _zeros(BI_SIZE)
+	displayBuf := _zeros(520)
+	titleWide := if title != ? { true -> utf16(title) + char(0) + char(0), _ -> ? }
+
+	bufPtr := int(addr(buf))
+	if hwnd != ? & hwnd != 0 -> _writePtr(bufPtr, hwnd)
+	_writePtr(bufPtr + 16, int(addr(displayBuf)))
+	if titleWide != ? -> _writePtr(bufPtr + 24, int(addr(titleWide)))
+	writeU32(bufPtr + 32, BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE)
+
+	res := windows.shell32('SHBrowseForFolderW', bufPtr)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			pidl := res.r1
+			pathBuf := _zeros(520)
+			pathRes := windows.shell32('SHGetPathFromIDListW', pidl, int(addr(pathBuf)))
+			// Free pidl via CoTaskMemFree
+			windows.ole32('CoTaskMemFree', pidl)
+			if windows.callOk?(pathRes) & pathRes.r1 != 0 {
+				true -> {
+					path := _readUtf16Str(int(addr(pathBuf)))
+					{ type: :ok, path: path }
+				}
+				_ -> { type: :error, error: 'SHGetPathFromIDListW failed' }
+			}
+		}
+		_ -> { type: :cancel }
+	}
+}
+
+// ─── Font Chooser ───────────────────────────────────────────────────────────
+// CHOOSEFONTW on x64: 104 bytes
+//   0   DWORD       lStructSize
+//   8   HWND        hwndOwner
+//   16  HDC         hDC
+//   24  LOGFONTW*   lpLogFont
+//   32  INT         iPointSize
+//   36  DWORD       Flags
+//   40  COLORREF    rgbColors
+// LOGFONTW: 92 bytes
+//   0   LONG  lfHeight
+//   16  LONG  lfWeight
+//   20  BYTE  lfItalic
+//   28  WCHAR lfFaceName[32]  (64 bytes)
+
+CF_SIZE := if _ptrSize { 8 -> 104, _ -> 60 }
+LOGFONT_SIZE := 92
+CF_SCREENFONTS := 1
+CF_EFFECTS := 256
+CF_INITTOLOGFONTSTRUCT := 64
+
+// chooseFont(options) -> { type: :ok, name, size, weight, italic, color } | { type: :cancel }
+// options: { hwnd, initialSize, initialName, initialColor }
+fn chooseFont(options) {
+	opts := if options { ? -> {}, _ -> options }
+	hwnd := opts.hwnd
+	initialSize := _default(opts.initialSize, 12)
+	initialColor := _default(opts.initialColor, 0)
+
+	logFont := _zeros(LOGFONT_SIZE)
+	lfPtr := int(addr(logFont))
+
+	// Set initial height: lfHeight = -(size * 96 / 72)  (assuming 96 DPI)
+	lfHeight := -(initialSize * 96 / 72)
+	writeU32(lfPtr, int(lfHeight) & 4294967295)
+
+	// Write initial face name at offset 28 as UTF-16LE
+	if opts.initialName != ? -> {
+		nameWide := utf16(opts.initialName) + char(0) + char(0)
+		fn copyBytes(i) if i < len(nameWide) & i < 62 {
+			true -> {
+				memwrite(pointer(lfPtr + 28 + i), string(bits([bits(nameWide).(i)])))
+				copyBytes(i + 1)
+			}
+		}
+		copyBytes(0)
+	}
+
+	cfBuf := _zeros(CF_SIZE)
+	cfPtr := int(addr(cfBuf))
+	writeU32(cfPtr, CF_SIZE)
+	if hwnd != ? & hwnd != 0 -> _writePtr(cfPtr + 8, hwnd)
+	_writePtr(cfPtr + 24, lfPtr)
+	flags := CF_SCREENFONTS | CF_EFFECTS
+	if opts.initialName != ? | opts.initialSize != ? -> flags <- flags | CF_INITTOLOGFONTSTRUCT
+	writeU32(cfPtr + 36, flags)
+	writeU32(cfPtr + 40, initialColor)
+
+	res := windows.comdlg32('ChooseFontW', cfPtr)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			pointSizeTenths := readU32(cfPtr + 32)
+			pointSize := int(pointSizeTenths / 10)
+			weight := readU32(lfPtr + 16)
+			italic := bits(memread(pointer(lfPtr + 20), 1)).(0) != 0
+			color := readU32(cfPtr + 40)
+			faceName := _readUtf16Str(lfPtr + 28)
+			{ type: :ok, name: faceName, size: pointSize, weight: weight, italic: italic, color: color }
+		}
+		_ -> { type: :cancel }
+	}
+}

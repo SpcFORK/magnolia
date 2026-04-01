@@ -1,0 +1,203 @@
+// gui-systray provides Win32 system tray (notification area) icon support.
+// Shell_NotifyIconW with NOTIFYICONDATAW struct.
+
+std := import('std')
+windows := import('windows')
+{
+	writeU32: writeU32
+	readU32: readU32
+} := import('writes')
+
+// Shell_NotifyIcon actions
+NIM_ADD := 0
+NIM_MODIFY := 1
+NIM_DELETE := 2
+NIM_SETVERSION := 4
+
+// NOTIFYICONDATAW flags (uFlags)
+NIF_MESSAGE := 1
+NIF_ICON := 2
+NIF_TIP := 4
+NIF_INFO := 16
+
+// Fixed size for NOTIFYICONDATAW (Version 3, no GUID) on x64:
+// We use the full 956-byte extended struct to support balloon tips.
+_NOTIFYICONDATA_SIZE := 956
+
+// Tray callback message id (arbitrary, > WM_USER)
+WM_TRAYICON := 32769
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn _zeros(n) {
+	fn sub(i, acc) if i < n {
+		true -> sub(i + 1, acc << 0)
+		_ -> acc
+	}
+	string(bits(sub(0, [])))
+}
+
+// Write a UTF-16LE string into a buffer at a given address, up to maxBytes.
+fn _writeUtf16At(baseAddr, text, maxBytes) {
+	wide := utf16(text) + char(0) + char(0)
+	fn copy(i) if i < len(wide) & i < maxBytes {
+		true -> {
+			memwrite(pointer(baseAddr + i), string(bits([bits(wide).(i)])))
+			copy(i + 1)
+		}
+	}
+	copy(0)
+}
+
+// ─── NOTIFYICONDATAW layout (x64) ──────────────────────────────────────────
+// Offset  Field
+// 0       cbSize (DWORD)
+// 4       hWnd (HWND) — at 8 due to alignment on x64
+// 16      uID (UINT)
+// 20      uFlags (UINT)
+// 24      uCallbackMessage (UINT)
+// 28      (pad)
+// 32      hIcon (HICON ptr)
+// 40      szTip[128] (WCHAR, 256 bytes)
+// 296     dwState (DWORD)
+// 300     dwStateMask (DWORD)
+// 304     szInfo[256] (WCHAR, 512 bytes)
+// 816     union { uTimeout, uVersion } (UINT)
+// 820     szInfoTitle[64] (WCHAR, 128 bytes)
+// 948     dwInfoFlags (DWORD)
+// 952     (for GUID — not used)
+
+_NID_OFF_HWND := 8
+_NID_OFF_UID := 16
+_NID_OFF_FLAGS := 20
+_NID_OFF_CALLBACKMSG := 24
+_NID_OFF_HICON := 32
+_NID_OFF_TIP := 40
+_NID_OFF_INFO := 304
+_NID_OFF_INFOTITLE := 820
+_NID_OFF_INFOFLAGS := 948
+
+// ─── Tray icon management ───────────────────────────────────────────────────
+
+// addTrayIcon(window, id, tooltip, hIcon) -> bool
+// Adds a tray icon. id should be a unique uint for this window.
+// hIcon: icon handle (HICON). Pass 0 or ? for no icon.
+// tooltip: up to 127 characters.
+fn addTrayIcon(window, id, tooltip, hIcon) {
+	buf := _zeros(_NOTIFYICONDATA_SIZE)
+	p := int(addr(buf))
+	writeU32(p, _NOTIFYICONDATA_SIZE)
+	windows.writePtr(p + _NID_OFF_HWND, window.hwnd)
+	writeU32(p + _NID_OFF_UID, id)
+
+	flags := NIF_MESSAGE | NIF_TIP
+	if hIcon != ? & hIcon != 0 -> flags <- flags | NIF_ICON
+	writeU32(p + _NID_OFF_FLAGS, flags)
+	writeU32(p + _NID_OFF_CALLBACKMSG, WM_TRAYICON)
+	if hIcon != ? & hIcon != 0 -> windows.writePtr(p + _NID_OFF_HICON, hIcon)
+	if tooltip != ? -> _writeUtf16At(p + _NID_OFF_TIP, tooltip, 254)
+
+	res := windows.shell32('Shell_NotifyIconW', NIM_ADD, p)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			window._trayId <- id
+			window._trayBuf <- buf
+			true
+		}
+		_ -> false
+	}
+}
+
+// removeTrayIcon(window, id) -> bool
+fn removeTrayIcon(window, id) {
+	buf := _zeros(_NOTIFYICONDATA_SIZE)
+	p := int(addr(buf))
+	writeU32(p, _NOTIFYICONDATA_SIZE)
+	windows.writePtr(p + _NID_OFF_HWND, window.hwnd)
+	writeU32(p + _NID_OFF_UID, id)
+
+	res := windows.shell32('Shell_NotifyIconW', NIM_DELETE, p)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			window._trayId <- ?
+			window._trayBuf <- ?
+			true
+		}
+		_ -> false
+	}
+}
+
+// updateTrayTooltip(window, id, tooltip) -> bool
+fn updateTrayTooltip(window, id, tooltip) {
+	buf := _zeros(_NOTIFYICONDATA_SIZE)
+	p := int(addr(buf))
+	writeU32(p, _NOTIFYICONDATA_SIZE)
+	windows.writePtr(p + _NID_OFF_HWND, window.hwnd)
+	writeU32(p + _NID_OFF_UID, id)
+	writeU32(p + _NID_OFF_FLAGS, NIF_TIP)
+	_writeUtf16At(p + _NID_OFF_TIP, tooltip, 254)
+
+	res := windows.shell32('Shell_NotifyIconW', NIM_MODIFY, p)
+	windows.callOk?(res) & res.r1 != 0
+}
+
+// showBalloonTip(window, id, title, message, iconFlag) -> bool
+// iconFlag: 0 = none, 1 = info, 2 = warning, 3 = error
+fn showBalloonTip(window, id, title, message, iconFlag) {
+	buf := _zeros(_NOTIFYICONDATA_SIZE)
+	p := int(addr(buf))
+	writeU32(p, _NOTIFYICONDATA_SIZE)
+	windows.writePtr(p + _NID_OFF_HWND, window.hwnd)
+	writeU32(p + _NID_OFF_UID, id)
+	writeU32(p + _NID_OFF_FLAGS, NIF_INFO)
+	if message != ? -> _writeUtf16At(p + _NID_OFF_INFO, message, 510)
+	if title != ? -> _writeUtf16At(p + _NID_OFF_INFOTITLE, title, 126)
+	writeU32(p + _NID_OFF_INFOFLAGS, if iconFlag { ? -> 0, _ -> iconFlag })
+
+	res := windows.shell32('Shell_NotifyIconW', NIM_MODIFY, p)
+	windows.callOk?(res) & res.r1 != 0
+}
+
+// ─── Tray event handling ────────────────────────────────────────────────────
+
+// Tray callback lParam values
+TRAY_WM_LBUTTONDOWN := 513
+TRAY_WM_LBUTTONUP := 514
+TRAY_WM_RBUTTONDOWN := 516
+TRAY_WM_RBUTTONUP := 517
+TRAY_WM_LBUTTONDBLCLK := 515
+
+// onTrayEvent(window, handler) — handler receives (eventType) when tray icon is interacted.
+// eventType: :lbuttondown, :lbuttonup, :rbuttondown, :rbuttonup, :lbuttondblclk
+fn onTrayEvent(window, handler) {
+	guiEvents := import('gui-events')
+	guiEvents.on(window, :dispatch, fn(_) if guiEvents.formMsgType(window) = WM_TRAYICON -> {
+		lp := guiEvents.formMsgLParam(window)
+		evtName := if lp {
+			TRAY_WM_LBUTTONDOWN -> :lbuttondown
+			TRAY_WM_LBUTTONUP -> :lbuttonup
+			TRAY_WM_RBUTTONDOWN -> :rbuttondown
+			TRAY_WM_RBUTTONUP -> :rbuttonup
+			TRAY_WM_LBUTTONDBLCLK -> :lbuttondblclk
+			_ -> ?
+		}
+		if evtName != ? -> handler(evtName)
+	})
+}
+
+// ─── Minimize-to-tray helpers ───────────────────────────────────────────────
+
+// minimizeToTray(window) — hide the window (ShowWindow SW_HIDE).
+fn minimizeToTray(window) {
+	windows.user32('ShowWindow', window.hwnd, 0)
+	window._minimizedToTray <- true
+	window
+}
+
+// restoreFromTray(window) — show the window (ShowWindow SW_SHOW + SetForegroundWindow).
+fn restoreFromTray(window) {
+	windows.user32('ShowWindow', window.hwnd, 5)
+	windows.user32('SetForegroundWindow', window.hwnd)
+	window._minimizedToTray <- false
+	window
+}

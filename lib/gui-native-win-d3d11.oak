@@ -1,0 +1,357 @@
+// gui-native-win-d3d11 contains Direct3D 11 2D presenter backend for Win32.
+//
+// Uses D3D11CreateDeviceAndSwapChain to create a device, swap chain, and
+// immediate context.  Pixels from the GDI back-buffer are uploaded via
+// UpdateSubresource to the swap chain's back buffer, then presented via
+// IDXGISwapChain::Present.  DXGI handles resolution scaling automatically
+// when the swap chain buffer dimensions differ from the window size.
+
+windows := import('windows')
+{ _default: _default } := import('gui-common')
+{ _ptrRead: _ptrRead, _comCall: _comCall, _readOutPointer: _readOutPointer, _releaseOk?: _releaseOk? } := import('win-common')
+
+// COM vtable indices
+COM_RELEASE := 2
+
+// IDXGISwapChain vtable indices (IUnknown:3 + IDXGIObject:4 + IDXGIDeviceSubObject:1 = 8 base)
+IDXGISWAPCHAIN_PRESENT := 8
+IDXGISWAPCHAIN_GETBUFFER := 9
+IDXGISWAPCHAIN_RESIZEBUFFERS := 13
+
+// ID3D11DeviceContext vtable indices
+// IUnknown:3 + ID3D11DeviceChild:4 = 7 base
+// Then the methods in order per d3d11.h
+ID3D11DEVICECONTEXT_MAP := 14
+ID3D11DEVICECONTEXT_UNMAP := 15
+ID3D11DEVICECONTEXT_UPDATESUBRESOURCE := 48
+
+// ID3D11Device vtable indices
+// IUnknown:3, then:
+ID3D11DEVICE_CREATETEXTURE2D := 5
+
+// D3D11 / DXGI constants
+DXGI_FORMAT_B8G8R8A8_UNORM := 87
+DXGI_USAGE_RENDER_TARGET_OUTPUT := 32
+DXGI_SWAP_EFFECT_DISCARD := 0
+D3D11_SDK_VERSION := 7
+D3D_DRIVER_TYPE_HARDWARE := 1
+D3D_DRIVER_TYPE_WARP := 5
+D3D11_CREATE_DEVICE_BGRA_SUPPORT := 32
+
+// DIB constants (for GetDIBits pixel extraction)
+DIB_RGB_COLORS := 0
+BI_RGB := 0
+
+// IID_ID3D11Texture2D = {6f15aaf2-d208-4e89-9ab4-489535d34f9c}
+fn _iidD3d11Texture2D() bits([
+	242, 170, 21, 111
+	8, 210
+	137, 78
+	154, 180, 72, 149, 53, 211, 79, 156
+])
+
+fn initD3d112DLayer(window) {
+	is64 := windows.ptrSize() = 8
+	ps := windows.ptrSize()
+	hwnd := window.hwnd
+
+	// Determine buffer dimensions: use design resolution if scaling is active,
+	// otherwise use window dimensions.  DXGI stretches the buffer to the window
+	// size during Present, giving us free resolution scaling.
+	r := window._res
+	bufW := if r != ? & r.dw > 0 { true -> r.dw, _ -> window.width }
+	bufH := if r != ? & r.dh > 0 { true -> r.dh, _ -> window.height }
+
+	// Build DXGI_SWAP_CHAIN_DESC
+	// x64: 72 bytes (HWND at +48, size 8, alignment padding)
+	// x86: 60 bytes (HWND at +44, size 4)
+	descSize := if is64 { true -> 72, _ -> 60 }
+	desc := bits({
+		fn zeros(n, acc) if n {
+			0 -> acc
+			_ -> zeros(n - 1, acc << 0)
+		}
+		zeros(descSize, [])
+	})
+	dp := addr(desc)
+
+	// BufferDesc.Width/Height
+	windows.writeU32(dp + 0, bufW)
+	windows.writeU32(dp + 4, bufH)
+	// BufferDesc.RefreshRate = 60/1
+	windows.writeU32(dp + 8, 60)
+	windows.writeU32(dp + 12, 1)
+	// BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM
+	windows.writeU32(dp + 16, DXGI_FORMAT_B8G8R8A8_UNORM)
+	// ScanlineOrdering = 0 (unspecified), Scaling = 0 (unspecified)
+	// SampleDesc.Count = 1, Quality = 0
+	windows.writeU32(dp + 28, 1)
+	windows.writeU32(dp + 32, 0)
+	// BufferUsage
+	windows.writeU32(dp + 36, DXGI_USAGE_RENDER_TARGET_OUTPUT)
+	// BufferCount
+	windows.writeU32(dp + 40, 1)
+	// OutputWindow (HWND — pointer)
+	if is64 {
+		true -> {
+			windows.writeU64(dp + 48, hwnd)
+			// Windowed = TRUE
+			windows.writeU32(dp + 56, 1)
+			// SwapEffect = DXGI_SWAP_EFFECT_DISCARD
+			windows.writeU32(dp + 60, DXGI_SWAP_EFFECT_DISCARD)
+			// Flags = 0
+			windows.writeU32(dp + 64, 0)
+		}
+		_ -> {
+			windows.writeU32(dp + 44, hwnd)
+			// Windowed = TRUE
+			windows.writeU32(dp + 48, 1)
+			// SwapEffect
+			windows.writeU32(dp + 52, DXGI_SWAP_EFFECT_DISCARD)
+			// Flags
+			windows.writeU32(dp + 56, 0)
+		}
+	}
+
+	// Output pointer buffers for device, context, swap chain
+	fn freshPtr() if is64 {
+		true -> bits([0, 0, 0, 0, 0, 0, 0, 0])
+		_ -> bits([0, 0, 0, 0])
+	}
+	swapChainOut := freshPtr()
+	deviceOut := freshPtr()
+	featureLevelOut := bits([0, 0, 0, 0])
+	contextOut := freshPtr()
+
+	// Call D3D11CreateDeviceAndSwapChain
+	// Parameters: pAdapter, DriverType, Software, Flags, pFeatureLevels,
+	//             FeatureLevels, SDKVersion, pSwapChainDesc,
+	//             ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext
+	result := windows.d3d11(
+		'D3D11CreateDeviceAndSwapChain'
+		0
+		D3D_DRIVER_TYPE_HARDWARE
+		0
+		D3D11_CREATE_DEVICE_BGRA_SUPPORT
+		0
+		0
+		D3D11_SDK_VERSION
+		dp
+		addr(swapChainOut)
+		addr(deviceOut)
+		addr(featureLevelOut)
+		addr(contextOut)
+	)
+
+	swapChain := _readOutPointer(swapChainOut)
+	device := _readOutPointer(deviceOut)
+	context := _readOutPointer(contextOut)
+	featureLevel := windows.readU32(addr(featureLevelOut))
+
+	if windows.callOk?(result) & windows.statusOk?(result) & swapChain > 0 & device > 0 & context > 0 {
+		true -> {
+			// Get back buffer: swapChain->GetBuffer(0, IID_ID3D11Texture2D, &backBuffer)
+			iid := _iidD3d11Texture2D()
+			backBufOut := freshPtr()
+			getBuf := _comCall(swapChain, IDXGISWAPCHAIN_GETBUFFER, 0, addr(iid), addr(backBufOut))
+			backBuffer := _readOutPointer(backBufOut)
+
+			if windows.callOk?(getBuf) & windows.statusOk?(getBuf) & backBuffer > 0 {
+				true -> {
+					// Allocate CPU pixel buffer for GetDIBits
+					pixBufSize := bufW * bufH * 4
+					pixBuf := windows.virtualAlloc(pixBufSize)
+
+					// Store D3D11 state on window
+					window._d3d11Device <- device
+					window._d3d11Context <- context
+					window._d3d11SwapChain <- swapChain
+					window._d3d11BackBuffer <- backBuffer
+					window._d3d11BufW <- bufW
+					window._d3d11BufH <- bufH
+					window._d3d11PixBuf <- pixBuf
+					window._d3d11PixBufSize <- pixBufSize
+					window._d3d11FeatureLevel <- featureLevel
+					window._d3d11Ready <- true
+
+					// BITMAPINFOHEADER (40 bytes) for GetDIBits
+					bmi := bits({
+						fn zeros(n, acc) if n {
+							0 -> acc
+							_ -> zeros(n - 1, acc << 0)
+						}
+						zeros(40, [])
+					})
+					window._d3d11BmiPtr <- addr(bmi)
+					// Keep bmi alive
+					window._d3d11Bmi <- bmi
+
+					{
+						type: :ok
+						device: device
+						context: context
+						swapChain: swapChain
+						backBuffer: backBuffer
+						featureLevel: featureLevel
+						bufferWidth: bufW
+						bufferHeight: bufH
+					}
+				}
+				_ -> {
+					// GetBuffer failed; release everything
+					_comCall(swapChain, COM_RELEASE)
+					_comCall(device, COM_RELEASE)
+					_comCall(context, COM_RELEASE)
+					{
+						type: :error
+						error: 'IDXGISwapChain::GetBuffer failed'
+						getBufferResult: getBuf
+					}
+				}
+			}
+		}
+		_ -> {
+			// Try WARP driver as fallback
+			warpResult := windows.d3d11(
+				'D3D11CreateDeviceAndSwapChain'
+				0
+				D3D_DRIVER_TYPE_WARP
+				0
+				D3D11_CREATE_DEVICE_BGRA_SUPPORT
+				0
+				0
+				D3D11_SDK_VERSION
+				dp
+				addr(swapChainOut)
+				addr(deviceOut)
+				addr(featureLevelOut)
+				addr(contextOut)
+			)
+
+			warpSwapChain := _readOutPointer(swapChainOut)
+			warpDevice := _readOutPointer(deviceOut)
+			warpContext := _readOutPointer(contextOut)
+			warpFeatureLevel := windows.readU32(addr(featureLevelOut))
+
+			if windows.callOk?(warpResult) & windows.statusOk?(warpResult) & warpSwapChain > 0 & warpDevice > 0 & warpContext > 0 {
+				true -> {
+					iid := _iidD3d11Texture2D()
+					backBufOut := freshPtr()
+					getBuf := _comCall(warpSwapChain, IDXGISWAPCHAIN_GETBUFFER, 0, addr(iid), addr(backBufOut))
+					backBuffer := _readOutPointer(backBufOut)
+
+					if windows.callOk?(getBuf) & windows.statusOk?(getBuf) & backBuffer > 0 {
+						true -> {
+							pixBufSize := bufW * bufH * 4
+							pixBuf := windows.virtualAlloc(pixBufSize)
+
+							window._d3d11Device <- warpDevice
+							window._d3d11Context <- warpContext
+							window._d3d11SwapChain <- warpSwapChain
+							window._d3d11BackBuffer <- backBuffer
+							window._d3d11BufW <- bufW
+							window._d3d11BufH <- bufH
+							window._d3d11PixBuf <- pixBuf
+							window._d3d11PixBufSize <- pixBufSize
+							window._d3d11FeatureLevel <- warpFeatureLevel
+							window._d3d11Ready <- true
+
+							bmi := bits({
+								fn zeros(n, acc) if n {
+									0 -> acc
+									_ -> zeros(n - 1, acc << 0)
+								}
+								zeros(40, [])
+							})
+							window._d3d11BmiPtr <- addr(bmi)
+							window._d3d11Bmi <- bmi
+
+							{
+								type: :ok
+								device: warpDevice
+								context: warpContext
+								swapChain: warpSwapChain
+								backBuffer: backBuffer
+								featureLevel: warpFeatureLevel
+								bufferWidth: bufW
+								bufferHeight: bufH
+								driverType: :warp
+							}
+						}
+						_ -> {
+							_comCall(warpSwapChain, COM_RELEASE)
+							_comCall(warpDevice, COM_RELEASE)
+							_comCall(warpContext, COM_RELEASE)
+							{
+								type: :error
+								error: 'D3D11 initialization failed (hardware and WARP)'
+								hardwareResult: result
+								warpResult: warpResult
+								warpGetBufferResult: getBuf
+							}
+						}
+					}
+				}
+				_ -> {
+					{
+						type: :error
+						error: 'D3D11CreateDeviceAndSwapChain failed (hardware and WARP)'
+						hardwareResult: result
+						warpResult: warpResult
+					}
+				}
+			}
+		}
+	}
+}
+
+fn presentFrameViaD3d11(window) if _default(window._d3d11Ready, false) {
+	_ -> { presented: false, error: 'D3D11 not initialized' }
+	true -> {
+		bufW := window._d3d11BufW
+		bufH := window._d3d11BufH
+
+		// Extract GDI back-buffer pixels via GetDIBits into CPU buffer
+		bmiPtr := window._d3d11BmiPtr
+		windows.writeU32(bmiPtr + 0, 40)
+		windows.writeU32(bmiPtr + 4, bufW)
+		windows.writeU32(bmiPtr + 8, bufH)
+		windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
+		windows.writeU32(bmiPtr + 16, BI_RGB)
+		windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, bufH, window._d3d11PixBuf, bmiPtr, DIB_RGB_COLORS)
+
+		// UpdateSubresource: upload pixel data to back buffer
+		// pDstResource, DstSubresource, pDstBox (NULL=full), pSrcData, SrcRowPitch, SrcDepthPitch
+		rowPitch := bufW * 4
+		_comCall(window._d3d11Context, ID3D11DEVICECONTEXT_UPDATESUBRESOURCE,
+			window._d3d11BackBuffer, 0, 0,
+			window._d3d11PixBuf, rowPitch, rowPitch * bufH)
+
+		// Present: swap chain -> screen
+		// SyncInterval=1 (vsync), Flags=0
+		presentResult := _comCall(window._d3d11SwapChain, IDXGISWAPCHAIN_PRESENT, 1, 0)
+
+		if windows.callOk?(presentResult) & windows.statusOk?(presentResult) {
+			true -> { presented: true }
+			_ -> { presented: false, error: 'IDXGISwapChain::Present failed', detail: presentResult }
+		}
+	}
+}
+
+fn releaseD3d11(window) {
+	if _default(window._d3d11Ready, false) {
+		true -> {
+			if window._d3d11PixBuf > 0 -> windows.virtualFree(window._d3d11PixBuf)
+			if window._d3d11BackBuffer > 0 -> _comCall(window._d3d11BackBuffer, COM_RELEASE)
+			if window._d3d11SwapChain > 0 -> _comCall(window._d3d11SwapChain, COM_RELEASE)
+			if window._d3d11Context > 0 -> _comCall(window._d3d11Context, COM_RELEASE)
+			if window._d3d11Device > 0 -> _comCall(window._d3d11Device, COM_RELEASE)
+			window._d3d11Ready <- false
+			window._d3d11Device <- 0
+			window._d3d11Context <- 0
+			window._d3d11SwapChain <- 0
+			window._d3d11BackBuffer <- 0
+			window._d3d11PixBuf <- 0
+		}
+	}
+}

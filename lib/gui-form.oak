@@ -128,6 +128,201 @@ fn formTruncateText(s, maxChars) if len(s) > maxChars {
 
 fn formIsPrintableChar?(code) code != ? & code >= 32 & code < 127
 
+// ─── Text selection state helpers ────────────────────────────────────────────
+
+// _charWidth is the approximate fixed-width char width used for layout.
+_charWidth := 7
+
+// formSelectionState() -> new mutable selection state.
+// cursor: cursor position (char index), anchor: selection start.
+// When cursor = anchor, no selection exists.
+fn formSelectionState() {
+	{ cursor: 0, anchor: 0 }
+}
+
+// formSelSetCursor(sel, pos, shifting) — move cursor.
+// If shifting is true, extend selection; otherwise collapse.
+fn formSelSetCursor(sel, pos, shifting) {
+	sel.cursor <- pos
+	if !shifting -> sel.anchor <- pos
+	sel
+}
+
+// formSelMoveCursor(sel, text, dir, shifting) — move cursor left/right.
+// dir: -1 (left) or 1 (right).
+fn formSelMoveCursor(sel, text, dir, shifting) {
+	newPos := sel.cursor + dir
+	if newPos < 0 -> newPos <- 0
+	if newPos > len(text) -> newPos <- len(text)
+	formSelSetCursor(sel, newPos, shifting)
+}
+
+// formSelHome(sel, shifting) — move cursor to beginning.
+fn formSelHome(sel, shifting) formSelSetCursor(sel, 0, shifting)
+
+// formSelEnd(sel, text, shifting) — move cursor to end.
+fn formSelEnd(sel, text, shifting) formSelSetCursor(sel, len(text), shifting)
+
+// formSelAll(sel, text) — select all text.
+fn formSelAll(sel, text) {
+	sel.anchor <- 0
+	sel.cursor <- len(text)
+	sel
+}
+
+// formSelRange(sel) -> { start, end } (ordered).
+fn formSelRange(sel) {
+	s := if sel.cursor < sel.anchor { true -> sel.cursor, _ -> sel.anchor }
+	e := if sel.cursor > sel.anchor { true -> sel.cursor, _ -> sel.anchor }
+	{ start: s, end: e }
+}
+
+// formSelHasSelection?(sel) -> bool
+fn formSelHasSelection?(sel) sel.cursor != sel.anchor
+
+// formSelSelectedText(sel, text) -> the selected substring.
+fn formSelSelectedText(sel, text) {
+	r := formSelRange(sel)
+	std.slice(text, r.start, r.end)
+}
+
+// formSelDeleteSelection(sel, text) -> new text with selection removed.
+// Also collapses cursor to start of selection.
+fn formSelDeleteSelection(sel, text) {
+	r := formSelRange(sel)
+	result := std.slice(text, 0, r.start) + std.slice(text, r.end, len(text))
+	sel.cursor <- r.start
+	sel.anchor <- r.start
+	result
+}
+
+// formSelInsertAtCursor(sel, text, insert) -> new text with insert at cursor.
+// Replaces selection if one exists.
+fn formSelInsertAtCursor(sel, text, insert) {
+	newText := if formSelHasSelection?(sel) {
+		true -> {
+			r := formSelRange(sel)
+			std.slice(text, 0, r.start) + insert + std.slice(text, r.end, len(text))
+		}
+		_ -> std.slice(text, 0, sel.cursor) + insert + std.slice(text, sel.cursor, len(text))
+	}
+	newPos := if formSelHasSelection?(sel) {
+		true -> formSelRange(sel).start + len(insert)
+		_ -> sel.cursor + len(insert)
+	}
+	sel.cursor <- newPos
+	sel.anchor <- newPos
+	newText
+}
+
+// formSelBackspace(sel, text) -> new text with char before cursor deleted.
+// If selection exists, deletes selection instead.
+fn formSelBackspace(sel, text) {
+	if formSelHasSelection?(sel) {
+		true -> formSelDeleteSelection(sel, text)
+		_ -> if sel.cursor > 0 {
+			true -> {
+				result := std.slice(text, 0, sel.cursor - 1) + std.slice(text, sel.cursor, len(text))
+				sel.cursor <- sel.cursor - 1
+				sel.anchor <- sel.cursor
+				result
+			}
+			_ -> text
+		}
+	}
+}
+
+// formSelClickPos(mx, fieldX, fieldPadding, text) -> char index at click x.
+fn formSelClickPos(mx, fieldX, fieldPadding, text) {
+	relX := mx - fieldX - fieldPadding
+	idx := int(relX / _charWidth)
+	if idx < 0 -> idx <- 0
+	if idx > len(text) -> idx <- len(text)
+	idx
+}
+
+// formDrawFieldWithSel(ctx, window, x, y, w, h, text, placeholder, focused, sel,
+//   fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor, selColor)
+// Draws a text field with optional selection highlight.
+fn formDrawFieldWithSel(ctx, window, x, y, w, h, text, placeholder, focused, sel, fieldColor, fieldFocusColor, borderColor, borderFocusColor, cursorColor, selColor) {
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	bd := if focused { true -> borderFocusColor, _ -> borderColor }
+	ctx.fillRect(window, x, y, w, h, bg)
+	formDrawBorder(ctx, window, x, y, w, h, bd)
+
+	textX := x + 10
+	textY := int(y + (h / 2) - 6)
+
+	if text = '' {
+		true -> ctx.drawText(window, textX, textY, placeholder)
+		_ -> {
+			// Draw selection highlight if present
+			if focused & formSelHasSelection?(sel) -> {
+				r := formSelRange(sel)
+				selX := textX + r.start * _charWidth
+				selW := (r.end - r.start) * _charWidth
+				ctx.fillRect(window, selX, y + 3, selW, h - 6, selColor)
+			}
+			ctx.drawText(window, textX, textY, text)
+			// Draw cursor
+			if focused -> {
+				cx := textX + sel.cursor * _charWidth + 2
+				if cx < x + w - 6 -> ctx.drawLine(window, cx, y + 6, cx, y + h - 7, cursorColor)
+			}
+		}
+	}
+}
+
+// ─── Undo/redo history ───────────────────────────────────────────────────────
+
+// formUndoState(maxHistory) -> new undo/redo history state.
+// maxHistory: max snapshots to keep (default 50).
+fn formUndoState(maxHistory) {
+	{ stack: [], redoStack: [], max: _default(maxHistory, 50) }
+}
+
+// formUndoPush(hist, text, sel) — record a snapshot.
+// Call before each mutation. Clears redo stack.
+fn formUndoPush(hist, text, sel) {
+	entry := { text: text, cursor: sel.cursor, anchor: sel.anchor }
+	hist.stack <- hist.stack << entry
+	if len(hist.stack) > hist.max -> hist.stack <- std.slice(hist.stack, len(hist.stack) - hist.max, len(hist.stack))
+	hist.redoStack <- []
+	hist
+}
+
+// formUndo(hist, text, sel) -> new text (or same if nothing to undo).
+// Restores cursor/anchor from the snapshot.
+fn formUndo(hist, text, sel) {
+	if len(hist.stack) > 0 {
+		true -> {
+			// Save current state to redo stack
+			hist.redoStack <- hist.redoStack << { text: text, cursor: sel.cursor, anchor: sel.anchor }
+			entry := hist.stack.(len(hist.stack) - 1)
+			hist.stack <- std.slice(hist.stack, 0, len(hist.stack) - 1)
+			sel.cursor <- entry.cursor
+			sel.anchor <- entry.anchor
+			entry.text
+		}
+		_ -> text
+	}
+}
+
+// formRedo(hist, text, sel) -> new text (or same if nothing to redo).
+fn formRedo(hist, text, sel) {
+	if len(hist.redoStack) > 0 {
+		true -> {
+			hist.stack <- hist.stack << { text: text, cursor: sel.cursor, anchor: sel.anchor }
+			entry := hist.redoStack.(len(hist.redoStack) - 1)
+			hist.redoStack <- std.slice(hist.redoStack, 0, len(hist.redoStack) - 1)
+			sel.cursor <- entry.cursor
+			sel.anchor <- entry.anchor
+			entry.text
+		}
+		_ -> text
+	}
+}
+
 fn formAppendByFocus(state, focus, c, fieldSpecs, notesSpec) {
 	fn loop(i) if i < len(fieldSpecs) {
 		true -> {
@@ -161,6 +356,87 @@ fn formBackspaceByFocus(state, focus, fieldKeys, notesSpec) {
 	if notesSpec != ? & focus = notesSpec.focusKey -> {
 		state.(notesSpec.valueKey) <- formNotesBackspace(state.(notesSpec.valueKey))
 	}
+}
+
+// ─── Clipboard integration for form fields ──────────────────────────────────
+
+// Lazy clipboard import to avoid import-order races with GUI.oak
+_clipboard := ?
+fn _cb() if _clipboard {
+	? -> {
+		_clipboard <- import('gui-clipboard')
+		_clipboard
+	}
+	_ -> _clipboard
+}
+
+// formCopyByFocus copies the focused field's text to the clipboard.
+// Returns the copied text or ? if no field matched.
+fn formCopyByFocus(state, focus, fieldKeys) {
+	fn loop(i) if i < len(fieldKeys) {
+		true -> {
+			k := fieldKeys.(i)
+			if focus = k {
+				true -> {
+					text := _default(state.(k), '')
+					_cb().clipboardSetText(text)
+					text
+				}
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
+// formPasteByFocus pastes clipboard text into the focused field, respecting limits.
+fn formPasteByFocus(state, focus, fieldSpecs) {
+	text := _cb().clipboardGetText()
+	if text != ? {
+		true -> {
+			fn loop(i) if i < len(fieldSpecs) {
+				true -> {
+					spec := fieldSpecs.(i)
+					if focus = spec.key {
+						true -> {
+							v := _default(state.(spec.key), '')
+							remaining := spec.max - len(v)
+							if remaining > 0 -> {
+								paste := if len(text) > remaining {
+									true -> std.slice(text, 0, remaining)
+									_ -> text
+								}
+								state.(spec.key) <- v + paste
+							}
+						}
+						_ -> loop(i + 1)
+					}
+				}
+			}
+			loop(0)
+		}
+	}
+}
+
+// formCutByFocus copies the focused field's text to the clipboard, then clears it.
+fn formCutByFocus(state, focus, fieldKeys) {
+	fn loop(i) if i < len(fieldKeys) {
+		true -> {
+			k := fieldKeys.(i)
+			if focus = k {
+				true -> {
+					text := _default(state.(k), '')
+					_cb().clipboardSetText(text)
+					state.(k) <- ''
+					text
+				}
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> ?
+	}
+	loop(0)
 }
 
 fn formNotesAppendChar(lines, c) {
@@ -250,6 +526,264 @@ fn formNextField(current, order) {
 		_ -> order.(0)
 	}
 	loop(0)
+}
+
+// formPrevField(current, order) — cycle focus backwards (Shift+Tab).
+fn formPrevField(current, order) {
+	fn loop(i) if i < len(order) {
+		true -> if order.(i) = current {
+			true -> if i > 0 {
+				true -> order.(i - 1)
+				_ -> order.(len(order) - 1)
+			}
+			_ -> loop(i + 1)
+		}
+		_ -> order.(0)
+	}
+	loop(0)
+}
+
+// ─── Focus management ────────────────────────────────────────────────────────
+
+// formFocusState(tabOrder) -> mutable focus state.
+// tabOrder: list of focus keys (identifiers) in tab order.
+fn formFocusState(tabOrder) {
+	{ current: if len(tabOrder) > 0 { true -> tabOrder.(0), _ -> ? }, order: tabOrder }
+}
+
+// formFocusNext(fs) — move focus to next widget in tab order.
+fn formFocusNext(fs) {
+	fs.current <- formNextField(fs.current, fs.order)
+	fs
+}
+
+// formFocusPrev(fs) — move focus to previous widget in tab order.
+fn formFocusPrev(fs) {
+	fs.current <- formPrevField(fs.current, fs.order)
+	fs
+}
+
+// formFocusSet(fs, key) — set focus directly to a specific key.
+fn formFocusSet(fs, key) {
+	fs.current <- key
+	fs
+}
+
+// formFocusIs?(fs, key) -> bool — is this key currently focused?
+fn formFocusIs?(fs, key) fs.current = key
+
+// formDrawFocusRing(ctx, window, x, y, w, h, color, options)
+// Draws a focus ring (dashed or solid outline) around a widget.
+// options: { offset, thickness }
+fn formDrawFocusRing(ctx, window, x, y, w, h, color, options) {
+	opts := if options { ? -> {}, _ -> options }
+	off := _default(opts.offset, 2)
+	rx := x - off
+	ry := y - off
+	rw := w + off * 2
+	rh := h + off * 2
+	// Draw outer ring
+	ctx.drawLine(window, rx, ry, rx + rw, ry, color)
+	ctx.drawLine(window, rx + rw, ry, rx + rw, ry + rh, color)
+	ctx.drawLine(window, rx + rw, ry + rh, rx, ry + rh, color)
+	ctx.drawLine(window, rx, ry + rh, rx, ry, color)
+}
+
+// formHandleTabKey(fs, shiftDown) — call when Tab key is pressed.
+// shiftDown: true if Shift is held (reverse tab).
+fn formHandleTabKey(fs, shiftDown) {
+	if shiftDown {
+		true -> formFocusPrev(fs)
+		_ -> formFocusNext(fs)
+	}
+}
+
+// ─── Keyboard-only navigation helpers ────────────────────────────────────────
+
+// VK constants for keyboard activation
+_VK_RETURN := 13
+_VK_SPACE := 32
+_VK_ESCAPE := 27
+_VK_UP := 38
+_VK_DOWN := 40
+_VK_LEFT := 37
+_VK_RIGHT := 39
+_VK_HOME := 36
+_VK_END := 35
+_VK_PGUP := 33
+_VK_PGDN := 34
+
+// formIsActivateKey?(vk) -> bool — is this key Enter or Space?
+// Use to trigger button/checkbox/radio activation from keyboard.
+fn formIsActivateKey?(vk) vk = _VK_RETURN | vk = _VK_SPACE
+
+// formHandleKeyNav(fs, vk, shiftDown, widgetHandlers, options)
+// Central keyboard dispatcher for focused widgets.
+//   fs: focus state from formFocusState()
+//   vk: virtual key code from onKeyDown event
+//   shiftDown: whether Shift is held
+//   widgetHandlers: { focusKey: fn(action) {...}, ... }
+//     action is one of: :activate, :up, :down, :left, :right, :home, :end, :pgup, :pgdn, :escape
+//   options: { wrapTab } — wrapTab is true by default
+// Returns the action symbol dispatched, or ? if no handler matched.
+fn formHandleKeyNav(fs, vk, shiftDown, widgetHandlers, options) {
+	// Tab / Shift+Tab for focus cycling
+	if vk {
+		9 -> {
+			formHandleTabKey(fs, shiftDown)
+			:tab
+		}
+		_ -> {
+			// Determine action from key
+			action := if vk {
+				_VK_RETURN -> :activate
+				_VK_SPACE -> :activate
+				_VK_UP -> :up
+				_VK_DOWN -> :down
+				_VK_LEFT -> :left
+				_VK_RIGHT -> :right
+				_VK_HOME -> :home
+				_VK_END -> :end
+				_VK_PGUP -> :pgup
+				_VK_PGDN -> :pgdn
+				_VK_ESCAPE -> :escape
+				_ -> ?
+			}
+			if action {
+				? -> ?
+				_ -> {
+					handler := widgetHandlers.(fs.current)
+					if handler {
+						? -> ?
+						_ -> {
+							handler(action)
+							action
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// formCheckboxKeyToggle(checked, vk) -> toggled value or original.
+// Toggle checkbox when Enter/Space pressed on focused checkbox.
+fn formCheckboxKeyToggle(checked, vk) if formIsActivateKey?(vk) {
+	true -> !checked
+	_ -> checked
+}
+
+// formRadioKeySelect(current, vk, choices) -> selected value.
+// Arrow keys cycle through radio choices, Enter/Space confirm.
+fn formRadioKeySelect(current, vk, choices) {
+	idx := 0
+	fn findIdx(i) if i < len(choices) {
+		true -> if choices.(i) = current {
+			true -> { idx <- i }
+			_ -> findIdx(i + 1)
+		}
+	}
+	findIdx(0)
+	if vk {
+		_VK_DOWN -> choices.(if idx + 1 < len(choices) { true -> idx + 1, _ -> 0 })
+		_VK_RIGHT -> choices.(if idx + 1 < len(choices) { true -> idx + 1, _ -> 0 })
+		_VK_UP -> choices.(if idx > 0 { true -> idx - 1, _ -> len(choices) - 1 })
+		_VK_LEFT -> choices.(if idx > 0 { true -> idx - 1, _ -> len(choices) - 1 })
+		_ -> current
+	}
+}
+
+// formSliderKeyAdjust(value, vk, minVal, maxVal, step) -> new value.
+// Arrow keys adjust slider value by step, Home/End go to min/max.
+fn formSliderKeyAdjust(value, vk, minVal, maxVal, step) {
+	if vk {
+		_VK_RIGHT -> if value + step > maxVal { true -> maxVal, _ -> value + step }
+		_VK_UP -> if value + step > maxVal { true -> maxVal, _ -> value + step }
+		_VK_LEFT -> if value - step < minVal { true -> minVal, _ -> value - step }
+		_VK_DOWN -> if value - step < minVal { true -> minVal, _ -> value - step }
+		_VK_HOME -> minVal
+		_VK_END -> maxVal
+		_VK_PGUP -> if value + step * 10 > maxVal { true -> maxVal, _ -> value + step * 10 }
+		_VK_PGDN -> if value - step * 10 < minVal { true -> minVal, _ -> value - step * 10 }
+		_ -> value
+	}
+}
+
+// formDropdownKeyNav(open?, selectedIdx, vk, itemCount)
+// Returns { open?, selectedIdx } after keyboard navigation.
+// Enter/Space toggles open, arrows move selection, Escape closes.
+fn formDropdownKeyNav(open?, selectedIdx, vk, itemCount) {
+	if open? {
+		true -> if vk {
+			_VK_ESCAPE -> { open?: false, selectedIdx: selectedIdx }
+			_VK_RETURN -> { open?: false, selectedIdx: selectedIdx }
+			_VK_SPACE -> { open?: false, selectedIdx: selectedIdx }
+			_VK_DOWN -> { open?: true, selectedIdx: if selectedIdx + 1 < itemCount { true -> selectedIdx + 1, _ -> 0 } }
+			_VK_UP -> { open?: true, selectedIdx: if selectedIdx > 0 { true -> selectedIdx - 1, _ -> itemCount - 1 } }
+			_VK_HOME -> { open?: true, selectedIdx: 0 }
+			_VK_END -> { open?: true, selectedIdx: itemCount - 1 }
+			_ -> { open?: open?, selectedIdx: selectedIdx }
+		}
+		_ -> if vk {
+			_VK_RETURN -> { open?: true, selectedIdx: selectedIdx }
+			_VK_SPACE -> { open?: true, selectedIdx: selectedIdx }
+			_VK_DOWN -> { open?: false, selectedIdx: if selectedIdx + 1 < itemCount { true -> selectedIdx + 1, _ -> 0 } }
+			_VK_UP -> { open?: false, selectedIdx: if selectedIdx > 0 { true -> selectedIdx - 1, _ -> itemCount - 1 } }
+			_ -> { open?: open?, selectedIdx: selectedIdx }
+		}
+	}
+}
+
+// formTreeKeyNav(flatList, selectedIdx, vk) -> { selectedIdx, toggle? }
+// Arrow keys navigate tree, Enter/Space toggles expand, Left collapses/parent.
+fn formTreeKeyNav(flatList, selectedIdx, vk) {
+	count := len(flatList)
+	if vk {
+		_VK_DOWN -> { selectedIdx: if selectedIdx + 1 < count { true -> selectedIdx + 1, _ -> selectedIdx }, toggle?: false }
+		_VK_UP -> { selectedIdx: if selectedIdx > 0 { true -> selectedIdx - 1, _ -> selectedIdx }, toggle?: false }
+		_VK_RETURN -> { selectedIdx: selectedIdx, toggle?: true }
+		_VK_SPACE -> { selectedIdx: selectedIdx, toggle?: true }
+		_VK_RIGHT -> {
+			// Expand if collapsed, else move down
+			node := flatList.(selectedIdx)
+			if node {
+				? -> { selectedIdx: selectedIdx, toggle?: false }
+				_ -> if len(node.children) > 0 & !node.expanded {
+					true -> { selectedIdx: selectedIdx, toggle?: true }
+					_ -> { selectedIdx: if selectedIdx + 1 < count { true -> selectedIdx + 1, _ -> selectedIdx }, toggle?: false }
+				}
+			}
+		}
+		_VK_LEFT -> {
+			// Collapse if expanded, else move up
+			node := flatList.(selectedIdx)
+			if node {
+				? -> { selectedIdx: selectedIdx, toggle?: false }
+				_ -> if len(node.children) > 0 & node.expanded {
+					true -> { selectedIdx: selectedIdx, toggle?: true }
+					_ -> { selectedIdx: if selectedIdx > 0 { true -> selectedIdx - 1, _ -> selectedIdx }, toggle?: false }
+				}
+			}
+		}
+		_VK_HOME -> { selectedIdx: 0, toggle?: false }
+		_VK_END -> { selectedIdx: if count > 0 { true -> count - 1, _ -> 0 }, toggle?: false }
+		_ -> { selectedIdx: selectedIdx, toggle?: false }
+	}
+}
+
+// formTableKeyNav(selectedRow, vk, rowCount, pageSize) -> new selectedRow.
+// Arrow keys move row selection, PgUp/PgDn jump pages, Home/End go to start/end.
+fn formTableKeyNav(selectedRow, vk, rowCount, pageSize) {
+	pg := _default(pageSize, 10)
+	if vk {
+		_VK_DOWN -> if selectedRow + 1 < rowCount { true -> selectedRow + 1, _ -> selectedRow }
+		_VK_UP -> if selectedRow > 0 { true -> selectedRow - 1, _ -> selectedRow }
+		_VK_PGDN -> if selectedRow + pg < rowCount { true -> selectedRow + pg, _ -> rowCount - 1 }
+		_VK_PGUP -> if selectedRow - pg >= 0 { true -> selectedRow - pg, _ -> 0 }
+		_VK_HOME -> 0
+		_VK_END -> if rowCount > 0 { true -> rowCount - 1, _ -> 0 }
+		_ -> selectedRow
+	}
 }
 
 fn formMaskText(s) {
@@ -447,4 +981,687 @@ fn formDrawStatusBanner(ctx, window, x, y, w, h, message, ok, fieldColor, border
 	ctx.fillRect(window, x, y, 4, h, accent)
 	formDrawBorder(ctx, window, x, y, w, h, borderColor)
 	ctx.drawText(window, x + 12, y + 8, message)
+}
+
+// ─── Progress bar ────────────────────────────────────────────────────────────
+// Draws a determinate progress bar (0..maxVal).
+// options: { showPercent, height, indeterminate, indeterminateOffset }
+fn formDrawProgressBar(ctx, window, x, y, w, value, maxVal, trackColor, fillColor, borderColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	h := _default(opts.height, 20)
+	showPercent := _default(opts.showPercent, false)
+	indeterminate := _default(opts.indeterminate, false)
+
+	// Track background
+	ctx.fillRect(window, x, y, w, h, trackColor)
+
+	if indeterminate {
+		true -> {
+			// Animate a sliding block inside the track
+			blockW := int(w / 4)
+			offset := _default(opts.indeterminateOffset, 0) % (w + blockW)
+			bx := x + offset - blockW
+			// Clamp to track bounds
+			clippedX := if bx < x { true -> x, _ -> bx }
+			clippedW := if bx + blockW > x + w { true -> x + w - clippedX, _ -> bx + blockW - clippedX }
+			if clippedW > 0 -> ctx.fillRect(window, clippedX, y, clippedW, h, fillColor)
+		}
+		_ -> {
+			// Determinate fill
+			clamped := formClamp(value, 0, maxVal)
+			ratio := if maxVal > 0 { true -> float(clamped) / float(maxVal), _ -> 0.0 }
+			fillW := int(float(w) * ratio)
+			if fillW > 0 -> ctx.fillRect(window, x, y, fillW, h, fillColor)
+
+			if showPercent -> {
+				pct := int(ratio * 100.0)
+				label := string(pct) + '%'
+				ctx.drawText(window, x + int(w / 2) - len(label) * 3, y + int(h / 2) - 6, label)
+			}
+		}
+	}
+
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+}
+
+// ─── Tab strip ───────────────────────────────────────────────────────────────
+// Draws a row of tabs and returns the active tab index.
+// tabs: list of label strings.
+// options: { tabHeight, tabWidth, tabPadding }
+fn formDrawTabStrip(ctx, window, x, y, tabs, activeIdx, bgColor, activeBgColor, borderColor, activeTextColor, inactiveTextColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	tabH := _default(opts.tabHeight, 28)
+	tabW := _default(opts.tabWidth, 0)
+	tabPad := _default(opts.tabPadding, 20)
+
+	fn drawTab(i, cx) if i < len(tabs) {
+		true -> {
+			label := tabs.(i)
+			tw := if tabW > 0 { true -> tabW, _ -> len(label) * 7 + tabPad * 2 }
+			isActive := i = activeIdx
+			bg := if isActive { true -> activeBgColor, _ -> bgColor }
+			tc := if isActive { true -> activeTextColor, _ -> inactiveTextColor }
+			ctx.fillRect(window, cx, y, tw, tabH, bg)
+			if !isActive -> formDrawBorder(ctx, window, cx, y, tw, tabH, borderColor)
+			ctx.drawText(window, cx + tabPad, y + int(tabH / 2) - 6, label, tc)
+			drawTab(i + 1, cx + tw)
+		}
+	}
+	drawTab(0, x)
+}
+
+// formHitTab(mx, my, x, y, tabs, options) -> index of the tab under (mx, my) or -1.
+fn formHitTab(mx, my, x, y, tabs, options) {
+	opts := if options { ? -> {}, _ -> options }
+	tabH := _default(opts.tabHeight, 28)
+	tabW := _default(opts.tabWidth, 0)
+	tabPad := _default(opts.tabPadding, 20)
+
+	fn check(i, cx) if i < len(tabs) {
+		true -> {
+			label := tabs.(i)
+			tw := if tabW > 0 { true -> tabW, _ -> len(label) * 7 + tabPad * 2 }
+			if mx >= cx & mx <= cx + tw & my >= y & my <= y + tabH {
+				true -> i
+				_ -> check(i + 1, cx + tw)
+			}
+		}
+		_ -> -1
+	}
+	check(0, x)
+}
+
+// ─── Dropdown / combo box ────────────────────────────────────────────────────
+// Draws a closed dropdown (shows current selection). The open list must be drawn
+// separately when state indicates the dropdown is open.
+fn formDrawDropdown(ctx, window, x, y, w, h, selectedLabel, open, fieldColor, fieldFocusColor, borderColor, arrowColor) {
+	bg := if open { true -> fieldFocusColor, _ -> fieldColor }
+	ctx.fillRect(window, x, y, w, h, bg)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+	ctx.drawText(window, x + 8, y + int(h / 2) - 6, selectedLabel)
+	// Draw down-arrow indicator on the right
+	ax := x + w - 18
+	ay := y + int(h / 2)
+	ctx.drawLine(window, ax, ay - 3, ax + 5, ay + 3, arrowColor)
+	ctx.drawLine(window, ax + 5, ay + 3, ax + 10, ay - 3, arrowColor)
+}
+
+// formDrawDropdownList — draws the open dropdown list below the closed box.
+fn formDrawDropdownList(ctx, window, x, y, w, items, hoverIdx, itemHeight, listBgColor, hoverBgColor, borderColor) {
+	ih := _default(itemHeight, 24)
+	totalH := len(items) * ih
+	ctx.fillRect(window, x, y, w, totalH, listBgColor)
+	fn drawItem(i) if i < len(items) {
+		true -> {
+			iy := y + i * ih
+			if i = hoverIdx -> ctx.fillRect(window, x, iy, w, ih, hoverBgColor)
+			ctx.drawText(window, x + 8, iy + int(ih / 2) - 6, items.(i))
+			drawItem(i + 1)
+		}
+	}
+	drawItem(0)
+	formDrawBorder(ctx, window, x, y, w, totalH, borderColor)
+}
+
+// formHitDropdownItem(mx, my, x, y, w, items, itemHeight) -> index or -1
+fn formHitDropdownItem(mx, my, x, y, w, items, itemHeight) {
+	ih := _default(itemHeight, 24)
+	totalH := len(items) * ih
+	if mx >= x & mx <= x + w & my >= y & my <= y + totalH {
+		true -> {
+			idx := int((my - y) / ih)
+			if idx >= 0 & idx < len(items) { true -> idx, _ -> -1 }
+		}
+		_ -> -1
+	}
+}
+
+// ─── Tooltip / hover hint ────────────────────────────────────────────────────
+
+// formTooltipState() -> new mutable tooltip state object.
+// Tracks current text, position, visibility, and delay timing.
+fn formTooltipState() {
+	{ text: '', x: 0, y: 0, visible: false, _hoverStart: 0, _lastRegion: ? }
+}
+
+// formTooltipUpdate(state, mx, my, regionKey, text, delay) — call on mouse move.
+// regionKey: any comparable value identifying the hover region (changes reset timer).
+// delay: ms before showing (default 500).
+// Returns the (mutated) state.
+fn formTooltipUpdate(state, mx, my, regionKey, text, delay) {
+	d := _default(delay, 500)
+	now := int(nanotime() / 1000000)
+	if regionKey != state._lastRegion {
+		true -> {
+			state._lastRegion <- regionKey
+			state._hoverStart <- now
+			state.visible <- false
+			state.text <- text
+			state.x <- mx + 12
+			state.y <- my + 16
+		}
+		_ -> if !state.visible & (now - state._hoverStart) >= d -> {
+			state.visible <- true
+			state.text <- text
+			state.x <- mx + 12
+			state.y <- my + 16
+		}
+	}
+	state
+}
+
+// formTooltipHide(state) — call when mouse leaves all tooltip regions.
+fn formTooltipHide(state) {
+	state.visible <- false
+	state._lastRegion <- ?
+	state
+}
+
+// formDrawTooltip(ctx, window, state, bgColor, borderColor, textColor, options)
+// Draws the tooltip overlay if state.visible is true.
+// options: { padding, maxWidth }
+fn formDrawTooltip(ctx, window, state, bgColor, borderColor, textColor, options) if state.visible -> {
+	opts := if options { ? -> {}, _ -> options }
+	pad := _default(opts.padding, 6)
+	tw := len(state.text) * 7 + pad * 2
+	th := 12 + pad * 2
+	tx := state.x
+	ty := state.y
+	ctx.fillRect(window, tx, ty, tw, th, bgColor)
+	formDrawBorder(ctx, window, tx, ty, tw, th, borderColor)
+	ctx.drawText(window, tx + pad, ty + pad, state.text, textColor)
+}
+
+// ─── Spinner / number input ──────────────────────────────────────────────────
+
+// formDrawSpinner(ctx, window, x, y, w, h, value, focused, fieldColor, fieldFocusColor, borderColor, arrowColor, options)
+// Draws a numeric input with up/down arrow buttons on the right side.
+// options: { minVal, maxVal, step, showValue }
+fn formDrawSpinner(ctx, window, x, y, w, h, value, focused, fieldColor, fieldFocusColor, borderColor, arrowColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	btnW := _default(opts.buttonWidth, 20)
+
+	// Field background
+	bg := if focused { true -> fieldFocusColor, _ -> fieldColor }
+	ctx.fillRect(window, x, y, w, bg)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+
+	// Value text
+	label := string(value)
+	ctx.drawText(window, x + 6, y + int(h / 2) - 6, label)
+
+	// Up/down button area
+	bx := x + w - btnW
+	halfH := int(h / 2)
+
+	// Up button (top half)
+	ctx.fillRect(window, bx, y, btnW, halfH, fieldColor)
+	formDrawBorder(ctx, window, bx, y, btnW, halfH, borderColor)
+	// Up arrow
+	cx := bx + int(btnW / 2)
+	ctx.drawLine(window, cx, y + 4, cx - 4, y + halfH - 4, arrowColor)
+	ctx.drawLine(window, cx, y + 4, cx + 4, y + halfH - 4, arrowColor)
+
+	// Down button (bottom half)
+	ctx.fillRect(window, bx, y + halfH, btnW, h - halfH, fieldColor)
+	formDrawBorder(ctx, window, bx, y + halfH, btnW, h - halfH, borderColor)
+	// Down arrow
+	ctx.drawLine(window, cx, y + h - 4, cx - 4, y + halfH + 4, arrowColor)
+	ctx.drawLine(window, cx, y + h - 4, cx + 4, y + halfH + 4, arrowColor)
+}
+
+// formSpinnerHit(mx, my, x, y, w, h, options) -> :up, :down, or ?
+// Returns which part of the spinner was clicked.
+fn formSpinnerHit(mx, my, x, y, w, h, options) {
+	opts := if options { ? -> {}, _ -> options }
+	btnW := _default(opts.buttonWidth, 20)
+	bx := x + w - btnW
+	halfH := int(h / 2)
+	if mx >= bx & mx <= x + w {
+		true -> if my >= y & my < y + halfH {
+			true -> :up
+			_ -> if my >= y + halfH & my <= y + h {
+				true -> :down
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+}
+
+// formSpinnerAdjust(value, direction, options) -> new value clamped to [minVal, maxVal]
+// direction: :up or :down
+fn formSpinnerAdjust(value, direction, options) {
+	opts := if options { ? -> {}, _ -> options }
+	step := _default(opts.step, 1)
+	minV := _default(opts.minVal, 0)
+	maxV := _default(opts.maxVal, 100)
+	newVal := if direction {
+		:up -> value + step
+		:down -> value - step
+		_ -> value
+	}
+	formClamp(newVal, minV, maxV)
+}
+
+// ─── Native scrollbar ────────────────────────────────────────────────────────
+
+// formDrawScrollbar(ctx, window, x, y, w, h, scrollPos, contentSize, viewSize, trackColor, thumbColor, borderColor, options)
+// Draws a vertical scrollbar track + thumb.
+// scrollPos: current scroll offset (0-based).
+// contentSize: total content height.
+// viewSize: visible viewport height.
+// options: { horizontal, minThumbSize }
+fn formDrawScrollbar(ctx, window, x, y, w, h, scrollPos, contentSize, viewSize, trackColor, thumbColor, borderColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	horiz := _default(opts.horizontal, false)
+	minThumb := _default(opts.minThumbSize, 20)
+
+	// Track
+	ctx.fillRect(window, x, y, w, h, trackColor)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+
+	if contentSize > viewSize -> {
+		ratio := float(viewSize) / float(contentSize)
+		if horiz {
+			true -> {
+				thumbW := int(float(w) * ratio)
+				if thumbW < minThumb -> thumbW <- minThumb
+				maxScroll := contentSize - viewSize
+				scrollRatio := if maxScroll > 0 { true -> float(scrollPos) / float(maxScroll), _ -> 0.0 }
+				thumbX := x + int(float(w - thumbW) * scrollRatio)
+				ctx.fillRect(window, thumbX, y + 1, thumbW, h - 2, thumbColor)
+			}
+			_ -> {
+				thumbH := int(float(h) * ratio)
+				if thumbH < minThumb -> thumbH <- minThumb
+				maxScroll := contentSize - viewSize
+				scrollRatio := if maxScroll > 0 { true -> float(scrollPos) / float(maxScroll), _ -> 0.0 }
+				thumbY := y + int(float(h - thumbH) * scrollRatio)
+				ctx.fillRect(window, x + 1, thumbY, w - 2, thumbH, thumbColor)
+			}
+		}
+	}
+}
+
+// formScrollbarHit(mx, my, x, y, w, h, scrollPos, contentSize, viewSize, options) -> new scrollPos or ?
+// Returns the scroll position corresponding to clicking at (mx, my) on the track.
+fn formScrollbarHit(mx, my, x, y, w, h, scrollPos, contentSize, viewSize, options) {
+	opts := if options { ? -> {}, _ -> options }
+	horiz := _default(opts.horizontal, false)
+	if contentSize <= viewSize -> ?
+	maxScroll := contentSize - viewSize
+	if horiz {
+		true -> if mx >= x & mx <= x + w & my >= y & my <= y + h {
+			true -> {
+				ratio := float(mx - x) / float(w)
+				formClamp(int(float(maxScroll) * ratio), 0, maxScroll)
+			}
+			_ -> ?
+		}
+		_ -> if mx >= x & mx <= x + w & my >= y & my <= y + h {
+			true -> {
+				ratio := float(my - y) / float(h)
+				formClamp(int(float(maxScroll) * ratio), 0, maxScroll)
+			}
+			_ -> ?
+		}
+	}
+}
+
+// ─── Tree view ───────────────────────────────────────────────────────────────
+// Tree data format: list of nodes, each { label, children, expanded }
+// children: list of child nodes (same format), or [] for leaf nodes.
+// expanded: mutable bool — controls whether children are shown.
+
+// _flattenTree(nodes, depth, out) — recursively flatten visible tree nodes into
+// a list of { node, depth, index, hasChildren } entries for rendering.
+fn _flattenTree(nodes, depth, out) {
+	fn loop(i) if i < len(nodes) {
+		true -> {
+			n := nodes.(i)
+			hasKids := len(n.children) > 0
+			out <- out << { node: n, depth: depth, hasChildren: hasKids }
+			if hasKids & n.expanded = true -> _flattenTree(n.children, depth + 1, out)
+			loop(i + 1)
+		}
+	}
+	loop(0)
+	out
+}
+
+// formDrawTreeView(ctx, window, x, y, w, h, nodes, selectedIdx, scrollPos,
+//   bgColor, selectedBgColor, textColor, selectedTextColor, borderColor, options)
+// Draws a tree view with collapsible nodes.
+// nodes: tree data (list of root nodes).
+// selectedIdx: index into the flattened visible node list (or -1).
+// scrollPos: vertical scroll offset in pixels.
+// options: { rowHeight, indentSize }
+// Returns the list of flattened visible entries (for hit detection).
+fn formDrawTreeView(ctx, window, x, y, w, h, nodes, selectedIdx, scrollPos, bgColor, selectedBgColor, textColor, selectedTextColor, borderColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	rowH := _default(opts.rowHeight, 22)
+	indent := _default(opts.indentSize, 18)
+
+	// Background
+	ctx.fillRect(window, x, y, w, h, bgColor)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+
+	// Flatten visible nodes
+	flat := []
+	_flattenTree(nodes, 0, flat)
+
+	// Draw visible rows
+	fn drawRow(i) if i < len(flat) {
+		true -> {
+			ry := y + i * rowH - scrollPos
+			if ry + rowH > y & ry < y + h -> {
+				entry := flat.(i)
+				// Selected row bg
+				if i = selectedIdx -> ctx.fillRect(window, x + 1, ry, w - 2, rowH, selectedBgColor)
+				// Indent
+				lx := x + 6 + entry.depth * indent
+				// Expand/collapse indicator
+				if entry.hasChildren -> {
+					indicator := if entry.node.expanded = true { true -> '-', _ -> '+' }
+					ctx.drawText(window, lx, ry + int(rowH / 2) - 6, indicator, textColor)
+				}
+				// Label
+				labelX := lx + if entry.hasChildren { true -> 14, _ -> 0 }
+				tc := if i = selectedIdx { true -> selectedTextColor, _ -> textColor }
+				ctx.drawText(window, labelX, ry + int(rowH / 2) - 6, entry.node.label, tc)
+			}
+			drawRow(i + 1)
+		}
+	}
+	drawRow(0)
+	flat
+}
+
+// formTreeHitRow(mx, my, x, y, flat, scrollPos, options) -> index into flat list or -1.
+fn formTreeHitRow(mx, my, x, y, w, flat, scrollPos, options) {
+	opts := if options { ? -> {}, _ -> options }
+	rowH := _default(opts.rowHeight, 22)
+	if mx < x | mx > x + w -> -1
+	relY := my - y + scrollPos
+	idx := int(relY / rowH)
+	if idx >= 0 & idx < len(flat) { true -> idx, _ -> -1 }
+}
+
+// formTreeToggle(flat, idx) — toggle expanded state of the node at flat[idx].
+// Only acts if the node has children.
+fn formTreeToggle(flat, idx) {
+	if idx >= 0 & idx < len(flat) -> {
+		entry := flat.(idx)
+		if entry.hasChildren -> {
+			entry.node.expanded <- !(entry.node.expanded = true)
+		}
+	}
+}
+
+// formTreeContentHeight(flat, options) -> total content height in pixels.
+fn formTreeContentHeight(flat, options) {
+	opts := if options { ? -> {}, _ -> options }
+	rowH := _default(opts.rowHeight, 22)
+	len(flat) * rowH
+}
+
+// ─── Date picker ─────────────────────────────────────────────────────────────
+
+// _isLeapYear?(y) -> bool
+fn _isLeapYear?(y) (y % 4 = 0 & y % 100 != 0) | y % 400 = 0
+
+// _daysInMonth(year, month) -> int (month 1-12)
+fn _daysInMonth(year, month) if month {
+	1 -> 31, 2 -> if _isLeapYear?(year) { true -> 29, _ -> 28 }
+	3 -> 31, 4 -> 30, 5 -> 31, 6 -> 30
+	7 -> 31, 8 -> 31, 9 -> 30, 10 -> 31
+	11 -> 30, 12 -> 31, _ -> 30
+}
+
+// _dayOfWeek(year, month, day) -> 0=Sun..6=Sat (Tomohiko Sakamoto's algorithm)
+fn _dayOfWeek(y, m, d) {
+	t := [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+	yr := if m < 3 { true -> y - 1, _ -> y }
+	(yr + int(yr / 4) - int(yr / 100) + int(yr / 400) + t.(m - 1) + d) % 7
+}
+
+// formDatePickerState(year, month, day) -> mutable date picker state.
+fn formDatePickerState(year, month, day) {
+	{ year: year, month: month, day: day, open: false }
+}
+
+// formDatePickerPrevMonth(state) — navigate to previous month.
+fn formDatePickerPrevMonth(state) {
+	if state.month <= 1 {
+		true -> { state.month <- 12, state.year <- state.year - 1 }
+		_ -> state.month <- state.month - 1
+	}
+	state
+}
+
+// formDatePickerNextMonth(state) — navigate to next month.
+fn formDatePickerNextMonth(state) {
+	if state.month >= 12 {
+		true -> { state.month <- 1, state.year <- state.year + 1 }
+		_ -> state.month <- state.month + 1
+	}
+	state
+}
+
+// _padZero(n) -> '01', '12', etc.
+fn _padZero(n) if n < 10 { true -> '0' + string(n), _ -> string(n) }
+
+_monthNames := ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+// formDateLabel(state) -> formatted date string 'YYYY-MM-DD'
+fn formDateLabel(state) string(state.year) + '-' + _padZero(state.month) + '-' + _padZero(state.day)
+
+// formDrawDateField(ctx, window, x, y, w, h, state, fieldColor, fieldFocusColor, borderColor, arrowColor)
+// Draws the closed date field (shows selected date + dropdown arrow).
+fn formDrawDateField(ctx, window, x, y, w, h, state, fieldColor, fieldFocusColor, borderColor, arrowColor) {
+	bg := if state.open { true -> fieldFocusColor, _ -> fieldColor }
+	ctx.fillRect(window, x, y, w, h, bg)
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+	ctx.drawText(window, x + 8, y + int(h / 2) - 6, formDateLabel(state))
+	ax := x + w - 18
+	ay := y + int(h / 2)
+	ctx.drawLine(window, ax, ay - 3, ax + 5, ay + 3, arrowColor)
+	ctx.drawLine(window, ax + 5, ay + 3, ax + 10, ay - 3, arrowColor)
+}
+
+// formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, selectedBgColor, todayBorderColor, textColor, selectedTextColor, headerTextColor, borderColor, options)
+// Draws the open calendar grid below the date field.
+// options: { cellSize }
+fn formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, selectedBgColor, todayBorderColor, textColor, selectedTextColor, headerTextColor, borderColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	cs := _default(opts.cellSize, 30)
+	calW := cs * 7
+	headerH := 28
+
+	// Background
+	ctx.fillRect(window, x, y, calW, headerH, headerBgColor)
+	// Month/Year header + nav arrows
+	label := _monthNames.(state.month - 1) + ' ' + string(state.year)
+	ctx.drawText(window, x + int(calW / 2) - len(label) * 3, y + 8, label, headerTextColor)
+	// Left arrow
+	ctx.drawText(window, x + 8, y + 8, '<', headerTextColor)
+	// Right arrow
+	ctx.drawText(window, x + calW - 16, y + 8, '>', headerTextColor)
+
+	// Day-of-week row
+	dayRow := y + headerH
+	dayLabels := ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']
+	fn drawDayHeaders(i) if i < 7 {
+		true -> {
+			ctx.drawText(window, x + i * cs + int(cs / 2) - 7, dayRow + 4, dayLabels.(i), headerTextColor)
+			drawDayHeaders(i + 1)
+		}
+	}
+	drawDayHeaders(0)
+
+	// Calendar grid
+	gridY := dayRow + 20
+	startDow := _dayOfWeek(state.year, state.month, 1)
+	days := _daysInMonth(state.year, state.month)
+
+	ctx.fillRect(window, x, gridY, calW, int((days + startDow + 6) / 7) * cs, bgColor)
+
+	fn drawCells(d, col, row) if d <= days {
+		true -> {
+			cx := x + col * cs
+			cy := gridY + row * cs
+			if d = state.day -> ctx.fillRect(window, cx + 2, cy + 2, cs - 4, cs - 4, selectedBgColor)
+			tc := if d = state.day { true -> selectedTextColor, _ -> textColor }
+			label := string(d)
+			ctx.drawText(window, cx + int(cs / 2) - len(label) * 3, cy + int(cs / 2) - 6, label, tc)
+			nextCol := col + 1
+			if nextCol >= 7 {
+				true -> drawCells(d + 1, 0, row + 1)
+				_ -> drawCells(d + 1, nextCol, row)
+			}
+		}
+	}
+	drawCells(1, startDow, 0)
+
+	// Border
+	totalH := headerH + 20 + int((days + startDow + 6) / 7) * cs
+	formDrawBorder(ctx, window, x, y, calW, totalH, borderColor)
+}
+
+// formDateCalendarHit(mx, my, x, y, state, options) -> { action } or ?
+// action: :prevMonth, :nextMonth, or :selectDay with .day field.
+fn formDateCalendarHit(mx, my, x, y, state, options) {
+	opts := if options { ? -> {}, _ -> options }
+	cs := _default(opts.cellSize, 30)
+	calW := cs * 7
+	headerH := 28
+
+	// Check nav arrows
+	if my >= y & my < y + headerH {
+		true -> if mx >= x & mx < x + 24 {
+			true -> { action: :prevMonth }
+			_ -> if mx > x + calW - 24 & mx <= x + calW {
+				true -> { action: :nextMonth }
+				_ -> ?
+			}
+		}
+		_ -> {
+			// Check day cells
+			gridY := y + headerH + 20
+			startDow := _dayOfWeek(state.year, state.month, 1)
+			days := _daysInMonth(state.year, state.month)
+			relX := mx - x
+			relY := my - gridY
+			if relX >= 0 & relX < calW & relY >= 0 {
+				true -> {
+					col := int(relX / cs)
+					row := int(relY / cs)
+					dayIdx := row * 7 + col - startDow + 1
+					if dayIdx >= 1 & dayIdx <= days {
+						true -> { action: :selectDay, day: dayIdx }
+						_ -> ?
+					}
+				}
+				_ -> ?
+			}
+		}
+	}
+}
+
+// ─── Table / data grid ───────────────────────────────────────────────────────
+
+// formDrawTable(ctx, window, x, y, w, h, columns, rows, scrollPos, selectedRow,
+//   headerBgColor, rowBgColor, altRowBgColor, selectedBgColor,
+//   headerTextColor, textColor, selectedTextColor, borderColor, options)
+// columns: list of { label, width } (width in pixels).
+// rows: list of lists (each row is a list of cell strings).
+// options: { rowHeight, headerHeight }
+fn formDrawTable(ctx, window, x, y, w, h, columns, rows, scrollPos, selectedRow, headerBgColor, rowBgColor, altRowBgColor, selectedBgColor, headerTextColor, textColor, selectedTextColor, borderColor, options) {
+	opts := if options { ? -> {}, _ -> options }
+	rowH := _default(opts.rowHeight, 24)
+	headerH := _default(opts.headerHeight, 28)
+
+	// Background
+	ctx.fillRect(window, x, y, w, h, rowBgColor)
+
+	// Header
+	ctx.fillRect(window, x, y, w, headerH, headerBgColor)
+	fn drawHeaders(i, cx) if i < len(columns) {
+		true -> {
+			col := columns.(i)
+			ctx.drawText(window, cx + 6, y + int(headerH / 2) - 6, col.label, headerTextColor)
+			// Column separator
+			ctx.drawLine(window, cx + col.width, y, cx + col.width, y + h, borderColor)
+			drawHeaders(i + 1, cx + col.width)
+		}
+	}
+	drawHeaders(0, x)
+
+	// Rows
+	dataY := y + headerH
+	fn drawRows(ri) if ri < len(rows) {
+		true -> {
+			ry := dataY + ri * rowH - scrollPos
+			if ry + rowH > dataY & ry < y + h -> {
+				// Row background
+				bg := if ri = selectedRow {
+					true -> selectedBgColor
+					_ -> if ri % 2 = 0 { true -> rowBgColor, _ -> altRowBgColor }
+				}
+				ctx.fillRect(window, x + 1, ry, w - 2, rowH, bg)
+				// Cells
+				row := rows.(ri)
+				fn drawCells(ci, cx) if ci < len(columns) & ci < len(row) {
+					true -> {
+						col := columns.(ci)
+						tc := if ri = selectedRow { true -> selectedTextColor, _ -> textColor }
+						ctx.drawText(window, cx + 6, ry + int(rowH / 2) - 6, row.(ci), tc)
+						drawCells(ci + 1, cx + col.width)
+					}
+				}
+				drawCells(0, x)
+			}
+			drawRows(ri + 1)
+		}
+	}
+	drawRows(0)
+
+	// Border
+	formDrawBorder(ctx, window, x, y, w, h, borderColor)
+	// Header line
+	ctx.drawLine(window, x, y + headerH, x + w, y + headerH, borderColor)
+}
+
+// formTableHitRow(mx, my, x, y, w, columns, rows, scrollPos, options) -> row index or -1
+fn formTableHitRow(mx, my, x, y, w, columns, rows, scrollPos, options) {
+	opts := if options { ? -> {}, _ -> options }
+	rowH := _default(opts.rowHeight, 24)
+	headerH := _default(opts.headerHeight, 28)
+	if mx < x | mx > x + w | my < y + headerH | my > y + 10000 -> -1
+	relY := my - y - headerH + scrollPos
+	idx := int(relY / rowH)
+	if idx >= 0 & idx < len(rows) { true -> idx, _ -> -1 }
+}
+
+// formTableContentHeight(rows, options) -> total content height (excluding header).
+fn formTableContentHeight(rows, options) {
+	opts := if options { ? -> {}, _ -> options }
+	rowH := _default(opts.rowHeight, 24)
+	len(rows) * rowH
+}
+
+// formTableHitColumn(mx, x, columns) -> column index or -1
+fn formTableHitColumn(mx, x, columns) {
+	fn check(i, cx) if i < len(columns) {
+		true -> {
+			col := columns.(i)
+			if mx >= cx & mx < cx + col.width {
+				true -> i
+				_ -> check(i + 1, cx + col.width)
+			}
+		}
+		_ -> -1
+	}
+	check(0, x)
 }

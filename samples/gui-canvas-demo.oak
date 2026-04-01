@@ -1,0 +1,206 @@
+// Floating canvas sample — demonstrates gui-canvas windowless overlays.
+//
+// Creates three floating canvases on a single window:
+//   1. A draggable HUD panel (top-left)
+//   2. A semi-transparent status bar (bottom)
+//   3. A minimap with color-key transparency (top-right)
+//
+// Controls:
+//   Arrow keys  — move the HUD panel
+//   T           — toggle HUD visibility
+//   +/-         — adjust status bar opacity
+//   Esc         — close
+
+{
+	println: println
+	string: string
+	int: int
+	floor: floor
+	sin: sin
+	cos: cos
+} := import('std')
+{ printf: printf } := import('fmt')
+
+gui := import('GUI')
+
+fn main() {
+	window := gui.createWindow('Floating Canvas Demo', 900, 600, {
+		layer2D: 'auto'
+		frameMs: 16
+	})
+
+	if window.type != :ok -> {
+		println('Could not create GUI window.')
+		println(string(window))
+		exit(1)
+	}
+
+	// ── Colors ──────────────────────────────────────────────────────────
+	bgColor := gui.rgb(16, 20, 32)
+	hudBg := gui.rgb(24, 32, 52)
+	hudBorder := gui.rgb(60, 100, 180)
+	hudText := gui.rgb(220, 230, 255)
+	hudLabel := gui.rgb(140, 160, 200)
+	barBg := gui.rgb(20, 28, 44)
+	barText := gui.rgb(180, 200, 240)
+	mapBg := gui.rgb(255, 0, 255)
+	mapDot := gui.rgb(80, 255, 120)
+	mapWall := gui.rgb(40, 55, 80)
+	accent := gui.rgb(255, 180, 60)
+	starColor := gui.rgb(200, 210, 240)
+
+	// ── State ───────────────────────────────────────────────────────────
+	hudX := 20
+	hudY := 20
+	hudW := 220
+	hudH := 160
+	hudVisible := true
+	barOpacity := 200
+	moveSpeed := 200
+	ticks := 0
+	elapsed := 0.0
+	dx := 0
+	dy := 0
+
+	// ── Create canvases ─────────────────────────────────────────────────
+	hud := gui.createCanvas(window, {
+		x: hudX, y: hudY
+		width: hudW, height: hudH
+		zIndex: 10
+	})
+
+	bar := gui.createCanvas(window, {
+		x: 0, y: 560
+		width: 900, height: 40
+		zIndex: 5
+		opacity: barOpacity
+	})
+
+	minimap := gui.createCanvas(window, {
+		x: 760, y: 20
+		width: 120, height: 120
+		zIndex: 8
+		transparentColor: mapBg
+	})
+
+	// ── Input ───────────────────────────────────────────────────────────
+	gui.onKeyDownEvent(window, fn(key, _evt) if key {
+		'up' -> dy <- -1
+		'down' -> dy <- 1
+		'left' -> dx <- -1
+		'right' -> dx <- 1
+		'T' -> {
+			hudVisible <- !hudVisible
+			gui.setCanvasVisible(hud, hudVisible)
+		}
+		'=' -> {
+			barOpacity <- if barOpacity + 15 > 255 { true -> 255, _ -> barOpacity + 15 }
+			gui.setCanvasOpacity(bar, barOpacity)
+		}
+		'-' -> {
+			barOpacity <- if barOpacity - 15 < 0 { true -> 0, _ -> barOpacity - 15 }
+			gui.setCanvasOpacity(bar, barOpacity)
+		}
+		'escape' -> window.closed <- true
+	})
+
+	gui.onKeyUpEvent(window, fn(key, _evt) if key {
+		'up' -> if dy = -1 -> dy <- 0
+		'down' -> if dy = 1 -> dy <- 0
+		'left' -> if dx = -1 -> dx <- 0
+		'right' -> if dx = 1 -> dx <- 0
+	})
+
+	// ── Draw helpers ────────────────────────────────────────────────────
+
+	fn drawBackground(win, t) {
+		gui.fillRect(win, 0, 0, win.width, win.height, bgColor)
+		// Animated star field
+		fn step(i) if i < 40 {
+			true -> {
+				sx := int((sin(float(i) * 1.7 + t * 0.3) + 1.0) * 450.0)
+				sy := int((cos(float(i) * 2.3 + t * 0.2) + 1.0) * 300.0)
+				gui.fillRect(win, sx, sy, 2, 2, starColor)
+				step(i + 1)
+			}
+		}
+		step(0)
+		// Ground line
+		gui.drawLine(win, 0, 500, 900, 500, gui.rgb(40, 50, 70))
+		gui.drawText(win, 340, 280, 'Floating Canvas Demo', accent)
+		gui.drawText(win, 310, 310, 'Arrows=move HUD  T=toggle  +/-=opacity', hudLabel)
+	}
+
+	fn drawHud(canvas, t) {
+		gui.beginCanvas(canvas)
+		gui.fillRect(canvas, 0, 0, hudW, hudH, hudBg, hudBorder)
+		gui.drawText(canvas, 10, 8, 'HUD Panel', accent)
+		gui.drawLine(canvas, 10, 28, hudW - 10, 28, hudBorder)
+		gui.drawText(canvas, 10, 36, 'Frame: ' + string(ticks), hudText)
+		gui.drawText(canvas, 10, 56, 'Time:  ' + string(int(t * 10) / 10) + 's', hudText)
+		gui.drawText(canvas, 10, 76, 'Pos:   ' + string(hudX) + ', ' + string(hudY), hudText)
+		gui.drawText(canvas, 10, 96, 'Bar a: ' + string(barOpacity), hudLabel)
+		gui.drawText(canvas, 10, 120, 'Canvases: ' + string(gui.canvasCount(window)), hudLabel)
+		gui.drawText(canvas, 10, 140, '[z=' + string(canvas.zIndex) + ']', hudLabel)
+		gui.endCanvas(canvas)
+	}
+
+	fn drawBar(canvas, t) {
+		gui.beginCanvas(canvas)
+		gui.fillRect(canvas, 0, 0, 900, 40, barBg)
+		gui.drawText(canvas, 10, 10, 'Status: running | opacity=' + string(barOpacity) + '/255 | frame ' + string(ticks), barText)
+		// Animated progress indicator
+		pw := int((sin(t * 2.0) + 1.0) * 100.0)
+		gui.fillRect(canvas, 700, 12, pw, 16, accent)
+		gui.endCanvas(canvas)
+	}
+
+	fn drawMinimap(canvas, t) {
+		gui.beginCanvas(canvas)
+		// Fill with transparent key color
+		gui.fillRect(canvas, 0, 0, 120, 120, mapBg)
+		// Draw map border + walls
+		gui.fillRect(canvas, 4, 4, 112, 112, gui.rgb(10, 14, 24))
+		gui.fillRect(canvas, 20, 20, 40, 6, mapWall)
+		gui.fillRect(canvas, 70, 50, 6, 40, mapWall)
+		gui.fillRect(canvas, 30, 80, 50, 6, mapWall)
+		// Animated player dot
+		px := int(60.0 + sin(t * 1.5) * 30.0)
+		py := int(60.0 + cos(t * 1.0) * 25.0)
+		gui.fillRect(canvas, px - 2, py - 2, 5, 5, mapDot)
+		gui.endCanvas(canvas)
+	}
+
+	// ── Main loop ───────────────────────────────────────────────────────
+
+	gui.show(window)
+	gui.setTitle(window, 'Floating Canvas Demo')
+
+	gui.run(window, ?, fn(win, dt) {
+		ticks <- ticks + 1
+		elapsed <- elapsed + dt
+
+		// Move HUD panel
+		if dx != 0 | dy != 0 -> {
+			hudX <- hudX + int(float(dx) * moveSpeed * dt)
+			hudY <- hudY + int(float(dy) * moveSpeed * dt)
+			// Clamp to window
+			if hudX < 0 -> hudX <- 0
+			if hudY < 0 -> hudY <- 0
+			if hudX + hudW > win.width -> hudX <- win.width - hudW
+			if hudY + hudH > win.height -> hudY <- win.height - hudH
+			gui.moveCanvas(hud, hudX, hudY)
+		}
+
+		gui.beginFrame(win)
+		drawBackground(win, elapsed)
+		drawHud(hud, elapsed)
+		drawBar(bar, elapsed)
+		drawMinimap(minimap, elapsed)
+		gui.endFrame(win)
+	})
+
+	gui.close(window)
+}
+
+main()

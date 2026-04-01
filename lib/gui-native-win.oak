@@ -9,9 +9,11 @@ guiNativeWinFrame := import('gui-native-win-frame')
 guiNativeWinPoll := import('gui-native-win-poll')
 guiNativeWinClose := import('gui-native-win-close')
 guiNativeWinDdraw := import('gui-native-win-ddraw')
+guiNativeWinD3d11 := import('gui-native-win-d3d11')
 guiNativeWinVulkan := import('gui-native-win-vulkan')
 guiNativeWinOpenGL := import('gui-native-win-opengl')
 guiNativeWinProbe := import('gui-native-win-probe')
+guiCanvas := import('gui-canvas')
 _nwImportT2 := nanotime()
 { time: _cwsTime } := import('std')
 
@@ -89,15 +91,17 @@ fn _applyDllProbeResult(state) {
 			state.vulkan <- _default(result.vulkan, state.vulkan)
 			state.ddraw <- _default(result.ddraw, state.ddraw)
 			state.d3d9 <- _default(result.d3d9, state.d3d9)
+			state.d3d11 <- _default(result.d3d11, state.d3d11)
 
 			state.layers.twoD.opengl <- state.opengl
 			state.layers.twoD.vulkan <- state.vulkan
 			state.layers.twoD.ddraw <- state.ddraw
+			state.layers.twoD.d3d11 <- state.d3d11
 			state.layers.threeD.d3d9 <- state.d3d9
 
 			if !_default(state._layerReady, false) {
 				true -> {
-					state.presenterBackend <- guiNativeWinProbe.select2DLayer(state._options, state.opengl, state.ddraw, state.vulkan)
+					state.presenterBackend <- guiNativeWinProbe.select2DLayer(state._options, state.opengl, state.ddraw, state.vulkan, state.d3d11)
 					state.layers.twoD.selected <- state.presenterBackend
 					state.layers.threeD.selected <- guiNativeWinProbe.select3DLayer(state._options, state.d3d9)
 				}
@@ -113,6 +117,7 @@ fn _init2DLayer(window) if window.presenterBackend {
 	:vulkan -> guiNativeWinVulkan.initVulkan2DLayer(window)
 	:opengl -> guiNativeWinOpenGL.initOpenGL2DLayer(window)
 	:ddraw -> guiNativeWinDdraw.initDdraw2DLayer(window)
+	:d3d11 -> guiNativeWinD3d11.initD3d112DLayer(window)
 	_ -> {
 		{
 			type: :skipped
@@ -278,6 +283,41 @@ fn _handleOpenGL2DInit(state) {
 	}
 }
 
+fn _handleD3d11Init(state) {
+	state.layers.twoD.d3d11Init <- state.layers.twoD.init
+	if state.layers.twoD.init.type = :ok {
+		true -> {
+			state.layers.twoD.staged <- {
+				requested: :d3d11
+				active: true
+			}
+		}
+		_ -> {
+			state.layers.twoD.fallback <- if state.layers.twoD.ddraw.available {
+				true -> {
+					from: :d3d11
+					to: :ddraw
+					reason: 'Direct3D 11 initialization failed; using DirectDraw presenter fallback'
+					detail: state.layers.twoD.init
+				}
+				_ -> {
+					from: :d3d11
+					to: :gdi
+					reason: 'Direct3D 11 initialization failed; using GDI presenter fallback'
+					detail: state.layers.twoD.init
+				}
+			}
+			state.presenterBackend <- state.layers.twoD.fallback.to
+			state.layers.twoD.selected <- state.layers.twoD.fallback.to
+			state.layers.twoD.staged <- {
+				requested: :d3d11
+				active: false
+			}
+			state.layers.twoD.init <- _init2DLayer(state)
+		}
+	}
+}
+
 fn _finalize2DInit(state) {
 	if state.layers.twoD.init.type = :error | (state.layers.twoD.init.type = :warn & !_default(state.layers.twoD.init.primarySurfaceCreated, false)) {
 		true -> {
@@ -321,6 +361,9 @@ fn _runLayerInit(state) {
 	}
 	if state.presenterBackend = :opengl {
 		true -> _handleOpenGL2DInit(state)
+	}
+	if state.presenterBackend = :d3d11 {
+		true -> _handleD3d11Init(state)
 	}
 	_finalize2DInit(state)
 	state.layers.threeD.init <- _init3DLayer(state)
@@ -411,16 +454,17 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 	vulkan := probes.vulkan
 	ddraw := probes.ddraw
 	d3d9 := probes.d3d9
-	layer2D := guiNativeWinProbe.select2DLayer(opts, opengl, ddraw, vulkan)
+	d3d11 := _default(probes.d3d11, { available: false, backend: :gdi })
+	layer2D := guiNativeWinProbe.select2DLayer(opts, opengl, ddraw, vulkan, d3d11)
 	layer3D := guiNativeWinProbe.select3DLayer(opts, d3d9)
-	classStyle := windows.CS_HREDRAW | windows.CS_VREDRAW | if layer2D = :opengl | layer2D = :vulkan {
+	classStyle := windows.CS_HREDRAW | windows.CS_VREDRAW | if layer2D = :opengl | layer2D = :vulkan | layer2D = :d3d11 {
 		true -> windows.CS_OWNDC
 		_ -> 0
 	}
 	// If the selected layer requires CS_OWNDC (OpenGL/Vulkan) and the caller
 	// supplied the pre-registered default class name, fall back to a unique
 	// class name so RegisterClassExW is called with the correct style flags.
-	effectiveClassName := if className = windows.DefaultClassName & (layer2D = :opengl | layer2D = :vulkan) {
+	effectiveClassName := if className = windows.DefaultClassName & (layer2D = :opengl | layer2D = :vulkan | layer2D = :d3d11) {
 		true -> 'MagnoliaGUIWindowClass_' + string(nanotime())
 		_ -> className
 	}
@@ -441,7 +485,12 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 		}
 		_ -> {
 			_t5 := _cwsTime()
-			hwnd := windows.createTopLevelWindow(effectiveClassName, title, width, height)
+			borderless := _default(opts.borderless, false)
+			windowStyle := if borderless {
+				true -> windows.WS_POPUP | windows.WS_VISIBLE
+				_ -> ?
+			}
+			hwnd := windows.createTopLevelWindow(effectiveClassName, title, width, height, windowStyle)
 			_t6 := _cwsTime()
 			if hwnd.type {
 				:ok -> if hwnd.r1 > 0 {
@@ -472,6 +521,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							y: 0
 							visible: false
 							fullscreen: false
+							borderless: borderless
 							restoreBounds: ?
 							preFullscreenStyle: ?
 							locked: false
@@ -495,6 +545,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 							_vkSwapchainReady: false
 							ddraw: ddraw
 							d3d9: d3d9
+							d3d11: d3d11
 							vulkan: vulkan
 							layers: {
 								twoD: {
@@ -503,6 +554,7 @@ fn createWindowState(title, width, height, options, className, frameMs, updateOn
 									vulkan: vulkan
 									opengl: opengl
 									ddraw: ddraw
+									d3d11: d3d11
 									gdi: { available: true, backend: :gdi }
 								}
 								threeD: {
@@ -771,6 +823,120 @@ fn lockResize(window, locked) {
 	}
 }
 
+// setAlwaysOnTop(window, enabled) — toggle HWND_TOPMOST for a window.
+fn setAlwaysOnTop(window, enabled) {
+	hWndInsertAfter := if enabled {
+		true -> windows.HWND_TOPMOST
+		_ -> windows.HWND_NOTOPMOST
+	}
+	windows.user32(
+		'SetWindowPos'
+		window.hwnd
+		hWndInsertAfter
+		0
+		0
+		0
+		0
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+	)
+	window.alwaysOnTop <- if enabled { true -> true, _ -> false }
+	window
+}
+
+// ─── Layered / transparent windows ──────────────────────────────────────────
+WS_EX_LAYERED := 524288
+LWA_ALPHA := 2
+LWA_COLORKEY := 1
+
+// setWindowOpacity(window, alpha) — set window transparency.
+// alpha: 0 (fully transparent) to 255 (fully opaque).
+fn setWindowOpacity(window, alpha) {
+	// Add WS_EX_LAYERED to extended style
+	exStyle := windows.getWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE)
+	if windows.callOk?(exStyle) -> {
+		newStyle := exStyle.r1 | WS_EX_LAYERED
+		windows.setWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE, newStyle)
+	}
+	clampedAlpha := if alpha < 0 { true -> 0, _ -> if alpha > 255 { true -> 255, _ -> alpha } }
+	windows.user32('SetLayeredWindowAttributes', window.hwnd, 0, clampedAlpha, LWA_ALPHA)
+	window._opacity <- clampedAlpha
+	window
+}
+
+// setWindowColorKey(window, colorKey) — make a specific color transparent.
+// colorKey: COLORREF (0x00BBGGRR).
+fn setWindowColorKey(window, colorKey) {
+	exStyle := windows.getWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE)
+	if windows.callOk?(exStyle) -> {
+		newStyle := exStyle.r1 | WS_EX_LAYERED
+		windows.setWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE, newStyle)
+	}
+	windows.user32('SetLayeredWindowAttributes', window.hwnd, colorKey, 0, LWA_COLORKEY)
+	window._colorKey <- colorKey
+	window
+}
+
+// removeLayeredStyle(window) — remove the WS_EX_LAYERED flag (restore opaque).
+fn removeLayeredStyle(window) {
+	exStyle := windows.getWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE)
+	if windows.callOk?(exStyle) -> {
+		newStyle := xor(exStyle.r1, exStyle.r1 & WS_EX_LAYERED)
+		windows.setWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE, newStyle)
+	}
+	window._opacity <- ?
+	window._colorKey <- ?
+	window
+}
+
+// Begins a window drag operation using screen-space cursor tracking.
+// Call this from a mouse-down handler to let the user drag the window
+// by its client area (useful for borderless/top-barless windows).
+// Returns the drag state object; poll with updateDrag() and end with endDrag().
+fn beginDrag(window) {
+	cursor := windows.getCursorPos()
+	rect := windows.getWindowRect(window.hwnd)
+	if cursor.type = :ok & rect.type = :ok {
+		true -> {
+			dragState := {
+				active: true
+				window: window
+				startCursorX: cursor.x
+				startCursorY: cursor.y
+				startWindowX: rect.left
+				startWindowY: rect.top
+			}
+			window._dragState <- dragState
+			dragState
+		}
+		_ -> { active: false }
+	}
+}
+
+// Updates an active drag, moving the window to follow the cursor.
+// Call this from a mouse-move handler while dragging.
+fn updateDrag(window) {
+	drag := window._dragState
+	if drag != ? & drag.active {
+		true -> {
+			cursor := windows.getCursorPos()
+			if cursor.type = :ok -> {
+				dx := cursor.x - drag.startCursorX
+				dy := cursor.y - drag.startCursorY
+				moveWindow(window, drag.startWindowX + dx, drag.startWindowY + dy)
+			}
+		}
+	}
+}
+
+// Ends the current drag operation.
+fn endDrag(window) {
+	drag := window._dragState
+	if drag != ? -> {
+		drag.active <- false
+	}
+	window._dragState <- ?
+}
+
 fn setTitle(window, title) {
 	windows.setWindowText(window.hwnd, title)
 	window.title <- title
@@ -828,6 +994,8 @@ fn beginFrame(window) {
 
 fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 	true -> {
+		// Composite floating canvases onto the back-buffer before presenting.
+		guiCanvas.compositeAll(window)
 		// Direct dispatch to active presenter backend (avoids calling all 3 every frame)
 		if window.presenterBackend {
 			:opengl -> {
@@ -837,6 +1005,10 @@ fn endFrame(window) if window.frameHdc > 0 & window.frameTargetHdc > 0 {
 			:ddraw -> {
 				result := guiNativeWinDdraw.presentFrameViaDdraw(window)
 				if !result.presented -> guiNativeWinPresent.presentFrameViaGdi(window)
+			}
+			:d3d11 -> {
+				result := guiNativeWinD3d11.presentFrameViaD3d11(window)
+				if !_default(result.presented, false) -> guiNativeWinPresent.presentFrameViaGdi(window)
 			}
 			:vulkan -> if _default(window._vkSwapchainReady, false) {
 				true -> {
@@ -883,6 +1055,7 @@ fn close(window) {
 		true -> 0
 		_ -> {
 			endFrame(window)
+			guiCanvas.destroyAll(window)
 			guiNativeWinClose.cleanupFrameBuffers(window)
 			guiNativeWinDdraw.releasePrimarySurface(window)
 			guiNativeWinOpenGL.releaseGlPixelBuffer(window)
@@ -903,4 +1076,243 @@ fn close(window) {
 			0
 		}
 	}
+}
+
+// ─── Multi-window management ─────────────────────────────────────────────────
+
+// Global window registry for multi-window apps.
+_windowRegistry := []
+
+// registerWindow(window) — add window to the global registry.
+fn registerWindow(window) {
+	_windowRegistry <- _windowRegistry << window
+	window._registryIdx <- len(_windowRegistry) - 1
+	window
+}
+
+// unregisterWindow(window) — remove window from the global registry.
+fn unregisterWindow(window) {
+	fn rebuild(i, acc) if i < len(_windowRegistry) {
+		true -> if _windowRegistry.(i) != window {
+			true -> rebuild(i + 1, acc << _windowRegistry.(i))
+			_ -> rebuild(i + 1, acc)
+		}
+		_ -> acc
+	}
+	_windowRegistry <- rebuild(0, [])
+	window._registryIdx <- ?
+	window
+}
+
+// allWindows() -> list of all registered windows.
+fn allWindows() _windowRegistry
+
+// pollAllWindows() — poll messages for all registered windows.
+// Returns list of poll results (one per window).
+fn pollAllWindows() {
+	fn loop(i, results) if i < len(_windowRegistry) {
+		true -> {
+			w := _windowRegistry.(i)
+			r := pollWindowMessages(w)
+			loop(i + 1, results << { window: w, result: r })
+		}
+		_ -> results
+	}
+	loop(0, [])
+}
+
+// closeAllWindows() — close all registered windows.
+fn closeAllWindows() {
+	fn loop(i) if i < len(_windowRegistry) {
+		true -> {
+			w := _windowRegistry.(i)
+			if !w.closed -> {
+				if windows.windowAlive?(w.hwnd) -> windows.destroyWindow(w.hwnd)
+				w.closed <- true
+			}
+			loop(i + 1)
+		}
+	}
+	loop(0)
+	_windowRegistry <- []
+}
+
+// anyWindowOpen?() -> true if at least one registered window is open.
+fn anyWindowOpen?() {
+	fn loop(i) if i < len(_windowRegistry) {
+		true -> if !_windowRegistry.(i).closed {
+			true -> true
+			_ -> loop(i + 1)
+		}
+		_ -> false
+	}
+	loop(0)
+}
+
+// ─── Window snap / restore state ─────────────────────────────────────────────
+
+// saveWindowState(window) -> { x, y, w, h, maximized } snapshot.
+// Can be serialized to file for persistence across sessions.
+fn saveWindowState(window) {
+	rect := windows.getWindowRect(window.hwnd)
+	if rect.type = :ok {
+		true -> {
+			placement := windows.getWindowPlacement(window.hwnd)
+			maximized := if placement != ? {
+				true -> placement.showCmd = 3
+				_ -> false
+			}
+			{
+				x: rect.left
+				y: rect.top
+				w: rect.right - rect.left
+				h: rect.bottom - rect.top
+				maximized: maximized
+			}
+		}
+		_ -> ?
+	}
+}
+
+// restoreWindowState(window, state) — apply a saved window state.
+fn restoreWindowState(window, state) {
+	if state != ? -> {
+		windows.user32(
+			'SetWindowPos'
+			window.hwnd
+			0
+			state.x
+			state.y
+			state.w
+			state.h
+			SWP_NOZORDER | SWP_NOACTIVATE
+		)
+		if state.maximized = true -> windows.user32('ShowWindow', window.hwnd, 3)
+	}
+	window
+}
+
+// ─── Single-instance enforcement ─────────────────────────────────────────────
+
+// ERROR_ALREADY_EXISTS (Win32 error code)
+_ERROR_ALREADY_EXISTS := 183
+
+// acquireSingleInstance(name) -> { type: :ok, handle: mutexHandle } | { type: :already_running }
+// Uses a named mutex (Global\\ prefix) to detect prior instances.
+// The caller should keep the returned handle alive for the lifetime of the process.
+// If the mutex already exists, returns :already_running so the caller can exit.
+fn acquireSingleInstance(name) {
+	mutexName := 'Global\\' + name
+	res := windows.kernel32('CreateMutexW', 0, 0, windows.wstr(mutexName))
+	if windows.callOk?(res) {
+		true -> {
+			lastErr := windows.getLastError()
+			if lastErr = _ERROR_ALREADY_EXISTS {
+				true -> {
+					// Close our duplicate handle and signal already running
+					windows.closeHandle(res.r1)
+					{ type: :already_running }
+				}
+				_ -> { type: :ok, handle: res.r1 }
+			}
+		}
+		_ -> { type: :error, detail: res }
+	}
+}
+
+// releaseSingleInstance(inst) — close the mutex handle when shutting down.
+fn releaseSingleInstance(inst) {
+	if inst != ? & inst.type = :ok & inst.handle != ? {
+		true -> windows.closeHandle(inst.handle)
+	}
+}
+
+// ─── Taskbar progress ────────────────────────────────────────────────────────
+// ITaskbarList3 COM interface for taskbar progress bar.
+//
+// Uses CoCreateInstance to get ITaskbarList3 interface pointer.
+// CLSID_TaskbarList = {56FDF344-FD6D-11d0-958A-006097C9A090}
+// IID_ITaskbarList3 = {ea1afb91-9e28-4b86-90e9-9e9f8a5eefaf}
+//
+// vtable offsets (IUnknown=3 + ITaskbarList=1 + ITaskbarList2=1):
+//   SetProgressValue = index 9 (9 * ptrSize)
+//   SetProgressState = index 10 (10 * ptrSize)
+
+_ptrSize := windows.ptrSize()
+
+// TBPF flags for taskbar progress state
+TBPF_NOPROGRESS := 0
+TBPF_INDETERMINATE := 1
+TBPF_NORMAL := 2
+TBPF_ERROR := 4
+TBPF_PAUSED := 8
+
+// Internal: create ITaskbarList3 instance via COM
+// Returns the interface pointer or ? on failure.
+fn _createTaskbarList3() {
+	// CLSID_TaskbarList {56FDF344-FD6D-11d0-958A-006097C9A090}
+	clsid := bits([68, 243, 223, 86, 109, 253, 208, 17, 149, 138, 0, 96, 151, 201, 160, 144])
+	// IID_ITaskbarList3 {ea1afb91-9e28-4b86-90e9-9e9f8a5eefaf}
+	iid := bits([145, 251, 26, 234, 40, 158, 134, 75, 144, 233, 158, 159, 138, 94, 239, 175])
+	ppv := bits(windows._zeros(windows.ptrSize(), ''))
+	// CoCreateInstance(clsid, ?, CLSCTX_INPROC_SERVER|CLSCTX_LOCAL_SERVER, iid, &ppv)
+	res := windows.ole32('CoCreateInstance', addr(clsid), 0, 5, addr(iid), addr(ppv))
+	if windows.callOk?(res) & res.r1 = 0 {
+		true -> {
+			pInterface := if _ptrSize {
+				8 -> windows.readU64(addr(ppv))
+				_ -> windows.readU32(addr(ppv))
+			}
+			if pInterface != 0 -> pInterface
+		}
+	}
+}
+
+// Internal: call COM vtable method
+fn _comCall(pInterface, vtableIdx, args...) {
+	// Read vtable pointer from first field of interface
+	vtable := if _ptrSize {
+		8 -> windows.readU64(pInterface)
+		_ -> windows.readU32(pInterface)
+	}
+	// Read function pointer at vtable[idx]
+	fnPtr := if _ptrSize {
+		8 -> windows.readU64(vtable + vtableIdx * 8)
+		_ -> windows.readU32(vtable + vtableIdx * 4)
+	}
+	// Call with pInterface as first arg (this pointer)
+	syscall(fnPtr, pInterface, args...)
+}
+
+// Cached taskbar interface (lazily initialized)
+_taskbarList3 := ?
+_taskbarInited := false
+
+fn _getTaskbar() {
+	if !_taskbarInited {
+		true -> {
+			_taskbarInited <- true
+			// Initialize COM (apartment-threaded)
+			windows.ole32('CoInitializeEx', 0, 2)
+			_taskbarList3 <- _createTaskbarList3()
+			// Call HrInit (vtable index 3)
+			if _taskbarList3 != ? -> _comCall(_taskbarList3, 3)
+		}
+	}
+	_taskbarList3
+}
+
+// setTaskbarProgress(window, completed, total) — set taskbar progress value.
+// Shows progress indicator on the taskbar button for this window.
+fn setTaskbarProgress(window, completed, total) {
+	tb := _getTaskbar()
+	if tb != ? -> _comCall(tb, 9, window.hwnd, completed, 0, total, 0)
+}
+
+// setTaskbarProgressState(window, flags) — set taskbar progress state.
+// flags: TBPF_NOPROGRESS (0), TBPF_INDETERMINATE (1), TBPF_NORMAL (2),
+//        TBPF_ERROR (4), TBPF_PAUSED (8)
+fn setTaskbarProgressState(window, flags) {
+	tb := _getTaskbar()
+	if tb != ? -> _comCall(tb, 10, window.hwnd, flags)
 }

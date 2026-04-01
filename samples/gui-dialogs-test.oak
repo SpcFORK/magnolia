@@ -1,0 +1,101 @@
+// Test sample: native dialogs (file open, save, color, folder picker)
+//
+// Opens a window with buttons for each dialog type.
+// Click a button to invoke the corresponding Win32 common dialog.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+
+fn main() {
+	window := gui.createWindow('Native Dialogs Test', 500, 350, {
+		layer2D: 'auto'
+	})
+	if window.type != :ok -> {
+		println('Failed to create window: ' + string(window))
+		exit(1)
+	}
+
+	state := {
+		lastResult: 'Click a button to test a dialog.'
+		hoverBtn: ?
+	}
+
+	btnOpen := { x: 20, y: 60, w: 200, h: 36, label: 'Open File Dialog' }
+	btnSave := { x: 20, y: 110, w: 200, h: 36, label: 'Save File Dialog' }
+	btnColor := { x: 20, y: 160, w: 200, h: 36, label: 'Color Chooser' }
+	btnFolder := { x: 20, y: 210, w: 200, h: 36, label: 'Folder Picker' }
+	buttons := [btnOpen, btnSave, btnColor, btnFolder]
+
+	gui.show(window)
+
+	gui.onLButtonDown(window, fn(mx, my) {
+		if gui.formInRect?(mx, my, btnOpen.x, btnOpen.y, btnOpen.w, btnOpen.h) -> {
+			result := gui.openFileDialog({
+				hwnd: window.hwnd
+				title: 'Pick a file'
+				filter: 'Oak Files|*.oak|All Files|*.*'
+			})
+			state.lastResult <- 'Open: ' + string(result)
+			printf('Open result: {{ 0 }}\n', result)
+		}
+		if gui.formInRect?(mx, my, btnSave.x, btnSave.y, btnSave.w, btnSave.h) -> {
+			result := gui.saveFileDialog({
+				hwnd: window.hwnd
+				title: 'Save a file'
+				filter: 'Oak Files|*.oak|All Files|*.*'
+			})
+			state.lastResult <- 'Save: ' + string(result)
+			printf('Save result: {{ 0 }}\n', result)
+		}
+		if gui.formInRect?(mx, my, btnColor.x, btnColor.y, btnColor.w, btnColor.h) -> {
+			result := gui.chooseColor({
+				hwnd: window.hwnd
+				initialColor: gui.rgb(100, 150, 200)
+			})
+			state.lastResult <- 'Color: ' + string(result)
+			printf('Color result: {{ 0 }}\n', result)
+		}
+		if gui.formInRect?(mx, my, btnFolder.x, btnFolder.y, btnFolder.w, btnFolder.h) -> {
+			result := gui.pickFolder({
+				hwnd: window.hwnd
+				title: 'Pick a folder'
+			})
+			state.lastResult <- 'Folder: ' + string(result)
+			printf('Folder result: {{ 0 }}\n', result)
+		}
+	})
+
+	fn draw(win) {
+		frame := gui.beginFrame(win)
+		if frame.type = :ok -> {
+			bg := gui.rgb(20, 25, 35)
+			white := gui.rgb(255, 255, 255)
+			btnBg := gui.rgb(50, 70, 110)
+			gui.fillRect(win, 0, 0, win.width, win.height, bg)
+			gui.drawText(win, 20, 24, 'Native Dialogs Test', white)
+
+			std.each(buttons, fn(btn) {
+				gui.fillRect(win, btn.x, btn.y, btn.w, btn.h, btnBg)
+				gui.drawText(win, btn.x + 10, btn.y + 10, btn.label, white)
+			})
+
+			gui.drawText(win, 20, 270, state.lastResult, gui.rgb(180, 220, 255))
+			gui.drawText(win, 20, 310, 'Close window to exit.', gui.rgb(140, 140, 160))
+			gui.endFrame(win)
+		}
+	}
+
+	draw(window)
+	gui.run(window, ?, fn(win, _dt) draw(win))
+	println('Dialog test complete.')
+	gui.close(window)
+}
+
+main()

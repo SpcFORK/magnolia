@@ -8,14 +8,18 @@ windows := import('windows')
 	VK_STRUCTURE_TYPE_PRESENT_INFO_KHR: VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
 	VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 	VK_ACCESS_TRANSFER_WRITE_BIT: VK_ACCESS_TRANSFER_WRITE_BIT
+	VK_ACCESS_TRANSFER_READ_BIT: VK_ACCESS_TRANSFER_READ_BIT
 	VK_IMAGE_LAYOUT_UNDEFINED: VK_IMAGE_LAYOUT_UNDEFINED
 	VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+	VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
 	VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
 	VK_QUEUE_FAMILY_IGNORED: VK_QUEUE_FAMILY_IGNORED
 	VK_IMAGE_ASPECT_COLOR_BIT: VK_IMAGE_ASPECT_COLOR_BIT
 	VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
 	VK_PIPELINE_STAGE_TRANSFER_BIT: VK_PIPELINE_STAGE_TRANSFER_BIT
 	VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+	VK_FILTER_NEAREST: VK_FILTER_NEAREST
+	VK_FILTER_LINEAR: VK_FILTER_LINEAR
 	DIB_RGB_COLORS: DIB_RGB_COLORS
 	BI_RGB: BI_RGB
 	_vkZeros: _vkZeros
@@ -28,11 +32,9 @@ windows := import('windows')
 
 fn presentFrameVulkan(window) if _default(window._vkSwapchainReady, false) {
 	_ -> { presented: false, error: 'swapchain not ready' }
-	true -> if window._res != ? {
-		// Vulkan swapchain is at physical size but the backbuffer is at logical
-		// size when resolution scaling is active.  Decline to let the GDI
-		// StretchBlt path handle the scaling correctly.
-		true -> { presented: false, error: 'Vulkan defers to GDI for resolution scaling' }
+	true -> if window._res != ? & !(type(window._vkScaleImage) = :int & window._vkScaleImage > 0) {
+		// Resolution scaling active but no intermediate image — decline to GDI
+		true -> { presented: false, error: 'Vulkan defers to GDI for resolution scaling (no scale image)' }
 		_ -> {
 		dev := window.vulkanDevice
 		queue := window.vulkanQueue
@@ -59,16 +61,22 @@ fn presentFrameVulkan(window) if _default(window._vkSwapchainReady, false) {
 						imgIdx := windows.readU32(addr(imgIdxBuf))
 						swapImage := window._vkSwapImages.(imgIdx)
 
+						// Determine dimensions: if scaling, staging is at design resolution
+						r := window._res
+						useScale := r != ? & type(window._vkScaleImage) = :int & window._vkScaleImage > 0
+						stagingW := _default(window._vkStagingW, window._vkSwapExtent.width)
+						stagingH := _default(window._vkStagingH, window._vkSwapExtent.height)
+						swapW := window._vkSwapExtent.width
+						swapH := window._vkSwapExtent.height
+
 						// Copy GDI backbuffer pixels into staging buffer via GetDIBits
-						w := window._vkSwapExtent.width
-						h := window._vkSwapExtent.height
 						bmiPtr := window._vkBmiPtr
 						windows.writeU32(bmiPtr + 0, 40)
-						windows.writeU32(bmiPtr + 4, w)
-						windows.writeU32(bmiPtr + 8, h)
+						windows.writeU32(bmiPtr + 4, stagingW)
+						windows.writeU32(bmiPtr + 8, stagingH)
 						windows.writeU32(bmiPtr + 12, 1 + (32 << 16))
 						windows.writeU32(bmiPtr + 16, BI_RGB)
-						windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, h, window._vkStagingMapped, bmiPtr, DIB_RGB_COLORS)
+						windows.gdi32('GetDIBits', window.frameHdc, window.frameBitmap, 0, stagingH, window._vkStagingMapped, bmiPtr, DIB_RGB_COLORS)
 
 						// Record command buffer
 						cmdBuf := window._vkCmdBuf
@@ -83,70 +91,169 @@ fn presentFrameVulkan(window) if _default(window._vkSwapchainReady, false) {
 						}
 						windows.vulkan1('vkBeginCommandBuffer', cmdBuf, addr(beginInfo))
 
-						// Barrier: undefined -> transfer_dst
+						// Barrier: swapchain image undefined -> transfer_dst
 						barrierSize := if is64 { true -> 72, _ -> 48 }
 						barrier := bits(_vkZeros(barrierSize))
 						barP := addr(barrier)
 						windows.writeU32(barP, VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
-						if is64 {
+
+						fn _writeBarrier(bp, srcAccess, dstAccess, oldLayout, newLayout, image) if is64 {
 							true -> {
-								windows.writeU32(barP + 16, 0)
-								windows.writeU32(barP + 20, VK_ACCESS_TRANSFER_WRITE_BIT)
-								windows.writeU32(barP + 24, VK_IMAGE_LAYOUT_UNDEFINED)
-								windows.writeU32(barP + 28, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-								windows.writeU32(barP + 32, VK_QUEUE_FAMILY_IGNORED)
-								windows.writeU32(barP + 36, VK_QUEUE_FAMILY_IGNORED)
-								_vkWritePtr(barP + 40, swapImage)
-								windows.writeU32(barP + 48, VK_IMAGE_ASPECT_COLOR_BIT)
-								windows.writeU32(barP + 52, 0)
-								windows.writeU32(barP + 56, 1)
-								windows.writeU32(barP + 60, 0)
-								windows.writeU32(barP + 64, 1)
+								windows.writeU32(bp + 16, srcAccess)
+								windows.writeU32(bp + 20, dstAccess)
+								windows.writeU32(bp + 24, oldLayout)
+								windows.writeU32(bp + 28, newLayout)
+								windows.writeU32(bp + 32, VK_QUEUE_FAMILY_IGNORED)
+								windows.writeU32(bp + 36, VK_QUEUE_FAMILY_IGNORED)
+								_vkWritePtr(bp + 40, image)
+								windows.writeU32(bp + 48, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(bp + 52, 0)
+								windows.writeU32(bp + 56, 1)
+								windows.writeU32(bp + 60, 0)
+								windows.writeU32(bp + 64, 1)
 							}
 							_ -> {
-								windows.writeU32(barP + 8, 0)
-								windows.writeU32(barP + 12, VK_ACCESS_TRANSFER_WRITE_BIT)
-								windows.writeU32(barP + 16, VK_IMAGE_LAYOUT_UNDEFINED)
-								windows.writeU32(barP + 20, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-								windows.writeU32(barP + 24, VK_QUEUE_FAMILY_IGNORED)
-								windows.writeU32(barP + 28, VK_QUEUE_FAMILY_IGNORED)
-								_vkWritePtr(barP + 32, swapImage)
-								windows.writeU32(barP + 36, VK_IMAGE_ASPECT_COLOR_BIT)
-								windows.writeU32(barP + 40, 0)
-								windows.writeU32(barP + 44, 1)
-								windows.writeU32(barP + 48, 0)
-								windows.writeU32(barP + 52, 1)
+								windows.writeU32(bp + 8, srcAccess)
+								windows.writeU32(bp + 12, dstAccess)
+								windows.writeU32(bp + 16, oldLayout)
+								windows.writeU32(bp + 20, newLayout)
+								windows.writeU32(bp + 24, VK_QUEUE_FAMILY_IGNORED)
+								windows.writeU32(bp + 28, VK_QUEUE_FAMILY_IGNORED)
+								_vkWritePtr(bp + 32, image)
+								windows.writeU32(bp + 36, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(bp + 40, 0)
+								windows.writeU32(bp + 44, 1)
+								windows.writeU32(bp + 48, 0)
+								windows.writeU32(bp + 52, 1)
 							}
 						}
-						windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
-							VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-							0, 0, 0, 0, 0, 1, barP)
 
-						// vkCmdCopyBufferToImage
-						copyRegion := bits(_vkZeros(56))
-						crp := addr(copyRegion)
-						windows.writeU64(crp + 0, 0)
-						windows.writeU32(crp + 8, 0)
-						windows.writeU32(crp + 12, 0)
-						windows.writeU32(crp + 16, VK_IMAGE_ASPECT_COLOR_BIT)
-						windows.writeU32(crp + 20, 0)
-						windows.writeU32(crp + 24, 0)
-						windows.writeU32(crp + 28, 1)
-						windows.writeU32(crp + 44, w)
-						windows.writeU32(crp + 48, h)
-						windows.writeU32(crp + 52, 1)
+						if useScale {
+							true -> {
+								scaleImage := window._vkScaleImage
 
-						windows.vulkan1('vkCmdCopyBufferToImage', cmdBuf, window._vkStagingBuf, swapImage,
-							VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, crp)
+								// Barrier: scale image undefined -> transfer_dst
+								_writeBarrier(barP, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+									VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, scaleImage)
+								windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+									VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+									0, 0, 0, 0, 0, 1, barP)
 
-						// Barrier: transfer_dst -> present_src
-						windows.writeU32(barP + if is64 { true -> 16, _ -> 8 }, VK_ACCESS_TRANSFER_WRITE_BIT)
-						windows.writeU32(barP + if is64 { true -> 20, _ -> 12 }, 0)
-						windows.writeU32(barP + if is64 { true -> 24, _ -> 16 }, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-						windows.writeU32(barP + if is64 { true -> 28, _ -> 20 }, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-						windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
-							VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-							0, 0, 0, 0, 0, 1, barP)
+								// Copy staging buffer -> scale image at design resolution
+								copyRegion := bits(_vkZeros(56))
+								crp := addr(copyRegion)
+								windows.writeU64(crp + 0, 0)
+								windows.writeU32(crp + 8, 0)
+								windows.writeU32(crp + 12, 0)
+								windows.writeU32(crp + 16, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(crp + 20, 0)
+								windows.writeU32(crp + 24, 0)
+								windows.writeU32(crp + 28, 1)
+								windows.writeU32(crp + 44, stagingW)
+								windows.writeU32(crp + 48, stagingH)
+								windows.writeU32(crp + 52, 1)
+								windows.vulkan1('vkCmdCopyBufferToImage', cmdBuf, window._vkStagingBuf, scaleImage,
+									VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, crp)
+
+								// Barrier: scale image transfer_dst -> transfer_src
+								_writeBarrier(barP, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+									VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scaleImage)
+								windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+									VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+									0, 0, 0, 0, 0, 1, barP)
+
+								// Barrier: swapchain image undefined -> transfer_dst
+								_writeBarrier(barP, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+									VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, swapImage)
+								windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+									VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+									0, 0, 0, 0, 0, 1, barP)
+
+								// vkCmdBlitImage: scale image (dw×dh) -> swapchain image (pw×ph)
+								// Compute destination rect with letterbox offsets
+								sx := _default(r.sx, 1.0)
+								sy := _default(r.sy, 1.0)
+								ox := _default(r.ox, 0)
+								oy := _default(r.oy, 0)
+								dstW := int(float(r.dw) * sx)
+								dstH := int(float(r.dh) * sy)
+								filter := if _default(r.pp, false) {
+									true -> VK_FILTER_NEAREST
+									_ -> VK_FILTER_LINEAR
+								}
+
+								// VkImageBlit: srcSubresource(16) + srcOffsets[2](24) +
+								//              dstSubresource(16) + dstOffsets[2](24) = 80 bytes
+								blitRegion := bits(_vkZeros(80))
+								brp := addr(blitRegion)
+								// src subresource
+								windows.writeU32(brp + 0, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(brp + 4, 0)
+								windows.writeU32(brp + 8, 0)
+								windows.writeU32(brp + 12, 1)
+								// srcOffsets[0] = {0, 0, 0}
+								// srcOffsets[1] = {dw, dh, 1}
+								windows.writeU32(brp + 28, stagingW)
+								windows.writeU32(brp + 32, stagingH)
+								windows.writeU32(brp + 36, 1)
+								// dst subresource
+								windows.writeU32(brp + 40, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(brp + 44, 0)
+								windows.writeU32(brp + 48, 0)
+								windows.writeU32(brp + 52, 1)
+								// dstOffsets[0] = {ox, oy, 0}
+								windows.writeU32(brp + 56, ox)
+								windows.writeU32(brp + 60, oy)
+								windows.writeU32(brp + 64, 0)
+								// dstOffsets[1] = {ox + dstW, oy + dstH, 1}
+								windows.writeU32(brp + 68, ox + dstW)
+								windows.writeU32(brp + 72, oy + dstH)
+								windows.writeU32(brp + 76, 1)
+
+								windows.vulkan1('vkCmdBlitImage', cmdBuf,
+									scaleImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+									swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+									1, brp, filter)
+
+								// Barrier: swapchain image transfer_dst -> present_src
+								_writeBarrier(barP, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+									VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, swapImage)
+								windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+									VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+									0, 0, 0, 0, 0, 1, barP)
+							}
+							// No resolution scaling — direct copy to swapchain image
+							_ -> {
+								_writeBarrier(barP, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+									VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, swapImage)
+								windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+									VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+									0, 0, 0, 0, 0, 1, barP)
+
+								// vkCmdCopyBufferToImage
+								copyRegion := bits(_vkZeros(56))
+								crp := addr(copyRegion)
+								windows.writeU64(crp + 0, 0)
+								windows.writeU32(crp + 8, 0)
+								windows.writeU32(crp + 12, 0)
+								windows.writeU32(crp + 16, VK_IMAGE_ASPECT_COLOR_BIT)
+								windows.writeU32(crp + 20, 0)
+								windows.writeU32(crp + 24, 0)
+								windows.writeU32(crp + 28, 1)
+								windows.writeU32(crp + 44, swapW)
+								windows.writeU32(crp + 48, swapH)
+								windows.writeU32(crp + 52, 1)
+								windows.vulkan1('vkCmdCopyBufferToImage', cmdBuf, window._vkStagingBuf, swapImage,
+									VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, crp)
+
+								// Barrier: transfer_dst -> present_src
+								_writeBarrier(barP, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+									VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, swapImage)
+								windows.vulkan1('vkCmdPipelineBarrier', cmdBuf,
+									VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+									0, 0, 0, 0, 0, 1, barP)
+							}
+						}
 
 						windows.vulkan1('vkEndCommandBuffer', cmdBuf)
 

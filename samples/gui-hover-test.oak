@@ -1,0 +1,70 @@
+// Test sample: mouse hover/leave tracking
+// Opens a window and logs hover/leave events to verify WM_MOUSEHOVER / WM_MOUSELEAVE.
+
+{
+	println: println
+	string: string
+} := import('std')
+{
+	printf: printf
+} := import('fmt')
+
+gui := import('GUI')
+
+fn main() {
+	window := gui.createWindow('Hover/Leave Test', 400, 300, {
+		layer2D: 'auto'
+	})
+	if window.type != :ok -> {
+		println('Failed to create window: ' + string(window))
+		exit(1)
+	}
+
+	state := {
+		hoverCount: 0
+		leaveCount: 0
+		lastEvent: 'none'
+		mx: 0
+		my: 0
+	}
+
+	gui.show(window)
+
+	gui.onMouseHover(window, fn(x, y) {
+		state.hoverCount <- state.hoverCount + 1
+		state.lastEvent <- 'hover'
+		state.mx <- x
+		state.my <- y
+		printf('HOVER #{{ 0 }} at ({{ 1 }}, {{ 2 }})\n', state.hoverCount, x, y)
+	})
+
+	gui.onMouseLeave(window, fn() {
+		state.leaveCount <- state.leaveCount + 1
+		state.lastEvent <- 'leave'
+		printf('LEAVE #{{ 0 }}\n', state.leaveCount)
+	})
+
+	fn draw(win) {
+		frame := gui.beginFrame(win)
+		if frame.type = :ok -> {
+			bg := gui.rgb(20, 25, 35)
+			gui.fillRect(win, 0, 0, win.width, win.height, bg)
+			gui.drawText(win, 20, 24, 'Mouse Hover/Leave Test', gui.rgb(255, 255, 255))
+			gui.drawText(win, 20, 52, 'Last event: ' + state.lastEvent, gui.rgb(180, 220, 255))
+			gui.drawText(win, 20, 76, 'Hovers: ' + string(state.hoverCount) + '  Leaves: ' + string(state.leaveCount), gui.rgb(160, 200, 160))
+			if state.lastEvent = 'hover' -> {
+				gui.drawText(win, 20, 100, 'Pos: (' + string(state.mx) + ', ' + string(state.my) + ')', gui.rgb(255, 210, 120))
+			}
+			gui.drawText(win, 20, 140, 'Move mouse in/out of window to test.', gui.rgb(140, 140, 160))
+			gui.drawText(win, 20, 164, 'Close window to exit.', gui.rgb(140, 140, 160))
+			gui.endFrame(win)
+		}
+	}
+
+	draw(window)
+	gui.run(window, ?, fn(win, _dt) draw(win))
+	println('Test complete.')
+	gui.close(window)
+}
+
+main()

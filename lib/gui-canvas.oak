@@ -1,0 +1,521 @@
+// gui-canvas provides floating windowless canvases for the Magnolia GUI.
+//
+// A canvas is a lightweight off-screen drawing surface that can be positioned,
+// layered, and composited onto a parent window.  Canvas objects expose the same
+// fields that gui-draw functions use (type, backend, frameHdc, width, height),
+// so all existing drawing primitives (fillRect, drawText, drawLine, etc.) work
+// on canvases without modification.
+//
+// Usage:
+//   canvas := gui.createCanvas(window, { x: 50, y: 50, width: 200, height: 100 })
+//   gui.beginCanvas(canvas)
+//   gui.fillRect(canvas, 0, 0, 200, 100, gui.rgb(30, 30, 40))
+//   gui.drawText(canvas, 10, 10, 'Hello', gui.rgb(255, 255, 255))
+//   gui.endCanvas(canvas)
+//   // Canvases are composited automatically in gui.endFrame(window).
+//
+// Supports:
+//   - Arbitrary positioning (x, y) on the parent window
+//   - Z-ordering via zIndex (higher = on top)
+//   - Visibility toggle
+//   - Color-key transparency (transparentColor)
+//   - Whole-surface alpha blending (opacity 0–255)
+
+{ _default: _default, _err: _err } := import('gui-common')
+windows := import('windows')
+linux := import('linux')
+{ each: each, filter: filter } := import('std')
+{ sort: sort } := import('sort')
+
+// Shared success sentinel.
+_OK := { type: :ok }
+
+SRCCOPY := 13369376
+
+// Module-level parent registry avoids circular references between
+// canvas and window objects (which causes stack overflow in bytecode
+// mode where interopValue recursively walks all object properties).
+_parentMap := {}
+_nextId := { n: 0 }
+
+fn _getParent(canvas) _parentMap.(string(canvas._canvasId))
+
+// ─── Canvas creation ────────────────────────────────────────────────────────
+
+fn create(parentWindow, options) {
+	opts := _default(options, {})
+	x := _default(opts.x, 0)
+	y := _default(opts.y, 0)
+	w := _default(opts.width, 200)
+	h := _default(opts.height, 100)
+	visible := _default(opts.visible, true)
+	zIndex := _default(opts.zIndex, 0)
+	opacity := _default(opts.opacity, 255)
+	transparentColor := _default(opts.transparentColor, ?)
+
+	canvas := {
+		type: :ok
+		backend: parentWindow.backend
+		_isCanvas: true
+		_canvasId: _nextId.n
+		x: x
+		y: y
+		width: w
+		height: h
+		visible: visible
+		zIndex: zIndex
+		opacity: opacity
+		transparentColor: transparentColor
+		// GDI surface handles
+		frameHdc: 0
+		hwnd: parentWindow.hwnd
+		_canvasBitmap: 0
+		_canvasPrevBitmap: 0
+		_canvasWidth: 0
+		_canvasHeight: 0
+		// Per-canvas draw caches (same fields as window uses)
+		_curPen: ?
+		_curBrush: ?
+		_curNullPen: ?
+		_curBkMode: ?
+		_curTextColor: ?
+		_fontHandle: 0
+		_fontKey: ?
+		_penCache: {}
+		_brushCache: {}
+		_penCacheCount: 0
+		_brushCacheCount: 0
+		textFont: parentWindow.textFont
+		// Dirty tracking
+		_dirty: false
+	}
+
+	// Register canvas on parent window and in the parent registry
+	_parentMap.(string(canvas._canvasId)) <- parentWindow
+	_nextId.n <- _nextId.n + 1
+	if parentWindow._canvases = ? -> parentWindow._canvases <- []
+	parentWindow._canvases << canvas
+
+	canvas
+}
+
+// ─── Canvas surface management ──────────────────────────────────────────────
+
+fn _ensureCanvasSurface(canvas) if canvas.backend {
+	:windows -> {
+		parent := _getParent(canvas)
+		parentHdc := parent.frameTargetHdc
+		// Need a reference DC for CreateCompatibleBitmap.  Prefer the
+		// parent's screen DC; fall back to the parent's back-buffer DC.
+		refHdc := if parentHdc > 0 {
+			true -> parentHdc
+			_ -> parent.frameHdc
+		}
+		if refHdc = 0 -> {
+			refHdc <- parent.frameHdc
+		}
+
+		if canvas.frameHdc = 0 {
+			true -> {
+				memdc := windows.gdi32('CreateCompatibleDC', refHdc)
+				if windows.callOk?(memdc) & memdc.r1 > 0 {
+					true -> canvas.frameHdc <- memdc.r1
+				}
+			}
+		}
+		if canvas.frameHdc = 0 {
+			true -> _err('Canvas CreateCompatibleDC failed', ?)
+			_ -> {
+				needsResize := (canvas._canvasBitmap = 0) |
+					(canvas._canvasWidth != canvas.width) |
+					(canvas._canvasHeight != canvas.height)
+				if needsResize {
+					true -> {
+						if canvas._canvasBitmap > 0 {
+							true -> {
+								if canvas._canvasPrevBitmap > 0 -> {
+									windows.selectObject(canvas.frameHdc, canvas._canvasPrevBitmap)
+								}
+								windows.deleteObject(canvas._canvasBitmap)
+								canvas._canvasBitmap <- 0
+							}
+						}
+						bmp := windows.gdi32('CreateCompatibleBitmap', refHdc, canvas.width, canvas.height)
+						if windows.callOk?(bmp) & bmp.r1 > 0 {
+							true -> {
+								canvas._canvasBitmap <- bmp.r1
+								prev := windows.selectObject(canvas.frameHdc, canvas._canvasBitmap)
+								if windows.callOk?(prev) {
+									true -> canvas._canvasPrevBitmap <- prev.r1
+								}
+								canvas._canvasWidth <- canvas.width
+								canvas._canvasHeight <- canvas.height
+								_OK
+							}
+							_ -> _err('Canvas CreateCompatibleBitmap failed', bmp)
+						}
+					}
+					_ -> _OK
+				}
+			}
+		}
+	}
+	:linux -> {
+		// Linux: canvases use a Pixmap as the off-screen surface
+		parent := _getParent(canvas)
+		if canvas._pixmap = ? | canvas._canvasWidth != canvas.width | canvas._canvasHeight != canvas.height {
+			true -> {
+				if canvas._pixmap != ? -> {
+					linux.freePixmap(parent.display, canvas._pixmap)
+				}
+				pix := linux.createPixmap(
+					parent.display
+					parent.window
+					canvas.width
+					canvas.height
+					24
+				)
+				if linux.callOk?(pix) & pix.r1 > 0 {
+					true -> {
+						canvas._pixmap <- pix.r1
+						// Create a GC for drawing on the pixmap
+						if canvas._gcHandle = ? {
+							true -> {
+								gc := linux.createGC(parent.display, canvas._pixmap, 0, 0)
+								if linux.callOk?(gc) & gc.r1 > 0 {
+									true -> canvas._gcHandle <- gc.r1
+								}
+							}
+						}
+						canvas._canvasWidth <- canvas.width
+						canvas._canvasHeight <- canvas.height
+						_OK
+					}
+					_ -> _err('Canvas XCreatePixmap failed', pix)
+				}
+			}
+			_ -> _OK
+		}
+	}
+	:web -> {
+		// Web canvases use an off-screen message list, composited by the JS runtime.
+		if canvas._webMessages = ? -> canvas._webMessages <- []
+		_OK
+	}
+	_ -> _err('Unknown canvas backend', canvas.backend)
+}
+
+// ─── Begin / End canvas drawing ─────────────────────────────────────────────
+
+fn beginCanvas(canvas) {
+	result := _ensureCanvasSurface(canvas)
+	// Reset per-frame draw caches
+	canvas._curPen <- ?
+	canvas._curBrush <- ?
+	canvas._curNullPen <- ?
+	canvas._curBkMode <- ?
+	canvas._curTextColor <- ?
+	canvas._dirty <- true
+	if canvas.backend = :web {
+		true -> {
+			canvas._webMessages <- []
+			canvas.messages <- canvas._webMessages
+		}
+	}
+	result
+}
+
+fn endCanvas(canvas) {
+	if canvas.backend = :windows {
+		true -> {
+			if canvas.frameHdc > 0 -> windows.gdi32('GdiFlush')
+		}
+	}
+	_OK
+}
+
+// ─── Compositing: blit all canvases onto the parent window ──────────────────
+
+fn _sortedVisibleCanvases(window) {
+	canvases := _default(window._canvases, [])
+	visible := filter(canvases, fn(c) c.visible & c._dirty)
+	sort(visible, fn(c) c.zIndex)
+}
+
+fn _compositeCanvasWindows(window, canvas) {
+	if canvas.frameHdc > 0 & window.frameHdc > 0 {
+		true -> {
+			dstHdc := window.frameHdc
+			srcHdc := canvas.frameHdc
+			cx := canvas.x
+			cy := canvas.y
+			cw := canvas.width
+			ch := canvas.height
+
+			if canvas.transparentColor != ? {
+				// TransparentBlt: color-key transparency
+				true -> {
+					// msimg32.TransparentBlt(dest, dx, dy, dw, dh, src, sx, sy, sw, sh, colorKey)
+					windows.loadDll('msimg32.dll')
+					windows.callIn(
+						'msimg32.dll'
+						'TransparentBlt'
+						dstHdc
+						cx, cy, cw, ch
+						srcHdc
+						0, 0, cw, ch
+						canvas.transparentColor
+					)
+				}
+				_ -> if canvas.opacity < 255 {
+					// AlphaBlend: whole-surface alpha blending
+					true -> {
+						// Build BLENDFUNCTION struct as a single u32:
+						// AC_SRC_OVER=0, flags=0, SourceConstantAlpha, AC_SRC_ALPHA=0
+						blendFn := canvas.opacity * 256
+						windows.loadDll('msimg32.dll')
+						windows.callIn(
+							'msimg32.dll'
+							'AlphaBlend'
+							dstHdc
+							cx, cy, cw, ch
+							srcHdc
+							0, 0, cw, ch
+							blendFn
+						)
+					}
+					// Opaque: fast BitBlt
+					_ -> windows.gdi32(
+						'BitBlt'
+						dstHdc
+						cx, cy
+						cw, ch
+						srcHdc
+						0, 0
+						SRCCOPY
+					)
+				}
+			}
+		}
+	}
+}
+
+fn _compositeCanvasLinux(window, canvas) {
+	if canvas._pixmap != ? & canvas._pixmap > 0 {
+		true -> {
+			display := window.display
+			target := window.window
+			gc := if window._gcCache > 0 {
+				true -> window._gcCache
+				_ -> 0
+			}
+			if gc > 0 -> {
+				linux.copyArea(
+					display
+					canvas._pixmap
+					target
+					gc
+					0, 0
+					canvas.width, canvas.height
+					canvas.x, canvas.y
+				)
+			}
+		}
+	}
+}
+
+fn _compositeCanvasWeb(window, canvas) {
+	if canvas._webMessages != ? {
+		true -> {
+			msgs := canvas._webMessages
+			if len(msgs) > 0 {
+				true -> {
+					// Wrap canvas messages with a push/pop translate for positioning
+					window.messages <- window.messages << {
+						type: :pushClip
+						x: canvas.x
+						y: canvas.y
+						width: canvas.width
+						height: canvas.height
+						translateX: canvas.x
+						translateY: canvas.y
+					}
+					each(msgs, fn(msg) window.messages <- window.messages << msg)
+					window.messages <- window.messages << { type: :popClip }
+				}
+			}
+		}
+	}
+}
+
+fn compositeAll(window) {
+	sorted := _sortedVisibleCanvases(window)
+	if len(sorted) > 0 {
+		true -> {
+			each(sorted, fn(canvas) if window.backend {
+				:windows -> _compositeCanvasWindows(window, canvas)
+				:linux -> _compositeCanvasLinux(window, canvas)
+				:web -> _compositeCanvasWeb(window, canvas)
+			})
+			// Clear dirty flags after compositing
+			each(sorted, fn(canvas) canvas._dirty <- false)
+		}
+	}
+}
+
+// ─── Canvas manipulation ────────────────────────────────────────────────────
+
+fn move(canvas, x, y) {
+	canvas.x <- x
+	canvas.y <- y
+	_OK
+}
+
+fn resize(canvas, w, h) {
+	canvas.width <- w
+	canvas.height <- h
+	_OK
+}
+
+fn setVisible(canvas, vis) {
+	canvas.visible <- vis
+	_OK
+}
+
+fn setZIndex(canvas, z) {
+	canvas.zIndex <- z
+	_OK
+}
+
+fn setOpacity(canvas, alpha) {
+	canvas.opacity <- alpha
+	_OK
+}
+
+fn setTransparentColor(canvas, color) {
+	canvas.transparentColor <- color
+	_OK
+}
+
+// ─── Canvas destruction ─────────────────────────────────────────────────────
+
+fn _releaseCanvasSurface(canvas) if canvas.backend {
+	:windows -> {
+		if canvas.frameHdc > 0 {
+			true -> {
+				if canvas._canvasPrevBitmap > 0 -> {
+					windows.selectObject(canvas.frameHdc, canvas._canvasPrevBitmap)
+				}
+				if canvas._canvasBitmap > 0 -> {
+					windows.deleteObject(canvas._canvasBitmap)
+				}
+				windows.gdi32('DeleteDC', canvas.frameHdc)
+				canvas.frameHdc <- 0
+				canvas._canvasBitmap <- 0
+				canvas._canvasPrevBitmap <- 0
+			}
+		}
+		// Clean up cached pens/brushes
+		if canvas._penCache != ? -> {
+			each(keys(canvas._penCache), fn(k) {
+				h := canvas._penCache.(k)
+				if type(h) = :int & h > 0 -> windows.deleteObject(h)
+			})
+			canvas._penCache <- {}
+			canvas._penCacheCount <- 0
+		}
+		if canvas._brushCache != ? -> {
+			each(keys(canvas._brushCache), fn(k) {
+				h := canvas._brushCache.(k)
+				if type(h) = :int & h > 0 -> windows.deleteObject(h)
+			})
+			canvas._brushCache <- {}
+			canvas._brushCacheCount <- 0
+		}
+		// Clear font tracking (handles are globally cached, not deleted here)
+		canvas._fontHandle <- 0
+		canvas._fontKey <- ?
+		_OK
+	}
+	:linux -> {
+		display := _getParent(canvas).display
+		if canvas._gcHandle != ? & canvas._gcHandle > 0 -> {
+			linux.freeGC(display, canvas._gcHandle)
+			canvas._gcHandle <- ?
+		}
+		if canvas._pixmap != ? & canvas._pixmap > 0 -> {
+			linux.freePixmap(display, canvas._pixmap)
+			canvas._pixmap <- ?
+		}
+		_OK
+	}
+	:web -> {
+		canvas._webMessages <- ?
+		canvas.messages <- ?
+		_OK
+	}
+	_ -> _OK
+}
+
+fn destroy(canvas) {
+	_releaseCanvasSurface(canvas)
+	// Remove from parent's canvas list
+	parent := _getParent(canvas)
+	if parent != ? & parent._canvases != ? {
+		true -> {
+			parent._canvases <- filter(parent._canvases, fn(c) c != canvas)
+		}
+	}
+	canvas.type <- :destroyed
+	_parentMap.(string(canvas._canvasId)) <- ?
+	_OK
+}
+
+// ─── Query helpers ──────────────────────────────────────────────────────────
+
+fn isCanvas?(obj) _default(obj._isCanvas, false)
+
+fn canvases(window) _default(window._canvases, [])
+
+fn canvasCount(window) len(_default(window._canvases, []))
+
+// Hit test: is (px, py) inside the canvas bounds?
+fn hitTest?(canvas, px, py) {
+	canvas.visible &
+		px >= canvas.x & px < canvas.x + canvas.width &
+		py >= canvas.y & py < canvas.y + canvas.height
+}
+
+// Find the topmost visible canvas at (px, py), sorted by zIndex descending.
+fn canvasAt(window, px, py) {
+	sorted := _sortedVisibleCanvases(window)
+	_findTopmost(sorted, len(sorted) - 1, px, py)
+}
+
+fn _findTopmost(sorted, i, px, py) if i < 0 {
+	true -> ?
+	_ -> {
+		c := sorted.(i)
+		if hitTest?(c, px, py) {
+			true -> c
+			_ -> _findTopmost(sorted, i - 1, px, py)
+		}
+	}
+}
+
+// Convert window-space coordinates to canvas-local coordinates.
+fn toLocal(canvas, px, py) {
+	{ x: px - canvas.x, y: py - canvas.y }
+}
+
+// destroyAll cleans up all canvases on a window (call in close handler).
+fn destroyAll(window) {
+	canvasList := _default(window._canvases, [])
+	each(canvasList, fn(c) {
+		_releaseCanvasSurface(c)
+		c.type <- :destroyed
+		_parentMap.(string(c._canvasId)) <- ?
+	})
+	window._canvases <- []
+	_OK
+}
