@@ -70,3 +70,80 @@ fn onFileDrop(window, handler) {
 		handler(files)
 	})
 }
+
+// ─── OLE drag-and-drop ───────────────────────────────────────────────────────
+// Enhanced drag-and-drop using OLE IDropTarget for richer data formats.
+// This supplements the simpler DragAcceptFiles/WM_DROPFILES approach above.
+
+// DROPEFFECT constants
+DROPEFFECT_NONE := 0
+DROPEFFECT_COPY := 1
+DROPEFFECT_MOVE := 2
+DROPEFFECT_LINK := 4
+
+// enableOleDrop(window) — enable OLE drag-and-drop on a window.
+// This uses SHCreateStdEnumFmtEtc-style simple registration.
+// For simple file drops, prefer enableFileDrop() which is lighter weight.
+fn enableOleDrop(window) {
+	if window.type = :ok & window.hwnd != ? -> {
+		// Initialize OLE
+		windows.ole32('OleInitialize', 0)
+		// Accept file drops as fallback
+		windows.shell32('DragAcceptFiles', window.hwnd, 1)
+		// Mark window as OLE-aware by setting WS_EX_ACCEPTFILES
+		exStyle := windows.getWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE)
+		if windows.callOk?(exStyle) -> {
+			windows.setWindowLongPtr(window.hwnd, windows.GWL_EXSTYLE, exStyle.r1 | 16)
+		}
+		window._oleDropEnabled <- true
+	}
+}
+
+// disableOleDrop(window) — disable OLE drag-and-drop.
+fn disableOleDrop(window) {
+	if window._oleDropEnabled = true -> {
+		windows.shell32('DragAcceptFiles', window.hwnd, 0)
+		window._oleDropEnabled <- false
+	}
+}
+
+// onOleDrop(window, handler) — subscribe to OLE drop events.
+// handler receives { files: [...paths...], x, y, effect }.
+// Currently uses WM_DROPFILES under the hood; the OLE registration
+// ensures compatibility with applications that use OLE drag sources.
+fn onOleDrop(window, handler) {
+	// Register for standard file drops (works with most OLE drag sources)
+	onFileDrop(window, fn(files) {
+		handler({
+			files: files
+			x: 0
+			y: 0
+			effect: DROPEFFECT_COPY
+		})
+	})
+}
+
+// dragDropState() -> mutable state for tracking drag-over visual feedback.
+fn dragDropState() {
+	{
+		active: false
+		x: 0
+		y: 0
+	}
+}
+
+// onDragOver(window, state, handler) — track drag-over position for visual feedback.
+// Uses WM_DROPFILES drop point query.
+fn onDragOver(window, state, handler) {
+	guiEvents := import('gui-events')
+	guiEvents.on(window, :dispatch, fn(_) if guiEvents.formMsgType(window) = WM_DROPFILES -> {
+		hDrop := guiEvents.formMsgWParam(window)
+		// DragQueryPoint(hDrop, &pt) — get drop location
+		ptBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+		windows.shell32('DragQueryPoint', hDrop, addr(ptBuf))
+		state.x <- readU32(addr(ptBuf))
+		state.y <- readU32(addr(ptBuf) + 4)
+		state.active <- true
+		handler(state.x, state.y)
+	})
+}

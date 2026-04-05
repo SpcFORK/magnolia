@@ -527,13 +527,46 @@ fn parseList(lineReader, listType) {
 	peek := lineReader.peek
 	next := lineReader.next
 
-	fn sub(items) if listItemLine?(peek()) {
-		false -> items
+	// continuationLine? checks if a line is a continuation paragraph
+	// (indented by at least 2 spaces or 1 tab, not a list marker)
+	fn continuationLine?(line) if line {
+		? -> false
+		_ -> if !listItemLine?(line) {
+			true -> startsWith?(line, '  ') | startsWith?(line, '\t')
+			_ -> false
+		}
+	}
+
+	// collectContinuations gathers continuation paragraphs after a blank line
+	fn collectContinuations() {
+		paras := []
+		fn loop() if lineNodeType(peek()) {
+			:empty -> {
+				next() // consume blank line
+				if continuationLine?(peek()) {
+					true -> {
+						// collect indented continuation lines into a paragraph
+						fn gatherPara(lines) if continuationLine?(peek()) {
+							true -> gatherPara(lines << (next() |> trimStart()))
+							_ -> lines
+						}
+						paraLines := gatherPara([next() |> trimStart()])
+						paras << {
+							tag: :p
+							children: tokenizeText(join(paraLines, ' ')) |> parseText()
+						}
+						loop()
+					}
+				}
+			}
+		}
+		loop()
+		paras
+	}
+
+	fn sub(items, hasBlankSep) if listItemLine?(peek()) {
+		false -> [items, hasBlankSep]
 		_ -> {
-			// TODO: provide a way for one listItem to contain 2+ paragraphs
-			// The current convention seems to be that if there is at least one
-			// multi-paragraph listItem in a UL, every listItem in the UL gets
-			// <p>s rather than inline text nodes as content.
 			line := next()
 			lineType := lineNodeType(line)
 			reader := Reader(line)
@@ -550,35 +583,66 @@ fn parseList(lineReader, listType) {
 				children: tokenizeText(text) |> parseText()
 			}
 
+			// Check for continuation paragraphs (blank line + indented text)
+			continuations := collectContinuations()
+			if len(continuations) > 0 {
+				true -> {
+					// Wrap existing children in <p> and append continuation <p>s
+					listItem.children <- [{
+						tag: :p
+						children: listItem.children
+					}] |> append(continuations)
+				}
+			}
+
+			// Check if next line is blank (loose list detection)
+			nextHasBlank := hasBlankSep
+			if lineNodeType(peek()) = :empty & listItemLine?(lineReader.peek) {
+				true -> nextHasBlank <- true
+			}
+
 			// handle list items that have distinct levels
 			if lastItem := items.(len(items) - 1) {
-				? -> sub(items << listItem)
+				? -> sub(items << listItem, nextHasBlank)
 				_ -> if {
 					lastItem.level = level -> if lineType {
-						// continue if same list type; otherwise re-parse
-						listType -> sub(items << listItem)
+						listType -> sub(items << listItem, nextHasBlank)
 						_ -> {
 							lineReader.back()
-							items
+							[items, nextHasBlank]
 						}
 					}
 					lastItem.level < level -> {
-						// indent in: begin parsing a separate list
 						lineReader.back()
 						list := parseList(lineReader, lineType)
 						lastItem.children << list
-						sub(items)
+						sub(items, nextHasBlank)
 					}
 					_ -> {
-						// indent out: give up control in this parsing depth
 						lineReader.back()
-						items
+						[items, nextHasBlank]
 					}
 				}
 			}
 		}
 	}
-	children := sub([])
+	[children, isLoose] := sub([], false)
+
+	// If the list is "loose" (had blank lines between items), wrap any
+	// non-<p> item children in <p> tags for spec compliance.
+	if isLoose {
+		true -> children |> each(fn(child) if child.tag = :li {
+			true -> {
+				alreadyWrapped := child.children |> with some() fn(c) type(c) = :object & c.tag = :p
+				if !alreadyWrapped {
+					true -> child.children <- [{
+						tag: :p
+						children: child.children
+					}]
+				}
+			}
+		})
+	}
 
 	// remove the level annotations
 	children |> each(fn(child) if child.tag = :li -> child.level := _)

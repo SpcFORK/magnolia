@@ -510,11 +510,18 @@ func (co *compiler) declareLocal(name string) int {
 	return idx
 }
 
+// pushScope saves the current locals for restoration via popScope.
+// Currently unused but retained for future nested-scope compilation.
+var _ = (*compiler).pushScope //nolint:unused
+
 func (co *compiler) pushScope() {
 	saved := make([]string, len(co.locals))
 	copy(saved, co.locals)
 	co.scopeStack = append(co.scopeStack, saved)
 }
+
+// popScope restores locals saved by pushScope.
+var _ = (*compiler).popScope //nolint:unused
 
 func (co *compiler) popScope() {
 	n := len(co.scopeStack)
@@ -857,6 +864,9 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 }
 
 // compileIf compiles an if-expression (pattern matching).
+// Convenience wrapper; callers use compileIfTail directly.
+var _ = (*compiler).compileIf //nolint:unused
+
 func (co *compiler) compileIf(n ifExprNode) {
 	co.compileIfTail(n, false)
 }
@@ -989,6 +999,9 @@ func (co *compiler) compileClass(n classNode) {
 }
 
 // compileFnCall compiles a function call.
+// Convenience wrapper; callers use compileFnCallTail directly.
+var _ = (*compiler).compileFnCall //nolint:unused
+
 func (co *compiler) compileFnCall(n fnCallNode) {
 	co.compileFnCallTail(n, false)
 }
@@ -1097,6 +1110,9 @@ func compileToByteCode(nodes []astNode) *bytecodeChunk {
 // ---------------------------------------------------------------------------
 // Disassembler (for debugging)
 // ---------------------------------------------------------------------------
+
+// disassemble returns a human-readable dump of bytecode (for debugging).
+var _ = disassemble //nolint:unused
 
 func disassemble(chunk *bytecodeChunk) string {
 	var sb strings.Builder
@@ -1358,6 +1374,8 @@ func (vm *VM) vmError(reason string) *runtimeError {
 // wrapClosureForInterop wraps a bytecode closureVal as a BuiltinFnValue so
 // it can be called by the tree-walking interpreter.  Each invocation spawns
 // a small child VM that runs only the closure's body and returns.
+var _ = (*VM).wrapClosureForInterop //nolint:unused
+
 func (vm *VM) wrapClosureForInterop(cv *closureVal) BuiltinFnValue {
 	chunk := vm.chunk
 	ctx := vm.ctx
@@ -1643,6 +1661,17 @@ func (vm *VM) run() (Value, *runtimeError) {
 					break
 				}
 			}
+			// Fast path: string + string (common in string-heavy code)
+			if ls, ok := left.(*StringValue); ok {
+				if rs, ok := right.(*StringValue); ok {
+					buf := make([]byte, 0, len(*ls)+len(*rs))
+					buf = append(buf, *ls...)
+					buf = append(buf, *rs...)
+					sv := StringValue(buf)
+					vm.push(&sv)
+					break
+				}
+			}
 			vm.push(vmAdd(left, right))
 
 		case opSub:
@@ -1670,6 +1699,16 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opDiv:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok && ri != 0 {
+					if li%ri == 0 {
+						vm.push(IntValue(li / ri))
+					} else {
+						vm.push(FloatValue(float64(li) / float64(ri)))
+					}
+					break
+				}
+			}
 			result, errReason := vmDiv(left, right)
 			if errReason != "" {
 				return nil, vm.vmError(errReason)
@@ -1679,6 +1718,12 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opMod:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok && ri != 0 {
+					vm.push(IntValue(li % ri))
+					break
+				}
+			}
 			result, errReason := vmMod(left, right)
 			if errReason != "" {
 				return nil, vm.vmError(errReason)
@@ -1850,11 +1895,26 @@ func (vm *VM) run() (Value, *runtimeError) {
 					break
 				}
 			}
+			// Fast path for single-byte string comparison (dominant in char loops)
+			if ls, ok := left.(*StringValue); ok {
+				if rs, ok := right.(*StringValue); ok {
+					if len(*ls) == 1 && len(*rs) == 1 {
+						vm.push(BoolValue((*ls)[0] == (*rs)[0]))
+						break
+					}
+				}
+			}
 			vm.push(BoolValue(left.Eq(right)))
 
 		case opNeq:
 			right := vm.pop()
 			left := vm.pop()
+			if li, ok := left.(IntValue); ok {
+				if ri, ok := right.(IntValue); ok {
+					vm.push(BoolValue(li != ri))
+					break
+				}
+			}
 			vm.push(BoolValue(!left.Eq(right)))
 
 		case opDeepEq:
@@ -1985,43 +2045,45 @@ func (vm *VM) run() (Value, *runtimeError) {
 
 		case opCall:
 			arity := int(vm.fetchU8())
-			args := make([]Value, arity)
-			for j := arity - 1; j >= 0; j-- {
-				args[j] = vm.pop()
-			}
-			callee := vm.pop()
 
-			switch fn := callee.(type) {
-			case *closureVal:
+			// Peek at callee (below args on stack)
+			callee := vm.stack[vm.sp-arity-1]
+
+			if fn, ok := callee.(*closureVal); ok {
+				// Fast path for closure calls: copy args directly from
+				// stack to locals, avoiding intermediate args slice allocation.
 				ft := &vm.chunk.functions[fn.fnIdx]
 
-				// Prepare locals
 				locals := make([]Value, ft.localCount)
 				for i := range locals {
 					locals[i] = null
 				}
 				paramCount := ft.arity
-				for i := 0; i < paramCount && i < len(args); i++ {
-					locals[i] = args[i]
+				// Copy args from stack directly to locals
+				argBase := vm.sp - arity
+				for i := 0; i < paramCount && i < arity; i++ {
+					locals[i] = vm.stack[argBase+i]
 				}
 				if ft.hasRestArg && paramCount < len(locals) {
 					var restList ListValue
-					if len(args) > paramCount {
-						restList = ListValue(args[paramCount:])
+					if arity > paramCount {
+						restList = make(ListValue, arity-paramCount)
+						copy(restList, vm.stack[argBase+paramCount:vm.sp])
 					} else {
 						restList = ListValue{}
 					}
 					locals[paramCount] = &restList
 				}
 
-				// Build scope for the new frame
+				// Pop callee + args
+				vm.sp = argBase - 1
+
 				scope := &vmScope{
 					names:  ft.localNames,
 					values: locals,
 					parent: fn.parentScope,
 				}
 
-				// Push call frame (NO recursive run())
 				vm.frames = append(vm.frames, callFrame{
 					returnPC: vm.pc,
 					baseSlot: vm.sp,
@@ -2030,39 +2092,48 @@ func (vm *VM) run() (Value, *runtimeError) {
 					scope:    scope,
 				})
 				vm.pc = ft.offset
+			} else {
+				// General path for builtins, FnValue, ClassValue
+				args := make([]Value, arity)
+				for j := arity - 1; j >= 0; j-- {
+					args[j] = vm.pop()
+				}
+				vm.pop() // pop callee
 
-			case BuiltinFnValue:
-				for i, a := range args {
-					args[i] = vm.interopValue(a)
-				}
-				result, bErr := fn.fn(args)
-				if bErr != nil {
-					return nil, bErr
-				}
-				vm.push(result)
+				switch fn := callee.(type) {
+				case BuiltinFnValue:
+					for i, a := range args {
+						args[i] = vm.interopValue(a)
+					}
+					result, bErr := fn.fn(args)
+					if bErr != nil {
+						return nil, bErr
+					}
+					vm.push(result)
 
-			case FnValue:
-				for i, a := range args {
-					args[i] = vm.interopValue(a)
-				}
-				result, fErr := vm.ctx.evalFnCall(fn, false, args)
-				if fErr != nil {
-					return nil, fErr
-				}
-				vm.push(result)
+				case FnValue:
+					for i, a := range args {
+						args[i] = vm.interopValue(a)
+					}
+					result, fErr := vm.ctx.evalFnCall(fn, false, args)
+					if fErr != nil {
+						return nil, fErr
+					}
+					vm.push(result)
 
-			case ClassValue:
-				for i, a := range args {
-					args[i] = vm.interopValue(a)
-				}
-				result, cErr := vm.ctx.evalFnCall(fn, false, args)
-				if cErr != nil {
-					return nil, cErr
-				}
-				vm.push(result)
+				case ClassValue:
+					for i, a := range args {
+						args[i] = vm.interopValue(a)
+					}
+					result, cErr := vm.ctx.evalFnCall(fn, false, args)
+					if cErr != nil {
+						return nil, cErr
+					}
+					vm.push(result)
 
-			default:
-				return nil, vm.vmError(fmt.Sprintf("%s is not a function and cannot be called", callee))
+				default:
+					return nil, vm.vmError(fmt.Sprintf("%s is not a function and cannot be called", callee))
+				}
 			}
 
 		case opReturn:
@@ -2476,8 +2547,7 @@ func (vm *VM) callBuiltin(idx int, args []Value) (Value, *runtimeError) {
 			return MakeString(""), nil
 		}
 		if iv, ok := args[0].(IntValue); ok {
-			sv := StringValue([]byte{byte(iv & 0xFF)})
-			return &sv, nil
+			return MakeSingleByteString(byte(iv & 0xFF)), nil
 		}
 		return MakeString(""), nil
 	case 8: // keys
@@ -2702,6 +2772,9 @@ func vmDiv(a, b Value) (Value, string) {
 		case IntValue:
 			if bv == 0 {
 				return nil, "Division by zero"
+			}
+			if av%bv == 0 {
+				return IntValue(av / bv), ""
 			}
 			return FloatValue(float64(av) / float64(bv)), ""
 		case FloatValue:
@@ -2944,8 +3017,7 @@ func vmGetProp(obj Value, key Value) (Value, string) {
 			if i < 0 || i >= len(*o) {
 				return null, ""
 			}
-			sv := StringValue([]byte{(*o)[i]})
-			return &sv, ""
+			return MakeSingleByteString((*o)[i]), ""
 		}
 		return nil, fmt.Sprintf("Cannot index into string with non-integer index %s", key)
 	case *ListValue:
@@ -3045,7 +3117,16 @@ func vmSlice(collection, startVal, endVal Value) (Value, *runtimeError) {
 		if start > end {
 			start = end
 		}
-		result := make([]byte, end-start)
+		sliceLen := end - start
+		// Fast path: single byte returns cached string
+		if sliceLen == 1 {
+			return MakeSingleByteString((*c)[start]), nil
+		}
+		// Fast path: empty slice
+		if sliceLen == 0 {
+			return MakeString(""), nil
+		}
+		result := make([]byte, sliceLen)
 		copy(result, (*c)[start:end])
 		sv := StringValue(result)
 		return &sv, nil

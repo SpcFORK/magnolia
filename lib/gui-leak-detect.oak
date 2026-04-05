@@ -1,0 +1,279 @@
+// gui-leak-detect — Memory and handle leak detector for Magnolia GUI apps.
+//
+// Tracks GDI object counts, USER object counts, handle counts,
+// and working set memory to detect leaks during GUI operation.
+// Uses Win32 GetGuiResources and GetProcessMemoryInfo.
+
+{
+	default: default
+	map: map
+	each: each
+	range: range
+} := import('std')
+{
+	max: max
+	abs: abs
+} := import('math')
+windows := import('windows')
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+GR_GDIOBJECTS := 0         // GetGuiResources: GDI objects
+GR_USEROBJECTS := 1        // GetGuiResources: USER objects
+GR_GDIOBJECTS_PEAK := 2    // peak GDI objects
+GR_USEROBJECTS_PEAK := 4   // peak USER objects
+
+// ─── Process handle helpers ──────────────────────────────────────────────────
+
+// _getCurrentProcess() — returns a pseudo-handle to the current process.
+fn _getCurrentProcess() {
+	windows.kernel32('GetCurrentProcess')
+}
+
+// ─── GDI / USER object tracking ──────────────────────────────────────────────
+
+// getGDIObjectCount() — current count of GDI objects for this process.
+fn getGDIObjectCount() {
+	windows.user32('GetGuiResources', _getCurrentProcess(), GR_GDIOBJECTS)
+}
+
+// getUserObjectCount() — current count of USER objects for this process.
+fn getUserObjectCount() {
+	windows.user32('GetGuiResources', _getCurrentProcess(), GR_USEROBJECTS)
+}
+
+// getGDIObjectPeak() — peak GDI object count since process start.
+fn getGDIObjectPeak() {
+	windows.user32('GetGuiResources', _getCurrentProcess(), GR_GDIOBJECTS_PEAK)
+}
+
+// getUserObjectPeak() — peak USER object count since process start.
+fn getUserObjectPeak() {
+	windows.user32('GetGuiResources', _getCurrentProcess(), GR_USEROBJECTS_PEAK)
+}
+
+// ─── Handle count ────────────────────────────────────────────────────────────
+
+// getHandleCount() — number of open handles in this process.
+fn getHandleCount() {
+	buf := windows._zeros(4)
+	windows.kernel32('GetProcessHandleCount', _getCurrentProcess(), windows.addr(buf))
+	windows.readU32(buf, 0)
+}
+
+// ─── Memory info ─────────────────────────────────────────────────────────────
+// PROCESS_MEMORY_COUNTERS struct (72 bytes on x64):
+//   cb (u32), PageFaultCount (u32),
+//   PeakWorkingSetSize (usize), WorkingSetSize (usize),
+//   ... (more fields)
+
+_PMC_SIZE := 72
+
+// getWorkingSetSize() — current working set (physical memory) in bytes.
+fn getWorkingSetSize() {
+	buf := windows._zeros(_PMC_SIZE)
+	windows.writeU32(buf, 0, _PMC_SIZE) // cb
+	ok := windows.kernel32('K32GetProcessMemoryInfo', _getCurrentProcess(), windows.addr(buf), _PMC_SIZE)
+	if ok != 0 -> {
+		// WorkingSetSize is at offset 16 (after cb, PageFaultCount, PeakWorkingSetSize)
+		// On x64, usize is 8 bytes
+		if windows.ptrSize = 8 {
+			true -> {
+				lo := windows.readU32(buf, 16)
+				hi := windows.readU32(buf, 20)
+				lo + hi * 4294967296
+			}
+			_ -> windows.readU32(buf, 12)
+		}
+	}
+}
+
+// getPeakWorkingSetSize() — peak working set in bytes.
+fn getPeakWorkingSetSize() {
+	buf := windows._zeros(_PMC_SIZE)
+	windows.writeU32(buf, 0, _PMC_SIZE)
+	ok := windows.kernel32('K32GetProcessMemoryInfo', _getCurrentProcess(), windows.addr(buf), _PMC_SIZE)
+	if ok != 0 -> {
+		if windows.ptrSize = 8 {
+			true -> {
+				lo := windows.readU32(buf, 8)
+				hi := windows.readU32(buf, 12)
+				lo + hi * 4294967296
+			}
+			_ -> windows.readU32(buf, 8)
+		}
+	}
+}
+
+// ─── Leak detector state ─────────────────────────────────────────────────────
+
+// leakDetectorState() — create a new leak detector with baseline snapshot.
+fn leakDetectorState() {
+	{
+		snapshots: []
+		baseline: ?
+		alerts: []
+		thresholds: {
+			gdiDelta: 50       // alert if GDI objects grow by this much
+			userDelta: 50      // alert if USER objects grow by this much
+			handleDelta: 100   // alert if handles grow by this much
+			memoryDeltaMB: 50  // alert if working set grows by this much (MB)
+		}
+	}
+}
+
+// leakSnapshot(state) — take a snapshot of current resource usage.
+fn leakSnapshot(state) {
+	snap := {
+		timestamp: nanotime()
+		gdiObjects: getGDIObjectCount()
+		userObjects: getUserObjectCount()
+		gdiPeak: getGDIObjectPeak()
+		userPeak: getUserObjectPeak()
+		handles: getHandleCount()
+		workingSetBytes: getWorkingSetSize()
+		peakWorkingSetBytes: getPeakWorkingSetSize()
+	}
+	state.snapshots <- state.snapshots << snap
+	if state.baseline = ? -> state.baseline := snap
+	state
+}
+
+// leakCheck(state) — compare latest snapshot against baseline, return alerts.
+fn leakCheck(state) {
+	if len(state.snapshots) < 2 -> {
+		state.alerts := []
+		state
+	}
+	base := state.baseline
+	latest := state.snapshots.(len(state.snapshots) - 1)
+	alerts := []
+	t := state.thresholds
+
+	gdiDelta := latest.gdiObjects - base.gdiObjects
+	if gdiDelta > t.gdiDelta -> {
+		alerts <- alerts << {
+			type: 'gdi'
+			message: 'GDI objects grew by ' + string(gdiDelta) + ' (from ' + string(base.gdiObjects) + ' to ' + string(latest.gdiObjects) + ')'
+			severity: if gdiDelta > t.gdiDelta * 3 {
+				true -> 'critical'
+				_ -> 'warning'
+			}
+		}
+	}
+
+	userDelta := latest.userObjects - base.userObjects
+	if userDelta > t.userDelta -> {
+		alerts <- alerts << {
+			type: 'user'
+			message: 'USER objects grew by ' + string(userDelta) + ' (from ' + string(base.userObjects) + ' to ' + string(latest.userObjects) + ')'
+			severity: if userDelta > t.userDelta * 3 {
+				true -> 'critical'
+				_ -> 'warning'
+			}
+		}
+	}
+
+	handleDelta := latest.handles - base.handles
+	if handleDelta > t.handleDelta -> {
+		alerts <- alerts << {
+			type: 'handles'
+			message: 'Handles grew by ' + string(handleDelta) + ' (from ' + string(base.handles) + ' to ' + string(latest.handles) + ')'
+			severity: if handleDelta > t.handleDelta * 3 {
+				true -> 'critical'
+				_ -> 'warning'
+			}
+		}
+	}
+
+	memDeltaBytes := latest.workingSetBytes - base.workingSetBytes
+	memDeltaMB := memDeltaBytes / 1048576
+	if memDeltaMB > t.memoryDeltaMB -> {
+		alerts <- alerts << {
+			type: 'memory'
+			message: 'Working set grew by ' + string(memDeltaMB) + ' MB (from ' + string(base.workingSetBytes / 1048576) + ' MB to ' + string(latest.workingSetBytes / 1048576) + ' MB)'
+			severity: if memDeltaMB > t.memoryDeltaMB * 3 {
+				true -> 'critical'
+				_ -> 'warning'
+			}
+		}
+	}
+
+	state.alerts := alerts
+	state
+}
+
+// leakReport(state) — generate a text report of resource usage and alerts.
+fn leakReport(state) {
+	report := '=== Leak Detector Report ===\n'
+
+	if len(state.snapshots) > 0 -> {
+		latest := state.snapshots.(len(state.snapshots) - 1)
+		report <- report + '\nCurrent:\n'
+		report <- report + '  GDI objects:  ' + string(latest.gdiObjects) + ' (peak: ' + string(latest.gdiPeak) + ')\n'
+		report <- report + '  USER objects: ' + string(latest.userObjects) + ' (peak: ' + string(latest.userPeak) + ')\n'
+		report <- report + '  Handles:      ' + string(latest.handles) + '\n'
+		report <- report + '  Working set:  ' + string(latest.workingSetBytes / 1048576) + ' MB (peak: ' + string(latest.peakWorkingSetBytes / 1048576) + ' MB)\n'
+	}
+
+	if state.baseline != ? -> {
+		base := state.baseline
+		report <- report + '\nBaseline:\n'
+		report <- report + '  GDI objects:  ' + string(base.gdiObjects) + '\n'
+		report <- report + '  USER objects: ' + string(base.userObjects) + '\n'
+		report <- report + '  Handles:      ' + string(base.handles) + '\n'
+		report <- report + '  Working set:  ' + string(base.workingSetBytes / 1048576) + ' MB\n'
+	}
+
+	report <- report + '\nSnapshots: ' + string(len(state.snapshots)) + '\n'
+
+	if len(state.alerts) > 0 {
+		true -> {
+			report <- report + '\nAlerts:\n'
+			each(state.alerts, fn(a) {
+				report <- report + '  [' + a.severity + '] ' + a.type + ': ' + a.message + '\n'
+			})
+		}
+		_ -> report <- report + '\nNo leak alerts.\n'
+	}
+
+	report
+}
+
+// leakSetThresholds(state, thresholds) — update alert thresholds.
+fn leakSetThresholds(state, thresholds) {
+	if thresholds.gdiDelta != ? -> state.thresholds.gdiDelta := thresholds.gdiDelta
+	if thresholds.userDelta != ? -> state.thresholds.userDelta := thresholds.userDelta
+	if thresholds.handleDelta != ? -> state.thresholds.handleDelta := thresholds.handleDelta
+	if thresholds.memoryDeltaMB != ? -> state.thresholds.memoryDeltaMB := thresholds.memoryDeltaMB
+	state
+}
+
+// leakResetBaseline(state) — reset the baseline to the latest snapshot.
+fn leakResetBaseline(state) {
+	if len(state.snapshots) > 0 -> {
+		state.baseline := state.snapshots.(len(state.snapshots) - 1)
+	}
+	state.alerts := []
+	state
+}
+
+// leakTrend(state) — return an array of deltas between consecutive snapshots.
+fn leakTrend(state) {
+	snaps := state.snapshots
+	trends := []
+	fn sub(i) if i < len(snaps) {
+		true -> {
+			prev := snaps.(i - 1)
+			curr := snaps.(i)
+			trends <- trends << {
+				gdiDelta: curr.gdiObjects - prev.gdiObjects
+				userDelta: curr.userObjects - prev.userObjects
+				handleDelta: curr.handles - prev.handles
+				memoryDeltaBytes: curr.workingSetBytes - prev.workingSetBytes
+			}
+			sub(i + 1)
+		}
+	}
+	if len(snaps) > 1 -> sub(1)
+	trends
+}

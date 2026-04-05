@@ -339,8 +339,9 @@ func (n ifExprNode) pos() pos {
 }
 
 type blockNode struct {
-	exprs []astNode
-	tok   *token
+	exprs    []astNode
+	tok      *token
+	hasLocal bool // true if block contains any local (:=) assignments
 }
 
 func (n blockNode) String() string {
@@ -353,6 +354,16 @@ func (n blockNode) String() string {
 
 func (n blockNode) pos() pos {
 	return n.tok.pos
+}
+
+// exprsHaveLocal returns true if any top-level expression is a local (:=) assignment.
+func exprsHaveLocal(exprs []astNode) bool {
+	for _, expr := range exprs {
+		if assign, ok := expr.(assignmentNode); ok && assign.isLocal {
+			return true
+		}
+	}
+	return false
 }
 
 type parser struct {
@@ -485,15 +496,15 @@ func rewriteClassSugarAssignmentLeft(node astNode, visibleFields, allFields, sha
 		if _, ok := shadowed[n.payload]; ok {
 			return n
 		}
-		if n.payload == "Self" {
-			return identifierNode{payload: selfName, tok: n.tok}
-		}
 		if _, ok := visibleFields[n.payload]; ok {
 			return propertyAccessNode{
 				left:  makeClassSugarSelfNode(selfName, n.tok),
 				right: n,
 				tok:   n.tok,
 			}
+		}
+		if n.payload == "self" || n.payload == "Self" {
+			return identifierNode{payload: selfName, tok: n.tok}
 		}
 		return n
 	case listNode:
@@ -536,15 +547,15 @@ func rewriteClassSugarNode(node astNode, visibleFields, allFields, shadowed map[
 		if _, ok := shadowed[n.payload]; ok {
 			return n
 		}
-		if n.payload == "Self" {
-			return identifierNode{payload: selfName, tok: n.tok}
-		}
 		if _, ok := visibleFields[n.payload]; ok {
 			return propertyAccessNode{
 				left:  makeClassSugarSelfNode(selfName, n.tok),
 				right: n,
 				tok:   n.tok,
 			}
+		}
+		if n.payload == "self" || n.payload == "Self" {
+			return identifierNode{payload: selfName, tok: n.tok}
 		}
 		return n
 	case listNode:
@@ -674,7 +685,7 @@ func rewriteClassSugarNode(node astNode, visibleFields, allFields, shadowed map[
 				addPatternBindings(blockShadowed, assign.left)
 			}
 		}
-		return blockNode{exprs: exprs, tok: n.tok}
+		return blockNode{exprs: exprs, tok: n.tok, hasLocal: exprsHaveLocal(exprs)}
 	default:
 		return node
 	}
@@ -747,7 +758,61 @@ func classBodyFromAssignmentBlock(body astNode, reservedNames []string) (astNode
 	}
 
 	newExprs = append(newExprs, identifierNode{payload: selfName, tok: block.tok})
-	return blockNode{exprs: newExprs, tok: block.tok}, true
+	return blockNode{exprs: newExprs, tok: block.tok, hasLocal: true}, true
+}
+
+// wrapBodyWithSelfVar wraps a non-assignment class body with a self variable
+// so that `self` and `Self` references resolve to the class instance.
+// Retained for alternate desugaring strategy; current path uses classBodyFromAssignmentBlock.
+var _ = wrapBodyWithSelfVar //nolint:unused
+
+func wrapBodyWithSelfVar(body astNode, reservedNames []string) astNode {
+	selfName := "__oakClassSelf"
+	reserved := make(map[string]struct{}, len(reservedNames))
+	for _, name := range reservedNames {
+		if name != "" {
+			reserved[name] = struct{}{}
+		}
+	}
+	for {
+		if _, used := reserved[selfName]; used {
+			selfName += "_"
+			continue
+		}
+		break
+	}
+
+	shadowed := map[string]struct{}{selfName: {}}
+	empty := map[string]struct{}{}
+	rewrittenBody := rewriteClassSugarNode(body, empty, empty, shadowed, selfName)
+
+	var nodeTok *token
+	switch n := body.(type) {
+	case identifierNode:
+		nodeTok = n.tok
+	case blockNode:
+		nodeTok = n.tok
+	case fnNode:
+		nodeTok = n.tok
+	case objectNode:
+		nodeTok = n.tok
+	case ifExprNode:
+		nodeTok = n.tok
+	default:
+		p := body.pos()
+		nodeTok = &token{pos: p}
+	}
+
+	newExprs := []astNode{
+		assignmentNode{
+			isLocal: true,
+			left:    identifierNode{payload: selfName, tok: nodeTok},
+			right:   objectNode{entries: []objectEntry{}, tok: nodeTok},
+			tok:     nodeTok,
+		},
+		rewrittenBody,
+	}
+	return blockNode{exprs: newExprs, tok: nodeTok, hasLocal: true}
 }
 
 func (p *parser) tryParseClassParentsClause() ([]astNode, astNode, bool, error) {
@@ -985,6 +1050,8 @@ func (p *parser) parseUnit() (astNode, error) {
 		switch p.peek().kind {
 		case identifier:
 			return atomNode{payload: p.next().payload, tok: &tok}, nil
+		case numberLiteral:
+			return atomNode{payload: p.next().payload, tok: &tok}, nil
 		case ifKeyword:
 			p.next()
 			return atomNode{payload: "if", tok: &tok}, nil
@@ -1128,7 +1195,7 @@ func (p *parser) parseUnit() (astNode, error) {
 			return nil, err
 		}
 
-		return blockNode{exprs: exprs, tok: &tok}, nil
+		return blockNode{exprs: exprs, tok: &tok, hasLocal: exprsHaveLocal(exprs)}, nil
 	case fnKeyword:
 		p.pushMinPrec(0)
 		defer p.popMinPrec()
@@ -1264,6 +1331,13 @@ func (p *parser) parseUnit() (astNode, error) {
 				return nil, err
 			}
 			if ok {
+				reservedNamesInherited := append([]string{}, args...)
+				if restArg != "" {
+					reservedNamesInherited = append(reservedNamesInherited, restArg)
+				}
+				if desugaredBody, desOk := classBodyFromAssignmentBlock(body, reservedNamesInherited); desOk {
+					body = desugaredBody
+				}
 				return classNode{
 					name:        nameTok.payload,
 					args:        args,
@@ -1467,9 +1541,18 @@ func (p *parser) parseUnit() (astNode, error) {
 		if _, err := p.expect(rightParen); err != nil {
 			return nil, err
 		}
-		// TODO: If only one body expr and body expr is identifier or literal,
-		// unwrap the blockNode and just return the bare child
-		return blockNode{exprs: exprs, tok: &tok}, nil
+		// Unwrap single-expression blocks when safe: (2+3), (fn ...) etc.
+		// Do NOT unwrap bare identifiers — (i) in property access list.(i) must
+		// remain a blockNode so evalAsObjKey treats it as a computed key.
+		if len(exprs) == 1 {
+			switch exprs[0].(type) {
+			case identifierNode:
+				// keep as blockNode — needed for computed property access
+			default:
+				return exprs[0], nil
+			}
+		}
+		return blockNode{exprs: exprs, tok: &tok, hasLocal: exprsHaveLocal(exprs)}, nil
 	}
 	return nil, parseError{
 		reason: fmt.Sprintf("Unexpected token %s at start of unit", tok),

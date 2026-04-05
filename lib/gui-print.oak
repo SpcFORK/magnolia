@@ -1,0 +1,447 @@
+// gui-print provides Win32 print dialog and GDI print rendering for the
+// Magnolia GUI. Supports: PrintDlgW, StartDoc/StartPage/EndPage/EndDoc,
+// print preview (off-screen DC), and PDF export via print-to-file.
+
+sys := import('sys')
+windows := import('windows')
+{
+	readU32: readU32
+	writeU32: writeU32
+	writeU64: writeU64
+} := import('writes')
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+// PRINTDLGW flags (PD_*)
+PD_ALLPAGES := 0
+PD_SELECTION := 1
+PD_PAGENUMS := 2
+PD_NOSELECTION := 4
+PD_NOPAGENUMS := 8
+PD_COLLATE := 16
+PD_PRINTTOFILE := 32
+PD_PRINTSETUP := 64
+PD_NOWARNING := 128
+PD_RETURNDC := 256
+PD_RETURNIC := 512
+PD_RETURNDEFAULT := 1024
+PD_SHOWHELP := 2048
+PD_USEDEVMODECOPIES := 262144
+PD_DISABLEPRINTTOFILE := 524288
+PD_HIDEPRINTTOFILE := 1048576
+PD_CURRENTPAGE := 4194304
+
+// DOCINFOW dwType flags
+DI_APPBANDING := 1
+
+// ─── PRINTDLGW struct layout (64-bit) ───────────────────────────────────────
+// lStructSize (4) + pad(4) + hwndOwner (8) + hDevMode (8) + hDevNames (8) +
+// hDC (8) + Flags (4) + nFromPage (2) + nToPage (2) + nMinPage (2) +
+// nMaxPage (2) + nCopies (2) + pad(2) + hInstance (8) + lCustData (8) +
+// lpfnPrintHook (8) + lpfnSetupHook (8) + lpPrintTemplateName (8) +
+// lpSetupTemplateName (8) + hPrintTemplate (8) + hSetupTemplate (8) = 120 bytes
+_PRINTDLGW_SIZE := if windows.ptrSize() = 8 { true -> 120, _ -> 66 }
+
+// Field offsets (64-bit)
+_PD_OFF_HWNDOWNER := 8
+_PD_OFF_HDEVMODE := 16
+_PD_OFF_HDEVNAMES := 24
+_PD_OFF_HDC := 32
+_PD_OFF_FLAGS := 40
+_PD_OFF_FROMPAGE := 44
+_PD_OFF_TOPAGE := 46
+_PD_OFF_MINPAGE := 48
+_PD_OFF_MAXPAGE := 50
+_PD_OFF_NCOPIES := 52
+
+// DOCINFOW struct (64-bit):
+// cbSize(4) + pad(4) + lpszDocName(8) + lpszOutput(8) + lpszDatatype(8) + fwType(4) = 36, padded to 40
+_DOCINFOW_SIZE := if windows.ptrSize() = 8 { true -> 40, _ -> 20 }
+_DI_OFF_DOCNAME := if windows.ptrSize() = 8 { true -> 8, _ -> 4 }
+_DI_OFF_OUTPUT := if windows.ptrSize() = 8 { true -> 16, _ -> 8 }
+_DI_OFF_DATATYPE := if windows.ptrSize() = 8 { true -> 24, _ -> 12 }
+_DI_OFF_FWTYPE := if windows.ptrSize() = 8 { true -> 32, _ -> 16 }
+
+// ─── _writeU16 helper ────────────────────────────────────────────────────────
+fn _writeU16(base, value) {
+	memwrite(pointer(base), char(value & 255) + char((value >> 8) & 255))
+}
+
+fn _readU16(base) {
+	lo := int(bits(memread(pointer(base), 1)).(0))
+	hi := int(bits(memread(pointer(base + 1), 1)).(0))
+	lo + hi * 256
+}
+
+// ─── Print Dialog ────────────────────────────────────────────────────────────
+
+// showPrintDialog(options) — display the Windows print dialog.
+// options: { hwnd, flags, fromPage, toPage, minPage, maxPage, copies }
+// Returns { type: :ok, hDC, fromPage, toPage, copies, flags } on success,
+//         { type: :cancel } if user cancelled,
+//         { type: :error, error } on failure.
+fn showPrintDialog(options) {
+	opts := if options = ? -> {}
+	hwnd := if opts.hwnd { ? -> 0, _ -> opts.hwnd }
+	flags := if opts.flags { ? -> PD_RETURNDC | PD_NOSELECTION, _ -> opts.flags | PD_RETURNDC }
+	fromPage := if opts.fromPage { ? -> 1, _ -> opts.fromPage }
+	toPage := if opts.toPage { ? -> 1, _ -> opts.toPage }
+	minPage := if opts.minPage { ? -> 1, _ -> opts.minPage }
+	maxPage := if opts.maxPage { ? -> 9999, _ -> opts.maxPage }
+	copies := if opts.copies { ? -> 1, _ -> opts.copies }
+
+	buf := bits(windows._zeros(_PRINTDLGW_SIZE, ''))
+	base := addr(buf)
+
+	// lStructSize
+	writeU32(base, _PRINTDLGW_SIZE)
+	// hwndOwner
+	windows.writePtr(base + _PD_OFF_HWNDOWNER, hwnd)
+	// Flags
+	writeU32(base + _PD_OFF_FLAGS, flags)
+	// nFromPage / nToPage / nMinPage / nMaxPage / nCopies (2 bytes each)
+	_writeU16(base + _PD_OFF_FROMPAGE, fromPage)
+	_writeU16(base + _PD_OFF_TOPAGE, toPage)
+	_writeU16(base + _PD_OFF_MINPAGE, minPage)
+	_writeU16(base + _PD_OFF_MAXPAGE, maxPage)
+	_writeU16(base + _PD_OFF_NCOPIES, copies)
+
+	res := windows.comdlg32('PrintDlgW', base)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			// Read back results
+			hDC := if windows.ptrSize() = 8 {
+				true -> readU32(base + _PD_OFF_HDC) + readU32(base + _PD_OFF_HDC + 4) * 4294967296
+				_ -> readU32(base + _PD_OFF_HDC)
+			}
+			retFlags := readU32(base + _PD_OFF_FLAGS)
+			retFrom := _readU16(base + _PD_OFF_FROMPAGE)
+			retTo := _readU16(base + _PD_OFF_TOPAGE)
+			retCopies := _readU16(base + _PD_OFF_NCOPIES)
+			// Free DEVMODE and DEVNAMES handles if allocated
+			hDevMode := if windows.ptrSize() = 8 {
+				true -> readU32(base + _PD_OFF_HDEVMODE) + readU32(base + _PD_OFF_HDEVMODE + 4) * 4294967296
+				_ -> readU32(base + _PD_OFF_HDEVMODE)
+			}
+			hDevNames := if windows.ptrSize() = 8 {
+				true -> readU32(base + _PD_OFF_HDEVNAMES) + readU32(base + _PD_OFF_HDEVNAMES + 4) * 4294967296
+				_ -> readU32(base + _PD_OFF_HDEVNAMES)
+			}
+			if hDevMode > 0 -> windows.kernel32('GlobalFree', hDevMode)
+			if hDevNames > 0 -> windows.kernel32('GlobalFree', hDevNames)
+			{
+				type: :ok
+				hDC: hDC
+				fromPage: retFrom
+				toPage: retTo
+				copies: retCopies
+				flags: retFlags
+				printToFile?: (retFlags & PD_PRINTTOFILE) > 0
+			}
+		}
+		_ -> { type: :cancel }
+	}
+}
+
+// ─── GDI Print Rendering ────────────────────────────────────────────────────
+
+// startDoc(hDC, docName, outputFile) — begin a print job.
+// outputFile can be ? for default printer output, or a file path for PDF/XPS.
+// Returns { type: :ok, jobId } or { type: :error }.
+fn startDoc(hDC, docName, outputFile) {
+	nameStr := windows.wstr(if docName = ? -> 'Magnolia Print Job')
+	buf := bits(windows._zeros(_DOCINFOW_SIZE, ''))
+	base := addr(buf)
+	writeU32(base, _DOCINFOW_SIZE)
+	windows.writePtr(base + _DI_OFF_DOCNAME, addr(nameStr))
+	if outputFile != ? -> {
+		outStr := windows.wstr(outputFile)
+		windows.writePtr(base + _DI_OFF_OUTPUT, addr(outStr))
+	}
+	res := windows.gdi32('StartDocW', hDC, base)
+	if windows.callOk?(res) & res.r1 > 0 {
+		true -> { type: :ok, jobId: res.r1 }
+		_ -> { type: :error, error: 'StartDocW failed' }
+	}
+}
+
+// startPage(hDC) — begin a new page.
+fn startPage(hDC) {
+	res := windows.gdi32('StartPage', hDC)
+	windows.callOk?(res) & res.r1 > 0
+}
+
+// endPage(hDC) — end the current page.
+fn endPage(hDC) {
+	res := windows.gdi32('EndPage', hDC)
+	windows.callOk?(res) & res.r1 > 0
+}
+
+// endDoc(hDC) — end the print job.
+fn endDoc(hDC) {
+	res := windows.gdi32('EndDoc', hDC)
+	windows.callOk?(res) & res.r1 > 0
+}
+
+// abortDoc(hDC) — cancel the print job.
+fn abortDoc(hDC) {
+	res := windows.gdi32('AbortDoc', hDC)
+	windows.callOk?(res)
+}
+
+// deleteDC(hDC) — release a printer DC.
+fn deleteDC(hDC) {
+	windows.gdi32('DeleteDC', hDC)
+}
+
+// ─── GDI Drawing on Printer DC ──────────────────────────────────────────────
+
+// printTextOut(hDC, x, y, text) — draw text at (x, y) on the printer DC.
+fn printTextOut(hDC, x, y, text) {
+	wText := windows.wstr(text)
+	wLen := int(len(wText) / 2) - 1
+	windows.gdi32('TextOutW', hDC, x, y, addr(wText), wLen)
+}
+
+// printMoveTo(hDC, x, y) — move the current position.
+fn printMoveTo(hDC, x, y) {
+	windows.gdi32('MoveToEx', hDC, x, y, 0)
+}
+
+// printLineTo(hDC, x, y) — draw a line from current position.
+fn printLineTo(hDC, x, y) {
+	windows.gdi32('LineTo', hDC, x, y)
+}
+
+// printRectangle(hDC, left, top, right, bottom) — draw a rectangle.
+fn printRectangle(hDC, left, top, right, bottom) {
+	windows.gdi32('Rectangle', hDC, left, top, right, bottom)
+}
+
+// printEllipse(hDC, left, top, right, bottom) — draw an ellipse.
+fn printEllipse(hDC, left, top, right, bottom) {
+	windows.gdi32('Ellipse', hDC, left, top, right, bottom)
+}
+
+// printSetFont(hDC, height, weight, italic, fontName) — create and select a font.
+// Returns the handle to the old font (save for cleanup).
+fn printSetFont(hDC, height, weight, italic, fontName) {
+	wName := windows.wstr(fontName)
+	hFont := windows.gdi32('CreateFontW', height, 0, 0, 0, weight, if italic { true -> 1, _ -> 0 }, 0, 0, 0, 0, 0, 0, 0, addr(wName))
+	if windows.callOk?(hFont) & hFont.r1 != 0 {
+		true -> {
+			oldFont := windows.gdi32('SelectObject', hDC, hFont.r1)
+			if windows.callOk?(oldFont) { true -> oldFont.r1, _ -> 0 }
+		}
+		_ -> 0
+	}
+}
+
+// printSetTextColor(hDC, r, g, b) — set the text color.
+fn printSetTextColor(hDC, r, g, b) {
+	colorRef := r + g * 256 + b * 65536
+	windows.gdi32('SetTextColor', hDC, colorRef)
+}
+
+// printSetBkMode(hDC, mode) — set background mode (1=TRANSPARENT, 2=OPAQUE).
+fn printSetBkMode(hDC, mode) {
+	windows.gdi32('SetBkMode', hDC, mode)
+}
+
+// printSetPen(hDC, style, width, r, g, b) — create and select a pen.
+// style: 0=solid, 1=dash, 2=dot, 3=dashdot, 5=null
+// Returns old pen handle.
+fn printSetPen(hDC, style, width, r, g, b) {
+	colorRef := r + g * 256 + b * 65536
+	hPen := windows.gdi32('CreatePen', style, width, colorRef)
+	if windows.callOk?(hPen) & hPen.r1 != 0 {
+		true -> {
+			old := windows.gdi32('SelectObject', hDC, hPen.r1)
+			if windows.callOk?(old) { true -> old.r1, _ -> 0 }
+		}
+		_ -> 0
+	}
+}
+
+// printDeleteObject(hObj) — delete a GDI object (pen, brush, font).
+fn printDeleteObject(hObj) {
+	if hObj != 0 & hObj != ? -> windows.gdi32('DeleteObject', hObj)
+}
+
+// ─── Printer info ────────────────────────────────────────────────────────────
+
+// getDeviceCaps(hDC, index) — query printer device capabilities.
+// Common indices: HORZRES=8, VERTRES=10, LOGPIXELSX=88, LOGPIXELSY=90,
+// PHYSICALWIDTH=110, PHYSICALHEIGHT=111, PHYSICALOFFSETX=112, PHYSICALOFFSETY=113
+DEVCAP_HORZRES := 8
+DEVCAP_VERTRES := 10
+DEVCAP_LOGPIXELSX := 88
+DEVCAP_LOGPIXELSY := 90
+DEVCAP_PHYSICALWIDTH := 110
+DEVCAP_PHYSICALHEIGHT := 111
+DEVCAP_PHYSICALOFFSETX := 112
+DEVCAP_PHYSICALOFFSETY := 113
+
+fn getDeviceCaps(hDC, index) {
+	res := windows.gdi32('GetDeviceCaps', hDC, index)
+	if windows.callOk?(res) { true -> res.r1, _ -> 0 }
+}
+
+// getPrinterPageSize(hDC) — convenience: get printable area and DPI.
+fn getPrinterPageSize(hDC) {
+	{
+		width: getDeviceCaps(hDC, DEVCAP_HORZRES)
+		height: getDeviceCaps(hDC, DEVCAP_VERTRES)
+		dpiX: getDeviceCaps(hDC, DEVCAP_LOGPIXELSX)
+		dpiY: getDeviceCaps(hDC, DEVCAP_LOGPIXELSY)
+		physWidth: getDeviceCaps(hDC, DEVCAP_PHYSICALWIDTH)
+		physHeight: getDeviceCaps(hDC, DEVCAP_PHYSICALHEIGHT)
+		offsetX: getDeviceCaps(hDC, DEVCAP_PHYSICALOFFSETX)
+		offsetY: getDeviceCaps(hDC, DEVCAP_PHYSICALOFFSETY)
+	}
+}
+
+// ─── Print preview (off-screen DC) ──────────────────────────────────────────
+
+// createPreviewDC(width, height) — create an off-screen compatible DC for preview.
+// Returns { type: :ok, hDC, hBitmap } or { type: :error }.
+fn createPreviewDC(width, height) {
+	screenDC := windows.user32('GetDC', 0)
+	if windows.callOk?(screenDC) & screenDC.r1 != 0 {
+		true -> {
+			hMemDC := windows.gdi32('CreateCompatibleDC', screenDC.r1)
+			if windows.callOk?(hMemDC) & hMemDC.r1 != 0 {
+				true -> {
+					hBitmap := windows.gdi32('CreateCompatibleBitmap', screenDC.r1, width, height)
+					windows.user32('ReleaseDC', 0, screenDC.r1)
+					if windows.callOk?(hBitmap) & hBitmap.r1 != 0 {
+						true -> {
+							windows.gdi32('SelectObject', hMemDC.r1, hBitmap.r1)
+							// Fill with white
+							whiteBrush := windows.gdi32('GetStockObject', 0)
+							if windows.callOk?(whiteBrush) -> {
+								// RECT: left, top, right, bottom
+								rectBuf := bits(windows._zeros(16, ''))
+								writeU32(addr(rectBuf), 0)
+								writeU32(addr(rectBuf) + 4, 0)
+								writeU32(addr(rectBuf) + 8, width)
+								writeU32(addr(rectBuf) + 12, height)
+								windows.user32('FillRect', hMemDC.r1, addr(rectBuf), whiteBrush.r1)
+							}
+							{
+								type: :ok
+								hDC: hMemDC.r1
+								hBitmap: hBitmap.r1
+								width: width
+								height: height
+							}
+						}
+						_ -> {
+							windows.gdi32('DeleteDC', hMemDC.r1)
+							{ type: :error, error: 'CreateCompatibleBitmap failed' }
+						}
+					}
+				}
+				_ -> {
+					windows.user32('ReleaseDC', 0, screenDC.r1)
+					{ type: :error, error: 'CreateCompatibleDC failed' }
+				}
+			}
+		}
+		_ -> { type: :error, error: 'GetDC failed' }
+	}
+}
+
+// destroyPreviewDC(preview) — release preview DC resources.
+fn destroyPreviewDC(preview) {
+	if preview.type = :ok -> {
+		windows.gdi32('DeleteDC', preview.hDC)
+		windows.gdi32('DeleteObject', preview.hBitmap)
+	}
+}
+
+// ─── PDF / XPS export ────────────────────────────────────────────────────────
+
+// printToFile(outputPath, docName, renderFn) — print to a file (PDF via XPS/PDF printer).
+// renderFn(hDC, pageSize) is called to draw each page.
+// Uses the default print-to-file mechanism: selects a virtual printer, sets output path.
+// For reliable PDF output, user should have "Microsoft Print to PDF" installed.
+fn printToFile(outputPath, docName, renderFn) {
+	// Show print dialog with PD_PRINTTOFILE pre-selected
+	result := showPrintDialog({
+		flags: PD_RETURNDC | PD_PRINTTOFILE
+	})
+	if result.type = :ok {
+		true -> {
+			hDC := result.hDC
+			doc := startDoc(hDC, docName, outputPath)
+			if doc.type = :ok {
+				true -> {
+					pageSize := getPrinterPageSize(hDC)
+					if startPage(hDC) -> {
+						renderFn(hDC, pageSize)
+						endPage(hDC)
+					}
+					endDoc(hDC)
+					deleteDC(hDC)
+					{ type: :ok, path: outputPath }
+				}
+				_ -> {
+					deleteDC(hDC)
+					{ type: :error, error: 'StartDoc failed' }
+				}
+			}
+		}
+		_ -> result
+	}
+}
+
+// printDocument(options, renderPageFn) — high-level print helper.
+// Shows dialog, prints pages. renderPageFn(hDC, pageSize, pageNum) is called per page.
+// options: { hwnd, docName, pageCount }
+fn printDocument(options, renderPageFn) {
+	opts := if options = ? -> {}
+	docName := if opts.docName { ? -> 'Document', _ -> opts.docName }
+	pageCount := if opts.pageCount { ? -> 1, _ -> opts.pageCount }
+
+	result := showPrintDialog({
+		hwnd: opts.hwnd
+		fromPage: 1
+		toPage: pageCount
+		minPage: 1
+		maxPage: pageCount
+	})
+	if result.type = :ok {
+		true -> {
+			hDC := result.hDC
+			doc := startDoc(hDC, docName, ?)
+			if doc.type = :ok {
+				true -> {
+					pageSize := getPrinterPageSize(hDC)
+					from := result.fromPage
+					to := result.toPage
+					fn printPages(p) if p <= to -> {
+						if startPage(hDC) -> {
+							renderPageFn(hDC, pageSize, p)
+							endPage(hDC)
+						}
+						printPages(p + 1)
+					}
+					fn printCopies(c) if c < result.copies -> {
+						printPages(from)
+						printCopies(c + 1)
+					}
+					printCopies(0)
+					endDoc(hDC)
+					deleteDC(hDC)
+					{ type: :ok, fromPage: from, toPage: to, copies: result.copies }
+				}
+				_ -> {
+					deleteDC(hDC)
+					{ type: :error, error: 'StartDoc failed' }
+				}
+			}
+		}
+		_ -> result
+	}
+}

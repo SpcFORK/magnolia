@@ -3,6 +3,8 @@
 //
 // This library enables shell-like functionality in Oak, including command
 // execution, directory navigation, and filesystem operations.
+// Supports pipes, redirections, quoted arguments, glob expansion,
+// command history, and aliases.
 
 {
 	default: default
@@ -18,6 +20,11 @@
 	merge: merge
 	keys: keys
 	compact: compact
+	indexOf: indexOf
+	take: take
+	range: range
+	reverse: reverse
+	some: some
 } := import('std')
 {
 	join: join
@@ -29,6 +36,8 @@
 	contains?: strContains?
 	startsWith?: startsWith?
 	endsWith?: endsWith?
+	padStart: padStart
+	padEnd: padEnd
 } := import('str')
 {
 	printf: printf
@@ -36,6 +45,242 @@
 } := import('fmt')
 path := import('path')
 fs := import('fs')
+
+// tokenizeLine splits a command line into tokens, respecting single and double
+// quotes. Handles escaped quotes within quoted strings.
+//
+// Example:
+//   tokenizeLine('echo "hello world" \'foo bar\'')
+//   // => ['echo', 'hello world', 'foo bar']
+fn tokenizeLine(line) {
+	tokens := []
+	current := ''
+	i := 0
+	n := len(line)
+
+	fn flush() if current != '' {
+		true -> {
+			tokens << current
+			current <- ''
+		}
+	}
+
+	fn loop() if i < n {
+		true -> {
+			ch := line.(i)
+			if ch {
+				' ', '\t' -> {
+					flush()
+					i <- i + 1
+				}
+				'\'' -> {
+					// single-quoted string: no escape processing
+					i <- i + 1
+					fn sqLoop() if i < n {
+						true -> if line.(i) = '\'' {
+							true -> i <- i + 1
+							_ -> {
+								current <- current << line.(i)
+								i <- i + 1
+								sqLoop()
+							}
+						}
+						_ -> ?
+					}
+					sqLoop()
+				}
+				'"' -> {
+					// double-quoted string: backslash escapes
+					i <- i + 1
+					fn dqLoop() if i < n {
+						true -> if line.(i) = '"' {
+							true -> i <- i + 1
+							_ -> if line.(i) = '\\' & (i + 1) < n {
+								true -> {
+									i <- i + 1
+									current <- current << line.(i)
+									i <- i + 1
+									dqLoop()
+								}
+								_ -> {
+									current <- current << line.(i)
+									i <- i + 1
+									dqLoop()
+								}
+							}
+						}
+						_ -> ?
+					}
+					dqLoop()
+				}
+				'\\' -> if (i + 1) < n {
+					// escaped character outside quotes
+					true -> {
+						i <- i + 1
+						current <- current << line.(i)
+						i <- i + 1
+					}
+					_ -> {
+						current <- current << '\\'
+						i <- i + 1
+					}
+				}
+				_ -> {
+					current <- current << ch
+					i <- i + 1
+				}
+			}
+			loop()
+		}
+	}
+
+	loop()
+	flush()
+	tokens
+}
+
+// splitPipeline splits a token list at bare '|' tokens into pipeline stages.
+//
+// Example:
+//   splitPipeline(['ls', '|', 'grep', 'foo'])
+//   // => [['ls'], ['grep', 'foo']]
+fn splitPipeline(tokens) {
+	stages := []
+	current := []
+	each(tokens, fn(tok) if tok {
+		'|' -> {
+			stages << current
+			current <- []
+		}
+		_ -> current << tok
+	})
+	if len(current) > 0 {
+		true -> stages << current
+	}
+	stages
+}
+
+// parseRedirections extracts >, >>, and < redirections from a token list,
+// returning {tokens: [...], stdout: ?, append: false, stdin: ?}.
+fn parseRedirections(tokens) {
+	result := { tokens: [], stdout: ?, append: false, stdin: ? }
+	i := 0
+	n := len(tokens)
+	fn loop() if i < n {
+		true -> {
+			tok := tokens.(i)
+			if tok {
+				'>>' -> if (i + 1) < n {
+					true -> {
+						result.stdout <- tokens.(i + 1)
+						result.append <- true
+						i <- i + 2
+					}
+					_ -> {
+						result.tokens << tok
+						i <- i + 1
+					}
+				}
+				'>' -> if (i + 1) < n {
+					true -> {
+						result.stdout <- tokens.(i + 1)
+						result.append <- false
+						i <- i + 2
+					}
+					_ -> {
+						result.tokens << tok
+						i <- i + 1
+					}
+				}
+				'<' -> if (i + 1) < n {
+					true -> {
+						result.stdin <- tokens.(i + 1)
+						i <- i + 2
+					}
+					_ -> {
+						result.tokens << tok
+						i <- i + 1
+					}
+				}
+				_ -> {
+					result.tokens << tok
+					i <- i + 1
+				}
+			}
+			loop()
+		}
+	}
+	loop()
+	result
+}
+
+// globMatch? tests whether a filename matches a simple glob pattern
+// supporting * (any sequence) and ? (single char).
+fn globMatch?(pattern, name) {
+	pi := 0
+	ni := 0
+	pn := len(pattern)
+	nn := len(name)
+	starPi := -1
+	starNi := -1
+
+	fn loop() {
+		if pi < pn {
+			true -> if pattern.(pi) = '*' {
+				true -> {
+					starPi <- pi
+					starNi <- ni
+					pi <- pi + 1
+					loop()
+				}
+				_ -> if ni < nn {
+					true -> if pattern.(pi) = '?' | pattern.(pi) = name.(ni) {
+						true -> {
+							pi <- pi + 1
+							ni <- ni + 1
+							loop()
+						}
+						_ -> if starPi >= 0 {
+							true -> {
+								pi <- starPi + 1
+								starNi <- starNi + 1
+								ni <- starNi
+								loop()
+							}
+							_ -> false
+						}
+					}
+					_ -> if starPi >= 0 {
+						true -> {
+							pi <- starPi + 1
+							starNi <- starNi + 1
+							ni <- starNi
+							loop()
+						}
+						_ -> false
+					}
+				}
+			}
+			_ -> if ni < nn {
+				true -> if starPi >= 0 {
+					true -> {
+						pi <- starPi + 1
+						starNi <- starNi + 1
+						ni <- starNi
+						loop()
+					}
+					_ -> false
+				}
+				_ -> true
+			}
+		}
+	}
+
+	loop()
+}
+
+// hasGlobChars? returns true if the string contains * or ? glob characters.
+fn hasGlobChars?(s) strContains?(s, '*') | strContains?(s, '?')
 
 // normalizePath resolves relative paths and handles special cases.
 // Takes a current directory and target path, returns normalized absolute path.
@@ -96,6 +341,9 @@ cs Shell(vfs?) {
 		HOME: '/home'
 		PWD: '/'
 	}
+	aliases := {}
+	history := []
+	_historyMax := 500
 
 	// determine which filesystem to use
 	filesystem := if vfs? {
@@ -103,13 +351,73 @@ cs Shell(vfs?) {
 		_ -> vfs?
 	}
 
+	// Output capture support for pipes and redirections.
+	// _out is the current data output function; normally printf.
+	// During capture, _out writes to _outBuf instead.
+	_out := printf
+	_outBuf := ''
+
+	fn _beginCapture() {
+		_outBuf <- ''
+		_out <- fn(fmtStr, xs...) {
+			_outBuf <- _outBuf << format(fmtStr, xs...)
+		}
+	}
+
+	fn _endCapture() {
+		_out <- printf
+		result := _outBuf
+		_outBuf <- ''
+		result
+	}
+
+	// expandGlobs expands glob patterns in a token list against the filesystem.
+	fn expandGlobs(tokens) {
+		tokens |> reduce([], fn(acc, tok) if hasGlobChars?(tok) {
+			true -> {
+				dir := path.dir(tok)
+				pat := path.base(tok)
+				resolvedDir := if dir {
+					'', ? -> currentDir
+					_ -> normalizePath(currentDir, dir)
+				}
+				files := if vfs? != ? {
+					true -> {
+						allFiles := vfs?.listFiles()
+						prefix := if resolvedDir = '/' {
+							true -> '/'
+							_ -> resolvedDir << '/'
+						}
+						allFiles |> filter(fn(f) startsWith?(f, prefix)) |> map(fn(f) slice(f, len(prefix), len(f))) |> filter(fn(f) !strContains?(f, '/'))
+					}
+					_ -> {
+						raw := fs.listFiles(resolvedDir)
+						if raw {
+							? -> []
+							_ -> raw |> map(fn(f) if f.name { ? -> string(f), _ -> f.name })
+						}
+					}
+				}
+				matched := files |> filter(fn(f) globMatch?(pat, f))
+				if len(matched) > 0 {
+					true -> matched |> reduce(acc, fn(a, m) if dir {
+						'', ? -> a << m
+						_ -> a << path.join(dir, m)
+					})
+					_ -> acc << tok
+				}
+			}
+			_ -> acc << tok
+		})
+	}
+
 	// Built-in commands
-	fn cmd_pwd(args) {
-		printf('{{ 0 }}\n', currentDir)
+	fn cmd_pwd(args, stdinData) {
+		_out('{{ 0 }}\n', currentDir)
 		0
 	}
 
-	fn cmd_cd(args) if len(args) {
+	fn cmd_cd(args, stdinData) if len(args) {
 		0 -> {
 			currentDir <- env.HOME
 			env.PWD <- currentDir
@@ -123,14 +431,13 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_ls(args) {
+	fn cmd_ls(args, stdinData) {
 		target := if len(args) > 0 {
 			true -> normalizePath(currentDir, args.0)
 			_ -> currentDir
 		}
 
 		files := if vfs? != ? {
-			// VFS: list all files and filter by path prefix
 			true -> {
 				allFiles := vfs?.listFiles()
 				prefix := if target = '/' {
@@ -145,73 +452,78 @@ cs Shell(vfs?) {
 					_ -> slice(f, len(prefix), len(f))
 				}) |> filter(fn(f) !strContains?(f, '/'))
 			}
-			// Real FS: use actual directory listing
 			_ -> {
 				stat := fs.statFile(target)
 				if stat {
 					? -> []
 					_ -> if stat.dir? {
-						true -> fs.listFiles(target)
+						true -> {
+							raw := fs.listFiles(target)
+							if raw {
+								? -> []
+								_ -> raw |> map(fn(f) if f.name { ? -> string(f), _ -> f.name })
+							}
+						}
 						_ -> [path.base(target)]
 					}
 				}
 			}
 		}
 
-		each(files, fn(f) printf('{{ 0 }}\n', f))
+		output := files |> map(fn(f) f << '\n') |> join('')
+		_out('{{ 0 }}', output)
 		0
 	}
 
-	fn cmd_cat(args) if len(args) {
-		0 -> {
-			printf('cat: missing file argument\n')
-			1
+	fn cmd_cat(args, stdinData) if len(args) {
+		0 -> if stdinData != ? {
+			// cat with no args + piped stdin: just echo stdin
+			true -> {
+				_out('{{ 0 }}', stdinData)
+				0
+			}
+			_ -> {
+				printf('cat: missing file argument\n')
+				1
+			}
 		}
 		_ -> {
-			fn printFile(filepath, idx) {
+			output := ''
+			exitCode := 0
+			each(args, fn(filepath) {
 				fullPath := normalizePath(currentDir, filepath)
 				content := filesystem.readFile(fullPath)
 				if content {
 					? -> {
 						printf('cat: cannot read {{ 0 }}: No such file\n', filepath)
-						1
+						exitCode <- 1
 					}
-					_ -> {
-						printf('{{ 0 }}', content)
-						0
-					}
+					_ -> output <- output << content
 				}
-			}
-
-			results := args |> map(printFile)
-			if contains?(results, 1) {
-				true -> 1
-				_ -> 0
-			}
+			})
+			_out('{{ 0 }}', output)
+			exitCode
 		}
 	}
 
-	fn cmd_echo(args) {
-		printf('{{ 0 }}\n', join(args, ' '))
+	fn cmd_echo(args, stdinData) {
+		_out('{{ 0 }}\n', join(args, ' '))
 		0
 	}
 
-	fn cmd_mkdir(args) if len(args) {
+	fn cmd_mkdir(args, stdinData) if len(args) {
 		0 -> {
 			printf('mkdir: missing directory argument\n')
 			1
 		}
 		_ -> if vfs? != ? {
-			// For VFS, create a placeholder file to represent the directory
 			true -> {
 				each(args, fn(dir) {
 					fullPath := normalizePath(currentDir, dir)
-					// VFS doesn't have real directories, so we just note it
 					printf('mkdir: VFS directory marker: {{ 0 }}\n', fullPath)
 				})
 				0
 			}
-			// For real FS
 			_ -> {
 				each(args, fn(dir) {
 					fullPath := normalizePath(currentDir, dir)
@@ -225,7 +537,7 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_rm(args) {
+	fn cmd_rm(args, stdinData) {
 		recursive? := false
 		files := args |> filter(fn(arg) if arg {
 			'-r', '-rf' -> {
@@ -255,13 +567,12 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_mv(args) if len(args) {
+	fn cmd_mv(args, stdinData) if len(args) {
 		2 -> {
 			src := normalizePath(currentDir, args.0)
 			dst := normalizePath(currentDir, args.1)
 
 			if vfs? != ? {
-				// VFS move (read, write, delete)
 				true -> {
 					content := vfs?.readFile(src)
 					if content {
@@ -276,7 +587,6 @@ cs Shell(vfs?) {
 						}
 					}
 				}
-				// Real FS move
 				_ -> {
 					result := fs.renameFile(src, dst)
 					if result {
@@ -295,7 +605,7 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_cp(args) if len(args) {
+	fn cmd_cp(args, stdinData) if len(args) {
 		2 -> {
 			src := normalizePath(currentDir, args.0)
 			dst := normalizePath(currentDir, args.1)
@@ -318,7 +628,7 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_touch(args) if len(args) {
+	fn cmd_touch(args, stdinData) if len(args) {
 		0 -> {
 			printf('touch: missing file argument\n')
 			1
@@ -326,8 +636,8 @@ cs Shell(vfs?) {
 		_ -> {
 			each(args, fn(file) {
 				fullPath := normalizePath(currentDir, file)
-				// Create empty file if it doesn't exist
-				if !filesystem.exists?(fullPath) {
+				existing := filesystem.readFile(fullPath)
+				if existing = ? {
 					true -> filesystem.writeFile(fullPath, '')
 				}
 			})
@@ -335,16 +645,16 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_env(args) {
+	fn cmd_env(args, stdinData) {
 		entries(env) |> each(fn(entry) {
-			printf('{{ 0 }}={{ 1 }}\n', entry.0, entry.1)
+			_out('{{ 0 }}={{ 1 }}\n', entry.0, entry.1)
 		})
 		0
 	}
 
-	fn cmd_export(args) if len(args) {
+	fn cmd_export(args, stdinData) if len(args) {
 		0 -> {
-			cmd_env([])
+			cmd_env([], ?)
 		}
 		_ -> {
 			each(args, fn(arg) {
@@ -358,23 +668,550 @@ cs Shell(vfs?) {
 		}
 	}
 
-	fn cmd_help(args) {
-		printf('Available commands:\n')
-		printf('  pwd              - print working directory\n')
-		printf('  cd [dir]         - change directory\n')
-		printf('  ls [dir]         - list files\n')
-		printf('  cat <file>...    - print file contents\n')
-		printf('  echo <text>...   - print text\n')
-		printf('  mkdir <dir>...   - create directory\n')
-		printf('  rm [-r] <file>   - remove file\n')
-		printf('  mv <src> <dst>   - move/rename file\n')
-		printf('  cp <src> <dst>   - copy file\n')
-		printf('  touch <file>...  - create empty file\n')
-		printf('  env              - show environment variables\n')
-		printf('  export VAR=val   - set environment variable\n')
-		printf('  help             - show this help\n')
-		printf('  exit             - exit shell\n')
+	// --- New commands ---
+
+	// grep: search for pattern in files or stdin
+	fn cmd_grep(args, stdinData) {
+		if len(args) = 0 {
+			true -> {
+				printf('grep: missing pattern\n')
+				1
+			}
+			_ -> {
+				pattern := args.0
+				files := slice(args, 1, len(args))
+
+				fn grepLines(text, filename) {
+					lines := split(text, '\n')
+					found := false
+					each(lines, fn(line) if strContains?(line, pattern) {
+						true -> {
+							found <- true
+							if filename != ? {
+								true -> _out('{{ 0 }}:{{ 1 }}\n', filename, line)
+								_ -> _out('{{ 0 }}\n', line)
+							}
+						}
+					})
+					found
+				}
+
+				if len(files) = 0 {
+					true -> if stdinData != ? {
+						true -> if grepLines(stdinData, ?) {
+							true -> 0
+							_ -> 1
+						}
+						_ -> {
+							printf('grep: no input\n')
+							1
+						}
+					}
+					_ -> {
+						showName := len(files) > 1
+						anyFound := false
+						each(files, fn(file) {
+							fullPath := normalizePath(currentDir, file)
+							content := filesystem.readFile(fullPath)
+							if content {
+								? -> printf('grep: {{ 0 }}: No such file\n', file)
+								_ -> if grepLines(content, if showName { true -> file, _ -> ? }) {
+									true -> anyFound <- true
+								}
+							}
+						})
+						if anyFound {
+							true -> 0
+							_ -> 1
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// head: print first N lines of file or stdin
+	fn cmd_head(args, stdinData) {
+		n := 10
+		files := []
+		each(args, fn(arg) if startsWith?(arg, '-n') {
+			true -> if len(arg) > 2 {
+				true -> n <- int(slice(arg, 2, len(arg)))
+				_ -> ?
+			}
+			_ -> if startsWith?(arg, '-') {
+				true -> {
+					val := int(slice(arg, 1, len(arg)))
+					if val > 0 { true -> n <- val }
+				}
+				_ -> files << arg
+			}
+		})
+
+		fn headText(text) {
+			lines := split(text, '\n')
+			count := if n < len(lines) { true -> n, _ -> len(lines) }
+			fn printLines(i) if i < count {
+				true -> {
+					_out('{{ 0 }}\n', lines.(i))
+					printLines(i + 1)
+				}
+			}
+			printLines(0)
+			0
+		}
+
+		if len(files) = 0 {
+			true -> if stdinData != ? {
+				true -> headText(stdinData)
+				_ -> {
+					printf('head: no input\n')
+					1
+				}
+			}
+			_ -> {
+				each(files, fn(file) {
+					fullPath := normalizePath(currentDir, file)
+					content := filesystem.readFile(fullPath)
+					if content {
+						? -> printf('head: {{ 0 }}: No such file\n', file)
+						_ -> {
+							if len(files) > 1 {
+								true -> _out('==> {{ 0 }} <==\n', file)
+							}
+							headText(content)
+						}
+					}
+				})
+				0
+			}
+		}
+	}
+
+	// tail: print last N lines of file or stdin
+	fn cmd_tail(args, stdinData) {
+		n := 10
+		files := []
+		each(args, fn(arg) if startsWith?(arg, '-n') {
+			true -> if len(arg) > 2 {
+				true -> n <- int(slice(arg, 2, len(arg)))
+				_ -> ?
+			}
+			_ -> if startsWith?(arg, '-') {
+				true -> {
+					val := int(slice(arg, 1, len(arg)))
+					if val > 0 { true -> n <- val }
+				}
+				_ -> files << arg
+			}
+		})
+
+		fn tailText(text) {
+			lines := split(text, '\n')
+			start := if len(lines) > n { true -> len(lines) - n, _ -> 0 }
+			fn printLines(i) if i < len(lines) {
+				true -> {
+					_out('{{ 0 }}\n', lines.(i))
+					printLines(i + 1)
+				}
+			}
+			printLines(start)
+			0
+		}
+
+		if len(files) = 0 {
+			true -> if stdinData != ? {
+				true -> tailText(stdinData)
+				_ -> {
+					printf('tail: no input\n')
+					1
+				}
+			}
+			_ -> {
+				each(files, fn(file) {
+					fullPath := normalizePath(currentDir, file)
+					content := filesystem.readFile(fullPath)
+					if content {
+						? -> printf('tail: {{ 0 }}: No such file\n', file)
+						_ -> {
+							if len(files) > 1 {
+								true -> _out('==> {{ 0 }} <==\n', file)
+							}
+							tailText(content)
+						}
+					}
+				})
+				0
+			}
+		}
+	}
+
+	// wc: word/line/char count
+	fn cmd_wc(args, stdinData) {
+		fn wcText(text, filename) {
+			lines := split(text, '\n')
+			lineCount := len(lines)
+			charCount := len(text)
+			wordCount := text |> split(' ') |> filter(fn(w) trim(w) != '') |> len()
+			if filename != ? {
+				true -> _out('  {{ 0 }}  {{ 1 }}  {{ 2 }} {{ 3 }}\n', lineCount, wordCount, charCount, filename)
+				_ -> _out('  {{ 0 }}  {{ 1 }}  {{ 2 }}\n', lineCount, wordCount, charCount)
+			}
+		}
+
+		files := args |> filter(fn(a) !startsWith?(a, '-'))
+		if len(files) = 0 {
+			true -> if stdinData != ? {
+				true -> {
+					wcText(stdinData, ?)
+					0
+				}
+				_ -> {
+					printf('wc: no input\n')
+					1
+				}
+			}
+			_ -> {
+				each(files, fn(file) {
+					fullPath := normalizePath(currentDir, file)
+					content := filesystem.readFile(fullPath)
+					if content {
+						? -> printf('wc: {{ 0 }}: No such file\n', file)
+						_ -> wcText(content, file)
+					}
+				})
+				0
+			}
+		}
+	}
+
+	// find: recursively list files matching a pattern
+	fn cmd_find(args, stdinData) {
+		startDir := '.'
+		namePattern := ?
+
+		// parse: find [dir] [-name pattern]
+		i := 0
+		fn parseArgs() if i < len(args) {
+			true -> if args.(i) = '-name' & (i + 1) < len(args) {
+				true -> {
+					namePattern <- args.(i + 1)
+					i <- i + 2
+					parseArgs()
+				}
+				_ -> {
+					startDir <- args.(i)
+					i <- i + 1
+					parseArgs()
+				}
+			}
+		}
+		parseArgs()
+
+		resolvedStart := normalizePath(currentDir, startDir)
+		if vfs? != ? {
+			true -> {
+				allFiles := vfs?.listFiles()
+				prefix := if resolvedStart = '/' {
+					true -> '/'
+					_ -> resolvedStart << '/'
+				}
+				matched := allFiles |> filter(fn(f) startsWith?(f, prefix)) |> filter(fn(f) if namePattern {
+					? -> true
+					_ -> globMatch?(namePattern, path.base(f))
+				})
+				each(matched, fn(f) _out('{{ 0 }}\n', f))
+				0
+			}
+			_ -> {
+				// Real FS: walk directory tree
+				fn walkDir(dir) {
+					raw := fs.listFiles(dir)
+					files := if raw {
+						? -> []
+						_ -> raw |> map(fn(f) if f.name { ? -> { name: string(f), dir: false }, _ -> f })
+					}
+					each(files, fn(f) {
+						fullPath := path.join(dir, f.name)
+						if namePattern = ? | globMatch?(namePattern, f.name) {
+							true -> _out('{{ 0 }}\n', fullPath)
+						}
+						if f.dir {
+							true -> walkDir(fullPath)
+						}
+					})
+				}
+				walkDir(resolvedStart)
+				0
+			}
+		}
+	}
+
+	// sort: sort lines of input
+	fn cmd_sort(args, stdinData) {
+		reverse? := contains?(args, '-r')
+		files := args |> filter(fn(a) !startsWith?(a, '-'))
+
+		text := if len(files) > 0 {
+			true -> files |> map(fn(f) {
+				fullPath := normalizePath(currentDir, f)
+				filesystem.readFile(fullPath)
+			}) |> filter(fn(c) c != ?) |> join('\n')
+			_ -> stdinData
+		}
+
+		if text = ? {
+			true -> {
+				printf('sort: no input\n')
+				1
+			}
+			_ -> {
+				lines := split(text, '\n') |> filter(fn(l) l != '')
+				// simple insertion sort for shell use
+				fn insertionSort(arr) {
+					n := len(arr)
+					fn outer(i) if i < n {
+						true -> {
+							key := arr.(i)
+							j := i - 1
+							fn inner() if j >= 0 & arr.(j) > key {
+								true -> {
+									arr.(j + 1) <- arr.(j)
+									j <- j - 1
+									inner()
+								}
+							}
+							inner()
+							arr.(j + 1) <- key
+							outer(i + 1)
+						}
+					}
+					outer(1)
+					arr
+				}
+				sorted := insertionSort(lines)
+				if reverse? {
+					true -> sorted <- reverse(sorted)
+				}
+				each(sorted, fn(l) _out('{{ 0 }}\n', l))
+				0
+			}
+		}
+	}
+
+	// uniq: remove adjacent duplicate lines
+	fn cmd_uniq(args, stdinData) {
+		files := args |> filter(fn(a) !startsWith?(a, '-'))
+		text := if len(files) > 0 {
+			true -> {
+				fullPath := normalizePath(currentDir, files.0)
+				filesystem.readFile(fullPath)
+			}
+			_ -> stdinData
+		}
+
+		if text = ? {
+			true -> {
+				printf('uniq: no input\n')
+				1
+			}
+			_ -> {
+				lines := split(text, '\n')
+				prev := ?
+				each(lines, fn(line) if line != prev {
+					true -> {
+						_out('{{ 0 }}\n', line)
+						prev <- line
+					}
+				})
+				0
+			}
+		}
+	}
+
+	// tee: copy stdin to files and stdout
+	fn cmd_tee(args, stdinData) if stdinData {
+		? -> {
+			printf('tee: no input\n')
+			1
+		}
+		_ -> {
+			append? := contains?(args, '-a')
+			files := args |> filter(fn(a) !startsWith?(a, '-'))
+			each(files, fn(file) {
+				fullPath := normalizePath(currentDir, file)
+				if append? {
+					true -> {
+						existing := filesystem.readFile(fullPath)
+						filesystem.writeFile(fullPath, default(existing, '') << stdinData)
+					}
+					_ -> filesystem.writeFile(fullPath, stdinData)
+				}
+			})
+			_out('{{ 0 }}', stdinData)
+			0
+		}
+	}
+
+	// alias: define command aliases
+	fn cmd_alias(args, stdinData) if len(args) {
+		0 -> {
+			entries(aliases) |> each(fn(entry) {
+				_out('alias {{ 0 }}=\'{{ 1 }}\'\n', entry.0, entry.1)
+			})
+			0
+		}
+		_ -> {
+			each(args, fn(arg) {
+				parts := split(arg, '=')
+				if len(parts) >= 2 {
+					true -> aliases.(parts.0) <- join(slice(parts, 1, len(parts)), '=')
+					_ -> {
+						val := aliases.(arg)
+						if val {
+							? -> printf('alias: {{ 0 }}: not found\n', arg)
+							_ -> _out('alias {{ 0 }}=\'{{ 1 }}\'\n', arg, val)
+						}
+					}
+				}
+			})
+			0
+		}
+	}
+
+	// unalias: remove an alias
+	fn cmd_unalias(args, stdinData) if len(args) {
+		0 -> {
+			printf('unalias: missing argument\n')
+			1
+		}
+		_ -> {
+			each(args, fn(name) aliases.(name) <- ?)
+			0
+		}
+	}
+
+	// history: show command history
+	fn cmd_history(args, stdinData) {
+		fn showHistory(i) if i < len(history) {
+			true -> {
+				_out('  {{ 0 }}  {{ 1 }}\n', i + 1, history.(i))
+				showHistory(i + 1)
+			}
+		}
+		showHistory(0)
 		0
+	}
+
+	fn cmd_help(args, stdinData) {
+		_out('Available commands:\n')
+		_out('  pwd              - print working directory\n')
+		_out('  cd [dir]         - change directory\n')
+		_out('  ls [dir]         - list files\n')
+		_out('  cat <file>...    - print file contents\n')
+		_out('  echo <text>...   - print text\n')
+		_out('  mkdir <dir>...   - create directory\n')
+		_out('  rm [-r] <file>   - remove file\n')
+		_out('  mv <src> <dst>   - move/rename file\n')
+		_out('  cp <src> <dst>   - copy file\n')
+		_out('  touch <file>...  - create empty file\n')
+		_out('  env              - show environment variables\n')
+		_out('  export VAR=val   - set environment variable\n')
+		_out('  grep <pat> [f..] - search for pattern in files\n')
+		_out('  head [-n N] [f]  - print first N lines\n')
+		_out('  tail [-n N] [f]  - print last N lines\n')
+		_out('  wc [file]...     - word, line, char count\n')
+		_out('  find [dir] [-name pat] - find files by name\n')
+		_out('  sort [-r] [f]    - sort lines\n')
+		_out('  uniq [file]      - remove adjacent duplicates\n')
+		_out('  tee [-a] <file>  - copy stdin to file and stdout\n')
+		_out('  alias [name=val] - define/show aliases\n')
+		_out('  unalias <name>   - remove alias\n')
+		_out('  history          - show command history\n')
+		_out('  tab <partial>    - show completions\n')
+		_out('  help             - show this help\n')
+		_out('  exit             - exit shell\n')
+		_out('\n')
+		_out('Features:\n')
+		_out('  Pipes:        cmd1 | cmd2 | cmd3\n')
+		_out('  Redirect:     cmd > file, cmd >> file, cmd < file\n')
+		_out('  Quotes:       "hello world", \'single quoted\'\n')
+		_out('  Globs:        ls *.oak, cat test?.txt\n')
+		_out('  Aliases:      alias ll=\'ls -l\'\n')
+		_out('  Tab complete: tab <partial>\n')
+		0
+	}
+
+	// completePath returns file/directory names matching a partial path.
+	fn completePath(partial) {
+		dir := path.dir(partial)
+		prefix := path.base(partial)
+		resolvedDir := if dir {
+			'', ? -> currentDir
+			_ -> normalizePath(currentDir, dir)
+		}
+		files := if vfs? != ? {
+			true -> {
+				allFiles := vfs?.listFiles()
+				pfx := if resolvedDir = '/' { true -> '/', _ -> resolvedDir << '/' }
+				allFiles |> filter(fn(f) startsWith?(f, pfx)) |> map(fn(f) slice(f, len(pfx), len(f))) |> filter(fn(f) !strContains?(f, '/'))
+			}
+			_ -> {
+				raw := fs.listFiles(resolvedDir)
+				if raw {
+					? -> []
+					_ -> raw |> map(fn(f) if f.name { ? -> string(f), _ -> f.name })
+				}
+			}
+		}
+		matched := if prefix {
+			'', ? -> files
+			_ -> files |> filter(fn(f) startsWith?(f, prefix))
+		}
+		matched |> map(fn(f) if dir {
+			'', ? -> f
+			_ -> path.join(dir, f)
+		})
+	}
+
+	// complete returns possible completions for a partial command line.
+	// Returns a list of completion strings.
+	fn complete(line) {
+		endsWithSpace := len(line) > 0 & (line.(len(line) - 1) = ' ' | line.(len(line) - 1) = '\t')
+		tokens := tokenizeLine(line)
+
+		if endsWithSpace {
+			// New argument: list files in current directory
+			true -> completePath('')
+			_ -> if len(tokens) <= 1 {
+				// Completing a command name
+				true -> {
+					prefix := if len(tokens) = 0 { true -> '', _ -> tokens.0 }
+					cmdNames := keys(builtins)
+					aliasNames := keys(aliases) |> filter(fn(k) aliases.(k) != ?)
+					all := append(cmdNames, aliasNames)
+					all |> filter(fn(name) startsWith?(name, prefix))
+				}
+				// Completing an argument (file/directory path)
+				_ -> completePath(tokens.(len(tokens) - 1))
+			}
+		}
+	}
+
+	// tab: show completions for a partial command line
+	fn cmd_tab(args, stdinData) {
+		partial := join(args, ' ')
+		matches := complete(partial)
+		if len(matches) = 0 {
+			true -> {
+				printf('No completions found.\n')
+				0
+			}
+			_ -> {
+				each(matches, fn(m) _out('{{ 0 }}\n', m))
+				0
+			}
+		}
 	}
 
 	builtins := {
@@ -391,36 +1228,75 @@ cs Shell(vfs?) {
 		env: cmd_env
 		export: cmd_export
 		help: cmd_help
+		grep: cmd_grep
+		head: cmd_head
+		tail: cmd_tail
+		wc: cmd_wc
+		find: cmd_find
+		sort: cmd_sort
+		uniq: cmd_uniq
+		tee: cmd_tee
+		alias: cmd_alias
+		unalias: cmd_unalias
+		history: cmd_history
+		tab: cmd_tab
 	}
 
-	// Execute a single command
-	fn exec(cmdline) {
-		line := trim(cmdline)
-		if line = '' | startsWith?(line, '#') {
-			true -> 0 // empty or comment
+	// runSingleCommand executes a single command (no pipes), with optional
+	// stdinData piped from a previous stage and redirection handling.
+	// If capture? is true, captures stdout and returns { output, exitCode }
+	// instead of printing. Used by pipes and redirections.
+	fn runSingleCommand(tokens, stdinData, capture?) {
+		redir := parseRedirections(tokens)
+		cmdTokens := expandGlobs(redir.tokens)
+		if len(cmdTokens) = 0 {
+			true -> if capture? { true -> { output: '', exitCode: 0 }, _ -> 0 }
 			_ -> {
-				// Simple tokenization (doesn't handle quotes yet)
-				tokens := split(line, ' ') |> filter(fn(t) t != '')
-				if len(tokens) {
-					0 -> 0
-					_ -> {
-						cmd := tokens.0
-						args := slice(tokens, 1, len(tokens))
+				cmd := cmdTokens.0
+				args := slice(cmdTokens, 1, len(cmdTokens))
 
-						// Check for exit
-						if cmd = 'exit' {
-							true -> :exit
-							_ -> {
-								// Execute builtin or report error
-								handler := builtins.(cmd)
-								if handler {
-									? -> {
-										printf('{{ 0 }}: command not found\n', cmd)
-										127
-									}
-									_ -> handler(args)
+				// Handle stdin redirection
+				actualStdin := if redir.stdin {
+					? -> stdinData
+					_ -> {
+						fullPath := normalizePath(currentDir, redir.stdin)
+						content := filesystem.readFile(fullPath)
+						if content { ? -> { printf('{{ 0 }}: No such file\n', redir.stdin), ? }, _ -> content }
+					}
+				}
+
+				handler := builtins.(cmd)
+				if handler {
+					? -> {
+						printf('{{ 0 }}: command not found\n', cmd)
+						if capture? { true -> { output: '', exitCode: 127 }, _ -> 127 }
+					}
+					_ -> if redir.stdout != ? {
+						// Stdout redirection: capture and write to file
+						true -> {
+							_beginCapture()
+							exitCode := handler(args, actualStdin)
+							output := _endCapture()
+							fullPath := normalizePath(currentDir, redir.stdout)
+							if redir.append? {
+								true -> {
+									existing := filesystem.readFile(fullPath)
+									filesystem.writeFile(fullPath, default(existing, '') << output)
 								}
+								_ -> filesystem.writeFile(fullPath, output)
 							}
+							if capture? { true -> { output: output, exitCode: exitCode }, _ -> exitCode }
+						}
+						_ -> if capture? {
+							// Capture mode (for pipes)
+							true -> {
+								_beginCapture()
+								exitCode := handler(args, actualStdin)
+								output := _endCapture()
+								{ output: output, exitCode: exitCode }
+							}
+							// Normal execution
+							_ -> handler(args, actualStdin)
 						}
 					}
 				}
@@ -428,16 +1304,74 @@ cs Shell(vfs?) {
 		}
 	}
 
+	// Execute a single command, resolving aliases and pipeline stages.
+	fn exec(cmdline) {
+		line := trim(cmdline)
+		if line = '' | startsWith?(line, '#') {
+			true -> 0
+			_ -> {
+				// Record in history
+				if len(history) >= _historyMax {
+					true -> history <- slice(history, 1, len(history))
+				}
+				history << line
+
+				// Tokenize with quote handling
+				tokens := tokenizeLine(line)
+				if len(tokens) = 0 { true -> 0, _ -> {
+					// Resolve alias on first token
+					expanded := aliases.(tokens.0)
+					resolvedTokens := if expanded {
+						? -> tokens
+						_ -> {
+							aliasTokens := tokenizeLine(expanded)
+							append(aliasTokens, slice(tokens, 1, len(tokens)))
+						}
+					}
+
+					// Check for exit
+					if resolvedTokens.0 = 'exit' {
+						true -> :exit
+						_ -> {
+							// Split into pipeline stages
+							stages := splitPipeline(resolvedTokens)
+							if len(stages) = 1 {
+								true -> runSingleCommand(stages.0, ?, false)
+								_ -> {
+									// Execute pipeline: capture stdout from each stage
+									// and pass as stdinData to the next.
+									fn runPipe(idx, stdinData) if idx < len(stages) {
+										true -> if idx < len(stages) - 1 {
+											// Intermediate stage: capture output
+											true -> {
+												captured := runSingleCommand(stages.(idx), stdinData, true)
+												runPipe(idx + 1, captured.output)
+											}
+											// Last stage: output normally
+											_ -> runSingleCommand(stages.(idx), stdinData, false)
+										}
+										_ -> 0
+									}
+									runPipe(0, ?)
+								}
+							}
+						}
+					}
+				}}
+			}
+		}
+	}
+
 	// REPL - read-eval-print loop
 	fn repl() {
-		printf('Oak Shell v0.1 (type "help" for commands, "exit" to quit)\n')
+		printf('Oak Shell v0.2 (type "help" for commands, "exit" to quit)\n')
 
 		fn loop() {
 			printf('{{ 0 }}> ', currentDir)
 			line := input()
 
 			if line {
-				? -> :exit // EOF
+				? -> :exit
 				_ -> {
 					result := exec(line)
 					if result {
@@ -474,6 +1408,11 @@ cs Shell(vfs?) {
 		getCurrentDir: fn() currentDir
 		getEnv: fn() clone(env)
 		setEnv: fn(key, val) env.(key) <- val
+		getHistory: fn() clone(history)
+		addAlias: fn(name, val) aliases.(name) <- val
+		removeAlias: fn(name) aliases.(name) <- ?
+		getAliases: fn() clone(aliases)
+		complete: complete
 	}
 }
 

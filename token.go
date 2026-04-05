@@ -251,7 +251,12 @@ func (t *tokenizer) back() {
 
 	if t.source[t.index] == '\n' {
 		t.line--
-		// TODO: reset col correctly
+		// Scan backwards to find the column at end of previous line
+		col := 0
+		for j := t.index - 1; j >= 0 && t.source[j] != '\n'; j-- {
+			col++
+		}
+		t.col = col
 	} else {
 		t.col--
 	}

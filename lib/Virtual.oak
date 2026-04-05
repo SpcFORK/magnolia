@@ -150,10 +150,26 @@ cs VirtualMachine {
 			right := evalExpr(node.right, sc)
 			evalUnaryOp(node.op, right)
 		}
+		:propertyAccess -> {
+			obj := evalExpr(node.left, sc)
+			key := if node.right.type = :identifier {
+				true -> node.right.val
+				_ -> string(evalExpr(node.right, sc))
+			}
+			obj.(key)
+		}
 		:assignment -> {
 			val := evalExpr(node.right, sc)
-			if node.left.type = :identifier {
-				true -> sc.(node.left.val) := val
+			if node.left.type {
+				:identifier -> sc.(node.left.val) := val
+				:propertyAccess -> {
+					obj := evalExpr(node.left.left, sc)
+					key := if node.left.right.type = :identifier {
+						true -> node.left.right.val
+						_ -> string(evalExpr(node.left.right, sc))
+					}
+					obj.(key) <- val
+				}
 				_ -> val
 			}
 		}
@@ -355,7 +371,7 @@ fn createVM() VirtualMachine()
 cs StandardVM {
 	vm := createVM()
 
-	// Register standard builtins
+	// -- core language and reflection --
 	vm.registerBuiltin('print', fn(s) {
 		printf(string(s))
 		s
@@ -400,14 +416,86 @@ cs StandardVM {
 		:string -> float(x) |> default(?)
 		_ -> ?
 	})
+	vm.registerBuiltin('atom', fn(x) atom(x))
+	vm.registerBuiltin('codepoint', fn(x) codepoint(x))
+	vm.registerBuiltin('char', fn(x) char(x))
+	vm.registerBuiltin('name', fn(x) name(x))
+	vm.registerBuiltin('csof', fn(x) csof(x))
+
+	// -- os interfaces --
+	vm.registerBuiltin('args', fn() args())
+	vm.registerBuiltin('env', fn() env())
+	vm.registerBuiltin('time', fn() time())
+	vm.registerBuiltin('nanotime', fn() nanotime())
+	vm.registerBuiltin('rand', fn() rand())
+	vm.registerBuiltin('srand', fn(seed) srand(seed))
+	vm.registerBuiltin('wait', fn(duration, cb) wait(duration, cb))
+	vm.registerBuiltin('exit', fn(code) exit(code))
+	vm.registerBuiltin('exec', fn(path, args, stdin, cb) exec(path, args, stdin, cb))
+	vm.registerBuiltin('sysproc', fn(library, name) sysproc(library, name))
+	vm.registerBuiltin('syscall', fn(target, args...) syscall(target, args...))
+	vm.registerBuiltin('win_msg_loop', fn(args...) win_msg_loop(args...))
+	vm.registerBuiltin('utf16', fn(x) utf16(x))
 	vm.registerBuiltin('bits', fn(x) bits(x))
 	vm.registerBuiltin('addr', fn(x) addr(x))
 	vm.registerBuiltin('pointer', fn(x) pointer(x))
 	vm.registerBuiltin('memread', fn(address, length) memread(address, length))
 	vm.registerBuiltin('memwrite', fn(address, data) memwrite(address, data))
-	vm.registerBuiltin('utf16', fn(x) utf16(x))
-	vm.registerBuiltin('sysproc', fn(library, name) sysproc(library, name))
-	vm.registerBuiltin('syscall', fn(target, args...) syscall(target, args...))
+	vm.registerBuiltin('go', fn(f) go(f))
+	vm.registerBuiltin('lock_thread', fn() lock_thread())
+	vm.registerBuiltin('unlock_thread', fn() unlock_thread())
+	vm.registerBuiltin('make_chan', fn() make_chan())
+	vm.registerBuiltin('chan_send', fn(ch, val) chan_send(ch, val))
+	vm.registerBuiltin('chan_recv', fn(ch) chan_recv(ch))
+
+	// -- i/o interfaces --
+	vm.registerBuiltin('input', fn(cb) input(cb))
+	vm.registerBuiltin('ls', fn(path, cb) ls(path, cb))
+	vm.registerBuiltin('rm', fn(path, cb) rm(path, cb))
+	vm.registerBuiltin('mkdir', fn(path, cb) mkdir(path, cb))
+	vm.registerBuiltin('stat', fn(path, cb) stat(path, cb))
+	vm.registerBuiltin('open', fn(path, flags, perm, cb) open(path, flags, perm, cb))
+	vm.registerBuiltin('close', fn(fd, cb) close(fd, cb))
+	vm.registerBuiltin('read', fn(fd, offset, length, cb) read(fd, offset, length, cb))
+	vm.registerBuiltin('write', fn(fd, offset, data, cb) write(fd, offset, data, cb))
+	vm.registerBuiltin('listen', fn(host, handler) listen(host, handler))
+	vm.registerBuiltin('req', fn(params, cb) req(params, cb))
+	vm.registerBuiltin('socket_connect', fn(host, port, cb) socket_connect(host, port, cb))
+	vm.registerBuiltin('socket_send', fn(sock, data, cb) socket_send(sock, data, cb))
+	vm.registerBuiltin('socket_recv', fn(sock, length, cb) socket_recv(sock, length, cb))
+	vm.registerBuiltin('socket_recv_exact', fn(sock, length, cb) socket_recv_exact(sock, length, cb))
+	vm.registerBuiltin('socket_recv_line', fn(sock, cb) socket_recv_line(sock, cb))
+	vm.registerBuiltin('socket_starttls', fn(sock, host, cb) socket_starttls(sock, host, cb))
+	vm.registerBuiltin('socket_close', fn(sock, cb) socket_close(sock, cb))
+	vm.registerBuiltin('socket_listen', fn(host, handler) socket_listen(host, handler))
+	vm.registerBuiltin('ws_dial', fn(url, cb) ws_dial(url, cb))
+	vm.registerBuiltin('ws_send', fn(conn, data, cb) ws_send(conn, data, cb))
+	vm.registerBuiltin('ws_recv', fn(conn, cb) ws_recv(conn, cb))
+	vm.registerBuiltin('ws_close', fn(conn, cb) ws_close(conn, cb))
+	vm.registerBuiltin('ws_listen', fn(host, handler) ws_listen(host, handler))
+
+	// -- math --
+	vm.registerBuiltin('sin', fn(x) sin(x))
+	vm.registerBuiltin('cos', fn(x) cos(x))
+	vm.registerBuiltin('tan', fn(x) tan(x))
+	vm.registerBuiltin('asin', fn(x) asin(x))
+	vm.registerBuiltin('acos', fn(x) acos(x))
+	vm.registerBuiltin('atan', fn(x) atan(x))
+	vm.registerBuiltin('pow', fn(base, exp) pow(base, exp))
+	vm.registerBuiltin('log', fn(base, n) log(base, n))
+
+	// -- language and runtime APIs --
+	vm.registerBuiltin('___runtime_lib', fn(name) ___runtime_lib(name))
+	vm.registerBuiltin('___runtime_lib?', fn(name) ___runtime_lib?(name))
+	vm.registerBuiltin('___runtime_gc', fn() ___runtime_gc())
+	vm.registerBuiltin('___runtime_mem', fn() ___runtime_mem())
+	vm.registerBuiltin('___runtime_proc', fn() ___runtime_proc())
+	vm.registerBuiltin('___runtime_go_version', fn() ___runtime_go_version())
+	vm.registerBuiltin('___runtime_sys_info', fn() ___runtime_sys_info())
+
+	// -- execution mode switching --
+	vm.registerBuiltin('bytecode', fn(f, args...) bytecode(f, args...))
+	vm.registerBuiltin('interpreter', fn(f, args...) interpreter(f, args...))
 
 	vm
 }
@@ -496,6 +584,22 @@ cs VirtualContext(initialScope) {
 	ctx.compileAstToBytecode := fn(ast) vm.compileAstToBytecode(ast)
 	ctx.runChunk := fn(chunk, opts) vm.runChunk(chunk, opts)
 	ctx.executeBytecode := fn(program, opts) vm.runBytecode(program, opts)
+
+	// call a Virtual function value from host Oak
+	ctx.call := fn(vfn, args...) if {
+		TYPE := type(vfn)
+		TYPE = :object & vfn.type = :function -> {
+			fnScope := clone(vfn.closure)
+			vfn.params |> each(fn(param, i) {
+				fnScope.(param) := args.(i) |> default(?)
+			})
+			if vfn.restArg != ? & vfn.restArg != '' -> {
+				fnScope.(vfn.restArg) := args |> slice(len(vfn.params))
+			}
+			vm.evalExpr(vfn.body, fnScope)
+		}
+		TYPE = :function -> vfn(args...)
+	}
 
 	ctx
 }

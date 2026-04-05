@@ -292,14 +292,35 @@ var libguiresolution string
 //go:embed lib/gui-canvas.oak
 var libguicanvas string
 
+//go:embed lib/gui-accessibility.oak
+var libguiaccessibility string
+
 //go:embed lib/gui-clipboard.oak
 var libguiclipboard string
 
 //go:embed lib/gui-filedrop.oak
 var libguifiledrop string
 
+//go:embed lib/gui-audio.oak
+var libguiaudio string
+
+//go:embed lib/gui-gamepad.oak
+var libguigamepad string
+
+//go:embed lib/gui-gpu-info.oak
+var libguigpuinfo string
+
+//go:embed lib/gui-leak-detect.oak
+var libguileakdetect string
+
 //go:embed lib/gui-menus.oak
 var libguimenus string
+
+//go:embed lib/gui-print.oak
+var libguiprint string
+
+//go:embed lib/gui-test.oak
+var libguitest string
 
 //go:embed lib/gui-theme.oak
 var libguitheme string
@@ -396,6 +417,9 @@ var libguicolor string
 
 //go:embed lib/gui-events.oak
 var libguievents string
+
+//go:embed lib/gui-input.oak
+var libguiinput string
 
 //go:embed lib/gui-graph.oak
 var libguigraph string
@@ -563,9 +587,16 @@ var stdlibs = map[string]string{
 	"gui-native-win-probe":            libguinativewinprobe,
 	"gui-native-linux":                libguinativelinux,
 	"gui-canvas":                      libguicanvas,
+	"gui-accessibility":               libguiaccessibility,
+	"gui-audio":                       libguiaudio,
 	"gui-clipboard":                   libguiclipboard,
 	"gui-filedrop":                    libguifiledrop,
+	"gui-gamepad":                     libguigamepad,
+	"gui-gpu-info":                    libguigpuinfo,
+	"gui-leak-detect":                 libguileakdetect,
 	"gui-menus":                       libguimenus,
+	"gui-print":                       libguiprint,
+	"gui-test":                        libguitest,
 	"gui-theme":                       libguitheme,
 	"gui-systray":                     libguisystray,
 	"gui-draw":                        libguidraw,
@@ -573,6 +604,7 @@ var stdlibs = map[string]string{
 	"gui-2d":                          libgui2d,
 	"gui-color":                       libguicolor,
 	"gui-events":                      libguievents,
+	"gui-input":                       libguiinput,
 	"gui-graph":                       libguigraph,
 	"gui-form":                        libguiform,
 	"gui-loop":                        libguiloop,

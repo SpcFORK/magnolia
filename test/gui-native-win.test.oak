@@ -1,0 +1,130 @@
+// Tests for gui-native-win toast notification escape helpers.
+// The escape functions are defined inline here (matching lib/gui-native-win.oak)
+// so the tests run without importing the full Windows GUI module.
+
+fn run(t) {
+	// ─── _escapeXml ─────────────────────────────────────────────
+
+	fn _escapeXml(s) {
+		out := ''
+		fn esc(i) if i < len(s) {
+			true -> {
+				ch := s.(i)
+				if ch {
+					'&' -> out <- out + '&amp;'
+					'<' -> out <- out + '&lt;'
+					'>' -> out <- out + '&gt;'
+					'"' -> out <- out + '&quot;'
+					'\'' -> out <- out + '&apos;'
+					_ -> out <- out + ch
+				}
+				esc(i + 1)
+			}
+		}
+		esc(0)
+		out
+	}
+
+	'escapeXml: plain text unchanged' |> t.eq(
+		_escapeXml('Hello World')
+		'Hello World'
+	)
+	'escapeXml: empty string' |> t.eq(
+		_escapeXml('')
+		''
+	)
+	'escapeXml: ampersand' |> t.eq(
+		_escapeXml('a&b')
+		'a&amp;b'
+	)
+	'escapeXml: less-than' |> t.eq(
+		_escapeXml('a<b')
+		'a&lt;b'
+	)
+	'escapeXml: greater-than' |> t.eq(
+		_escapeXml('a>b')
+		'a&gt;b'
+	)
+	'escapeXml: double quote' |> t.eq(
+		_escapeXml('a"b')
+		'a&quot;b'
+	)
+	'escapeXml: single quote' |> t.eq(
+		_escapeXml('a\'b')
+		'a&apos;b'
+	)
+	'escapeXml: all special chars together' |> t.eq(
+		_escapeXml('<b>&"\'</b>')
+		'&lt;b&gt;&amp;&quot;&apos;&lt;/b&gt;'
+	)
+	'escapeXml: multiple ampersands' |> t.eq(
+		_escapeXml('a&&b')
+		'a&amp;&amp;b'
+	)
+	'escapeXml: html-like injection' |> t.eq(
+		_escapeXml('<script>alert(1)</script>')
+		'&lt;script&gt;alert(1)&lt;/script&gt;'
+	)
+
+	// ─── _escapePsString ────────────────────────────────────────
+
+	fn _escapePsString(s) {
+		out := ''
+		fn esc(i) if i < len(s) {
+			true -> {
+				ch := s.(i)
+				if ch {
+					'\'' -> out <- out + '\'\''
+					_ -> out <- out + ch
+				}
+				esc(i + 1)
+			}
+		}
+		esc(0)
+		out
+	}
+
+	'escapePsString: plain text unchanged' |> t.eq(
+		_escapePsString('Hello World')
+		'Hello World'
+	)
+	'escapePsString: empty string' |> t.eq(
+		_escapePsString('')
+		''
+	)
+	'escapePsString: single quote doubled' |> t.eq(
+		_escapePsString('it\'s')
+		'it\'\'s'
+	)
+	'escapePsString: multiple quotes' |> t.eq(
+		_escapePsString('a\'b\'c')
+		'a\'\'b\'\'c'
+	)
+	'escapePsString: leading quote' |> t.eq(
+		_escapePsString('\'start')
+		'\'\'start'
+	)
+	'escapePsString: trailing quote' |> t.eq(
+		_escapePsString('end\'')
+		'end\'\''
+	)
+	'escapePsString: consecutive quotes' |> t.eq(
+		_escapePsString('a\'\'b')
+		'a\'\'\'\'b'
+	)
+	'escapePsString: no special chars besides quote' |> t.eq(
+		_escapePsString('<xml>&"test"</xml>')
+		'<xml>&"test"</xml>'
+	)
+
+	// ─── Combined pipeline (XML escape then PS escape) ──────────
+
+	'combined: XML then PS yields safe PowerShell XML string' |> t.eq(
+		_escapePsString(_escapeXml('it\'s <a> "test" & more'))
+		'it&apos;s &lt;a&gt; &quot;test&quot; &amp; more'
+	)
+	'combined: PS quote in title is XML-escaped then PS-doubled' |> t.eq(
+		_escapePsString(_escapeXml('Tom\'s alert'))
+		'Tom&apos;s alert'
+	)
+}

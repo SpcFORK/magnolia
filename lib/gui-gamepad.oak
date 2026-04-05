@@ -1,0 +1,276 @@
+// gui-gamepad provides XInput gamepad/joystick input for the Magnolia GUI.
+// Supports up to 4 controllers via XInput 1.4 (Windows 8+) with
+// fallback to XInput 9.1.0 (Vista+).
+
+sys := import('sys')
+windows := import('windows')
+{
+	readU32: readU32
+	writeU32: writeU32
+} := import('writes')
+
+// ─── XInput DLL resolution ──────────────────────────────────────────────────
+// Try xinput1_4 first (Win8+), fall back to xinput9_1_0 (Vista+)
+_xinputProcCache := {}
+_xinputDll := ?
+
+fn _resolveXInputDll {
+	if _xinputDll != ? -> _xinputDll
+	// Try xinput1_4 first
+	res := sys.resolve('xinput1_4.dll', 'XInputGetState')
+	if res.type = :ok {
+		true -> {
+			_xinputDll <- 'xinput1_4.dll'
+			_xinputDll
+		}
+		_ -> {
+			// Fall back to xinput9_1_0
+			res2 := sys.resolve('xinput9_1_0.dll', 'XInputGetState')
+			if res2.type = :ok {
+				true -> {
+					_xinputDll <- 'xinput9_1_0.dll'
+					_xinputDll
+				}
+				_ -> ?
+			}
+		}
+	}
+}
+
+fn xinput(symbol, args...) {
+	dll := _resolveXInputDll()
+	if dll != ? {
+		true -> {
+			cached := _xinputProcCache.(symbol)
+			if cached {
+				? -> {
+					resolved := sys.resolve(dll, symbol)
+					if resolved.type = :ok {
+						true -> {
+							_xinputProcCache.(symbol) <- resolved.proc
+							result := syscall(resolved.proc, args...)
+							if result.type = :success -> result.type <- :ok
+							result
+						}
+						_ -> resolved
+					}
+				}
+				_ -> {
+					result := syscall(cached, args...)
+					if result.type = :success -> result.type <- :ok
+					result
+				}
+			}
+		}
+		_ -> { type: :error, error: 'XInput DLL not available' }
+	}
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+// Maximum number of XInput controllers
+XUSER_MAX_COUNT := 4
+
+// XInputGetState return codes
+ERROR_SUCCESS := 0
+ERROR_DEVICE_NOT_CONNECTED := 1167
+
+// XINPUT_GAMEPAD button flags
+XINPUT_GAMEPAD_DPAD_UP := 1
+XINPUT_GAMEPAD_DPAD_DOWN := 2
+XINPUT_GAMEPAD_DPAD_LEFT := 4
+XINPUT_GAMEPAD_DPAD_RIGHT := 8
+XINPUT_GAMEPAD_START := 16
+XINPUT_GAMEPAD_BACK := 32
+XINPUT_GAMEPAD_LEFT_THUMB := 64
+XINPUT_GAMEPAD_RIGHT_THUMB := 128
+XINPUT_GAMEPAD_LEFT_SHOULDER := 256
+XINPUT_GAMEPAD_RIGHT_SHOULDER := 512
+XINPUT_GAMEPAD_A := 4096
+XINPUT_GAMEPAD_B := 8192
+XINPUT_GAMEPAD_X := 16384
+XINPUT_GAMEPAD_Y := 32768
+
+// Deadzone thresholds (official XInput values)
+XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE := 7849
+XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE := 8689
+XINPUT_GAMEPAD_TRIGGER_THRESHOLD := 30
+
+// Vibration range
+XINPUT_VIBRATION_MAX := 65535
+
+// XINPUT_STATE struct size: dwPacketNumber (4) + XINPUT_GAMEPAD (12) = 16 bytes
+_XINPUT_STATE_SIZE := 16
+// XINPUT_VIBRATION struct size: wLeftMotorSpeed (2) + wRightMotorSpeed (2) = 4 bytes
+// But pad to 4 bytes for alignment
+_XINPUT_VIBRATION_SIZE := 4
+
+// ─── State reading ───────────────────────────────────────────────────────────
+
+// _readI16(base, off) — read a signed 16-bit value from memory
+fn _readI16(base, off) {
+	lo := int(bits(memread(pointer(base + off), 1)).(0))
+	hi := int(bits(memread(pointer(base + off + 1), 1)).(0))
+	v := lo + hi * 256
+	if v >= 32768 { true -> v - 65536, _ -> v }
+}
+
+// getGamepadState(playerIndex) — polls the state of a gamepad (0-3).
+// Returns { type: :ok, connected: true/false, packetNumber, buttons, leftTrigger, rightTrigger,
+//   thumbLX, thumbLY, thumbRX, thumbRY } or { type: :error } if XInput unavailable.
+fn getGamepadState(playerIndex) {
+	buf := bits(windows._zeros(_XINPUT_STATE_SIZE, ''))
+	res := xinput('XInputGetState', playerIndex, addr(buf))
+	if res.type = :ok {
+		true -> if res.r1 = ERROR_SUCCESS {
+			true -> {
+				base := addr(buf)
+				packetNum := readU32(base)
+				// XINPUT_GAMEPAD at offset 4: wButtons (2), bLeftTrigger (1), bRightTrigger (1),
+				// sThumbLX (2), sThumbLY (2), sThumbRX (2), sThumbRY (2)
+				gpBase := base + 4
+				buttonsLo := int(bits(memread(pointer(gpBase), 1)).(0))
+				buttonsHi := int(bits(memread(pointer(gpBase + 1), 1)).(0))
+				buttons := buttonsLo + buttonsHi * 256
+				leftTrigger := int(bits(memread(pointer(gpBase + 2), 1)).(0))
+				rightTrigger := int(bits(memread(pointer(gpBase + 3), 1)).(0))
+				thumbLX := _readI16(gpBase, 4)
+				thumbLY := _readI16(gpBase, 6)
+				thumbRX := _readI16(gpBase, 8)
+				thumbRY := _readI16(gpBase, 10)
+				{
+					type: :ok
+					connected: true
+					packetNumber: packetNum
+					buttons: buttons
+					leftTrigger: leftTrigger
+					rightTrigger: rightTrigger
+					thumbLX: thumbLX
+					thumbLY: thumbLY
+					thumbRX: thumbRX
+					thumbRY: thumbRY
+				}
+			}
+			_ -> {
+				type: :ok
+				connected: false
+			}
+		}
+		_ -> { type: :error, error: 'XInput call failed' }
+	}
+}
+
+// ─── Button helpers ──────────────────────────────────────────────────────────
+
+fn gamepadButtonDown?(state, button) (state.buttons & button) > 0
+
+fn gamepadDpadUp?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_DPAD_UP)
+fn gamepadDpadDown?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_DPAD_DOWN)
+fn gamepadDpadLeft?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_DPAD_LEFT)
+fn gamepadDpadRight?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_DPAD_RIGHT)
+fn gamepadStart?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_START)
+fn gamepadBack?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_BACK)
+fn gamepadA?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_A)
+fn gamepadB?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_B)
+fn gamepadX?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_X)
+fn gamepadY?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_Y)
+fn gamepadLeftShoulder?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_LEFT_SHOULDER)
+fn gamepadRightShoulder?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_RIGHT_SHOULDER)
+fn gamepadLeftThumb?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_LEFT_THUMB)
+fn gamepadRightThumb?(state) gamepadButtonDown?(state, XINPUT_GAMEPAD_RIGHT_THUMB)
+
+// ─── Deadzone application ────────────────────────────────────────────────────
+
+// applyDeadzone(value, deadzone) — returns 0 if within deadzone, else normalized value
+fn applyDeadzone(value, deadzone) {
+	absVal := if value < 0 { true -> 0 - value, _ -> value }
+	if absVal < deadzone {
+		true -> 0
+		_ -> value
+	}
+}
+
+// applyThumbDeadzone(state) — returns new state with deadzones applied to thumbsticks
+fn applyThumbDeadzone(state) {
+	{
+		type: state.type
+		connected: state.connected
+		packetNumber: state.packetNumber
+		buttons: state.buttons
+		leftTrigger: if state.leftTrigger < XINPUT_GAMEPAD_TRIGGER_THRESHOLD { true -> 0, _ -> state.leftTrigger }
+		rightTrigger: if state.rightTrigger < XINPUT_GAMEPAD_TRIGGER_THRESHOLD { true -> 0, _ -> state.rightTrigger }
+		thumbLX: applyDeadzone(state.thumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)
+		thumbLY: applyDeadzone(state.thumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)
+		thumbRX: applyDeadzone(state.thumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE)
+		thumbRY: applyDeadzone(state.thumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE)
+	}
+}
+
+// ─── Vibration ───────────────────────────────────────────────────────────────
+
+// setGamepadVibration(playerIndex, leftMotor, rightMotor) — set rumble (0-65535).
+fn setGamepadVibration(playerIndex, leftMotor, rightMotor) {
+	buf := bits(windows._zeros(_XINPUT_VIBRATION_SIZE, ''))
+	base := addr(buf)
+	// wLeftMotorSpeed (2 bytes LE) + wRightMotorSpeed (2 bytes LE)
+	memwrite(pointer(base), char(leftMotor & 255) + char((leftMotor >> 8) & 255))
+	memwrite(pointer(base + 2), char(rightMotor & 255) + char((rightMotor >> 8) & 255))
+	xinput('XInputSetState', playerIndex, base)
+}
+
+// stopGamepadVibration(playerIndex) — stop all vibration.
+fn stopGamepadVibration(playerIndex) setGamepadVibration(playerIndex, 0, 0)
+
+// ─── Polling helper ──────────────────────────────────────────────────────────
+
+// gamepadPollState() — create a poll state tracker for detecting changes.
+// Returns { prev: [4 states], current: [4 states] }
+fn gamepadPollState {
+	empty := { connected: false, buttons: 0, leftTrigger: 0, rightTrigger: 0, thumbLX: 0, thumbLY: 0, thumbRX: 0, thumbRY: 0 }
+	{
+		prev: [empty, empty, empty, empty]
+		current: [empty, empty, empty, empty]
+	}
+}
+
+// gamepadPoll(pollState) — poll all 4 controllers, shift current→prev, read new state.
+fn gamepadPoll(ps) {
+	fn sub(i) if i < XUSER_MAX_COUNT -> {
+		ps.prev.(i) <- ps.current.(i)
+		state := getGamepadState(i)
+		if state.type = :ok & state.connected = true {
+			true -> ps.current.(i) <- applyThumbDeadzone(state)
+			_ -> ps.current.(i) <- { connected: false, buttons: 0, leftTrigger: 0, rightTrigger: 0, thumbLX: 0, thumbLY: 0, thumbRX: 0, thumbRY: 0 }
+		}
+		sub(i + 1)
+	}
+	sub(0)
+	ps
+}
+
+// gamepadButtonPressed?(pollState, playerIndex, button) — true if button was just pressed this frame
+fn gamepadButtonPressed?(ps, idx, button) {
+	prev := ps.prev.(idx)
+	curr := ps.current.(idx)
+	curr.connected = true & (curr.buttons & button) > 0 & (prev.buttons & button) = 0
+}
+
+// gamepadButtonReleased?(pollState, playerIndex, button) — true if button was just released this frame
+fn gamepadButtonReleased?(ps, idx, button) {
+	prev := ps.prev.(idx)
+	curr := ps.current.(idx)
+	curr.connected = true & (curr.buttons & button) = 0 & (prev.buttons & button) > 0
+}
+
+// gamepadConnected?(pollState, playerIndex) — true if controller is currently connected
+fn gamepadConnected?(ps, idx) ps.current.(idx).connected = true
+
+// gamepadJustConnected?(pollState, playerIndex) — true if controller just connected this frame
+fn gamepadJustConnected?(ps, idx) {
+	ps.current.(idx).connected = true & ps.prev.(idx).connected != true
+}
+
+// gamepadJustDisconnected?(pollState, playerIndex) — true if controller just disconnected
+fn gamepadJustDisconnected?(ps, idx) {
+	ps.current.(idx).connected != true & ps.prev.(idx).connected = true
+}

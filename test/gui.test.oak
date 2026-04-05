@@ -453,4 +453,131 @@ fn run(t) {
 	'enableFileDrop is a function' |> t.eq(type(gui.enableFileDrop), :function)
 	'disableFileDrop is a function' |> t.eq(type(gui.disableFileDrop), :function)
 	'onFileDrop is a function' |> t.eq(type(gui.onFileDrop), :function)
+
+	// ─── Opacity helpers ────────────────────────────────────────────────
+	{
+		bg := gui.rgb(18, 20, 26)
+		overlay := gui.opacity(gui.rgb(248, 232, 242), 0.2, bg)
+		overlayRgba := gui.rgba(248, 232, 242, 0.2, bg)
+
+		'opacity helper matches rgba helper' |> t.eq(overlay, overlayRgba)
+		'opacity helper color channel extraction' |> t.eq(
+			[gui.colorR(overlay), gui.colorG(overlay), gui.colorB(overlay)]
+			[64, 62, 69]
+		)
+	}
+
+	// ─── Draw ops preserve color on web backend ─────────────────────────
+	{
+		bg := gui.rgb(18, 20, 26)
+		textColor := gui.opacity(gui.rgb(248, 232, 242), 0.2, bg)
+		rectColor := gui.opacity(gui.rgb(80, 120, 160), 0.5, bg)
+		win := {
+			type: :ok
+			backend: :web
+			messages: []
+		}
+
+		gui.drawText(win, 10, 20, 'alpha', textColor)
+		gui.fillRect(win, 1, 2, 30, 40, rectColor)
+		gui.drawLine(win, 0, 0, 5, 5, textColor)
+
+		'web draw ops record expected message count' |> t.eq(len(win.messages), 3)
+		'web drawText preserves color' |> t.eq(win.messages.(0).color, textColor)
+		'web fillRect preserves color' |> t.eq(win.messages.(1).color, rectColor)
+		'web drawLine preserves color' |> t.eq(win.messages.(2).color, textColor)
+	}
+
+	// ─── Event bus helpers ──────────────────────────────────────────────
+	{
+		win := {type: :ok}
+		seen := []
+
+		persist := gui.on(win, :dispatch, fn(step, name) {
+			seen << (string(name) + ':' + string(step.type))
+		})
+		gui.once(win, :dispatch, fn(_, name) {
+			seen << (string(name) + ':once')
+		})
+
+		first := gui.emit(win, :dispatch, {type: :dispatch})
+		second := gui.emit(win, :dispatch, {type: :dispatch})
+		removed := gui.off(win, :dispatch, persist)
+		third := gui.emit(win, :dispatch, {type: :dispatch})
+
+		'event bus on/once/off/emit flow' |> t.eq(
+			[seen, first, second, removed, third, gui.listenerCount(win, :dispatch)]
+			[
+				['dispatch:dispatch', 'dispatch:once', 'dispatch:dispatch']
+				2, 1, 1, 0, 0
+			]
+		)
+		'event bus exposes emitAsync' |> t.eq(type(gui.eventBus(win).emitAsync), :function)
+	}
+
+	// ─── Graphing helpers ───────────────────────────────────────────────
+	{
+		win := {
+			type: :ok
+			backend: :web
+			messages: []
+			width: 320
+			height: 200
+		}
+
+		values := [2, 5, 9, 4, 7]
+		range := gui.graphRange(values, {padding: 1})
+
+		'graphRange computes min/max/span' |> t.eq(
+			[range.min, range.max, range.span]
+			[1, 10, 9]
+		)
+
+		'graphMapX maps index to pixel' |> t.eq(
+			gui.graphMapX(2, len(values), 10, 100)
+			60
+		)
+
+		'graphMapY maps value to pixel' |> t.eq(
+			gui.graphMapY(range.max, 20, 70, range)
+			20
+		)
+
+		gui.drawGraphAxes(win, 10, 10, 180, 90, {
+			showGrid: true
+			xTicks: 3
+			yTicks: 2
+		})
+		gui.drawLineGraph(win, 10, 120, 180, 60, values, {
+			showPoints: true
+			showLabels: true
+		})
+		gui.drawBarGraph(win, 200, 120, 100, 60, values, {
+			showLabels: true
+			barGap: 2
+		})
+		gui.drawSparkline(win, 200, 20, 100, 40, values, {
+			rangePadding: 1
+		})
+
+		'graph drawing emits at least some messages' |> t.assert(len(win.messages) > 0)
+	}
+
+	// ─── GUI safe surface: createWindow + backend + close ───────────────
+	{
+		window := gui.createWindow('GUI Smoke', 320, 220)
+
+		'gui.createWindow returns ok-typed object' |> t.eq(window.type, :ok)
+
+		'gui backend and window backend match' |> t.eq(
+			if ___runtime_sys_info().os {
+				'windows' -> (gui.backend() = :windows) & (window.backend = :windows)
+				'linux' -> (gui.backend() = :linux) & (window.backend = :linux)
+				_ -> (gui.backend() = :web) | (gui.backend() = :unknown)
+			}
+			true
+		)
+
+		'gui.close returns without error' |> t.eq(type(gui.close(window)), :int)
+	}
 }

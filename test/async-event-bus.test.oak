@@ -1,0 +1,27 @@
+buslib := import('async/event-bus')
+
+fn run(t) {
+	{
+		bus := buslib.create()
+		seen := []
+		persistId := bus.on('tick', fn(payload) {
+			seen << payload
+		})
+		bus.once('tick', fn(payload) {
+			seen << payload + 100
+		})
+
+		first := bus.emit('tick', 1)
+		second := bus.emitSync('tick', 2)
+		removed := bus.off('tick', persistId)
+		third := bus.emit('tick', 3)
+
+		'sync event bus on/once/emit/emitSync/off flow' |> t.eq(
+			[seen, first, second, removed, third, bus.listenerCount('tick')]
+			[
+				[1, 101, 2]
+				2, 1, 1, 0, 0
+			]
+		)
+	}
+}

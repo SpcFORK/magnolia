@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -400,8 +399,7 @@ func (c *Context) getGoChan(arg Value, fnName string) (chan Value, *runtimeError
 }
 
 func rawMemoryRegion(addr uintptr, length int) []byte {
-	hdr := reflect.SliceHeader{Data: addr, Len: length, Cap: length}
-	return *(*[]byte)(unsafe.Pointer(&hdr))
+	return unsafe.Slice((*byte)(unsafe.Pointer(addr)), length)
 }
 
 func (c *Context) callbackify(syncFn builtinFn) builtinFn {
@@ -675,8 +673,7 @@ func (c *Context) oakChar(args []Value) (Value, *runtimeError) {
 		if codepoint > 255 {
 			codepoint = 255
 		}
-		bytes := StringValue([]byte{byte(codepoint)})
-		return &bytes, nil
+		return MakeSingleByteString(byte(codepoint)), nil
 	default:
 		return null, nil
 	}
@@ -808,11 +805,9 @@ func (c *Context) oakKeys(args []Value) (Value, *runtimeError) {
 	case *ListValue:
 		return makeIntListUpTo(len(*arg)), nil
 	case ObjectValue:
-		keys := make(ListValue, len(arg))
-		i := 0
+		keys := make(ListValue, 0, len(arg))
 		for key := range arg {
-			keys[i] = MakeString(key)
-			i++
+			keys = append(keys, MakeString(key))
 		}
 		return &keys, nil
 	default:
@@ -1451,12 +1446,18 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 
 	fnArgs := args[1:] // remaining arguments
 
+	// Fork a lightweight context so this goroutine can evaluate code in
+	// parallel with other goroutines.  The forked context shares the engine
+	// (channels, imports, WaitGroup) but runs evaluations without competing
+	// for asyncEvalLock.  Scope variable reads are safe (per-scope RWMutex);
+	// local bindings created during evaluation stay isolated in new child
+	// scopes.
+	fork := c.forkContext()
+
 	c.eng.Add(1)
 	go func() {
 		defer c.eng.Done()
-		c.Lock()
-		defer c.Unlock()
-		_, err := c.EvalFnValueAsync(fn, false, fnArgs...)
+		_, err := fork.EvalFnValueParallel(fn, false, fnArgs...)
 		if err != nil {
 			c.eng.reportErr(err)
 		}
@@ -2833,13 +2834,14 @@ func (c *Context) oakWSRecv(args []Value) (Value, *runtimeError) {
 	messageType, payload, readErr := conn.ReadMessage()
 	c.Lock()
 	if readErr != nil {
-		if closeErr, ok := readErr.(*websocket.CloseError); ok {
-			removeWebsocket(id)
-			return websocketClosedEvent(closeErr.Code, closeErr.Text), nil
-		}
+		// Always remove the websocket on any read error: gorilla/websocket
+		// marks the connection as permanently failed after any read error,
+		// and a subsequent ReadMessage will panic with "repeated read on
+		// failed websocket connection".
+		removeWebsocket(id)
 
-		if websocket.IsUnexpectedCloseError(readErr) || readErr == io.EOF {
-			removeWebsocket(id)
+		if closeErr, ok := readErr.(*websocket.CloseError); ok {
+			return websocketClosedEvent(closeErr.Code, closeErr.Text), nil
 		}
 
 		return errObj(fmt.Sprintf("Could not read websocket message: %s", readErr.Error())), nil
@@ -2879,13 +2881,16 @@ func (c *Context) oakWSClose(args []Value) (Value, *runtimeError) {
 		closeText = reason.stringContent()
 	}
 
+	// Remove from map first so concurrent ws_recv callers get "not available"
+	// instead of racing with conn.Close() (which panics in gorilla/websocket).
+	removeWebsocket(id)
+
 	frame := websocket.FormatCloseMessage(closeCode, closeText)
 	c.Unlock()
 	_ = conn.WriteControl(websocket.CloseMessage, frame, time.Now().Add(2*time.Second))
 	closeErr := conn.Close()
 	c.Lock()
 
-	removeWebsocket(id)
 	if closeErr != nil {
 		return errObj(fmt.Sprintf("Could not close websocket: %s", closeErr.Error())), nil
 	}

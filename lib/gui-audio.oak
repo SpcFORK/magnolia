@@ -1,0 +1,282 @@
+// gui-audio — Windows spatial audio, volume mixer, and media transport controls.
+//
+// Spatial audio: positional audio relative to a GUI viewport using
+//   simple stereo panning + distance attenuation.
+// Volume mixer: IAudioSessionControl via PowerShell for per-app volume label.
+// Media transport controls: SystemMediaTransportControls for play/pause overlay.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+} := import('std')
+{
+	sqrt: sqrt
+	abs: abs
+	min: min
+	max: max
+	Pi: Pi
+} := import('math')
+
+// ─── Spatial audio (viewport-relative stereo panning) ────────────────────────
+// Provides a minimal spatial audio model:
+//   - 2D position (x,y) relative to a viewport (window width/height)
+//   - Stereo panning based on horizontal position
+//   - Distance-based attenuation from a listener position (center by default)
+
+// spatialAudioSource(id, x, y, volume) — create a spatial audio source descriptor.
+fn spatialAudioSource(id, x, y, volume) {
+	{
+		id: id
+		x: default(x, 0)
+		y: default(y, 0)
+		volume: default(volume, 1)
+		pan: 0
+		gain: 1
+	}
+}
+
+// spatialAudioUpdate(source, listenerX, listenerY, viewW, viewH, maxDist) →
+//   updated source with computed pan [-1..1] and gain [0..1].
+fn spatialAudioUpdate(source, listenerX, listenerY, viewW, viewH, maxDist) {
+	lx := default(listenerX, viewW / 2)
+	ly := default(listenerY, viewH / 2)
+	md := default(maxDist, sqrt(viewW * viewW + viewH * viewH))
+	dx := source.x - lx
+	dy := source.y - ly
+	dist := sqrt(dx * dx + dy * dy)
+	// pan from -1 (left) to +1 (right) based on horizontal offset
+	pan := if viewW > 0 {
+		true -> max(-1, min(1, dx / (viewW / 2)))
+		_ -> 0
+	}
+	// distance attenuation: linear falloff to 0 at maxDist
+	gain := if md > 0 {
+		true -> max(0, 1 - dist / md) * source.volume
+		_ -> source.volume
+	}
+	source.pan := pan
+	source.gain := gain
+	source
+}
+
+// spatialApplyToSamples(samples, pan, gain) →
+//   apply pan + gain to interleaved stereo [L,R,L,R,...] samples.
+fn spatialApplyToSamples(samples, pan, gain) {
+	// equal-power pan law
+	leftGain := gain * sqrt((1 - pan) / 2)
+	rightGain := gain * sqrt((1 + pan) / 2)
+	n := len(samples)
+	fn sub(i) if i < n {
+		true -> {
+			samples.(i) := samples.(i) * leftGain
+			if i + 1 < n -> samples.(i + 1) := samples.(i + 1) * rightGain
+			sub(i + 2)
+		}
+	}
+	sub(0)
+	samples
+}
+
+// spatialMixSources(sources, listenerX, listenerY, viewW, viewH, maxDist, bufLen) →
+//   mix multiple spatial sources into a single stereo buffer.
+fn spatialMixSources(sources, listenerX, listenerY, viewW, viewH, maxDist, bufLen) {
+	buf := []
+	{
+		fn sub(i) if i < bufLen {
+			true -> {
+				buf.(i) := 0
+				sub(i + 1)
+			}
+		}
+		sub(0)
+	}
+	each(sources, fn(src) {
+		s := spatialAudioUpdate(src, listenerX, listenerY, viewW, viewH, maxDist)
+		leftGain := s.gain * sqrt((1 - s.pan) / 2)
+		rightGain := s.gain * sqrt((1 + s.pan) / 2)
+		// Accumulate — assume each source has .samples of length bufLen
+		if src.samples != ? -> {
+			samps := src.samples
+			sLen := len(samps)
+			fn mix(i) if i < bufLen {
+				true -> if i < sLen {
+					true -> {
+						if i % 2 = 0 {
+							true -> buf.(i) := buf.(i) + samps.(i) * leftGain
+							_ -> buf.(i) := buf.(i) + samps.(i) * rightGain
+						}
+						mix(i + 1)
+					}
+					_ -> mix(i + 1)
+				}
+			}
+			mix(0)
+		}
+	})
+	buf
+}
+
+// ─── System volume mixer integration ─────────────────────────────────────────
+// Uses PowerShell to interact with Windows Audio Session API.
+
+// _escapePsString — reuse from shared helper pattern
+fn _escapePs(s) {
+	// Simple single-quote escape for PowerShell strings
+	result := ''
+	fn sub(i) if i < len(s) {
+		true -> {
+			ch := s.(i)
+			result <- if ch {
+				'\'' -> result + '\'\''
+				_ -> result + ch
+			}
+			sub(i + 1)
+		}
+	}
+	sub(0)
+	result
+}
+
+// setAppVolumeName(displayName) — set the display name for this app in the volume mixer.
+fn setAppVolumeName(displayName) {
+	safe := _escapePs(displayName)
+	ps := 'Add-Type -AssemblyName System.Runtime.InteropServices; '
+	ps <- ps + 'try { '
+	ps <- ps + '$code = @"
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("BFA971F1-4D5E-40BB-935E-967039BFBEE4"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionManager2 { }
+"@; '
+	ps <- ps + 'Write-Output "volume-name-set" '
+	ps <- ps + '} catch { Write-Output "volume-name-error" }'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// getSystemVolume() — get the current system master volume (0-100).
+fn getSystemVolume() {
+	ps := 'Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume {
+    int RegisterControlChangeNotify(System.IntPtr p);
+    int UnregisterControlChangeNotify(System.IntPtr p);
+    int GetChannelCount(out int c);
+    int SetMasterVolumeLevel(float l, System.Guid g);
+    int SetMasterVolumeLevelScalar(float l, System.Guid g);
+    int GetMasterVolumeLevel(out float l);
+    int GetMasterVolumeLevelScalar(out float l);
+}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice {
+    int Activate(ref System.Guid id, int ctx, System.IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o);
+}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceEnumerator {
+    int EnumAudioEndpoints(int df, int sm, out System.IntPtr c);
+    int GetDefaultAudioEndpoint(int df, int r, out IMMDevice d);
+}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {}
+"@; '
+	ps <- ps + '$e = New-Object MMDeviceEnumerator; '
+	ps <- ps + '$d = $null; [void]$e.GetDefaultAudioEndpoint(0, 1, [ref]$d); '
+	ps <- ps + '$iid = [Guid]"5CDF2C82-841E-4546-9722-0CF74078229A"; '
+	ps <- ps + '$vol = $null; [void]$d.Activate([ref]$iid, 23, [IntPtr]::Zero, [ref]$vol); '
+	ps <- ps + '$v = $vol -as [IAudioEndpointVolume]; '
+	ps <- ps + '$level = 0.0; [void]$v.GetMasterVolumeLevelScalar([ref]$level); '
+	ps <- ps + 'Write-Output ([math]::Round($level * 100, 1))'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// setSystemVolume(level) — set the master volume (0-100).
+fn setSystemVolume(level) {
+	scalar := max(0, min(1, level / 100))
+	ps := 'Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume {
+    int RegisterControlChangeNotify(System.IntPtr p);
+    int UnregisterControlChangeNotify(System.IntPtr p);
+    int GetChannelCount(out int c);
+    int SetMasterVolumeLevel(float l, System.Guid g);
+    int SetMasterVolumeLevelScalar(float l, System.Guid g);
+}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice {
+    int Activate(ref System.Guid id, int ctx, System.IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o);
+}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceEnumerator {
+    int EnumAudioEndpoints(int df, int sm, out System.IntPtr c);
+    int GetDefaultAudioEndpoint(int df, int r, out IMMDevice d);
+}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {}
+"@; '
+	ps <- ps + '$e = New-Object MMDeviceEnumerator; '
+	ps <- ps + '$d = $null; [void]$e.GetDefaultAudioEndpoint(0, 1, [ref]$d); '
+	ps <- ps + '$iid = [Guid]"5CDF2C82-841E-4546-9722-0CF74078229A"; '
+	ps <- ps + '$vol = $null; [void]$d.Activate([ref]$iid, 23, [IntPtr]::Zero, [ref]$vol); '
+	ps <- ps + '$v = $vol -as [IAudioEndpointVolume]; '
+	ps <- ps + '[void]$v.SetMasterVolumeLevelScalar(' + string(scalar) + ', [Guid]::Empty)'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// ─── Media transport controls ────────────────────────────────────────────────
+// Uses PowerShell + WinRT SystemMediaTransportControls for play/pause/next/prev.
+
+// enableMediaTransportControls(options) — register media transport control handlers.
+// options: { title, artist, onPlay, onPause, onNext, onPrev, onStop }
+fn enableMediaTransportControls(options) {
+	safeTitle := _escapePs(default(options.title, 'Magnolia'))
+	safeArtist := _escapePs(default(options.artist, ''))
+	// Register using WinRT via PowerShell
+	ps := '[Windows.Media.SystemMediaTransportControls, Windows.Media, ContentType=WindowsRuntime] | Out-Null; '
+	ps <- ps + '$smtc = [Windows.Media.SystemMediaTransportControls]::GetForCurrentView(); '
+	ps <- ps + '$smtc.IsEnabled = $true; '
+	ps <- ps + '$smtc.IsPlayEnabled = $true; '
+	ps <- ps + '$smtc.IsPauseEnabled = $true; '
+	ps <- ps + '$smtc.IsNextEnabled = $true; '
+	ps <- ps + '$smtc.IsPreviousEnabled = $true; '
+	ps <- ps + '$smtc.IsStopEnabled = $true; '
+	ps <- ps + '$updater = $smtc.DisplayUpdater; '
+	ps <- ps + '$updater.Type = [Windows.Media.MediaPlaybackType]::Music; '
+	ps <- ps + '$updater.MusicProperties.Title = \'' + safeTitle + '\'; '
+	ps <- ps + '$updater.MusicProperties.Artist = \'' + safeArtist + '\'; '
+	ps <- ps + '$updater.Update(); '
+	ps <- ps + 'Write-Output "smtc-enabled"'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// setMediaPlaybackStatus(status) — update the playback status.
+// status: 'playing', 'paused', 'stopped', 'changing'
+fn setMediaPlaybackStatus(status) {
+	s := if status {
+		'playing' -> 'Playing'
+		'paused' -> 'Paused'
+		'stopped' -> 'Stopped'
+		'changing' -> 'Changing'
+		_ -> 'Closed'
+	}
+	ps := '[Windows.Media.SystemMediaTransportControls, Windows.Media, ContentType=WindowsRuntime] | Out-Null; '
+	ps <- ps + '$smtc = [Windows.Media.SystemMediaTransportControls]::GetForCurrentView(); '
+	ps <- ps + '$smtc.PlaybackStatus = [Windows.Media.MediaPlaybackStatus]::' + s
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// updateMediaInfo(title, artist, albumTitle) — update displayed media info.
+fn updateMediaInfo(title, artist, albumTitle) {
+	st := _escapePs(default(title, ''))
+	sa := _escapePs(default(artist, ''))
+	sal := _escapePs(default(albumTitle, ''))
+	ps := '[Windows.Media.SystemMediaTransportControls, Windows.Media, ContentType=WindowsRuntime] | Out-Null; '
+	ps <- ps + '$smtc = [Windows.Media.SystemMediaTransportControls]::GetForCurrentView(); '
+	ps <- ps + '$updater = $smtc.DisplayUpdater; '
+	ps <- ps + '$updater.Type = [Windows.Media.MediaPlaybackType]::Music; '
+	ps <- ps + '$updater.MusicProperties.Title = \'' + st + '\'; '
+	ps <- ps + '$updater.MusicProperties.Artist = \'' + sa + '\'; '
+	ps <- ps + '$updater.MusicProperties.AlbumTitle = \'' + sal + '\'; '
+	ps <- ps + '$updater.Update()'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}

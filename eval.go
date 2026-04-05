@@ -77,6 +77,14 @@ func (v NullValue) Eq(u Value) bool {
 
 type StringValue []byte
 
+// MakeSingleByteString returns a new *StringValue for a single byte.
+// Each call allocates a fresh value so that in-place mutation via << does not
+// corrupt shared state.
+func MakeSingleByteString(b byte) *StringValue {
+	sv := StringValue([]byte{b})
+	return &sv
+}
+
 func MakeString(s string) *StringValue {
 	v := StringValue(s)
 	return &v
@@ -90,6 +98,10 @@ func (v *StringValue) Eq(u Value) bool {
 	}
 
 	if w, ok := u.(*StringValue); ok {
+		// Fast path: both are single-byte (dominant case in char-by-char loops)
+		if len(*v) == 1 && len(*w) == 1 {
+			return (*v)[0] == (*w)[0]
+		}
 		return bytes.Equal(*v, *w)
 	}
 	return false
@@ -238,6 +250,30 @@ func (v *ListValue) Eq(u Value) bool {
 
 type ObjectValue map[string]Value
 
+// Striped RWMutex pool for concurrent ObjectValue map access.
+// Each map is assigned a stripe based on its runtime pointer so that
+// distinct objects rarely share a lock while the same object always
+// maps to the same lock.
+const objMuN = 32
+
+var objMu [objMuN]sync.RWMutex
+
+// objLock acquires an exclusive lock for the given ObjectValue and
+// returns the mutex so the caller can Unlock it.
+func objLock(m ObjectValue) *sync.RWMutex {
+	mu := &objMu[reflect.ValueOf(m).Pointer()/8%objMuN]
+	mu.Lock()
+	return mu
+}
+
+// objRLock acquires a shared read lock for the given ObjectValue and
+// returns the mutex so the caller can RUnlock it.
+func objRLock(m ObjectValue) *sync.RWMutex {
+	mu := &objMu[reflect.ValueOf(m).Pointer()/8%objMuN]
+	mu.RLock()
+	return mu
+}
+
 // only used for efficient serialization to string
 type serializedObjEntry struct {
 	key  string
@@ -245,16 +281,40 @@ type serializedObjEntry struct {
 }
 
 func (v ObjectValue) String() string {
-	// TODO: fix how this deals with circular references
-	entries := make([]serializedObjEntry, len(v))
+	return v.stringWithSeen(make(map[*ObjectValue]bool))
+}
 
-	i := 0
+func (v ObjectValue) stringWithSeen(seen map[*ObjectValue]bool) string {
+	if seen[&v] {
+		return "{...}"
+	}
+	seen[&v] = true
+
+	// Snapshot key-value pairs under read lock, then release before
+	// recursing into child ObjectValues (avoids recursive RLock).
+	mu := objRLock(v)
+	type kv struct {
+		k string
+		v Value
+	}
+	pairs := make([]kv, 0, len(v))
 	for key, val := range v {
-		entries[i] = serializedObjEntry{
-			key:  key,
-			full: key + ": " + val.String(),
+		pairs = append(pairs, kv{key, val})
+	}
+	mu.RUnlock()
+
+	entries := make([]serializedObjEntry, len(pairs))
+	for i, p := range pairs {
+		valStr := ""
+		if ov, ok := p.v.(ObjectValue); ok {
+			valStr = ov.stringWithSeen(seen)
+		} else {
+			valStr = p.v.String()
 		}
-		i++
+		entries[i] = serializedObjEntry{
+			key:  p.k,
+			full: p.k + ": " + valStr,
+		}
 	}
 
 	// sort entries lexicographically for easier debugging use
@@ -280,13 +340,34 @@ func (v ObjectValue) Eq(u Value) bool {
 	}
 
 	if w, ok := u.(ObjectValue); ok {
-		if len(v) != len(w) {
+		muV := objRLock(v)
+		vLen := len(v)
+		muV.RUnlock()
+		muW := objRLock(w)
+		wLen := len(w)
+		muW.RUnlock()
+		if vLen != wLen {
 			return false
 		}
 
+		// Snapshot v under read lock, then compare without holding it.
+		muV = objRLock(v)
+		type kv struct {
+			k string
+			v Value
+		}
+		pairs := make([]kv, 0, vLen)
 		for key, val := range v {
-			if wVal, ok := w[key]; ok {
-				if !val.Eq(wVal) {
+			pairs = append(pairs, kv{key, val})
+		}
+		muV.RUnlock()
+
+		for _, p := range pairs {
+			muW = objRLock(w)
+			wVal, ok := w[p.k]
+			muW.RUnlock()
+			if ok {
+				if !p.v.Eq(wVal) {
 					return false
 				}
 			} else {
@@ -352,6 +433,11 @@ func (v thunkValue) String() string {
 func (v thunkValue) Eq(u Value) bool {
 	panic("Illegal to compare thunk values!")
 }
+
+// unwrapThunk iteratively evaluates a chain of tail-call thunks.
+// Retained for reference; current eval loop inlines this logic.
+var _ = (*Context).unwrapThunk //nolint:unused
+
 func (c *Context) unwrapThunk(thunk thunkValue) (v Value, err *runtimeError) {
 	for isThunk := true; isThunk; thunk, isThunk = v.(thunkValue) {
 		v, err = c.evalExprWithOpt(thunk.defn.body, thunk.scope, true)
@@ -790,9 +876,23 @@ func bindCallScope(parent *scope, params []string, restArg string, args []Value)
 }
 
 func mergeObjectValue(dst ObjectValue, src ObjectValue) {
-	for key, val := range src {
-		dst[key] = val
+	// Snapshot src under read lock to avoid holding two locks (deadlock-safe).
+	srcMu := objRLock(src)
+	type kv struct {
+		k string
+		v Value
 	}
+	pairs := make([]kv, 0, len(src))
+	for key, val := range src {
+		pairs = append(pairs, kv{key, val})
+	}
+	srcMu.RUnlock()
+
+	dstMu := objLock(dst)
+	for _, p := range pairs {
+		dst[p.k] = p.v
+	}
+	dstMu.Unlock()
 }
 
 func (c *Context) constructClassValue(class ClassValue, args ...Value) (Value, *runtimeError) {
@@ -892,6 +992,31 @@ func (c *Context) EvalFnValueAsync(maybeFn Value, thunkable bool, args ...Value)
 	return c.evalFnCall(maybeFn, thunkable, args)
 }
 
+// EvalFnValueParallel evaluates a function without acquiring asyncEvalLock,
+// allowing true parallel execution. The caller must ensure the function does
+// not race on shared mutable objects. Designed for thread.parallel tasks that
+// work on their own closure-captured data and return results via channels.
+func (c *Context) EvalFnValueParallel(maybeFn Value, thunkable bool, args ...Value) (Value, *runtimeError) {
+	return c.evalFnCall(maybeFn, thunkable, args)
+}
+
+// forkContext creates a lightweight Context that shares the engine (channels,
+// imports, WaitGroup) with the parent but can evaluate code independently
+// without competing for asyncEvalLock. Each forked context has its own scope
+// chain starting from the parent's current scope, so variable reads are safe
+// (scope.mu provides per-scope RWMutex protection) and local bindings stay
+// isolated. Use for CPU-bound parallel tasks that don't mutate shared Objects
+// or Lists.
+func (c *Context) forkContext() *Context {
+	return &Context{
+		eng:         c.eng,
+		rootPath:    c.rootPath,
+		currentFile: c.currentFile,
+		scope:       c.scope,
+		vm:          nil, // forked contexts do not inherit cached VM
+	}
+}
+
 // evalFnCall is the slice-based fast path for function evaluation.
 func (c *Context) evalFnCall(maybeFn Value, thunkable bool, args []Value) (Value, *runtimeError) {
 	if fn, ok := maybeFn.(FnValue); ok {
@@ -980,7 +1105,10 @@ func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 		if right == 0 {
 			return nil, &divisionByZeroErr
 		}
-		return FloatValue(FloatValue(left) / FloatValue(right)), nil
+		if left%right == 0 {
+			return IntValue(left / right), nil
+		}
+		return FloatValue(float64(left) / float64(right)), nil
 	case modulus:
 		if right == 0 {
 			return nil, &divisionByZeroErr
@@ -1206,11 +1334,29 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		}
 		return fn, nil
 	case identifierNode:
-		val, err := sc.get(n.payload)
-		if err != nil {
-			err.pos = n.pos()
+		// Inline fast path: check local scope first without method call overhead.
+		// Most variable accesses hit the local scope (function params, block locals).
+		if sc.mu == nil {
+			if v, ok := sc.vars[n.payload]; ok {
+				return v, nil
+			}
+		} else {
+			sc.mu.RLock()
+			v, ok := sc.vars[n.payload]
+			sc.mu.RUnlock()
+			if ok {
+				return v, nil
+			}
 		}
-		return val, err
+		// Fall back to parent chain walk
+		if sc.parent != nil {
+			val, err := sc.parent.get(n.payload)
+			if err != nil {
+				err.pos = n.pos()
+			}
+			return val, err
+		}
+		return null, nil
 	case assignmentNode:
 		assignedValue, err := c.evalExpr(n.right, sc)
 		if err != nil {
@@ -1220,7 +1366,14 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		switch left := n.left.(type) {
 		case identifierNode:
 			if n.isLocal {
-				sc.put(left.payload, assignedValue)
+				// Inline sc.put() to avoid method call overhead on hot path
+				if sc.mu != nil {
+					sc.mu.Lock()
+					sc.vars[left.payload] = assignedValue
+					sc.mu.Unlock()
+				} else {
+					sc.vars[left.payload] = assignedValue
+				}
 			} else {
 				err := sc.update(left.payload, assignedValue)
 				if err != nil {
@@ -1385,6 +1538,30 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				return nil, err
 			}
 
+			// Fast path: obj.identifier assignment — avoid MakeString allocation
+			if ident, isIdent := assign.right.(identifierNode); isIdent {
+				switch target := assignLeft.(type) {
+				case ObjectValue:
+					mu := objLock(target)
+					if _, ok := assignedValue.(EmptyValue); ok {
+						delete(target, ident.payload)
+					} else {
+						target[ident.payload] = assignedValue
+					}
+					mu.Unlock()
+					return assignLeft, nil
+				case ClassValue:
+					mu := objLock(target.static)
+					if _, ok := assignedValue.(EmptyValue); ok {
+						delete(target.static, ident.payload)
+					} else {
+						target.static[ident.payload] = assignedValue
+					}
+					mu.Unlock()
+					return assignLeft, nil
+				}
+			}
+
 			assignRight, err := c.evalAsObjKey(assign.right, sc)
 			if err != nil {
 				return nil, err
@@ -1460,11 +1637,13 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					objKeyString = assignRight.String()
 				}
 
+				mu := objLock(target)
 				if _, ok := assignedValue.(EmptyValue); ok {
 					delete(target, objKeyString)
 				} else {
 					target[objKeyString] = assignedValue
 				}
+				mu.Unlock()
 			case ClassValue:
 				var objKeyString string
 				if objKey, ok := assignRight.(*StringValue); ok {
@@ -1475,11 +1654,13 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					objKeyString = assignRight.String()
 				}
 
+				mu := objLock(target.static)
 				if _, ok := assignedValue.(EmptyValue); ok {
 					delete(target.static, objKeyString)
 				} else {
 					target.static[objKeyString] = assignedValue
 				}
+				mu.Unlock()
 			case NullValue:
 				return nil, &runtimeError{
 					reason: fmt.Sprintf("Cannot assign to property of undefined value in %s", left.String()),
@@ -1505,6 +1686,29 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return nil, err
 		}
 
+		// Fast path: obj.identifier — the most common property access pattern.
+		// Avoids MakeString allocation and type-switch round-trip.
+		if ident, isIdent := n.right.(identifierNode); isIdent {
+			switch target := left.(type) {
+			case ObjectValue:
+				mu := objRLock(target)
+				val, ok := target[ident.payload]
+				mu.RUnlock()
+				if ok {
+					return val, nil
+				}
+				return null, nil
+			case ClassValue:
+				mu := objRLock(target.static)
+				val, ok := target.static[ident.payload]
+				mu.RUnlock()
+				if ok {
+					return val, nil
+				}
+				return null, nil
+			}
+		}
+
 		right, err := c.evalAsObjKey(n.right, sc)
 		if err != nil {
 			return nil, err
@@ -1524,8 +1728,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				return null, nil
 			}
 
-			targetByte := StringValue([]byte{(*target)[byteIndex]})
-			return &targetByte, nil
+			return MakeSingleByteString((*target)[byteIndex]), nil
 		case *ListValue:
 			listIndex, ok := right.(IntValue)
 			if !ok {
@@ -1550,7 +1753,10 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				objKeyString = right.String()
 			}
 
-			if val, ok := target[objKeyString]; ok {
+			mu := objRLock(target)
+			val, ok := target[objKeyString]
+			mu.RUnlock()
+			if ok {
 				return val, nil
 			}
 
@@ -1565,7 +1771,10 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				objKeyString = right.String()
 			}
 
-			if val, ok := target.static[objKeyString]; ok {
+			mu := objRLock(target.static)
+			val, ok := target.static[objKeyString]
+			mu.RUnlock()
+			if ok {
 				return val, nil
 			}
 
@@ -1628,11 +1837,18 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return nil, err
 		}
 
-		if n.op == eq {
+		switch n.op {
+		case eq:
 			return BoolValue(shallowEqual(leftComputed, rightComputed)), nil
-		} else if n.op == deepEq {
+		case deepEq:
 			return BoolValue(leftComputed.Eq(rightComputed)), nil
-		} else if n.op == neq {
+		case neq:
+			// Fast path: int != int (very common in loop guards)
+			if li, ok := leftComputed.(IntValue); ok {
+				if ri, ok := rightComputed.(IntValue); ok {
+					return BoolValue(li != ri), nil
+				}
+			}
 			return BoolValue(!leftComputed.Eq(rightComputed)), nil
 		}
 
@@ -1654,6 +1870,14 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					return BoolValue(leftInt <= rightInt), nil
 				case geq:
 					return BoolValue(leftInt >= rightInt), nil
+				case divide:
+					if rightInt == 0 {
+						return nil, &runtimeError{reason: "Division by zero", pos: n.pos()}
+					}
+					if leftInt%rightInt == 0 {
+						return IntValue(leftInt / rightInt), nil
+					}
+					return FloatValue(float64(leftInt) / float64(rightInt)), nil
 				case modulus:
 					if rightInt == 0 {
 						return nil, &runtimeError{reason: "Division by zero", pos: n.pos()}
@@ -1698,6 +1922,19 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 						err.pos = n.pos()
 					}
 					return val, err
+				}
+			}
+		}
+
+		// Fast path: string + string (common in template/concat-heavy code)
+		if n.op == plus {
+			if leftStr, ok := leftComputed.(*StringValue); ok {
+				if rightStr, ok := rightComputed.(*StringValue); ok {
+					base := make([]byte, 0, len(*leftStr)+len(*rightStr))
+					base = append(base, *leftStr...)
+					base = append(base, *rightStr...)
+					baseStr := StringValue(base)
+					return &baseStr, nil
 				}
 			}
 		}
@@ -1889,9 +2126,35 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			pos: n.pos(),
 		}
 	case fnCallNode:
-		maybeFn, err := c.evalExpr(n.fn, sc)
-		if err != nil {
-			return nil, err
+		// Super-fast path: identifier function call — inline scope lookup
+		// to avoid the full evalExpr type switch for the function itself.
+		var maybeFn Value
+		if fnIdent, isFnIdent := n.fn.(identifierNode); isFnIdent {
+			// Inline scope.get for the function identifier
+			if sc.mu == nil {
+				if v, ok := sc.vars[fnIdent.payload]; ok {
+					maybeFn = v
+				}
+			} else {
+				sc.mu.RLock()
+				v, ok := sc.vars[fnIdent.payload]
+				sc.mu.RUnlock()
+				if ok {
+					maybeFn = v
+				}
+			}
+			if maybeFn == nil && sc.parent != nil {
+				maybeFn, _ = sc.parent.get(fnIdent.payload)
+			}
+			if maybeFn == nil {
+				maybeFn = null
+			}
+		} else {
+			var err *runtimeError
+			maybeFn, err = c.evalExpr(n.fn, sc)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		// Fast path: direct FnValue call with exact args and no rest/spread
@@ -1935,6 +2198,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 
 		args := make([]Value, len(n.args))
 		for i, argNode := range n.args {
+			var err *runtimeError
 			args[i], err = c.evalExpr(argNode, sc)
 			if err != nil {
 				return nil, err
@@ -1971,14 +2235,59 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return nil, err
 		}
 
-		for _, branch := range n.branches {
-			target, err := c.evalExpr(branch.target, sc)
-			if err != nil {
-				return nil, err
+		// Fast paths for common condition types to avoid Eq() interface dispatch
+		switch cv := cond.(type) {
+		case IntValue:
+			for _, branch := range n.branches {
+				target, err := c.evalExpr(branch.target, sc)
+				if err != nil {
+					return nil, err
+				}
+				if _, isEmpty := target.(EmptyValue); isEmpty {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
+				if tv, ok := target.(IntValue); ok && cv == tv {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
 			}
-
-			if cond.Eq(target) {
-				return c.evalExprWithOpt(branch.body, sc, thunkable)
+		case AtomValue:
+			for _, branch := range n.branches {
+				target, err := c.evalExpr(branch.target, sc)
+				if err != nil {
+					return nil, err
+				}
+				if _, isEmpty := target.(EmptyValue); isEmpty {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
+				if tv, ok := target.(AtomValue); ok && cv == tv {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
+			}
+		case BoolValue:
+			for _, branch := range n.branches {
+				target, err := c.evalExpr(branch.target, sc)
+				if err != nil {
+					return nil, err
+				}
+				if _, isEmpty := target.(EmptyValue); isEmpty {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
+				if tv, ok := target.(BoolValue); ok && cv == tv {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
+			}
+		default:
+			for _, branch := range n.branches {
+				target, err := c.evalExpr(branch.target, sc)
+				if err != nil {
+					return nil, err
+				}
+				if _, isEmpty := target.(EmptyValue); isEmpty {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
+				if cond.Eq(target) {
+					return c.evalExprWithOpt(branch.body, sc, thunkable)
+				}
 			}
 		}
 		return null, nil
@@ -1988,7 +2297,12 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			return null, nil
 		}
 
-		blockScope := newScope(&sc)
+		// Fast path: blocks without local assignments don't need a new scope.
+		// This avoids a map allocation + mutex pool acquisition per block.
+		blockScope := sc
+		if n.hasLocal {
+			blockScope = newScope(&sc)
+		}
 
 		last := len(n.exprs) - 1
 		for _, expr := range n.exprs[:last] {

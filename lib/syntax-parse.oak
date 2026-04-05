@@ -35,13 +35,13 @@ fn rewriteClassSugarAssignmentLeft(node, visibleFields, allFields, shadowed, sel
 	:identifier -> if {
 		isLocal -> node
 		shadowed.(node.val) != ? -> node
-		node.val = 'Self' -> { type: :identifier, tok: node.tok, val: selfName }
 		visibleFields.(node.val) != ? -> {
 			type: :propertyAccess
 			tok: node.tok
 			left: { type: :identifier, tok: node.tok, val: selfName }
 			right: node
 		}
+		node.val = 'self' | node.val = 'Self' -> { type: :identifier, tok: node.tok, val: selfName }
 		_ -> node
 	}
 	:list -> {
@@ -70,13 +70,13 @@ fn rewriteClassSugarNode(node, visibleFields, allFields, shadowed, selfName) if 
 	:identifier -> if {
 		node.val = selfName -> node
 		shadowed.(node.val) != ? -> node
-		node.val = 'Self' -> { type: :identifier, tok: node.tok, val: selfName }
 		visibleFields.(node.val) != ? -> {
 			type: :propertyAccess
 			tok: node.tok
 			left: { type: :identifier, tok: node.tok, val: selfName }
 			right: node
 		}
+		node.val = 'self' | node.val = 'Self' -> { type: :identifier, tok: node.tok, val: selfName }
 		_ -> node
 	}
 	:list -> {
@@ -260,6 +260,37 @@ fn classBodyFromAssignmentBlock(body, reservedNames) if body.type {
 		}
 	}
 	_ -> [?, false]
+}
+
+fn wrapBodyWithSelfVar(body, reservedNames) {
+	selfName := '__oakClassSelf'
+	reserved := {}
+	reservedNames |> each(fn(name) if name != '' & name != '_' -> reserved.(name) <- true)
+	fn findUniqueSelf if reserved.(selfName) != ? -> {
+		selfName <- selfName << '_'
+		findUniqueSelf()
+	}
+	findUniqueSelf()
+
+	shadowed := {}
+	shadowed.(selfName) <- true
+	empty := {}
+	rewrittenBody := rewriteClassSugarNode(body, empty, empty, shadowed, selfName)
+
+	{
+		type: :block
+		tok: body.tok
+		exprs: [
+			{
+				type: :assignment
+				tok: body.tok
+				local?: true
+				left: { type: :identifier, tok: body.tok, val: selfName }
+				right: { type: :object, tok: body.tok, entries: [] }
+			}
+			rewrittenBody
+		]
+	}
 }
 
 // Parser takes a raw token stream, potentially including newlines and
@@ -664,6 +695,11 @@ fn Parser(tokens) {
 				}
 				:colon -> if peek().type {
 					:identifier -> {
+						type: :atom
+						tok: tok
+						val: next().val
+					}
+					:numberLiteral -> {
 						type: :atom
 						tok: tok
 						val: next().val

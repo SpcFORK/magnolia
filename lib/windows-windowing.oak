@@ -800,10 +800,10 @@ fn monitorFromWindow(hwnd, flags) if isWindows?() {
 fn adjustWindowRectExForDpi(x, y, w, h, style, exStyle, dpi) if isWindows?() {
 	true -> {
 		rectBuf := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-		writeI32(addr(rectBuf), x)
-		writeI32(addr(rectBuf) + 4, y)
-		writeI32(addr(rectBuf) + 8, x + w)
-		writeI32(addr(rectBuf) + 12, y + h)
+		writeU32(addr(rectBuf), x)
+		writeU32(addr(rectBuf) + 4, y)
+		writeU32(addr(rectBuf) + 8, x + w)
+		writeU32(addr(rectBuf) + 12, y + h)
 		res := user32('AdjustWindowRectExForDpi', addr(rectBuf), style, 0, exStyle, dpi)
 		if callOk?(res) & res.r1 != 0 {
 			true -> {
@@ -834,3 +834,86 @@ fn dpiScale(value, dpi) int(value * dpi / 96)
 
 // dpiUnscale(value, dpi) — convert physical coordinate back to 96 DPI design space.
 fn dpiUnscale(value, dpi) int(value * 96 / dpi)
+
+// ─── Multi-monitor ───────────────────────────────────────────────────────────
+
+// MONITORINFOEXW struct:
+//   0  DWORD cbSize (= 104 on x86/x64)
+//   4  RECT  rcMonitor  (16 bytes)
+//  20  RECT  rcWork     (16 bytes)
+//  36  DWORD dwFlags
+//  40  WCHAR szDevice[CCHDEVICENAME=32] (64 bytes)
+_MONITORINFOEX_SIZE := 104
+
+// getMonitorInfo(hMonitor) -> { monitor: rect, work: rect, flags, device } | ?
+fn getMonitorInfo(hMonitor) if isWindows?() {
+	true -> {
+		buf := bits(_zeros(_MONITORINFOEX_SIZE, ''))
+		writeU32(addr(buf), _MONITORINFOEX_SIZE)
+		res := user32('GetMonitorInfoW', hMonitor, addr(buf))
+		if callOk?(res) & res.r1 != 0 {
+			true -> {
+				{
+					monitor: {
+						left: _toI32(readU32(addr(buf) + 4))
+						top: _toI32(readU32(addr(buf) + 8))
+						right: _toI32(readU32(addr(buf) + 12))
+						bottom: _toI32(readU32(addr(buf) + 16))
+					}
+					work: {
+						left: _toI32(readU32(addr(buf) + 20))
+						top: _toI32(readU32(addr(buf) + 24))
+						right: _toI32(readU32(addr(buf) + 28))
+						bottom: _toI32(readU32(addr(buf) + 32))
+					}
+					flags: readU32(addr(buf) + 36)
+					primary: (readU32(addr(buf) + 36) & 1) = 1
+				}
+			}
+			_ -> ?
+		}
+	}
+	_ -> ?
+}
+
+// monitorFromPoint(x, y, flags) -> HMONITOR handle.
+fn monitorFromPoint(x, y, flags) if isWindows?() {
+	true -> {
+		res := user32('MonitorFromPoint', x, y, _default(flags, 2))
+		if callOk?(res) {
+			true -> res.r1
+			_ -> 0
+		}
+	}
+	_ -> 0
+}
+
+// monitorFromRect(left, top, right, bottom, flags) -> HMONITOR handle.
+fn monitorFromRect(left, top, right, bottom, flags) if isWindows?() {
+	true -> {
+		rectBuf := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+		writeU32(addr(rectBuf), left)
+		writeU32(addr(rectBuf) + 4, top)
+		writeU32(addr(rectBuf) + 8, right)
+		writeU32(addr(rectBuf) + 12, bottom)
+		res := user32('MonitorFromRect', addr(rectBuf), _default(flags, 2))
+		if callOk?(res) {
+			true -> res.r1
+			_ -> 0
+		}
+	}
+	_ -> 0
+}
+
+// getSystemMetricsForDpi(index, dpi) -> metric value.
+// DPI-aware system metrics (Windows 10 1607+).
+fn getSystemMetricsForDpi(index, dpi) if isWindows?() {
+	true -> {
+		res := user32('GetSystemMetricsForDpi', index, dpi)
+		if callOk?(res) {
+			true -> res.r1
+			_ -> 0
+		}
+	}
+	_ -> 0
+}

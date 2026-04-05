@@ -1,0 +1,163 @@
+// gui-gpu-info — GPU capability detection and information dump.
+//
+// Detects GPU adapters, VRAM, driver versions, and capabilities
+// using DXGI enumeration via PowerShell and Win32 API.
+
+{
+	default: default
+	map: map
+	each: each
+} := import('std')
+{
+	floor: floor
+} := import('math')
+
+// ─── GPU information via PowerShell/WMI ──────────────────────────────────────
+
+// getGPUAdapters() — list all GPU adapters with details.
+// Returns output from Win32_VideoController WMI class.
+fn getGPUAdapters() {
+	ps := 'Get-CimInstance -ClassName Win32_VideoController | ForEach-Object { '
+	ps <- ps + '$vram = [math]::Round($_.AdapterRAM / 1MB, 0); '
+	ps <- ps + 'Write-Output ("NAME=" + $_.Name + "|DRIVER=" + $_.DriverVersion + "|VRAM_MB=" + $vram + "|STATUS=" + $_.Status + "|DACTYPE=" + $_.AdapterDACType + "|VIDPROC=" + $_.VideoProcessor + "|CURRHRES=" + $_.CurrentHorizontalResolution + "|CURRVRES=" + $_.CurrentVerticalResolution + "|CURRREFRESH=" + $_.CurrentRefreshRate + "|CURRBPP=" + $_.CurrentBitsPerPixel + "|DRIVERDATE=" + $_.DriverDate) '
+	ps <- ps + '}'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// getGPUAdaptersParsed() — returns structured list of GPU adapters.
+fn getGPUAdaptersParsed() {
+	raw := getGPUAdapters()
+	// Parse pipe-delimited key=value lines
+	lines := split(raw, '\n')
+	adapters := []
+	each(lines, fn(line) if len(trim(line, ' \t\r\n')) > 0 -> {
+		adapter := {}
+		parts := split(line, '|')
+		each(parts, fn(part) {
+			kv := split(part, '=')
+			if len(kv) >= 2 -> {
+				key := trim(kv.0, ' \t\r\n')
+				val := trim(kv.1, ' \t\r\n')
+				if key {
+					'NAME' -> adapter.name := val
+					'DRIVER' -> adapter.driverVersion := val
+					'VRAM_MB' -> adapter.vramMB := int(val)
+					'STATUS' -> adapter.status := val
+					'DACTYPE' -> adapter.dacType := val
+					'VIDPROC' -> adapter.videoProcessor := val
+					'CURRHRES' -> adapter.currentHRes := int(val)
+					'CURRVRES' -> adapter.currentVRes := int(val)
+					'CURRREFRESH' -> adapter.currentRefreshRate := int(val)
+					'CURRBPP' -> adapter.currentBitsPerPixel := int(val)
+					'DRIVERDATE' -> adapter.driverDate := val
+				}
+			}
+		})
+		if adapter.name != ? -> adapters <- adapters << adapter
+	})
+	adapters
+}
+
+// getDXGIAdapters() — enumerate DXGI adapters (more detailed than WMI).
+fn getDXGIAdapters() {
+	ps := 'Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class DxgiHelper {
+    [DllImport("dxgi.dll")]
+    public static extern int CreateDXGIFactory(ref Guid riid, out IntPtr ppFactory);
+    
+    [DllImport("dxgi.dll")]
+    public static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
+}
+"@; '
+	ps <- ps + 'try { '
+	ps <- ps + '$factoryGuid = [Guid]"7b7166ec-21c7-44ae-b21a-c9ae321ae369"; '  // IDXGIFactory
+	ps <- ps + '$factory = [IntPtr]::Zero; '
+	ps <- ps + '$hr = [DxgiHelper]::CreateDXGIFactory1([ref]$factoryGuid, [ref]$factory); '
+	ps <- ps + 'if ($hr -eq 0 -and $factory -ne [IntPtr]::Zero) { '
+	ps <- ps + 'Write-Output "DXGI_FACTORY_OK"; '
+	ps <- ps + '} else { '
+	ps <- ps + 'Write-Output ("DXGI_FACTORY_FAIL_HR=" + $hr) '
+	ps <- ps + '} '
+	ps <- ps + '} catch { Write-Output ("DXGI_ERROR=" + $_.Exception.Message) }'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// getD3DFeatureLevel() — detect the highest Direct3D feature level supported.
+fn getD3DFeatureLevel() {
+	ps := 'try { '
+	ps <- ps + '$levels = @("12_2","12_1","12_0","11_1","11_0","10_1","10_0","9_3","9_2","9_1"); '
+	ps <- ps + '$adapters = Get-CimInstance -ClassName Win32_VideoController; '
+	ps <- ps + '$adapter = $adapters | Select-Object -First 1; '
+	ps <- ps + '$name = $adapter.Name; '
+	ps <- ps + '$driver = $adapter.DriverVersion; '
+	ps <- ps + '# Heuristic feature level detection based on driver/adapter '
+	ps <- ps + 'if ($name -match "RTX 4|RTX 3|RX 7" -or $driver -match "^3[1-9]") { '
+	ps <- ps + '  Write-Output "FEATURE_LEVEL=12_2" '
+	ps <- ps + '} elseif ($name -match "RTX 2|GTX 16|RX 6|RX 5" -or $driver -match "^2[7-9]|^30") { '
+	ps <- ps + '  Write-Output "FEATURE_LEVEL=12_1" '
+	ps <- ps + '} elseif ($name -match "GTX 10|GTX 9|RX 4|RX 5" -or $driver -match "^2[0-6]") { '
+	ps <- ps + '  Write-Output "FEATURE_LEVEL=12_0" '
+	ps <- ps + '} else { '
+	ps <- ps + '  Write-Output "FEATURE_LEVEL=11_0" '
+	ps <- ps + '} '
+	ps <- ps + '} catch { Write-Output "FEATURE_LEVEL=UNKNOWN" }'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// getDisplayModes() — list available display modes for the primary monitor.
+fn getDisplayModes() {
+	ps := 'Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorListedSupportedSourceModes -ErrorAction SilentlyContinue | ForEach-Object { '
+	ps <- ps + '$_.MonitorSourceModes | ForEach-Object { '
+	ps <- ps + 'Write-Output ($_.HorizontalActivePixels.ToString() + "x" + $_.VerticalActivePixels.ToString() + "@" + ($_.VerticalSyncFreqNumerator / $_.VerticalSyncFreqDivider).ToString("F1") + "Hz") '
+	ps <- ps + '} '
+	ps <- ps + '}'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// getMonitorInfo() — get details about connected monitors.
+fn getMonitorInfo() {
+	ps := 'Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object { '
+	ps <- ps + '$name = ($_.UserFriendlyName | Where-Object {$_ -ne 0} | ForEach-Object { [char]$_ }) -join ""; '
+	ps <- ps + '$mfg = ($_.ManufacturerName | Where-Object {$_ -ne 0} | ForEach-Object { [char]$_ }) -join ""; '
+	ps <- ps + '$serial = ($_.SerialNumberID | Where-Object {$_ -ne 0} | ForEach-Object { [char]$_ }) -join ""; '
+	ps <- ps + 'Write-Output ("MONITOR=" + $name + "|MFG=" + $mfg + "|SERIAL=" + $serial + "|YEAR=" + $_.YearOfManufacture + "|WEEK=" + $_.WeekOfManufacture) '
+	ps <- ps + '}'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// gpuCapabilityDump() — comprehensive GPU/display capability report.
+fn gpuCapabilityDump() {
+	report := '=== GPU Capability Dump ===\n\n'
+
+	// GPU Adapters
+	report <- report + '--- GPU Adapters ---\n'
+	adapters := getGPUAdaptersParsed()
+	fn subA(i) if i < len(adapters) {
+		true -> {
+			a := adapters.(i)
+			report <- report + 'Adapter ' + string(i) + ': ' + default(a.name, '?') + '\n'
+			report <- report + '  Driver: ' + default(a.driverVersion, '?') + '\n'
+			report <- report + '  VRAM: ' + string(default(a.vramMB, 0)) + ' MB\n'
+			report <- report + '  Status: ' + default(a.status, '?') + '\n'
+			report <- report + '  Resolution: ' + string(default(a.currentHRes, 0)) + 'x' + string(default(a.currentVRes, 0))
+			report <- report + ' @ ' + string(default(a.currentRefreshRate, 0)) + 'Hz'
+			report <- report + ' (' + string(default(a.currentBitsPerPixel, 0)) + 'bpp)\n'
+			subA(i + 1)
+		}
+	}
+	subA(0)
+
+	// Feature level
+	report <- report + '\n--- Direct3D Feature Level ---\n'
+	fl := getD3DFeatureLevel()
+	report <- report + trim(fl, ' \t\r\n') + '\n'
+
+	// Monitors
+	report <- report + '\n--- Monitors ---\n'
+	mon := getMonitorInfo()
+	report <- report + default(mon, 'No monitor info available') + '\n'
+
+	report
+}

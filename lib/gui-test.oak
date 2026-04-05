@@ -1,0 +1,401 @@
+// gui-test — Automated GUI test harness for Magnolia.
+//
+// Provides synthetic input injection (mouse, keyboard, touch) for
+// regression testing of GUI applications without manual interaction.
+// Uses Win32 SendInput API for realistic event simulation.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	range: range
+} := import('std')
+{
+	floor: floor
+	max: max
+} := import('math')
+windows := import('windows')
+guiInput := import('gui-input')
+
+// ─── SendInput constants ─────────────────────────────────────────────────────
+INPUT_MOUSE := 0
+INPUT_KEYBOARD := 1
+INPUT_HARDWARE := 2
+
+// Mouse event flags
+MOUSEEVENTF_MOVE := 1
+MOUSEEVENTF_LEFTDOWN := 2
+MOUSEEVENTF_LEFTUP := 4
+MOUSEEVENTF_RIGHTDOWN := 8
+MOUSEEVENTF_RIGHTUP := 16
+MOUSEEVENTF_MIDDLEDOWN := 32
+MOUSEEVENTF_MIDDLEUP := 64
+MOUSEEVENTF_WHEEL := 2048
+MOUSEEVENTF_ABSOLUTE := 32768
+MOUSEEVENTF_VIRTUALDESK := 16384
+
+// Keyboard event flags
+KEYEVENTF_KEYDOWN := 0
+KEYEVENTF_KEYUP := 2
+KEYEVENTF_UNICODE := 4
+KEYEVENTF_SCANCODE := 8
+
+// Virtual-key codes for common keys (from gui-input)
+VK_RETURN := guiInput.VK_RETURN
+VK_ESCAPE := guiInput.VK_ESCAPE
+VK_TAB := guiInput.VK_TAB
+VK_BACK := guiInput.VK_BACK
+VK_SPACE := guiInput.VK_SPACE
+VK_LEFT := guiInput.VK_LEFT
+VK_UP := guiInput.VK_UP
+VK_RIGHT := guiInput.VK_RIGHT
+VK_DOWN := guiInput.VK_DOWN
+VK_SHIFT := guiInput.VK_SHIFT
+VK_CONTROL := guiInput.VK_CONTROL
+VK_MENU := guiInput.VK_ALT
+VK_DELETE := guiInput.VK_DELETE
+VK_HOME := guiInput.VK_HOME
+VK_END := guiInput.VK_END
+
+// INPUT struct sizes (x64)
+_INPUT_SIZE := 40  // sizeof(INPUT) on x64
+
+// ─── Low-level input injection ───────────────────────────────────────────────
+
+// _buildMouseInput(dx, dy, flags, data) — build an INPUT struct for mouse.
+fn _buildMouseInput(dx, dy, flags, data) {
+	buf := windows._zeros(_INPUT_SIZE)
+	// type = INPUT_MOUSE (0) at offset 0 (4 bytes)
+	windows.writeU32(buf, 0, INPUT_MOUSE)
+	// MOUSEINPUT at offset 8 (after alignment)
+	// dx (i32) at 8
+	windows.writeU32(buf, 8, dx)
+	// dy (i32) at 12
+	windows.writeU32(buf, 12, dy)
+	// mouseData (u32) at 16
+	windows.writeU32(buf, 16, default(data, 0))
+	// dwFlags (u32) at 20
+	windows.writeU32(buf, 20, flags)
+	// time (u32) at 24 — 0 = system provided
+	// dwExtraInfo at 28 — 0
+	buf
+}
+
+// _buildKeyboardInput(vk, scan, flags) — build an INPUT struct for keyboard.
+fn _buildKeyboardInput(vk, scan, flags) {
+	buf := windows._zeros(_INPUT_SIZE)
+	// type = INPUT_KEYBOARD (1) at offset 0
+	windows.writeU32(buf, 0, INPUT_KEYBOARD)
+	// KEYBDINPUT at offset 8
+	// wVk (u16) at 8
+	buf.(8) := vk & 255
+	buf.(9) := (vk >> 8) & 255
+	// wScan (u16) at 10
+	buf.(10) := default(scan, 0) & 255
+	buf.(11) := (default(scan, 0) >> 8) & 255
+	// dwFlags (u32) at 12
+	windows.writeU32(buf, 12, flags)
+	buf
+}
+
+// _sendInputs(inputs) — call SendInput with array of INPUT structs.
+fn _sendInputs(inputs) {
+	count := len(inputs)
+	// Concatenate all input buffers
+	buf := ''
+	each(inputs, fn(inp) buf <- buf + inp)
+	windows.user32('SendInput', count, windows.addr(buf), _INPUT_SIZE)
+}
+
+// ─── Mouse simulation ────────────────────────────────────────────────────────
+
+// testMouseMove(x, y) — move cursor to absolute screen position.
+fn testMouseMove(x, y) {
+	// Normalize to 0..65535 range for absolute positioning
+	// Get screen size via GetSystemMetrics
+	screenW := windows.user32('GetSystemMetrics', 0) // SM_CXSCREEN
+	screenH := windows.user32('GetSystemMetrics', 1) // SM_CYSCREEN
+	nx := floor(x * 65535 / max(screenW, 1))
+	ny := floor(y * 65535 / max(screenH, 1))
+	inp := _buildMouseInput(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0)
+	_sendInputs([inp])
+}
+
+// testMouseClick(x, y) — move to (x,y) and perform a left click.
+fn testMouseClick(x, y) {
+	testMouseMove(x, y)
+	down := _buildMouseInput(0, 0, MOUSEEVENTF_LEFTDOWN, 0)
+	up := _buildMouseInput(0, 0, MOUSEEVENTF_LEFTUP, 0)
+	_sendInputs([down, up])
+}
+
+// testMouseRightClick(x, y) — move to (x,y) and perform a right click.
+fn testMouseRightClick(x, y) {
+	testMouseMove(x, y)
+	down := _buildMouseInput(0, 0, MOUSEEVENTF_RIGHTDOWN, 0)
+	up := _buildMouseInput(0, 0, MOUSEEVENTF_RIGHTUP, 0)
+	_sendInputs([down, up])
+}
+
+// testMouseDoubleClick(x, y) — double left click at (x,y).
+fn testMouseDoubleClick(x, y) {
+	testMouseClick(x, y)
+	testMouseClick(x, y)
+}
+
+// testMouseDrag(x1, y1, x2, y2) — drag from (x1,y1) to (x2,y2).
+fn testMouseDrag(x1, y1, x2, y2) {
+	testMouseMove(x1, y1)
+	down := _buildMouseInput(0, 0, MOUSEEVENTF_LEFTDOWN, 0)
+	_sendInputs([down])
+	testMouseMove(x2, y2)
+	up := _buildMouseInput(0, 0, MOUSEEVENTF_LEFTUP, 0)
+	_sendInputs([up])
+}
+
+// testMouseWheel(delta) — scroll the mouse wheel. delta>0 scrolls up.
+fn testMouseWheel(delta) {
+	// WHEEL_DELTA is 120
+	inp := _buildMouseInput(0, 0, MOUSEEVENTF_WHEEL, delta * 120)
+	_sendInputs([inp])
+}
+
+// ─── Keyboard simulation ─────────────────────────────────────────────────────
+
+// testKeyDown(vk) — press a key down.
+fn testKeyDown(vk) {
+	inp := _buildKeyboardInput(vk, 0, KEYEVENTF_KEYDOWN)
+	_sendInputs([inp])
+}
+
+// testKeyUp(vk) — release a key.
+fn testKeyUp(vk) {
+	inp := _buildKeyboardInput(vk, 0, KEYEVENTF_KEYUP)
+	_sendInputs([inp])
+}
+
+// testKeyPress(vk) — press and release a key.
+fn testKeyPress(vk) {
+	down := _buildKeyboardInput(vk, 0, KEYEVENTF_KEYDOWN)
+	up := _buildKeyboardInput(vk, 0, KEYEVENTF_KEYUP)
+	_sendInputs([down, up])
+}
+
+// testTypeText(text) — type a string character by character using Unicode input.
+fn testTypeText(text) {
+	fn sub(i) if i < len(text) {
+		true -> {
+			ch := codepoint(text.(i))
+			down := _buildKeyboardInput(0, ch, KEYEVENTF_UNICODE)
+			up := _buildKeyboardInput(0, ch, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+			_sendInputs([down, up])
+			sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+// testKeyCombo(keys) — press a key combination (e.g. Ctrl+C).
+// keys: list of VK codes, e.g. [VK_CONTROL, 67] for Ctrl+C
+fn testKeyCombo(keys) {
+	// Press all down
+	downs := map(keys, fn(vk) _buildKeyboardInput(vk, 0, KEYEVENTF_KEYDOWN))
+	_sendInputs(downs)
+	// Release in reverse
+	fn sub(i) if i >= 0 {
+		true -> {
+			up := _buildKeyboardInput(keys.(i), 0, KEYEVENTF_KEYUP)
+			_sendInputs([up])
+			sub(i - 1)
+		}
+	}
+	sub(len(keys) - 1)
+}
+
+// ─── Test harness / assertion framework ──────────────────────────────────────
+
+// testSuite(name) — create a test suite for organizing GUI tests.
+fn testSuite(name) {
+	{
+		name: name
+		tests: []
+		passed: 0
+		failed: 0
+		errors: []
+	}
+}
+
+// testCase(suite, name, fn) — add a test case to the suite.
+fn testCase(suite, name, testFn) {
+	suite.tests <- suite.tests << {
+		name: name
+		testFn: testFn
+		status: 'pending'
+		error: ?
+	}
+	suite
+}
+
+// testRun(suite) — run all tests in the suite, return results.
+fn testRun(suite) {
+	each(suite.tests, fn(tc) {
+		result := {
+			ok?: true
+			error: ?
+		}
+		// Execute test function — it should call testAssert helpers
+		tc.testFn(result)
+		if result.ok? {
+			true -> {
+				tc.status := 'passed'
+				suite.passed := suite.passed + 1
+			}
+			_ -> {
+				tc.status := 'failed'
+				suite.failed := suite.failed + 1
+				tc.error := result.error
+				suite.errors <- suite.errors << {
+					test: tc.name
+					error: result.error
+				}
+			}
+		}
+	})
+	suite
+}
+
+// testAssert(result, condition, message) — assert a condition is true.
+fn testAssert(result, condition, message) if !condition -> {
+	result.ok? := false
+	result.error := default(message, 'Assertion failed')
+}
+
+// testAssertEqual(result, actual, expected, message) — assert equality.
+fn testAssertEqual(result, actual, expected, message) if actual != expected -> {
+	result.ok? := false
+	result.error := default(message, 'Expected ' + string(expected) + ' but got ' + string(actual))
+}
+
+// testReport(suite) — generate a text report of test results.
+fn testReport(suite) {
+	report := '=== Test Suite: ' + suite.name + ' ===\n'
+	report <- report + 'Passed: ' + string(suite.passed) + '\n'
+	report <- report + 'Failed: ' + string(suite.failed) + '\n'
+	report <- report + 'Total: ' + string(len(suite.tests)) + '\n'
+	if len(suite.errors) > 0 -> {
+		report <- report + '\nFailures:\n'
+		each(suite.errors, fn(e) {
+			report <- report + '  - ' + e.test + ': ' + string(e.error) + '\n'
+		})
+	}
+	report
+}
+
+// ─── Window introspection for tests ──────────────────────────────────────────
+
+// testGetWindowRect(hwnd) — get window position and size {x, y, w, h}.
+fn testGetWindowRect(hwnd) {
+	buf := windows._zeros(16)  // RECT: left, top, right, bottom (4x i32)
+	windows.user32('GetWindowRect', hwnd, windows.addr(buf))
+	left := windows.readU32(buf, 0)
+	top := windows.readU32(buf, 4)
+	right := windows.readU32(buf, 8)
+	bottom := windows.readU32(buf, 12)
+	{
+		x: left
+		y: top
+		w: right - left
+		h: bottom - top
+	}
+}
+
+// testGetWindowText(hwnd) — get the window title text.
+fn testGetWindowText(hwnd) {
+	buf := windows._zeros(512)
+	windows.user32('GetWindowTextW', hwnd, windows.addr(buf), 256)
+	// Read UTF-16 until null
+	result := ''
+	fn sub(i) if i < 512 {
+		true -> {
+			lo := buf.(i)
+			hi := buf.(i + 1)
+			ch := lo + hi * 256
+			if ch > 0 {
+				true -> {
+					result <- result + char(ch)
+					sub(i + 2)
+				}
+			}
+		}
+	}
+	sub(0)
+	result
+}
+
+// testIsWindowVisible?(hwnd) — check if a window is visible.
+fn testIsWindowVisible?(hwnd) {
+	windows.user32('IsWindowVisible', hwnd) != 0
+}
+
+// testGetForegroundWindow() — get the currently focused window handle.
+fn testGetForegroundWindow {
+	windows.user32('GetForegroundWindow')
+}
+
+// testFindWindow(className, windowName) — find a window by class/title.
+fn testFindWindow(className, windowName) {
+	clsBuf := if className != ? -> {
+		b := windows._zeros((len(className) + 1) * 2)
+		fn sub(i) if i < len(className) {
+			true -> {
+				b.(i * 2) := codepoint(className.(i)) & 255
+				b.(i * 2 + 1) := (codepoint(className.(i)) >> 8) & 255
+				sub(i + 1)
+			}
+		}
+		sub(0)
+		windows.addr(b)
+	}
+	namBuf := if windowName != ? -> {
+		b := windows._zeros((len(windowName) + 1) * 2)
+		fn sub(i) if i < len(windowName) {
+			true -> {
+				b.(i * 2) := codepoint(windowName.(i)) & 255
+				b.(i * 2 + 1) := (codepoint(windowName.(i)) >> 8) & 255
+				sub(i + 1)
+			}
+		}
+		sub(0)
+		windows.addr(b)
+	}
+	windows.user32('FindWindowW', default(clsBuf, 0), default(namBuf, 0))
+}
+
+// testScreenshot(hwnd) — capture a bitmap of a window (returns raw pixel data).
+fn testScreenshot(hwnd) {
+	rect := testGetWindowRect(hwnd)
+	w := rect.w
+	h := rect.h
+	hdcScreen := windows.user32('GetDC', hwnd)
+	hdcMem := windows.gdi32('CreateCompatibleDC', hdcScreen)
+	hBmp := windows.gdi32('CreateCompatibleBitmap', hdcScreen, w, h)
+	windows.gdi32('SelectObject', hdcMem, hBmp)
+	// BitBlt: copy window contents
+	windows.gdi32('BitBlt', hdcMem, 0, 0, w, h, hdcScreen, 0, 0, 13369376) // SRCCOPY
+	// Read pixels via GetDIBits would be complex — return handle for now
+	result := {
+		hdc: hdcMem
+		hBitmap: hBmp
+		width: w
+		height: h
+	}
+	windows.user32('ReleaseDC', hwnd, hdcScreen)
+	result
+}
+
+// testFreeScreenshot(ss) — free a captured screenshot.
+fn testFreeScreenshot(ss) {
+	windows.gdi32('DeleteObject', ss.hBitmap)
+	windows.gdi32('DeleteDC', ss.hdc)
+}

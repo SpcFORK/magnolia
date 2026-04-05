@@ -9,6 +9,7 @@
 
 std := import('std')
 { _default: _default } := import('gui-common')
+guiInput := import('gui-input')
 
 // ─── Pure state helpers ───────────────────────────────────────────────────────
 
@@ -600,18 +601,18 @@ fn formHandleTabKey(fs, shiftDown) {
 
 // ─── Keyboard-only navigation helpers ────────────────────────────────────────
 
-// VK constants for keyboard activation
-_VK_RETURN := 13
-_VK_SPACE := 32
-_VK_ESCAPE := 27
-_VK_UP := 38
-_VK_DOWN := 40
-_VK_LEFT := 37
-_VK_RIGHT := 39
-_VK_HOME := 36
-_VK_END := 35
-_VK_PGUP := 33
-_VK_PGDN := 34
+// VK constants for keyboard activation (from gui-input)
+_VK_RETURN := guiInput.VK_RETURN
+_VK_SPACE := guiInput.VK_SPACE
+_VK_ESCAPE := guiInput.VK_ESCAPE
+_VK_UP := guiInput.VK_UP
+_VK_DOWN := guiInput.VK_DOWN
+_VK_LEFT := guiInput.VK_LEFT
+_VK_RIGHT := guiInput.VK_RIGHT
+_VK_HOME := guiInput.VK_HOME
+_VK_END := guiInput.VK_END
+_VK_PGUP := guiInput.VK_PAGEUP
+_VK_PGDN := guiInput.VK_PAGEDOWN
 
 // formIsActivateKey?(vk) -> bool — is this key Enter or Space?
 // Use to trigger button/checkbox/radio activation from keyboard.
@@ -629,7 +630,7 @@ fn formIsActivateKey?(vk) vk = _VK_RETURN | vk = _VK_SPACE
 fn formHandleKeyNav(fs, vk, shiftDown, widgetHandlers, options) {
 	// Tab / Shift+Tab for focus cycling
 	if vk {
-		9 -> {
+		guiInput.VK_TAB -> {
 			formHandleTabKey(fs, shiftDown)
 			:tab
 		}
@@ -1475,8 +1476,8 @@ fn formDrawDateField(ctx, window, x, y, w, h, state, fieldColor, fieldFocusColor
 // options: { cellSize }
 fn formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, selectedBgColor, todayBorderColor, textColor, selectedTextColor, headerTextColor, borderColor, options) {
 	opts := if options { ? -> {}, _ -> options }
-	cs := _default(opts.cellSize, 30)
-	calW := cs * 7
+	cellSz := _default(opts.cellSize, 30)
+	calW := cellSz * 7
 	headerH := 28
 
 	// Background
@@ -1494,7 +1495,7 @@ fn formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, select
 	dayLabels := ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']
 	fn drawDayHeaders(i) if i < 7 {
 		true -> {
-			ctx.drawText(window, x + i * cs + int(cs / 2) - 7, dayRow + 4, dayLabels.(i), headerTextColor)
+			ctx.drawText(window, x + i * cellSz + int(cellSz / 2) - 7, dayRow + 4, dayLabels.(i), headerTextColor)
 			drawDayHeaders(i + 1)
 		}
 	}
@@ -1505,16 +1506,16 @@ fn formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, select
 	startDow := _dayOfWeek(state.year, state.month, 1)
 	days := _daysInMonth(state.year, state.month)
 
-	ctx.fillRect(window, x, gridY, calW, int((days + startDow + 6) / 7) * cs, bgColor)
+	ctx.fillRect(window, x, gridY, calW, int((days + startDow + 6) / 7) * cellSz, bgColor)
 
 	fn drawCells(d, col, row) if d <= days {
 		true -> {
-			cx := x + col * cs
-			cy := gridY + row * cs
-			if d = state.day -> ctx.fillRect(window, cx + 2, cy + 2, cs - 4, cs - 4, selectedBgColor)
+			cx := x + col * cellSz
+			cy := gridY + row * cellSz
+			if d = state.day -> ctx.fillRect(window, cx + 2, cy + 2, cellSz - 4, cellSz - 4, selectedBgColor)
 			tc := if d = state.day { true -> selectedTextColor, _ -> textColor }
 			label := string(d)
-			ctx.drawText(window, cx + int(cs / 2) - len(label) * 3, cy + int(cs / 2) - 6, label, tc)
+			ctx.drawText(window, cx + int(cellSz / 2) - len(label) * 3, cy + int(cellSz / 2) - 6, label, tc)
 			nextCol := col + 1
 			if nextCol >= 7 {
 				true -> drawCells(d + 1, 0, row + 1)
@@ -1525,7 +1526,7 @@ fn formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, select
 	drawCells(1, startDow, 0)
 
 	// Border
-	totalH := headerH + 20 + int((days + startDow + 6) / 7) * cs
+	totalH := headerH + 20 + int((days + startDow + 6) / 7) * cellSz
 	formDrawBorder(ctx, window, x, y, calW, totalH, borderColor)
 }
 
@@ -1533,8 +1534,8 @@ fn formDrawDateCalendar(ctx, window, x, y, state, bgColor, headerBgColor, select
 // action: :prevMonth, :nextMonth, or :selectDay with .day field.
 fn formDateCalendarHit(mx, my, x, y, state, options) {
 	opts := if options { ? -> {}, _ -> options }
-	cs := _default(opts.cellSize, 30)
-	calW := cs * 7
+	cellSz := _default(opts.cellSize, 30)
+	calW := cellSz * 7
 	headerH := 28
 
 	// Check nav arrows
@@ -1555,8 +1556,8 @@ fn formDateCalendarHit(mx, my, x, y, state, options) {
 			relY := my - gridY
 			if relX >= 0 & relX < calW & relY >= 0 {
 				true -> {
-					col := int(relX / cs)
-					row := int(relY / cs)
+					col := int(relX / cellSz)
+					row := int(relY / cellSz)
 					dayIdx := row * 7 + col - startDow + 1
 					if dayIdx >= 1 & dayIdx <= days {
 						true -> { action: :selectDay, day: dayIdx }
@@ -1664,4 +1665,268 @@ fn formTableHitColumn(mx, x, columns) {
 		_ -> -1
 	}
 	check(0, x)
+}
+
+// ─── Frame timing overlay ────────────────────────────────────────────────────
+
+// formFrameTimerState(maxSamples) -> mutable frame timing state.
+// maxSamples: ring buffer size (default 120 = ~2 seconds at 60fps).
+fn formFrameTimerState(maxSamples) {
+	n := _default(maxSamples, 120)
+	{
+		samples: []
+		maxSamples: n
+		lastTime: nanotime()
+		frameCount: 0
+		fpsAccum: 0
+		fpsDisplay: 0
+		fpsUpdateInterval: 500
+		lastFpsUpdate: nanotime()
+	}
+}
+
+// formFrameTimerTick(state) — call once per frame to record timing.
+// Updates state in-place: pushes frame time (ms) into ring buffer,
+// updates FPS counter.
+fn formFrameTimerTick(state) {
+	now := nanotime()
+	dt := (now - state.lastTime) / 1000000.0
+	state.lastTime <- now
+	state.frameCount <- state.frameCount + 1
+	state.fpsAccum <- state.fpsAccum + dt
+	// Push sample into ring buffer
+	state.samples <- state.samples << dt
+	if len(state.samples) > state.maxSamples -> {
+		state.samples <- slice(state.samples, len(state.samples) - state.maxSamples)
+	}
+	// Update FPS display periodically
+	elapsed := (now - state.lastFpsUpdate) / 1000000.0
+	if elapsed >= state.fpsUpdateInterval -> {
+		state.fpsDisplay <- int(state.frameCount * 1000 / elapsed)
+		state.frameCount <- 0
+		state.fpsAccum <- 0
+		state.lastFpsUpdate <- now
+	}
+	state
+}
+
+// formDrawFrameTimingOverlay(ctx, window, state, x, y, w, h, options)
+// Draws the frame timing graph and FPS counter.
+// options: { bgColor, graphColor, targetColor, textColor, targetMs, showFps, showGraph, showStats }
+fn formDrawFrameTimingOverlay(ctx, window, state, x, y, w, h, options) {
+	opts := if options { ? -> {}, _ -> options }
+	bgColor := _default(opts.bgColor, [0, 0, 0, 180])
+	graphColor := _default(opts.graphColor, [0, 200, 80, 255])
+	targetColor := _default(opts.targetColor, [200, 200, 0, 128])
+	textColor := _default(opts.textColor, [255, 255, 255, 255])
+	targetMs := _default(opts.targetMs, 16.67)
+	showFps := _default(opts.showFps, true)
+	showGraph := _default(opts.showGraph, true)
+	showStats := _default(opts.showStats, true)
+
+	// Background
+	ctx.fillRect(window, x, y, w, h, bgColor)
+
+	samples := state.samples
+	count := len(samples)
+
+	if showGraph & count > 1 -> {
+		// Graph area
+		graphY := y + 16
+		graphH := h - 20
+		maxMs := targetMs * 3
+		barW := if count > 0 { true -> w / count, _ -> 1 }
+		if barW < 1 -> barW <- 1
+		fn drawBars(i) if i < count -> {
+			dt := samples.(i)
+			barH := int(dt / maxMs * graphH)
+			if barH > graphH -> barH <- graphH
+			if barH < 1 -> barH <- 1
+			bx := x + int(i * w / count)
+			by := graphY + graphH - barH
+			color := if dt > targetMs * 2 {
+				true -> [255, 60, 60, 255]
+				_ -> if dt > targetMs {
+					true -> [255, 200, 0, 255]
+					_ -> graphColor
+				}
+			}
+			ctx.fillRect(window, bx, by, barW, barH, color)
+			drawBars(i + 1)
+		}
+		drawBars(0)
+		// Target line
+		targetY := graphY + graphH - int(targetMs / maxMs * graphH)
+		ctx.drawLine(window, x, targetY, x + w, targetY, targetColor)
+	}
+
+	if showFps -> {
+		fpsText := string(state.fpsDisplay) + ' FPS'
+		ctx.drawText(window, x + 4, y + 2, fpsText, textColor)
+	}
+
+	if showStats & count > 0 -> {
+		// Compute min/max/avg from samples
+		fn calcStats(i, mn, mx, total) if i < count {
+			true -> {
+				s := samples.(i)
+				calcStats(i + 1
+					if s < mn { true -> s, _ -> mn }
+					if s > mx { true -> s, _ -> mx }
+					total + s)
+			}
+			_ -> { min: mn, max: mx, avg: total / count }
+		}
+		stats := calcStats(1, samples.(0), samples.(0), samples.(0))
+		statText := 'avg:' + string(int(stats.avg * 10) / 10) + ' min:' + string(int(stats.min * 10) / 10) + ' max:' + string(int(stats.max * 10) / 10) + 'ms'
+		ctx.drawText(window, x + 4, y + h - 14, statText, textColor)
+	}
+}
+
+// ─── Rich text / multi-style spans ──────────────────────────────────────────
+// A span is { text, color?, bold?, italic?, underline?, fontSize?, fontName? }
+// A rich text document is a list of lines, each line is a list of spans.
+// The rendering uses the form ctx.drawText approach, drawing span by span.
+
+// formRichTextState(lines) — create a rich text state.
+// lines: [[span, span, ...], [span, ...], ...]
+// Each span: { text, color?, bold?, italic?, underline?, fontSize?, fontName? }
+fn formRichTextState(lines) {
+	{
+		lines: if lines = ? -> [[]] 
+		scrollY: 0
+		lineHeight: 16
+		defaultColor: [220, 220, 220]
+		defaultFontSize: 14
+	}
+}
+
+// formRichTextSetLines(state, lines) — replace all lines.
+fn formRichTextSetLines(state, lines) {
+	state.lines <- lines
+	state
+}
+
+// formRichTextAppendLine(state, spans) — append a line of spans.
+fn formRichTextAppendLine(state, spans) {
+	state.lines <- state.lines << spans
+	state
+}
+
+// formRichTextInsertSpan(state, lineIdx, spanIdx, span) — insert a span at position.
+fn formRichTextInsertSpan(state, lineIdx, spanIdx, span) {
+	line := state.lines.(lineIdx)
+	if line != ? -> {
+		fn insertAt(i, acc) if i > len(line) {
+			true -> acc
+			_ -> if i = spanIdx {
+				true -> insertAt(i + 1, acc << span << line.(i))
+				_ -> insertAt(i + 1, acc << line.(i))
+			}
+		}
+		newLine := if spanIdx >= len(line) {
+			true -> line << span
+			_ -> insertAt(0, [])
+		}
+		state.lines.(lineIdx) <- newLine
+	}
+	state
+}
+
+// _spanWidth(text, fontSize) — estimate width of a text span.
+// Uses a simple character-width heuristic (monospace: fontSize * 0.6 per char).
+fn _spanWidth(text, fontSize) int(len(text) * fontSize * 6 / 10)
+
+// formDrawRichText(ctx, window, x, y, w, h, state, bgColor, borderColor) — render rich text.
+fn formDrawRichText(ctx, window, x, y, w, h, state, bgColor, borderColor) {
+	// Background
+	ctx.fillRect(window, x, y, w, h, bgColor)
+	// Border
+	ctx.fillRect(window, x, y, w, 1, borderColor)
+	ctx.fillRect(window, x, y + h - 1, w, 1, borderColor)
+	ctx.fillRect(window, x, y, 1, h, borderColor)
+	ctx.fillRect(window, x + w - 1, y, 1, h, borderColor)
+
+	lines := state.lines
+	lh := state.lineHeight
+	scrollY := state.scrollY
+	defColor := state.defaultColor
+	defFontSize := state.defaultFontSize
+	clipTop := y + 1
+	clipBottom := y + h - 1
+	padX := 4
+	padY := 2
+
+	fn renderLine(lineIdx) {
+		lineY := y + padY + lineIdx * lh - scrollY
+		if lineY + lh >= clipTop & lineY < clipBottom -> {
+			line := lines.(lineIdx)
+			if line != ? -> {
+				fn renderSpan(spanIdx, curX) if spanIdx < len(line) -> {
+					span := line.(spanIdx)
+					text := if span.text { ? -> '', _ -> span.text }
+					color := if span.color { ? -> defColor, _ -> span.color }
+					fontSize := if span.fontSize { ? -> defFontSize, _ -> span.fontSize }
+
+					// Draw underline
+					if span.underline? = true -> {
+						textW := _spanWidth(text, fontSize)
+						ctx.fillRect(window, curX, lineY + lh - 2, textW, 1, color)
+					}
+
+					// Bold: draw twice offset by 1px for faux bold
+					if span.bold? = true -> {
+						ctx.drawText(window, curX + 1, lineY, text, color)
+					}
+
+					ctx.drawText(window, curX, lineY, text, color)
+
+					// Italic: draw with 1px horizontal offset per line for faux italic
+					if span.italic? = true -> {
+						ctx.drawText(window, curX + 1, lineY - 1, text, color)
+					}
+
+					textW := _spanWidth(text, fontSize)
+					renderSpan(spanIdx + 1, curX + textW)
+				}
+				renderSpan(0, x + padX)
+			}
+		}
+	}
+
+	fn renderLines(i) if i < len(lines) -> {
+		renderLine(i)
+		renderLines(i + 1)
+	}
+	renderLines(0)
+}
+
+// formRichTextScroll(state, delta) — scroll the rich text by delta pixels.
+fn formRichTextScroll(state, delta) {
+	state.scrollY <- state.scrollY + delta
+	if state.scrollY < 0 -> state.scrollY <- 0
+	state
+}
+
+// formRichTextTotalHeight(state) — total height of all lines.
+fn formRichTextTotalHeight(state) len(state.lines) * state.lineHeight
+
+// ─── Convenience span constructors ──────────────────────────────────────────
+
+fn richSpan(text) { text: text }
+fn richBold(text) { text: text, bold?: true }
+fn richItalic(text) { text: text, italic?: true }
+fn richUnderline(text) { text: text, underline?: true }
+fn richColored(text, r, g, b) { text: text, color: [r, g, b] }
+fn richStyled(text, options) {
+	s := { text: text }
+	if options != ? -> {
+		if options.color != ? -> s.color <- options.color
+		if options.bold? = true -> s.bold? <- true
+		if options.italic? = true -> s.italic? <- true
+		if options.underline? = true -> s.underline? <- true
+		if options.fontSize != ? -> s.fontSize <- options.fontSize
+		if options.fontName != ? -> s.fontName <- options.fontName
+	}
+	s
 }

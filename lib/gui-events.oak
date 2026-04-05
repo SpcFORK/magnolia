@@ -5,6 +5,7 @@
 windows := import('windows')
 eventBusLib := import('async/event-bus')
 { _default: _default } := import('gui-common')
+guiInput := import('gui-input')
 
 // ─── Mouse coordinate transform helper ──────────────────────────────────────
 // When a design resolution is active (window._res exists), raw Win32 mouse
@@ -135,18 +136,32 @@ GUI_WM_MOUSEHOVER := 673
 GUI_WM_MOUSELEAVE := 675
 GUI_WM_DPICHANGED := 736
 
+// IME messages
+WM_IME_STARTCOMPOSITION := 269
+WM_IME_ENDCOMPOSITION := 270
+WM_IME_COMPOSITION := 271
+WM_IME_SETCONTEXT := 641
+WM_IME_NOTIFY := 642
+WM_IME_CHAR := 646
+
+// GCS flags for WM_IME_COMPOSITION lParam
+GCS_COMPSTR := 8
+GCS_RESULTSTR := 2048
+GCS_COMPATTR := 16
+GCS_CURSORPOS := 128
+
 // TRACKMOUSEEVENT flags
 TME_HOVER := 1
 TME_LEAVE := 2
 TME_SIZEOF := 24
 
-FORM_VK_BACK := 8
-FORM_VK_TAB := 9
-FORM_VK_RETURN := 13
-FORM_VK_SHIFT := 16
-FORM_VK_CONTROL := 17
-FORM_VK_ALT := 18
-FORM_VK_ESCAPE := 27
+FORM_VK_BACK := guiInput.VK_BACK
+FORM_VK_TAB := guiInput.VK_TAB
+FORM_VK_RETURN := guiInput.VK_RETURN
+FORM_VK_SHIFT := guiInput.VK_SHIFT
+FORM_VK_CONTROL := guiInput.VK_CONTROL
+FORM_VK_ALT := guiInput.VK_ALT
+FORM_VK_ESCAPE := guiInput.VK_ESCAPE
 
 // MK_ flags in wParam for mouse messages
 MK_LBUTTON := 1
@@ -231,20 +246,20 @@ fn formInRect?(mx, my, rx, ry, rw, rh) {
 
 // ─── Typed key events (cross-platform) ─────────────────────────────────────
 
-fn _vkKeyName(vk) if vk >= 65 & vk <= 90 {
+fn _vkKeyName(vk) if vk >= guiInput.VK_A & vk <= guiInput.VK_Z {
 	true -> char(vk)
-	_ -> if vk >= 48 & vk <= 57 {
+	_ -> if vk >= guiInput.VK_0 & vk <= guiInput.VK_9 {
 		true -> char(vk)
 		_ -> if vk {
-			37 -> 'left'
-			38 -> 'up'
-			39 -> 'right'
-			40 -> 'down'
-			32 -> ' '
-			8 -> 'backspace'
-			9 -> 'tab'
-			13 -> 'enter'
-			27 -> 'escape'
+			guiInput.VK_LEFT -> 'left'
+			guiInput.VK_UP -> 'up'
+			guiInput.VK_RIGHT -> 'right'
+			guiInput.VK_DOWN -> 'down'
+			guiInput.VK_SPACE -> ' '
+			guiInput.VK_BACK -> 'backspace'
+			guiInput.VK_TAB -> 'tab'
+			guiInput.VK_RETURN -> 'enter'
+			guiInput.VK_ESCAPE -> 'escape'
 			_ -> 'vk-' + string(vk)
 		}
 	}
@@ -527,6 +542,615 @@ fn onDpiChanged(window, handler) {
 		handler(newDpi, suggestedRect)
 	})
 }
+
+// ─── IME (Input Method Editor) event handlers ────────────────────────────────
+
+// _imeGetString(hwnd, gcsFlag) -> string of composition/result text.
+// Uses ImmGetContext + ImmGetCompositionStringW + ImmReleaseContext.
+fn _imeGetString(hwnd, gcsFlag) {
+	hImc := windows.imm32('ImmGetContext', hwnd)
+	if windows.callOk?(hImc) & hImc.r1 != 0 {
+		true -> {
+			ctx := hImc.r1
+			// Get buffer length (bytes) first
+			lenRes := windows.imm32('ImmGetCompositionStringW', ctx, gcsFlag, 0, 0)
+			if windows.callOk?(lenRes) & lenRes.r1 > 0 {
+				true -> {
+					size := lenRes.r1
+					buf := bits(windows._zeros(size + 2, ''))
+					windows.imm32('ImmGetCompositionStringW', ctx, gcsFlag, addr(buf), size)
+					windows.imm32('ImmReleaseContext', hwnd, ctx)
+					windows._utf16leToString(buf, size)
+				}
+				_ -> {
+					windows.imm32('ImmReleaseContext', hwnd, ctx)
+					''
+				}
+			}
+		}
+		_ -> ''
+	}
+}
+
+// _imeGetCursorPos(hwnd) -> cursor position in composition string.
+fn _imeGetCursorPos(hwnd) {
+	hImc := windows.imm32('ImmGetContext', hwnd)
+	if windows.callOk?(hImc) & hImc.r1 != 0 {
+		true -> {
+			ctx := hImc.r1
+			res := windows.imm32('ImmGetCompositionStringW', ctx, GCS_CURSORPOS, 0, 0)
+			windows.imm32('ImmReleaseContext', hwnd, ctx)
+			if windows.callOk?(res) {
+				true -> res.r1
+				_ -> 0
+			}
+		}
+		_ -> 0
+	}
+}
+
+// onImeStartComposition(window, handler) — fires when IME composition starts.
+fn onImeStartComposition(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_IME_STARTCOMPOSITION -> {
+		handler()
+	})
+}
+
+// onImeEndComposition(window, handler) — fires when IME composition ends.
+fn onImeEndComposition(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_IME_ENDCOMPOSITION -> {
+		handler()
+	})
+}
+
+// onImeComposition(window, handler) — fires during IME composition.
+// handler(event) where event is:
+//   { type: :composing, text, cursor } — intermediate composition text
+//   { type: :result, text } — finalized text ready for insertion
+fn onImeComposition(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_IME_COMPOSITION -> {
+		lp := formMsgLParam(window)
+		if (lp & GCS_RESULTSTR) != 0 -> {
+			text := _imeGetString(window.hwnd, GCS_RESULTSTR)
+			handler({ type: :result, text: text })
+		}
+		if (lp & GCS_COMPSTR) != 0 -> {
+			text := _imeGetString(window.hwnd, GCS_COMPSTR)
+			cursor := _imeGetCursorPos(window.hwnd)
+			handler({ type: :composing, text: text, cursor: cursor })
+		}
+	})
+}
+
+// setImePosition(window, x, y) — move the IME candidate window to a screen position.
+// Typically called to position the IME near the text cursor.
+fn setImePosition(window, x, y) {
+	hImc := windows.imm32('ImmGetContext', window.hwnd)
+	if windows.callOk?(hImc) & hImc.r1 != 0 -> {
+		ctx := hImc.r1
+		// COMPOSITIONFORM struct: dwStyle(4) + ptCurrentPos(8) + rcArea(16) = 28 bytes
+		buf := bits(windows._zeros(28, ''))
+		// CFS_POINT = 2
+		windows.writeU32(addr(buf), 2)
+		windows.writeU32(addr(buf) + 4, x)
+		windows.writeU32(addr(buf) + 8, y)
+		windows.imm32('ImmSetCompositionWindow', ctx, addr(buf))
+		windows.imm32('ImmReleaseContext', window.hwnd, ctx)
+	}
+}
+
+// ─── Touch / Pointer input ──────────────────────────────────────────────────
+
+// WM_TOUCH and touch constants
+WM_TOUCH := 576
+// TOUCHINPUT struct size: 40 bytes on 64-bit
+_TOUCHINPUT_SIZE := 40
+// Touch event flags (dwFlags in TOUCHINPUT)
+TOUCHEVENTF_MOVE := 1
+TOUCHEVENTF_DOWN := 2
+TOUCHEVENTF_UP := 4
+TOUCHEVENTF_INRANGE := 8
+TOUCHEVENTF_PRIMARY := 16
+TOUCHEVENTF_NOCOALESCE := 32
+TOUCHEVENTF_PEN := 64
+TOUCHEVENTF_PALM := 128
+// Touch input mask flags (dwMask in TOUCHINPUT)
+TOUCHINPUTMASKF_CONTACTAREA := 4
+TOUCHINPUTMASKF_EXTRAINFO := 2
+TOUCHINPUTMASKF_TIMEFROMSYSTEM := 1
+// RegisterTouchWindow flags
+TWF_FINETOUCH := 1
+TWF_WANTPALM := 2
+
+// WM_POINTER messages (Windows 8+)
+WM_POINTERDOWN := 582
+WM_POINTERUP := 583
+WM_POINTERUPDATE := 581
+WM_POINTERENTER := 585
+WM_POINTERLEAVE := 586
+WM_POINTERCAPTURECHANGED := 588
+WM_POINTERWHEEL := 590
+WM_POINTERHWHEEL := 591
+// Pointer types
+PT_POINTER := 1
+PT_TOUCH := 2
+PT_PEN := 3
+PT_MOUSE := 4
+PT_TOUCHPAD := 5
+// Pointer flags
+POINTER_FLAG_NONE := 0
+POINTER_FLAG_NEW := 1
+POINTER_FLAG_INRANGE := 2
+POINTER_FLAG_INCONTACT := 4
+POINTER_FLAG_FIRSTBUTTON := 16
+POINTER_FLAG_SECONDBUTTON := 32
+POINTER_FLAG_PRIMARY := 8192
+POINTER_FLAG_DOWN := 65536
+POINTER_FLAG_UPDATE := 131072
+POINTER_FLAG_UP := 262144
+// Pen flags
+PEN_FLAG_BARREL := 1
+PEN_FLAG_INVERTED := 2
+PEN_FLAG_ERASER := 4
+// Pen mask
+PEN_MASK_PRESSURE := 1
+PEN_MASK_ROTATION := 2
+PEN_MASK_TILT_X := 4
+PEN_MASK_TILT_Y := 8
+
+// registerTouchWindow(window) — registers the window for WM_TOUCH messages.
+// Call once after window creation to receive touch events.
+fn registerTouchWindow(window, flags) {
+	f := if flags = ? -> 0
+	windows.user32('RegisterTouchWindow', window.hwnd, f)
+}
+
+// unregisterTouchWindow(window) — disables WM_TOUCH messages.
+fn unregisterTouchWindow(window) {
+	windows.user32('UnregisterTouchWindow', window.hwnd)
+}
+
+// _parseTouchInputs(window, count) — extracts TOUCHINPUT structs from WM_TOUCH wParam/lParam.
+// Returns list of touch point objects.
+fn _parseTouchInputs(window, count) {
+	hTouchInput := formMsgLParam(window)
+	bufSize := count * _TOUCHINPUT_SIZE
+	buf := bits(windows._zeros(bufSize, ''))
+	res := windows.user32('GetTouchInputInfo', hTouchInput, count, addr(buf), _TOUCHINPUT_SIZE)
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			touches := []
+			fn _parsePt(i) if i < count -> {
+				off := i * _TOUCHINPUT_SIZE
+				base := addr(buf) + off
+				// TOUCHINPUT layout (64-bit):
+				// x (4), y (4), hSource (8), dwID (4), dwFlags (4),
+				// dwMask (4), dwTime (4), dwExtraInfo (8), cxContact (4), cyContact (4)
+				rawX := windows.readU32(base)
+				rawY := windows.readU32(base + 4)
+				id := windows.readU32(base + 16)
+				flags := windows.readU32(base + 20)
+				mask := windows.readU32(base + 24)
+				cxContact := windows.readU32(base + 36)
+				cyContact := windows.readU32(base + 40)
+				// Touch coordinates are in 1/100 of a pixel (CENTIPOINT)
+				physX := int(rawX / 100)
+				physY := int(rawY / 100)
+				mapped := _mapMouseXY(window, physX, physY)
+				touches <- touches << {
+					id: id
+					x: mapped.x
+					y: mapped.y
+					physX: physX
+					physY: physY
+					flags: flags
+					down?: (flags & TOUCHEVENTF_DOWN) > 0
+					up?: (flags & TOUCHEVENTF_UP) > 0
+					move?: (flags & TOUCHEVENTF_MOVE) > 0
+					primary?: (flags & TOUCHEVENTF_PRIMARY) > 0
+					pen?: (flags & TOUCHEVENTF_PEN) > 0
+					palm?: (flags & TOUCHEVENTF_PALM) > 0
+					contactW: if (mask & TOUCHINPUTMASKF_CONTACTAREA) > 0 { true -> cxContact, _ -> ? }
+					contactH: if (mask & TOUCHINPUTMASKF_CONTACTAREA) > 0 { true -> cyContact, _ -> ? }
+				}
+				_parsePt(i + 1)
+			}
+			_parsePt(0)
+			// Must close the touch handle after processing
+			windows.user32('CloseTouchInputHandle', hTouchInput)
+			touches
+		}
+		_ -> {
+			windows.user32('CloseTouchInputHandle', hTouchInput)
+			[]
+		}
+	}
+}
+
+// onTouch(window, handler) — fires for each WM_TOUCH message.
+// handler(touches) where touches is a list of { id, x, y, physX, physY, flags, down?, up?, move?, primary?, pen?, palm?, contactW, contactH }
+fn onTouch(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_TOUCH -> {
+		count := formMsgWParam(window) & 65535
+		if count > 0 -> {
+			touches := _parseTouchInputs(window, count)
+			handler(touches)
+		}
+	})
+}
+
+// enableTouchInput(window, options) — convenience: registers touch + wires handler.
+// options: { fineTouch?, wantPalm? }
+fn enableTouchInput(window, options) {
+	flags := 0
+	if options != ? -> {
+		if options.fineTouch? = true -> flags <- flags | TWF_FINETOUCH
+		if options.wantPalm? = true -> flags <- flags | TWF_WANTPALM
+	}
+	registerTouchWindow(window, flags)
+}
+
+// ─── WM_POINTER event handlers (Windows 8+ Pointer Input) ───────────────────
+// These use the modern pointer model that unifies touch, pen, and mouse.
+
+// _pointerIdFromWParam(wp) — extract pointer ID from WM_POINTER wParam
+fn _pointerIdFromWParam(wp) wp & 65535
+
+// _getPointerType(pointerId) -> PT_POINTER/PT_TOUCH/PT_PEN/PT_MOUSE/PT_TOUCHPAD
+fn _getPointerType(pointerId) {
+	typeBuf := bits(windows._zeros(4, ''))
+	res := windows.user32('GetPointerType', pointerId, addr(typeBuf))
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> windows.readU32(addr(typeBuf))
+		_ -> PT_POINTER
+	}
+}
+
+// POINTER_INFO struct size: 96 bytes (x64)
+_POINTER_INFO_SIZE := 96
+
+// _getPointerInfo(pointerId) -> pointer info object or ?
+fn _getPointerInfo(pointerId) {
+	buf := bits(windows._zeros(_POINTER_INFO_SIZE, ''))
+	res := windows.user32('GetPointerInfo', pointerId, addr(buf))
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			base := addr(buf)
+			// POINTER_INFO layout:
+			// pointerType (4), pointerId (4), frameId (4), pointerFlags (4),
+			// sourceDevice (8), hwndTarget (8), ptPixelLocation.x (4), ptPixelLocation.y (4),
+			// ptHimetricLocation.x (4), ptHimetricLocation.y (4), ptPixelLocationRaw.x (4), ptPixelLocationRaw.y (4),
+			// ptHimetricLocationRaw.x (4), ptHimetricLocationRaw.y (4),
+			// dwTime (4), historyCount (4), inputData (4), dwKeyStates (4),
+			// performanceCount (8), ButtonChangeType (4)
+			{
+				pointerType: windows.readU32(base)
+				pointerId: windows.readU32(base + 4)
+				frameId: windows.readU32(base + 8)
+				pointerFlags: windows.readU32(base + 12)
+				pixelX: windows.readU32(base + 24)
+				pixelY: windows.readU32(base + 28)
+				rawX: windows.readU32(base + 40)
+				rawY: windows.readU32(base + 44)
+				time: windows.readU32(base + 48)
+				historyCount: windows.readU32(base + 52)
+			}
+		}
+		_ -> ?
+	}
+}
+
+// POINTER_PEN_INFO struct: POINTER_INFO (96) + penFlags (4) + penMask (4) + pressure (4) + rotation (4) + tiltX (4) + tiltY (4) = 120 bytes
+_POINTER_PEN_INFO_SIZE := 120
+
+// _getPointerPenInfo(pointerId) -> pen info object with pressure/tilt or ?
+fn _getPointerPenInfo(pointerId) {
+	buf := bits(windows._zeros(_POINTER_PEN_INFO_SIZE, ''))
+	res := windows.user32('GetPointerPenInfo', pointerId, addr(buf))
+	if windows.callOk?(res) & res.r1 != 0 {
+		true -> {
+			base := addr(buf)
+			{
+				pointerType: windows.readU32(base)
+				pointerId: windows.readU32(base + 4)
+				frameId: windows.readU32(base + 8)
+				pointerFlags: windows.readU32(base + 12)
+				pixelX: windows.readU32(base + 24)
+				pixelY: windows.readU32(base + 28)
+				penFlags: windows.readU32(base + 96)
+				penMask: windows.readU32(base + 100)
+				pressure: windows.readU32(base + 104)
+				rotation: windows.readU32(base + 108)
+				tiltX: windows._toI32(windows.readU32(base + 112))
+				tiltY: windows._toI32(windows.readU32(base + 116))
+				barrel?: (windows.readU32(base + 96) & PEN_FLAG_BARREL) > 0
+				eraser?: (windows.readU32(base + 96) & PEN_FLAG_ERASER) > 0
+				inverted?: (windows.readU32(base + 96) & PEN_FLAG_INVERTED) > 0
+			}
+		}
+		_ -> ?
+	}
+}
+
+// _makePointerEvent(window, pointerId) -> standard pointer event object
+fn _makePointerEvent(window, pointerId) {
+	pType := _getPointerType(pointerId)
+	info := _getPointerInfo(pointerId)
+	if info != ? {
+		true -> {
+			mapped := _mapMouseXY(window, info.pixelX, info.pixelY)
+			evt := {
+				pointerId: pointerId
+				pointerType: if pType {
+					(PT_TOUCH) -> :touch
+					(PT_PEN) -> :pen
+					(PT_MOUSE) -> :mouse
+					(PT_TOUCHPAD) -> :touchpad
+					_ -> :unknown
+				}
+				x: mapped.x
+				y: mapped.y
+				physX: info.pixelX
+				physY: info.pixelY
+				flags: info.pointerFlags
+				primary?: (info.pointerFlags & POINTER_FLAG_PRIMARY) > 0
+				inContact?: (info.pointerFlags & POINTER_FLAG_INCONTACT) > 0
+				inRange?: (info.pointerFlags & POINTER_FLAG_INRANGE) > 0
+			}
+			// Enrich with pen data if applicable
+			if pType = PT_PEN -> {
+				penInfo := _getPointerPenInfo(pointerId)
+				if penInfo != ? -> {
+					evt.pressure <- penInfo.pressure
+					evt.tiltX <- penInfo.tiltX
+					evt.tiltY <- penInfo.tiltY
+					evt.rotation <- penInfo.rotation
+					evt.barrel? <- penInfo.barrel?
+					evt.eraser? <- penInfo.eraser?
+					evt.inverted? <- penInfo.inverted?
+				}
+			}
+			evt
+		}
+		_ -> ?
+	}
+}
+
+// onPointerDown(window, handler) — fires for WM_POINTERDOWN.
+// handler(event) where event has: pointerId, pointerType, x, y, physX, physY, flags,
+//   primary?, inContact?, inRange?. For pen: pressure, tiltX, tiltY, rotation, barrel?, eraser?.
+fn onPointerDown(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_POINTERDOWN -> {
+		wp := formMsgWParam(window)
+		id := _pointerIdFromWParam(wp)
+		evt := _makePointerEvent(window, id)
+		if evt != ? -> handler(evt)
+	})
+}
+
+// onPointerUp(window, handler) — fires for WM_POINTERUP.
+fn onPointerUp(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_POINTERUP -> {
+		wp := formMsgWParam(window)
+		id := _pointerIdFromWParam(wp)
+		evt := _makePointerEvent(window, id)
+		if evt != ? -> handler(evt)
+	})
+}
+
+// onPointerUpdate(window, handler) — fires for WM_POINTERUPDATE (move/hover).
+fn onPointerUpdate(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_POINTERUPDATE -> {
+		wp := formMsgWParam(window)
+		id := _pointerIdFromWParam(wp)
+		evt := _makePointerEvent(window, id)
+		if evt != ? -> handler(evt)
+	})
+}
+
+// onPointerEnter(window, handler) — fires when pointer enters window.
+fn onPointerEnter(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_POINTERENTER -> {
+		wp := formMsgWParam(window)
+		id := _pointerIdFromWParam(wp)
+		evt := _makePointerEvent(window, id)
+		if evt != ? -> handler(evt)
+	})
+}
+
+// onPointerLeave(window, handler) — fires when pointer leaves window.
+fn onPointerLeave(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_POINTERLEAVE -> {
+		wp := formMsgWParam(window)
+		id := _pointerIdFromWParam(wp)
+		evt := _makePointerEvent(window, id)
+		if evt != ? -> handler(evt)
+	})
+}
+
+// enablePointerInput(window) — enables WM_POINTER messages for the window.
+// Windows 8+ automatically sends WM_POINTER for touch; call this to opt in
+// to receiving them even when the app also uses WM_TOUCH.
+fn enablePointerInput(window) {
+	windows.user32('EnableMouseInPointer', 1)
+}
+
+// ─── Raw Input (HID) ────────────────────────────────────────────────────────
+
+WM_INPUT := 255
+// RAWINPUTDEVICE usage pages
+HID_USAGE_PAGE_GENERIC := 1
+HID_USAGE_PAGE_GAME := 5
+HID_USAGE_PAGE_LED := 8
+HID_USAGE_PAGE_BUTTON := 9
+// RAWINPUTDEVICE generic desktop usages
+HID_USAGE_GENERIC_POINTER := 1
+HID_USAGE_GENERIC_MOUSE := 2
+HID_USAGE_GENERIC_JOYSTICK := 4
+HID_USAGE_GENERIC_GAMEPAD := 5
+HID_USAGE_GENERIC_KEYBOARD := 6
+HID_USAGE_GENERIC_KEYPAD := 7
+HID_USAGE_GENERIC_MULTI_AXIS := 8
+// RAWINPUTDEVICE flags
+RIDEV_REMOVE := 1
+RIDEV_INPUTSINK := 256
+RIDEV_NOLEGACY := 48
+RIDEV_DEVNOTIFY := 8192
+// RID_INPUT / RID_HEADER
+RID_INPUT := 268435459
+RID_HEADER := 268435461
+// Raw input types
+RIM_TYPEMOUSE := 0
+RIM_TYPEKEYBOARD := 1
+RIM_TYPEHID := 2
+
+// RAWINPUTDEVICE struct: usUsagePage (2) + usUsage (2) + dwFlags (4) + hwndTarget (ptr)
+// Size: 16 bytes on 64-bit
+_RAWINPUTDEVICE_SIZE := if windows.ptrSize() = 8 { true -> 16, _ -> 12 }
+
+// registerRawInputDevice(window, usagePage, usage, flags) — register for WM_INPUT.
+// Common usages:
+//   (HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE) — raw mouse
+//   (HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_KEYBOARD) — raw keyboard
+//   (HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_GAMEPAD) — raw gamepad
+//   (HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_JOYSTICK) — raw joystick
+fn registerRawInputDevice(window, usagePage, usage, flags) {
+	f := if flags = ? -> 0
+	buf := bits(windows._zeros(_RAWINPUTDEVICE_SIZE, ''))
+	base := addr(buf)
+	// usUsagePage (2 bytes LE)
+	memwrite(pointer(base), char(usagePage & 255) + char((usagePage >> 8) & 255))
+	// usUsage (2 bytes LE)
+	memwrite(pointer(base + 2), char(usage & 255) + char((usage >> 8) & 255))
+	// dwFlags (4 bytes)
+	windows.writeU32(base + 4, f)
+	// hwndTarget (pointer)
+	windows.writePtr(base + 8, window.hwnd)
+	windows.user32('RegisterRawInputDevices', base, 1, _RAWINPUTDEVICE_SIZE)
+}
+
+// unregisterRawInputDevice(usagePage, usage) — stop receiving raw input for a device class.
+fn unregisterRawInputDevice(usagePage, usage) {
+	buf := bits(windows._zeros(_RAWINPUTDEVICE_SIZE, ''))
+	base := addr(buf)
+	memwrite(pointer(base), char(usagePage & 255) + char((usagePage >> 8) & 255))
+	memwrite(pointer(base + 2), char(usage & 255) + char((usage >> 8) & 255))
+	windows.writeU32(base + 4, RIDEV_REMOVE)
+	windows.writePtr(base + 8, 0)
+	windows.user32('RegisterRawInputDevices', base, 1, _RAWINPUTDEVICE_SIZE)
+}
+
+// RAWINPUTHEADER: dwType (4) + dwSize (4) + hDevice (ptr) + wParam (ptr)
+_RAWINPUTHEADER_SIZE := if windows.ptrSize() = 8 { true -> 24, _ -> 16 }
+
+// _getRawInputData(lParam) — get raw input data from WM_INPUT lParam.
+// Returns { type, headerSize, device, ... } with device-specific fields.
+fn _getRawInputData(lParam) {
+	// First call: get required buffer size
+	sizeBuf := bits(windows._zeros(4, ''))
+	windows.user32('GetRawInputData', lParam, RID_INPUT, 0, addr(sizeBuf), _RAWINPUTHEADER_SIZE)
+	size := windows.readU32(addr(sizeBuf))
+	if size > 0 {
+		true -> {
+			buf := bits(windows._zeros(size, ''))
+			gotRes := windows.user32('GetRawInputData', lParam, RID_INPUT, addr(buf), addr(sizeBuf), _RAWINPUTHEADER_SIZE)
+			if windows.callOk?(gotRes) {
+				true -> {
+					base := addr(buf)
+					rawType := windows.readU32(base)
+					dataOff := _RAWINPUTHEADER_SIZE
+					if rawType {
+						(RIM_TYPEMOUSE) -> {
+							// RAWMOUSE: usFlags(2), pad(2), ulButtons(4), usButtonFlags(2), usButtonData(2),
+							// ulRawButtons(4), lLastX(4), lLastY(4), ulExtraInformation(4)
+							mBase := base + dataOff
+							usFlags := windows.readU32(mBase) & 65535
+							buttonFlags := windows.readU32(mBase + 4) & 65535
+							buttonData := (windows.readU32(mBase + 4) >> 16) & 65535
+							lastX := windows._toI32(windows.readU32(mBase + 12))
+							lastY := windows._toI32(windows.readU32(mBase + 16))
+							{
+								type: :mouse
+								flags: usFlags
+								buttonFlags: buttonFlags
+								buttonData: buttonData
+								lastX: lastX
+								lastY: lastY
+								relative?: (usFlags & 1) = 0
+							}
+						}
+						(RIM_TYPEKEYBOARD) -> {
+							// RAWKEYBOARD: makeCode(2), flags(2), reserved(2), vKey(2), message(4), extraInfo(4)
+							kBase := base + dataOff
+							makeCodeLo := int(bits(memread(pointer(kBase), 1)).(0))
+							makeCodeHi := int(bits(memread(pointer(kBase + 1), 1)).(0))
+							makeCode := makeCodeLo + makeCodeHi * 256
+							kFlags := int(bits(memread(pointer(kBase + 2), 1)).(0)) + int(bits(memread(pointer(kBase + 3), 1)).(0)) * 256
+							vKeyLo := int(bits(memread(pointer(kBase + 6), 1)).(0))
+							vKeyHi := int(bits(memread(pointer(kBase + 7), 1)).(0))
+							vKey := vKeyLo + vKeyHi * 256
+							msg := windows.readU32(kBase + 8)
+							{
+								type: :keyboard
+								makeCode: makeCode
+								flags: kFlags
+								vKey: vKey
+								message: msg
+								down?: (kFlags & 1) = 0
+							}
+						}
+						(RIM_TYPEHID) -> {
+							// RAWHID: dwSizeHid(4), dwCount(4), bRawData[1]...
+							hBase := base + dataOff
+							sizeHid := windows.readU32(hBase)
+							count := windows.readU32(hBase + 4)
+							// Read raw bytes
+							dataSize := sizeHid * count
+							rawData := if dataSize > 0 {
+								true -> memread(pointer(hBase + 8), dataSize)
+								_ -> ''
+							}
+							{
+								type: :hid
+								sizeHid: sizeHid
+								count: count
+								rawData: rawData
+							}
+						}
+						_ -> { type: :unknown }
+					}
+				}
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+}
+
+// onRawInput(window, handler) — fires for each WM_INPUT message.
+// handler(rawEvent) where rawEvent is one of:
+//   { type: :mouse, flags, buttonFlags, buttonData, lastX, lastY, relative? }
+//   { type: :keyboard, makeCode, flags, vKey, message, down? }
+//   { type: :hid, sizeHid, count, rawData }
+fn onRawInput(window, handler) {
+	on(window, :dispatch, fn(_) if formMsgType(window) = WM_INPUT -> {
+		lp := formMsgLParam(window)
+		evt := _getRawInputData(lp)
+		if evt != ? -> handler(evt)
+	})
+}
+
+// enableRawMouse(window) — convenience: register for raw mouse input.
+fn enableRawMouse(window) registerRawInputDevice(window, HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE, 0)
+
+// enableRawKeyboard(window) — convenience: register for raw keyboard input.
+fn enableRawKeyboard(window) registerRawInputDevice(window, HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_KEYBOARD, 0)
+
+// enableRawGamepad(window) — convenience: register for raw gamepad/joystick input.
+fn enableRawGamepad(window) registerRawInputDevice(window, HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_GAMEPAD, 0)
+
+// enableRawJoystick(window) — convenience: register for raw joystick input.
+fn enableRawJoystick(window) registerRawInputDevice(window, HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_JOYSTICK, 0)
 
 fn isResizeDispatch?(window, step) {
 	if step.type = :dispatch {

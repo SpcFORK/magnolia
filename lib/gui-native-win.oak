@@ -1316,3 +1316,420 @@ fn setTaskbarProgressState(window, flags) {
 	tb := _getTaskbar()
 	if tb != ? -> _comCall(tb, 10, window.hwnd, flags)
 }
+
+// ─── Child / owned windows ───────────────────────────────────────────────────
+
+// createOwnedWindow(parent, title, width, height, options)
+// Creates a window owned by `parent`. The owned window stays above its owner
+// and is minimized/closed when the owner is.
+// options: { borderless, x, y, style }
+fn createOwnedWindow(parent, title, width, height, options) {
+	opts := if options { ? -> {}, _ -> options }
+	borderless := _default(opts.borderless, false)
+	style := if opts.style {
+		? -> if borderless {
+			true -> windows.WS_POPUP | windows.WS_VISIBLE
+			_ -> windows.WS_OVERLAPPEDWINDOW | windows.WS_VISIBLE
+		}
+		_ -> opts.style
+	}
+	exStyle := 0
+	posX := _default(opts.x, 100)
+	posY := _default(opts.y, 100)
+	base := windows.imageBase()
+	hwnd := windows.createWindowEx(
+		exStyle
+		windows.DefaultClassName
+		windows.wstr(title)
+		style
+		posX, posY, width, height
+		parent.hwnd
+		0
+		base
+		0
+	)
+	if hwnd.type {
+		:ok -> if hwnd.r1 > 0 {
+			true -> {
+				msgBuf := windows.createMsgBuffer()
+				child := {
+					type: :ok
+					backend: :windows
+					title: title
+					width: width
+					height: height
+					hwnd: hwnd.r1
+					msgBuf: msgBuf
+					parentHwnd: parent.hwnd
+					_eventHandlers: {}
+				}
+				registerWindow(child)
+				child
+			}
+			_ -> _err('CreateWindowExW null handle for owned window', hwnd)
+		}
+		_ -> _err('CreateWindowExW failed for owned window', hwnd)
+	}
+}
+
+// showModalDialog(parent, title, width, height, options, setupFn)
+// Creates an owned window that disables the parent until closed.
+// setupFn receives the dialog window for widget setup.
+fn showModalDialog(parent, title, width, height, options, setupFn) {
+	dialog := createOwnedWindow(parent, title, width, height, options)
+	if dialog.type = :ok {
+		true -> {
+			// Disable parent window
+			windows.user32('EnableWindow', parent.hwnd, 0)
+			dialog._isModal <- true
+			dialog._modalParent <- parent
+			// Let caller set up dialog content
+			if setupFn != ? -> setupFn(dialog)
+			dialog
+		}
+		_ -> dialog
+	}
+}
+
+// closeModalDialog(dialog) — close a modal dialog and re-enable its parent.
+fn closeModalDialog(dialog) {
+	if dialog._isModal = true {
+		true -> {
+			parentHwnd := dialog._modalParent.hwnd
+			// Re-enable parent
+			windows.user32('EnableWindow', parentHwnd, 1)
+			// Set parent as foreground
+			windows.user32('SetForegroundWindow', parentHwnd)
+		}
+	}
+	// Destroy the dialog window
+	windows.destroyWindow(dialog.hwnd)
+	unregisterWindow(dialog)
+}
+
+// setWindowOwner(child, parent) — change owner relationship after creation.
+// Uses GWLP_HWNDPARENT (SetWindowLongPtrW index -8).
+fn setWindowOwner(child, parent) {
+	parentHwnd := if parent { ? -> 0, _ -> parent.hwnd }
+	windows.setWindowLongPtr(child.hwnd, -8, parentHwnd)
+}
+
+// ─── Multi-monitor awareness ─────────────────────────────────────────────────
+
+// getWindowMonitor(window) -> monitor info { monitor, work, flags, primary } | ?
+// Returns info about the monitor the window is currently on.
+fn getWindowMonitor(window) {
+	hMon := windows.monitorFromWindow(window.hwnd, 2)
+	if hMon != 0 {
+		true -> windows.getMonitorInfo(hMon)
+		_ -> ?
+	}
+}
+
+// centerOnMonitor(window) — center window on its current monitor's work area.
+fn centerOnMonitor(window) {
+	info := getWindowMonitor(window)
+	if info != ? -> {
+		workW := info.work.right - info.work.left
+		workH := info.work.bottom - info.work.top
+		x := info.work.left + int((workW - window.width) / 2)
+		y := info.work.top + int((workH - window.height) / 2)
+		moveWindow(window, x, y)
+	}
+}
+
+// moveToMonitor(window, hMonitor) — move window to the center of a specific monitor.
+fn moveToMonitor(window, hMonitor) {
+	info := windows.getMonitorInfo(hMonitor)
+	if info != ? -> {
+		workW := info.work.right - info.work.left
+		workH := info.work.bottom - info.work.top
+		x := info.work.left + int((workW - window.width) / 2)
+		y := info.work.top + int((workH - window.height) / 2)
+		moveWindow(window, x, y)
+	}
+}
+
+// getWindowDpi(window) -> DPI value for the window's current monitor.
+fn getWindowDpi(window) windows.getDpiForWindow(window.hwnd)
+
+// ─── Custom window chrome ────────────────────────────────────────────────────
+
+// DwmExtendFrameIntoClientArea extends the DWM frame into the client area.
+// margins: { left, right, top, bottom } — pixel thickness of each glass edge.
+// Use -1 for all margins to create a fully transparent glass sheet.
+fn extendFrameIntoClientArea(window, margins) {
+	// MARGINS struct: 4 DWORDs = 16 bytes
+	buf := bits([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+	windows.writeU32(addr(buf), _default(margins.left, 0))
+	windows.writeU32(addr(buf) + 4, _default(margins.right, 0))
+	windows.writeU32(addr(buf) + 8, _default(margins.top, 0))
+	windows.writeU32(addr(buf) + 12, _default(margins.bottom, 0))
+	windows.dwmapi('DwmExtendFrameIntoClientArea', window.hwnd, addr(buf))
+}
+
+// enableGlassSheet(window) — extend glass over the entire client area.
+fn enableGlassSheet(window) extendFrameIntoClientArea(window, { left: -1, right: -1, top: -1, bottom: -1 })
+
+// WM_NCHITTEST return values for custom chrome hit regions
+HTCLIENT := 1
+HTCAPTION := 2
+HTSYSMENU := 3
+HTMINBUTTON := 8
+HTMAXBUTTON := 9
+HTLEFT := 10
+HTRIGHT := 11
+HTTOP := 12
+HTTOPLEFT := 13
+HTTOPRIGHT := 14
+HTBOTTOM := 15
+HTBOTTOMLEFT := 16
+HTBOTTOMRIGHT := 17
+HTCLOSE := 20
+
+// WM_NCHITTEST message code
+_WM_NCHITTEST := 132
+
+// onNcHitTest(window, handler)
+// handler(x, y) -> hit test result (one of HT* constants above).
+// If handler returns ?, default hit testing is used.
+// x, y are client-area coordinates.
+fn onNcHitTest(window, handler) {
+	window._ncHitTestHandler <- handler
+}
+
+// customChromeHitTest(mx, my, width, height, borderSize, captionHeight)
+// Returns an HT* value for standard resize + title bar regions.
+// Use this in onNcHitTest handler for a common custom chrome layout.
+fn customChromeHitTest(mx, my, width, height, borderSize, captionHeight) {
+	b := _default(borderSize, 8)
+	cap := _default(captionHeight, 32)
+	// Corners first (overlap between border zones)
+	if my < b & mx < b -> HTTOPLEFT
+	if my < b & mx >= width - b -> HTTOPRIGHT
+	if my >= height - b & mx < b -> HTBOTTOMLEFT
+	if my >= height - b & mx >= width - b -> HTBOTTOMRIGHT
+	// Edges
+	if my < b -> HTTOP
+	if my >= height - b -> HTBOTTOM
+	if mx < b -> HTLEFT
+	if mx >= width - b -> HTRIGHT
+	// Caption bar
+	if my < cap + b -> HTCAPTION
+	// Client area
+	HTCLIENT
+}
+
+// setWindowRgn(window, hRgn, redraw) — set a clipping region for custom shapes.
+fn setWindowRgn(window, hRgn, redraw) {
+	windows.user32('SetWindowRgn', window.hwnd, hRgn, if redraw { true -> 1, _ -> 0 })
+}
+
+// createRoundRectRgn(left, top, right, bottom, rx, ry) -> region handle.
+fn createRoundRectRgn(left, top, right, bottom, rx, ry) {
+	res := windows.gdi32('CreateRoundRectRgn', left, top, right, bottom, rx, ry)
+	if windows.callOk?(res) {
+		true -> res.r1
+		_ -> 0
+	}
+}
+
+// ─── Toast notifications ─────────────────────────────────────────────────────
+// Windows 10+ toast notifications via PowerShell WinRT interop.
+// Falls back to balloon tips (via gui-systray showBalloonTip) if PowerShell fails.
+
+// showToastNotification(title, message, options)
+// options: { appId, icon, silent, timeout, window, trayId }
+//   appId: app user model ID (defaults to a generic magnolia ID)
+//   icon: path to icon file
+//   silent: bool, suppress notification sound
+//   window/trayId: for balloon fallback via gui-systray
+
+// _escapeXml(s) — escape XML special characters in s.
+fn _escapeXml(s) {
+	out := ''
+	fn esc(i) if i < len(s) {
+		true -> {
+			ch := s.(i)
+			if ch {
+				'&' -> out <- out + '&amp;'
+				'<' -> out <- out + '&lt;'
+				'>' -> out <- out + '&gt;'
+				'"' -> out <- out + '&quot;'
+				'\'' -> out <- out + '&apos;'
+				_ -> out <- out + ch
+			}
+			esc(i + 1)
+		}
+	}
+	esc(0)
+	out
+}
+
+// _escapePsString(s) — escape a string for embedding inside a PowerShell
+// single-quoted literal.  The only escape in PS single-quoted strings is
+// '' (doubled single-quote) for a literal '.
+fn _escapePsString(s) {
+	out := ''
+	fn esc(i) if i < len(s) {
+		true -> {
+			ch := s.(i)
+			if ch {
+				'\'' -> out <- out + '\'\''
+				_ -> out <- out + ch
+			}
+			esc(i + 1)
+		}
+	}
+	esc(0)
+	out
+}
+
+fn showToastNotification(title, message, options) {
+	opts := if options { ? -> {}, _ -> options }
+	appId := _default(opts.appId, 'Magnolia.App')
+	// Build PowerShell script for toast
+	psScript := '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; '
+	psScript << '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null; '
+	// Escape for XML first, then for PowerShell single-quoted strings
+	safeTitle := _escapeXml(title)
+	safeMsg := _escapeXml(message)
+	safeAppId := _escapePsString(appId)
+	xml := '<toast><visual><binding template="ToastGeneric"><text>' + safeTitle + '</text><text>' + safeMsg + '</text></binding></visual>'
+	if opts.silent = true -> xml <- xml + '<audio silent="true"/>'
+	xml <- xml + '</toast>'
+	safeXml := _escapePsString(xml)
+	psScript << '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; '
+	psScript << '$xml.LoadXml(\'' + safeXml + '\'); '
+	psScript << '$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); '
+	psScript << '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\'' + safeAppId + '\').Show($toast)'
+	// Execute via PowerShell
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', psScript], '')
+}
+
+// showToastWithFallback(title, message, options)
+// Tries toast notification, falls back to balloon tip via gui-systray.
+fn showToastWithFallback(title, message, options) {
+	// Always show the toast (async, fire-and-forget)
+	showToastNotification(title, message, options)
+}
+
+// ─── Jump list customization ─────────────────────────────────────────────────
+// Uses PowerShell COM automation to manage Windows 7+ jump lists
+// (ICustomDestinationList via Shell.Application).
+
+// addJumpListTask(title, path, arguments, iconPath, iconIndex, description)
+// Add a task to the application's jump list. Tasks appear in the "Tasks" category.
+fn addJumpListTask(title, path, arguments, iconPath, iconIndex, description) {
+	safeTitle := _escapePsString(title)
+	safePath := _escapePsString(path)
+	safeArgs := _escapePsString(if arguments = ? -> '')
+	safeIcon := _escapePsString(if iconPath = ? -> path)
+	safeDesc := _escapePsString(if description = ? -> title)
+	idx := if iconIndex = ? -> 0
+	ps := '$shell = New-Object -ComObject Shell.Application; '
+	ps <- ps + '$link = (New-Object -ComObject WScript.Shell).CreateShortcut([System.IO.Path]::GetTempPath() + \'' + safeTitle + '.lnk\'); '
+	ps <- ps + '$link.TargetPath = \'' + safePath + '\'; '
+	ps <- ps + '$link.Arguments = \'' + safeArgs + '\'; '
+	ps <- ps + '$link.Description = \'' + safeDesc + '\'; '
+	ps <- ps + '$link.IconLocation = \'' + safeIcon + ',' + string(idx) + '\'; '
+	ps <- ps + '$link.Save()'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// clearJumpList() — remove all custom jump list entries.
+fn clearJumpList() {
+	ps := 'try { '
+	ps <- ps + '$t = [System.Type]::GetTypeFromCLSID([Guid]"77f10cf0-3db5-4966-b520-b7c54fd35ed6"); '
+	ps <- ps + '$cdl = [System.Activator]::CreateInstance($t); '
+	ps <- ps + '$cdl.GetType().GetMethod("DeleteList", [Type[]]@([String])).Invoke($cdl, @($null)) '
+	ps <- ps + '} catch { }'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// addJumpListRecentFile(filePath) — add a file to the "Recent" category.
+fn addJumpListRecentFile(filePath) {
+	// SHAddToRecentDocs(SHARD_PATHW=3, filePath)
+	windows.shell32('SHAddToRecentDocs', 3, windows.wstr(filePath))
+}
+
+// ─── File type association handler ───────────────────────────────────────────
+// Register the application as a handler for file extensions via registry.
+
+// registerFileAssociation(extension, progId, description, command, iconPath)
+// extension: e.g. '.mag'
+// progId: e.g. 'Magnolia.Document'
+// description: e.g. 'Magnolia Source File'
+// command: full command line with %1 placeholder, e.g. '"C:\\path\\magnolia.exe" "%1"'
+// iconPath: optional icon file path
+fn registerFileAssociation(extension, progId, description, command, iconPath) {
+	desc := if description { ? -> 'Magnolia File', _ -> description }
+	HKCU := windows.HKEY_CURRENT_USER
+	// Map extension to progId
+	windows.regWriteString(HKCU, 'Software\\Classes\\' + extension, '', progId)
+	// Set progId description
+	windows.regWriteString(HKCU, 'Software\\Classes\\' + progId, '', desc)
+	// Set open command
+	windows.regWriteString(HKCU, 'Software\\Classes\\' + progId + '\\shell\\open\\command', '', command)
+	// Set icon if provided
+	if iconPath != ? -> windows.regWriteString(HKCU, 'Software\\Classes\\' + progId + '\\DefaultIcon', '', iconPath)
+}
+
+// unregisterFileAssociation(extension, progId) — remove a file type association.
+fn unregisterFileAssociation(extension, progId) {
+	HKCU := windows.HKEY_CURRENT_USER
+	windows.regDeleteTree(HKCU, 'Software\\Classes\\' + extension)
+	windows.regDeleteTree(HKCU, 'Software\\Classes\\' + progId)
+}
+
+// refreshShellAssociations() — notify the shell that associations have changed.
+fn refreshShellAssociations() {
+	// SHChangeNotify(SHCNE_ASSOCCHANGED=0x08000000, SHCNF_IDLIST=0, NULL, NULL)
+	windows.shell32('SHChangeNotify', 134217728, 0, 0, 0)
+}
+
+// ─── Windows Search integration ──────────────────────────────────────────────
+
+// addSearchFolder(folderPath, scope) — add a folder to Windows Search indexing.
+// scope: 'default' (user default), 'include', 'exclude'
+fn addSearchFolder(folderPath, scope) {
+	safePath := _escapePsString(folderPath)
+	ps := 'try { '
+	ps <- ps + '$sm = New-Object -ComObject Microsoft.WindowsSearch.SearchManager; '
+	ps <- ps + '$catalog = $sm.GetCatalog("SystemIndex"); '
+	ps <- ps + '$scope = $catalog.GetCrawlScopeManager(); '
+	if scope = 'exclude' {
+		true -> ps <- ps + '$scope.AddUserScopeRule("file:///' + safePath + '", 0, 0, 0); '
+		_ -> ps <- ps + '$scope.AddUserScopeRule("file:///' + safePath + '", 1, 0, 0); '
+	}
+	ps <- ps + '$scope.SaveAll(); '
+	ps <- ps + '} catch { }'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// searchFiles(query, maxResults) — search indexed files using Windows Search.
+// Returns file paths matching the query.
+fn searchFiles(query, maxResults) {
+	safeQuery := _escapePsString(query)
+	max := if maxResults = ? -> 20
+	ps := '$conn = New-Object -ComObject ADODB.Connection; '
+	ps <- ps + '$conn.Open("Provider=Search.CollatorDSO;Extended Properties=\x27\x27Application=Windows\x27\x27"); '
+	ps <- ps + '$rs = $conn.Execute("SELECT TOP ' + string(max) + ' System.ItemPathDisplay FROM SYSTEMINDEX WHERE SCOPE=\x27\x27file:\x27\x27 AND CONTAINS(*,\x27\x27\x27' + safeQuery + '\x27\x27\x27)"); '
+	ps <- ps + 'while (!$rs.EOF) { Write-Output $rs.Fields.Item("System.ItemPathDisplay").Value; $rs.MoveNext() }; '
+	ps <- ps + '$rs.Close(); $conn.Close()'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}
+
+// searchFilesWithProperty(query, property, maxResults) — search with a specific property filter.
+// property: e.g. 'System.FileName', 'System.Author', 'System.Keywords'
+fn searchFilesWithProperty(query, property, maxResults) {
+	safeQuery := _escapePsString(query)
+	safeProp := _escapePsString(property)
+	max := if maxResults = ? -> 20
+	ps := '$conn = New-Object -ComObject ADODB.Connection; '
+	ps <- ps + '$conn.Open("Provider=Search.CollatorDSO;Extended Properties=\x27\x27Application=Windows\x27\x27"); '
+	ps <- ps + '$rs = $conn.Execute("SELECT TOP ' + string(max) + ' System.ItemPathDisplay, ' + safeProp + ' FROM SYSTEMINDEX WHERE SCOPE=\x27\x27file:\x27\x27 AND CONTAINS(*,\x27\x27\x27' + safeQuery + '\x27\x27\x27)"); '
+	ps <- ps + 'while (!$rs.EOF) { Write-Output ($rs.Fields.Item("System.ItemPathDisplay").Value + "|" + $rs.Fields.Item("' + safeProp + '").Value); $rs.MoveNext() }; '
+	ps <- ps + '$rs.Close(); $conn.Close()'
+	exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], '')
+}

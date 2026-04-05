@@ -92,4 +92,47 @@ fn run(t) {
 	'wasm bundle_len counts utf-8 byte length' |> t.assert(
 		str.contains?(byteEscapedWat, '(global $__oak_bundle_len (export "__oak_bundle_len") i32 (i32.const 3))')
 	)
+
+	// parseInclude keeps explicit extension
+	{
+		parsed := build.parseInclude('std.test:test/std.test.oak')
+		'parseInclude keeps explicit .oak extension' |> t.eq(parsed.name, 'std.test')
+		'parseInclude path ends with test/std.test.oak' |> t.assert(
+			str.endsWith?(parsed.path, 'test/std.test.oak')
+		)
+	}
+
+	// addImportsFromSource collects stdlib imports
+	{
+		buildImports := import('build-imports')
+		collected := []
+
+		buildImports.addImportsFromSource(
+			'/entry.oak'
+			''
+			{}
+			{}
+			false
+			fn(_) false
+			fn(_) ?
+			fn(name, _) '/deps/' + name
+			fn(_) '/root'
+			fn(path) collected << path
+			fn(_, _) [{
+				type: :assignment
+				local?: true
+				left: { type: :identifier, val: 'std' }
+				right: {
+					type: :fnCall
+					function: { type: :identifier, val: 'import' }
+					args: [{ type: :string, val: 'std' }]
+					restArg: ?
+				}
+			}]
+		)
+		'addImportsFromSource collects static std import path' |> t.eq(
+			collected
+			['/deps/std.oak']
+		)
+	}
 }
