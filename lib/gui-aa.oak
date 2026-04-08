@@ -1,0 +1,422 @@
+// gui-aa provides software anti-aliased drawing primitives for the Magnolia
+// GUI facade.  All routines use sub-pixel coverage blending via the opacity()
+// function from gui-color, layered on top of the existing platform drawLine
+// primitive so they work on every backend (Windows GDI, Linux X11, Web).
+//
+// Public API:
+//   drawLineAA(deps, window, x1, y1, x2, y2, color, bgColor)
+//   drawCircleFilledAA(deps, window, cx, cy, radius, color, bgColor)
+//   drawCircleOutlineAA(deps, window, cx, cy, radius, color, bgColor)
+//   drawEllipseFilledAA(deps, window, cx, cy, rx, ry, color, bgColor)
+//   drawRoundedRectFilledAA(deps, window, x, y, w, h, r, color, bgColor)
+//   drawTriangleFilledAA(deps, window, p0, p1, p2, color, bgColor)
+//
+// deps must contain at minimum { drawLine: fn(window, x1, y1, x2, y2, color) }
+// bgColor is the background color used for blending (default: black).
+
+{ _default: _default, _clamp: _clamp } := import('gui-common')
+guiColor := import('gui-color')
+
+_OK := { type: :ok }
+
+// --- Helpers ---
+
+fn _abs(x) if x < 0 { true -> 0 - x, _ -> x }
+fn _floor(x) int(x)
+fn _fpart(x) x - int(x)
+fn _rfpart(x) 1 - _fpart(x)
+fn _ipart(x) int(x)
+fn _round(x) int(x + 0.5)
+fn _swap(a, b) [b, a]
+fn _min(a, b) if a < b { true -> a, _ -> b }
+fn _max(a, b) if a > b { true -> a, _ -> b }
+
+fn _blendColor(fg, alpha, bg) guiColor.opacity(fg, alpha, bg)
+
+// Smoothstep for smooth edge transitions (Hermite interpolation).
+fn _smoothstep(edge0, edge1, x) {
+	t := _clamp((x - edge0) / (edge1 - edge0), 0, 1)
+	t * t * (3 - 2 * t)
+}
+
+// --------------------------------------------------------------------------
+// Xiaolin Wu's anti-aliased line drawing algorithm.
+// Draws a line from (x1,y1) to (x2,y2) with sub-pixel blending.
+// --------------------------------------------------------------------------
+fn drawLineAA(deps, window, x0, y0, x1, y1, color, bgColor) {
+	bg := _default(bgColor, 0)
+	steep := _abs(y1 - y0) > _abs(x1 - x0)
+
+	// If steep, transpose coordinates so we always step along x
+	ax := if steep { true -> float(y0), _ -> float(x0) }
+	ay := if steep { true -> float(x0), _ -> float(y0) }
+	bx := if steep { true -> float(y1), _ -> float(x1) }
+	by := if steep { true -> float(x1), _ -> float(y1) }
+
+	// Ensure we draw left to right
+	if ax > bx {
+		true -> {
+			tx := ax
+			ty := ay
+			ax <- bx
+			ay <- by
+			bx <- tx
+			by <- ty
+		}
+	}
+
+	dx := bx - ax
+	dy := by - ay
+	gradient := if dx = 0 { true -> 1, _ -> dy / dx }
+
+	// --- First endpoint ---
+	xend := _round(ax)
+	yend := ay + gradient * (xend - ax)
+	xgap := _rfpart(ax + 0.5)
+	xpxl1 := xend
+	ypxl1 := _ipart(yend)
+	alpha1a := _rfpart(yend) * xgap
+	alpha1b := _fpart(yend) * xgap
+	if steep {
+		true -> {
+			deps.drawLine(window, ypxl1, xpxl1, ypxl1, xpxl1, _blendColor(color, alpha1a, bg))
+			deps.drawLine(window, ypxl1 + 1, xpxl1, ypxl1 + 1, xpxl1, _blendColor(color, alpha1b, bg))
+		}
+		_ -> {
+			deps.drawLine(window, xpxl1, ypxl1, xpxl1, ypxl1, _blendColor(color, alpha1a, bg))
+			deps.drawLine(window, xpxl1, ypxl1 + 1, xpxl1, ypxl1 + 1, _blendColor(color, alpha1b, bg))
+		}
+	}
+	intery := yend + gradient
+
+	// --- Second endpoint ---
+	xend2 := _round(bx)
+	yend2 := by + gradient * (xend2 - bx)
+	xgap2 := _fpart(bx + 0.5)
+	xpxl2 := xend2
+	ypxl2 := _ipart(yend2)
+	alpha2a := _rfpart(yend2) * xgap2
+	alpha2b := _fpart(yend2) * xgap2
+	if steep {
+		true -> {
+			deps.drawLine(window, ypxl2, xpxl2, ypxl2, xpxl2, _blendColor(color, alpha2a, bg))
+			deps.drawLine(window, ypxl2 + 1, xpxl2, ypxl2 + 1, xpxl2, _blendColor(color, alpha2b, bg))
+		}
+		_ -> {
+			deps.drawLine(window, xpxl2, ypxl2, xpxl2, ypxl2, _blendColor(color, alpha2a, bg))
+			deps.drawLine(window, xpxl2, ypxl2 + 1, xpxl2, ypxl2 + 1, _blendColor(color, alpha2b, bg))
+		}
+	}
+
+	// --- Main loop between endpoints ---
+	fn _wuLoop(x, intery) if x >= xpxl2 {
+		true -> _OK
+		_ -> {
+			iy := _ipart(intery)
+			alphaA := _rfpart(intery)
+			alphaB := _fpart(intery)
+			if steep {
+				true -> {
+					deps.drawLine(window, iy, x, iy, x, _blendColor(color, alphaA, bg))
+					deps.drawLine(window, iy + 1, x, iy + 1, x, _blendColor(color, alphaB, bg))
+				}
+				_ -> {
+					deps.drawLine(window, x, iy, x, iy, _blendColor(color, alphaA, bg))
+					deps.drawLine(window, x, iy + 1, x, iy + 1, _blendColor(color, alphaB, bg))
+				}
+			}
+			_wuLoop(x + 1, intery + gradient)
+		}
+	}
+	_wuLoop(xpxl1 + 1, intery)
+}
+
+// --------------------------------------------------------------------------
+// Anti-aliased filled circle — scanline fill with sub-pixel edge blending.
+// Uses the signed distance from each edge pixel to the circle boundary to
+// compute smooth alpha coverage.
+// --------------------------------------------------------------------------
+fn drawCircleFilledAA(deps, window, cx, cy, radius, color, bgColor) {
+	bg := _default(bgColor, 0)
+	r := float(radius)
+	if r <= 0 {
+		true -> _OK
+		_ -> {
+			r2 := r * r
+			yStart := _floor(cy - r) - 1
+			yEnd := _floor(cy + r) + 1
+			fn _scanY(y) if y > yEnd {
+				true -> _OK
+				_ -> {
+					dy := float(y) + 0.5 - cy
+					dy2 := dy * dy
+					if dy2 <= (r + 1) * (r + 1) {
+						true -> {
+							// Exact x extent for this scanline
+							xHalf := pow(_max(r2 - dy2, 0), 0.5)
+							xLeft := cx - xHalf
+							xRight := cx + xHalf
+
+							// Fully opaque interior span
+							ixL := _floor(xLeft) + 1
+							ixR := _floor(xRight)
+							if ixL <= ixR {
+								true -> deps.drawLine(window, ixL, y, ixR, y, color)
+							}
+
+							// Left edge sub-pixel blend
+							leftAlpha := _smoothstep(0, 1, float(ixL) - xLeft)
+							if leftAlpha > 0.01 {
+								true -> deps.drawLine(window, ixL - 1, y, ixL - 1, y, _blendColor(color, leftAlpha, bg))
+							}
+
+							// Right edge sub-pixel blend
+							rightAlpha := _smoothstep(0, 1, xRight - float(ixR))
+							if rightAlpha > 0.01 {
+								true -> deps.drawLine(window, ixR + 1, y, ixR + 1, y, _blendColor(color, rightAlpha, bg))
+							}
+						}
+					}
+					_scanY(y + 1)
+				}
+			}
+			_scanY(yStart)
+		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// Anti-aliased circle outline — sub-pixel blended ring.
+// --------------------------------------------------------------------------
+fn drawCircleOutlineAA(deps, window, cx, cy, radius, color, bgColor) {
+	bg := _default(bgColor, 0)
+	r := float(radius)
+	if r <= 0 {
+		true -> _OK
+		_ -> {
+			yStart := _floor(cy - r) - 1
+			yEnd := _floor(cy + r) + 1
+			r2 := r * r
+			fn _scanY(y) if y > yEnd {
+				true -> _OK
+				_ -> {
+					dy := float(y) + 0.5 - cy
+					dy2 := dy * dy
+					if dy2 <= (r + 1.5) * (r + 1.5) {
+						true -> {
+							xHalf := pow(_max(r2 - dy2, 0), 0.5)
+							// For each pixel in the horizontal range, compute distance to circle
+							xStart := _floor(cx - xHalf) - 1
+							xEnd := _floor(cx + xHalf) + 1
+							fn _scanX(x) if x > xEnd {
+								true -> ?
+								_ -> {
+									dx := float(x) + 0.5 - cx
+									dist := pow(dx * dx + dy2, 0.5)
+									// Distance from circle edge
+									edgeDist := _abs(dist - r)
+									if edgeDist < 1.5 {
+										true -> {
+											alpha := 1 - _smoothstep(0, 1.2, edgeDist)
+											if alpha > 0.01 {
+												true -> deps.drawLine(window, x, y, x, y, _blendColor(color, alpha, bg))
+											}
+										}
+									}
+									_scanX(x + 1)
+								}
+							}
+							_scanX(xStart)
+						}
+					}
+					_scanY(y + 1)
+				}
+			}
+			_scanY(yStart)
+		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// Anti-aliased filled ellipse — scanline fill with sub-pixel edge blending.
+// --------------------------------------------------------------------------
+fn drawEllipseFilledAA(deps, window, cx, cy, rx, ry, color, bgColor) {
+	bg := _default(bgColor, 0)
+	radiusX := float(rx)
+	radiusY := float(ry)
+	if radiusX <= 0 | radiusY <= 0 {
+		true -> _OK
+		_ -> {
+			yStart := _floor(cy - radiusY) - 1
+			yEnd := _floor(cy + radiusY) + 1
+			fn _scanY(y) if y > yEnd {
+				true -> _OK
+				_ -> {
+					dy := float(y) + 0.5 - cy
+					// Ellipse: x^2/rx^2 + y^2/ry^2 = 1
+					yNorm2 := (dy * dy) / (radiusY * radiusY)
+					if yNorm2 <= 1.04 {
+						true -> {
+							xHalf := radiusX * pow(_max(1 - yNorm2, 0), 0.5)
+							xLeft := cx - xHalf
+							xRight := cx + xHalf
+
+							ixL := _floor(xLeft) + 1
+							ixR := _floor(xRight)
+							if ixL <= ixR {
+								true -> deps.drawLine(window, ixL, y, ixR, y, color)
+							}
+
+							leftAlpha := _smoothstep(0, 1, float(ixL) - xLeft)
+							if leftAlpha > 0.01 {
+								true -> deps.drawLine(window, ixL - 1, y, ixL - 1, y, _blendColor(color, leftAlpha, bg))
+							}
+
+							rightAlpha := _smoothstep(0, 1, xRight - float(ixR))
+							if rightAlpha > 0.01 {
+								true -> deps.drawLine(window, ixR + 1, y, ixR + 1, y, _blendColor(color, rightAlpha, bg))
+							}
+						}
+					}
+					_scanY(y + 1)
+				}
+			}
+			_scanY(yStart)
+		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// Anti-aliased filled rounded rectangle.
+// --------------------------------------------------------------------------
+fn drawRoundedRectFilledAA(deps, window, x, y, width, height, radius, color, bgColor) {
+	bg := _default(bgColor, 0)
+	r := _clamp(_default(radius, 4), 0, _min(width, height) / 2)
+	yStart := _floor(y) - 1
+	yEnd := _floor(y + height) + 1
+	fn _scanY(row) if row > yEnd {
+		true -> _OK
+		_ -> {
+			fy := float(row) + 0.5
+			// Vertical distance from nearest horizontal edge
+			insetY := if fy < y + r {
+				true -> y + r - fy
+				_ -> if fy > y + height - r {
+					true -> fy - (y + height - r)
+					_ -> 0
+				}
+			}
+			// Horizontal inset from rounded corner
+			inset := if insetY > 0 {
+				true -> r - pow(_max(r * r - insetY * insetY, 0), 0.5)
+				_ -> 0
+			}
+			xLeft := x + inset
+			xRight := x + width - inset
+
+			// Is this row within the vertical extent of the rect?
+			if (fy >= y - 0.5) & (fy <= y + height + 0.5) {
+				true -> {
+					ixL := _floor(xLeft) + 1
+					ixR := _floor(xRight)
+					if ixL <= ixR {
+						true -> deps.drawLine(window, ixL, row, ixR, row, color)
+					}
+
+					leftAlpha := _smoothstep(0, 1, float(ixL) - xLeft)
+					if leftAlpha > 0.01 {
+						true -> deps.drawLine(window, ixL - 1, row, ixL - 1, row, _blendColor(color, leftAlpha, bg))
+					}
+
+					rightAlpha := _smoothstep(0, 1, xRight - float(ixR))
+					if rightAlpha > 0.01 {
+						true -> deps.drawLine(window, ixR + 1, row, ixR + 1, row, _blendColor(color, rightAlpha, bg))
+					}
+
+					// Top/bottom edge blending for the row
+					if fy < y + 0.5 {
+						true -> {
+							topAlpha := _smoothstep(0, 1, fy - y + 0.5)
+							// Redraw the span with blended color
+							if topAlpha < 0.99 & ixL <= ixR {
+								true -> deps.drawLine(window, ixL, row, ixR, row, _blendColor(color, topAlpha, bg))
+							}
+						}
+					}
+					if fy > y + height - 0.5 {
+						true -> {
+							botAlpha := _smoothstep(0, 1, y + height + 0.5 - fy)
+							if botAlpha < 0.99 & ixL <= ixR {
+								true -> deps.drawLine(window, ixL, row, ixR, row, _blendColor(color, botAlpha, bg))
+							}
+						}
+					}
+				}
+			}
+			_scanY(row + 1)
+		}
+	}
+	_scanY(yStart)
+}
+
+// --------------------------------------------------------------------------
+// Anti-aliased filled triangle — scanline fill with sub-pixel edge blending.
+// Uses edge distance for smooth coverage at triangle boundaries.
+// --------------------------------------------------------------------------
+
+// Signed distance from point (px,py) to the line through (ax,ay)-(bx,by).
+fn _edgeDistSigned(px, py, ax, ay, bx, by) {
+	dx := bx - ax
+	dy := by - ay
+	len := pow(dx * dx + dy * dy, 0.5)
+	if len < 0.0001 {
+		true -> 0
+		_ -> (dy * (px - ax) - dx * (py - ay)) / len
+	}
+}
+
+fn _triMin3(a, b, c) _min(a, _min(b, c))
+fn _triMax3(a, b, c) _max(a, _max(b, c))
+
+fn drawTriangleFilledAA(deps, window, p0, p1, p2, color, bgColor) {
+	bg := _default(bgColor, 0)
+	// Bounding box
+	minX := _floor(_triMin3(p0.x, p1.x, p2.x)) - 1
+	maxX := _floor(_triMax3(p0.x, p1.x, p2.x)) + 1
+	minY := _floor(_triMin3(p0.y, p1.y, p2.y)) - 1
+	maxY := _floor(_triMax3(p0.y, p1.y, p2.y)) + 1
+
+	// Precompute winding sign so edge distances are positive inside
+	cross := (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)
+	windSign := if cross < 0 { true -> 1, _ -> -1 }
+
+	fn _scanY(y) if y > maxY {
+		true -> _OK
+		_ -> {
+			fy := float(y) + 0.5
+			fn _scanX(x) if x > maxX {
+				true -> ?
+				_ -> {
+					fx := float(x) + 0.5
+					// Signed distance to each edge (positive = inside)
+					d0 := windSign * _edgeDistSigned(fx, fy, p0.x, p0.y, p1.x, p1.y)
+					d1 := windSign * _edgeDistSigned(fx, fy, p1.x, p1.y, p2.x, p2.y)
+					d2 := windSign * _edgeDistSigned(fx, fy, p2.x, p2.y, p0.x, p0.y)
+					minDist := _triMin3(d0, d1, d2)
+					if minDist > -1 {
+						true -> {
+							alpha := _smoothstep(-0.5, 0.5, minDist)
+							if alpha > 0.01 {
+								true -> deps.drawLine(window, x, y, x, y, _blendColor(color, alpha, bg))
+							}
+						}
+					}
+					_scanX(x + 1)
+				}
+			}
+			_scanX(minX)
+			_scanY(y + 1)
+		}
+	}
+	_scanY(minY)
+}

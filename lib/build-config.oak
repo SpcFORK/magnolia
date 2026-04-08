@@ -3,6 +3,10 @@
 std := import('std')
 default := std.default
 
+buildIncludes := import('build-includes')
+hasOakExt? := buildIncludes.hasOakExt?
+resolveImportFile := buildIncludes.resolveImportFile
+
 fn requireOpt(flag, value, abort, format) if value {
 	?, '', true -> abort(format('[oak build] No --{{0}} specified.', flag))
 }
@@ -46,9 +50,14 @@ fn configure(config, state, parseIncludes, statFile, resolve, collectVFSFiles, t
 		_ -> targetFlags.0
 	}
 
-	if statFile(state.Entry) = ? -> state.Abort(format('[oak build] {{0}} does not exist.', state.Entry))
+	// Resolve entry with extension probing if needed
+	entryPath := if hasOakExt?(state.Entry) {
+		true -> state.Entry
+		_ -> resolveImportFile(state.Entry, fn(p) statFile(p) != ?)
+	}
+	if statFile(entryPath) = ? -> state.Abort(format('[oak build] {{0}} does not exist.', state.Entry))
 
-	state.AbsoluteEntry <- resolve(state.Entry)
+	state.AbsoluteEntry <- resolve(entryPath)
 	state.VFSFiles <- collectVFSFiles(state.IncludeVFS, state.Log)
 
 	transpile.configure({

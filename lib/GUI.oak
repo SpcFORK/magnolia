@@ -42,6 +42,8 @@ guiClipboard := import('gui-clipboard')
 guiFiledrop := import('gui-filedrop')
 guiAudio := import('gui-audio')
 guiGamepad := import('gui-gamepad')
+guiAA := import('gui-aa')
+guiDrawOps := import('gui-draw-ops')
 guiGpuInfo := import('gui-gpu-info')
 guiLeakDetect := import('gui-leak-detect')
 guiTest := import('gui-test')
@@ -1224,6 +1226,80 @@ fn drawThickLine2D(window, x1, y1, x2, y2, thickness, color) gui2d.drawThickLine
 fn drawDashedLine2D(window, x1, y1, x2, y2, color, dashLen, gapLen) gui2d.drawDashedLine2D(_depsLine, window, x1, y1, x2, y2, color, dashLen, gapLen)
 fn Element(bounds) gui2d.Element({ pushMask: pushMask, popMask: popMask }, bounds)
 
+// --- Anti-aliased drawing primitives ---
+// These use software sub-pixel blending for smooth edges on all backends.
+// bgColor is the background color used for blending (default: black).
+fn drawLineAA(window, x1, y1, x2, y2, color, bgColor) guiAA.drawLineAA(_depsLine, window, x1, y1, x2, y2, color, bgColor)
+fn drawCircleFilledAA(window, cx, cy, radius, color, bgColor) guiAA.drawCircleFilledAA(_depsLine, window, cx, cy, radius, color, bgColor)
+fn drawCircleOutlineAA(window, cx, cy, radius, color, bgColor) guiAA.drawCircleOutlineAA(_depsLine, window, cx, cy, radius, color, bgColor)
+fn drawEllipseFilledAA(window, cx, cy, rx, ry, color, bgColor) guiAA.drawEllipseFilledAA(_depsLine, window, cx, cy, rx, ry, color, bgColor)
+fn drawRoundedRectFilledAA(window, x, y, w, h, radius, color, bgColor) guiAA.drawRoundedRectFilledAA(_depsLine, window, x, y, w, h, radius, color, bgColor)
+fn drawTriangleFilledAA(window, p0, p1, p2, color, bgColor) guiAA.drawTriangleFilledAA(_depsLine, window, p0, p1, p2, color, bgColor)
+
+// --- Unified draw() API ---
+// Single entry point for all drawing — pass an options object describing
+// shape, geometry, color, fill, AA, lighting, line style, etc.
+// See docs/gui-draw-ops.md for the full reference.
+//
+// The _drawOpsDeps object is populated lazily after all facade functions are
+// defined (see _initDrawOpsDeps below).  Forward-declared here so the closure
+// captures the mutable binding.
+_drawOpsDeps := ?
+
+fn _initDrawOpsDeps() {
+	_drawOpsDeps <- {
+		// Core platform
+		drawLine: drawLine
+		drawLinesBatch: drawLinesBatch
+		fillRect: fillRect
+		drawText: drawText
+		rgb: rgb
+		// 2D shapes
+		drawRect2D: drawRect2D
+		drawCircle2D: drawCircle2D
+		drawPolyline2D: drawPolyline2D
+		drawPolygon2D: drawPolygon2D
+		drawEllipse2D: drawEllipse2D
+		drawArc2D: drawArc2D
+		drawTriangle2D: drawTriangle2D
+		drawRoundedRect2D: drawRoundedRect2D
+		drawStar2D: drawStar2D
+		drawBezier2D: drawBezier2D
+		drawRing2D: drawRing2D
+		drawCross2D: drawCross2D
+		drawDiamond2D: drawDiamond2D
+		drawArrow2D: drawArrow2D
+		drawCapsule2D: drawCapsule2D
+		drawSector2D: drawSector2D
+		drawRegularPolygon2D: drawRegularPolygon2D
+		drawSpiral2D: drawSpiral2D
+		drawGrid2D: drawGrid2D
+		drawThickLine2D: drawThickLine2D
+		drawDashedLine2D: drawDashedLine2D
+		// AA
+		drawLineAA: drawLineAA
+		drawCircleFilledAA: drawCircleFilledAA
+		drawCircleOutlineAA: drawCircleOutlineAA
+		drawEllipseFilledAA: drawEllipseFilledAA
+		drawRoundedRectFilledAA: drawRoundedRectFilledAA
+		drawTriangleFilledAA: drawTriangleFilledAA
+		// 3D (populated after mesh functions are defined; backfilled below)
+		drawMeshSolid: drawMeshSolid
+		drawMeshLit: drawMeshLit
+		drawMeshWireframe: drawMeshWireframe
+	}
+}
+
+fn draw(window, op) {
+	if _drawOpsDeps = ? -> _initDrawOpsDeps()
+	guiDrawOps.draw(_drawOpsDeps, window, op)
+}
+
+fn drawBatch(window, ops) {
+	if _drawOpsDeps = ? -> _initDrawOpsDeps()
+	guiDrawOps.drawBatch(_drawOpsDeps, window, ops)
+}
+
 fn CubeMesh(size) {
 	hs := _default(size, 2) / 2
 	{
@@ -1344,6 +1420,15 @@ fn IcosphereMesh(radius) guiMesh.IcosphereMesh(radius)
 
 fn drawMeshWireframe(window, mesh, transform, camera, color) {
 	guiRaster.drawMeshWireframe(_depsMeshWire, window, mesh, transform, camera, color)
+}
+
+// Back-fill 3D mesh refs into the unified draw deps now that mesh functions exist.
+if _drawOpsDeps != ? {
+	true -> {
+		_drawOpsDeps.drawMeshSolid <- drawMeshSolid
+		_drawOpsDeps.drawMeshLit <- drawMeshLit
+		_drawOpsDeps.drawMeshWireframe <- drawMeshWireframe
+	}
 }
 
 fn Renderer3D(window, options) guiRender.Renderer3D({

@@ -283,6 +283,29 @@ fn drawTriangleFilled(deps, window, p0, p1, p2, color, borderColor) {
 	}
 }
 
+// Anti-aliased triangle fill: renders the solid interior then blends edge
+// pixels using Xiaolin-Wu-style coverage.  deps must include drawLineAA from
+// gui-aa when borderColor is provided; otherwise only drawLine is required.
+// bgColor is the background color for edge blending.
+fn drawTriangleFilledAA(deps, window, p0, p1, p2, color, borderColor, bgColor) {
+	_clipAndFillTriangle(deps, window, p0, p1, p2, color)
+	if deps.drawLineAA != ? {
+		true -> {
+			bg := if bgColor { ? -> 0, _ -> bgColor }
+			deps.drawLineAA(deps, window, p0.x, p0.y, p1.x, p1.y, if borderColor { ? -> color, _ -> borderColor }, bg)
+			deps.drawLineAA(deps, window, p1.x, p1.y, p2.x, p2.y, if borderColor { ? -> color, _ -> borderColor }, bg)
+			deps.drawLineAA(deps, window, p2.x, p2.y, p0.x, p0.y, if borderColor { ? -> color, _ -> borderColor }, bg)
+		}
+		_ -> if borderColor != ? {
+			true -> {
+				deps.drawLine(window, int(p0.x), int(p0.y), int(p1.x), int(p1.y), borderColor)
+				deps.drawLine(window, int(p1.x), int(p1.y), int(p2.x), int(p2.y), borderColor)
+				deps.drawLine(window, int(p2.x), int(p2.y), int(p0.x), int(p0.y), borderColor)
+			}
+		}
+	}
+}
+
 fn _concatLists(left, right, i, out) if i {
 	len(right) -> out
 	_ -> _concatLists(left, right, i + 1, out << right.(i))

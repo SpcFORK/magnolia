@@ -3,6 +3,11 @@
 std := import('std')
 each := std.each
 len := std.len
+reduce := std.reduce
+
+buildIncludes := import('build-includes')
+SupportedExts := buildIncludes.SupportedExts
+hasOakExt? := buildIncludes.hasOakExt?
 
 fn cachedParse(path, text, moduleNodes, log, abort, syntax, format) if cached := moduleNodes.(path) {
 	? -> {
@@ -43,18 +48,37 @@ fn addImportsFromSource(path, file, moduleNodes, importAssignmentNode, web?, run
 			if isRtLib {
 				true -> if web? & moduleNodes.(importName) = ? -> addImportsFromSource(importName, runtimeLib(importName), moduleNodes, importAssignmentNode, web?, runtimeLibQ, runtimeLib, resolve, dir, addImportsFromFile, cachedParseFn)
 				_ -> {
-					importPath := resolve(importName, dir(path)) + '.oak'
-					if moduleNodes.(importPath) = ? -> addImportsFromFile(importPath)
+					basePath := resolve(importName, dir(path))
+					// Check if already imported under any extension
+					alreadyImported := SupportedExts |> reduce(false, fn(found, ext) found | moduleNodes.(basePath + ext) != ?)
+					if !alreadyImported -> addImportsFromFile(basePath)
 				}
 			}
 		}
 	}
 }
 
-fn addImportsFromFile(path, readFile, printf, addImportsFromSource) {
-	if file := readFile(path) {
-		? -> printf('[oak build] Import {{0}} does not exist.', path)
-		_ -> addImportsFromSource(path, file)
+fn addImportsFromFile(basePath, readFile, printf, addImportsFromSource) {
+	if hasOakExt?(basePath) {
+		// Path already has a recognized extension — try it directly
+		true -> if file := readFile(basePath) {
+			? -> printf('[oak build] Import {{0}} does not exist.', basePath)
+			_ -> addImportsFromSource(basePath, file)
+		}
+		// No extension — try each supported extension in order
+		_ -> {
+			fn tryExts(i) if i >= len(SupportedExts) {
+				true -> printf('[oak build] Import {{0}} does not exist.', basePath)
+				_ -> {
+					candidate := basePath + SupportedExts.(i)
+					if file := readFile(candidate) {
+						? -> tryExts(i + 1)
+						_ -> addImportsFromSource(candidate, file)
+					}
+				}
+			}
+			tryExts(0)
+		}
 	}
 }
 

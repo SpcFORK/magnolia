@@ -7,6 +7,7 @@ each := std.each
 filter := std.filter
 append := std.append
 contains? := std.contains?
+reduce := std.reduce
 
 sort := import('sort')
 sort! := sort.sort!
@@ -16,6 +17,8 @@ dir := path.dir
 resolve := path.resolve
 
 bundleUtils := import('bundle-utils')
+buildIncludes := import('build-includes')
+SupportedExts := buildIncludes.SupportedExts
 
 // wrapModule takes the body of a module and wraps it in a closure that returns
 // a global `module` object. It returns a single AST node object representing
@@ -78,6 +81,19 @@ fn wrapBundle(modules, entryModuleName, includes, importCallNode) {
 		) |> filter(fn(path) !___runtime_lib?(path))
 		bundlePrefixLen := bundleCommonPrefix(bundledPaths) |> len()
 
+		// Build set of known module paths for multi-extension resolution
+		modulePathSet := {}
+		modules |> each(fn(m) modulePathSet.(m.0) := true)
+
+		fn resolveModuleImport(importName, modulePath) {
+			basePath := resolve(importName, dir(modulePath))
+			// Find which extension matches a known module path
+			SupportedExts |> reduce(basePath + '.oak', fn(result, ext) if {
+				modulePathSet.(basePath + ext) != ? -> basePath + ext
+				_ -> result
+			})
+		}
+
 		fn normalizeModulePath(path) if {
 			___runtime_lib?(path) -> path
 			_ -> path |> slice(bundlePrefixLen)
@@ -100,7 +116,7 @@ fn wrapBundle(modules, entryModuleName, includes, importCallNode) {
 			}
 			:fnCall -> if node {
 				importCallNode -> if !___runtime_lib?(importName := node.args.(0).val) -> {
-					importPath := resolve(importName, dir(modulePath)) + '.oak'
+					importPath := resolveModuleImport(importName, modulePath)
 					node.args.(0).val := normalizeModulePath(importPath)
 				}
 				_ -> {

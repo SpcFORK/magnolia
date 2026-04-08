@@ -93,7 +93,6 @@ fn collectVFSFiles(includeSpecs, log) {
 				:list -> includeSpecs
 				_ -> [includeSpecs]
 			}
-
 			specs |> each(fn(spec) {
 				// Parse spec as "target:source" or just "source"
 				[targetName, sourcePath] := spec |> parseVFSIncludeSpec()
@@ -101,31 +100,38 @@ fn collectVFSFiles(includeSpecs, log) {
 				resolvedPath := resolve(sourcePath)
 
 				// Check if path is a file or directory
-				if stat := statFile(resolvedPath) {
+				// Use synchronous I/O (no callback) so vfsFiles is
+				// populated before we return.
+				stat := statFile(resolvedPath)
+				if stat {
 					? -> log(format('[oak pack] Warning: {{0}} not found, skipping', sourcePath))
-					_ -> if stat.dir? {
+					_ -> if stat.dir {
 						true -> {
 							// Recursively collect all files in directory
 							log(format('[oak pack] Collecting files from {{0}}...', sourcePath))
 							mountRoot := targetName |> trimEnd('/')
-							fn walkDir(path, prefix) {
-								with listFiles(path) fn(entries) if entries {
+							fn walkDir(dirPath, prefix) {
+								entries := listFiles(dirPath)
+								if entries {
 									? -> ?
 									_ -> entries |> each(fn(entry) {
-										fullPath := path + '/' + entry.name
+										fullPath := dirPath + '/' + entry.name
 										relPath := if prefix {
 											'' -> entry.name
 											_ -> prefix + '/' + entry.name
 										}
 
-										if entry.dir? {
+										if entry.dir {
 											true -> walkDir(fullPath, relPath)
-											_ -> with readFile(fullPath) fn(content) if content {
-												? -> log(format('[oak pack] Warning: Could not read {{0}}', fullPath))
-												_ -> {
-													vfsPath := joinVFSPath(mountRoot, relPath)
-													vfsFiles.(vfsPath) := content
-													log(format('[oak pack] Added {{0}} to VFS', vfsPath))
+											_ -> {
+												content := readFile(fullPath)
+												if content {
+													? -> log(format('[oak pack] Warning: Could not read {{0}}', fullPath))
+													_ -> {
+														vfsPath := joinVFSPath(mountRoot, relPath)
+														vfsFiles.(vfsPath) := content
+														log(format('[oak pack] Added {{0}} to VFS', vfsPath))
+													}
 												}
 											}
 										}
@@ -136,7 +142,8 @@ fn collectVFSFiles(includeSpecs, log) {
 						}
 						_ -> {
 							// Single file
-							with readFile(resolvedPath) fn(content) if content {
+							content := readFile(resolvedPath)
+							if content {
 								? -> log(format('[oak pack] Warning: Could not read {{0}}', sourcePath))
 								_ -> {
 									vfsFiles.(targetName) := content
@@ -215,7 +222,7 @@ fn run(config) {
 						firstSegment := rel |> split('/') |> default([rel])
 						{
 							name: firstSegment.0
-							dir?: rel |> split('/') |> len() > 1
+							dir: rel |> split('/') |> len() > 1
 						}
 				})
 				if withFiles {

@@ -1,0 +1,356 @@
+// gui-draw-ops — Unified drawing dispatcher for the Magnolia GUI.
+//
+// Provides a single `draw(deps, window, op)` function that accepts an options
+// object describing WHAT to draw and HOW to draw it, merging shape geometry,
+// fill/stroke, anti-aliasing, lighting, materials, and line styles into one
+// composable call.
+//
+// Instead of calling many separate functions:
+//   drawCircle2D(window, cx, cy, r, color, true, borderColor)
+//   drawCircleFilledAA(window, cx, cy, r, color, bgColor)
+//   drawMeshLit(window, mesh, transform, camera, color, scene, material, ?)
+//
+// You call:
+//   draw(window, { shape: :circle, cx: 100, cy: 100, r: 40, color: red, filled: true })
+//   draw(window, { shape: :circle, cx: 100, cy: 100, r: 40, color: red, filled: true, aa: true, bgColor: bg })
+//   draw(window, { shape: :mesh, mesh: m, transform: t, camera: c, color: white, lighting: scene, material: mat })
+//
+// All existing separate functions remain available; this module adds the
+// unified entry point on top.
+
+{ _default: _default, _clamp: _clamp } := import('gui-common')
+
+_OK := { type: :ok }
+
+// _get is a shorthand for option-with-default.
+fn _get(op, key, fallback) {
+	v := op.(key)
+	if v { ? -> fallback, _ -> v }
+}
+
+// ---------------------------------------------------------------------------
+// draw — unified drawing dispatcher
+//
+// deps: {
+//   drawLine, drawLinesBatch, fillRect, fillEllipse, fillPolygon,
+//   fillRoundedRect, pushMask, popMask,
+//   // AA module functions (optional)
+//   drawLineAA, drawCircleFilledAA, drawCircleOutlineAA,
+//   drawEllipseFilledAA, drawRoundedRectFilledAA, drawTriangleFilledAA,
+//   // 2D shape module functions
+//   drawRect2D, drawCircle2D, drawPolyline2D, drawPolygon2D, drawEllipse2D,
+//   drawArc2D, drawTriangle2D, drawRoundedRect2D, drawStar2D, drawBezier2D,
+//   drawRing2D, drawCross2D, drawDiamond2D, drawArrow2D, drawCapsule2D,
+//   drawSector2D, drawRegularPolygon2D, drawSpiral2D, drawThickLine2D,
+//   drawDashedLine2D, drawGrid2D,
+//   // 3D functions (optional)
+//   drawMeshSolid, drawMeshLit, drawMeshWireframe,
+//   // text
+//   drawText,
+//   // color
+//   rgb
+// }
+//
+// op: object with at minimum a `shape` field plus shape-specific geometry,
+//     and optional effect fields (aa, lighting, material, dash, thickness, …).
+//
+// Shape field values:
+//   :line, :rect, :circle, :ellipse, :polygon, :polyline, :triangle,
+//   :roundedRect, :arc, :star, :bezier, :ring, :cross, :diamond, :arrow,
+//   :capsule, :sector, :regularPolygon, :spiral, :grid, :text,
+//   :mesh, :meshWire
+//
+// Common option fields (all optional unless noted):
+//   color        — fill / stroke color (packed RGB int)
+//   borderColor  — outline color
+//   filled       — bool (default true for shapes that support it)
+//   aa           — bool, enable anti-aliasing
+//   bgColor      — background color for AA blending
+//   thickness    — line thickness (for :line shape)
+//   dash         — { len, gap } for dashed lines
+//   lighting     — LightScene object — triggers lit rendering for meshes
+//   material     — Material object for lit rendering
+//   light        — simple directional light (legacy single-light)
+//
+// Shape-specific geometry fields are documented inline below.
+// ---------------------------------------------------------------------------
+fn draw(deps, window, op) {
+	shape := op.shape
+	color := _get(op, 'color', 0)
+	borderColor := _get(op, 'borderColor', ?)
+	filled := _get(op, 'filled', true)
+	aa := _get(op, 'aa', false)
+	bgColor := _get(op, 'bgColor', 0)
+
+	if shape {
+		// ---- Lines ----
+		:line -> {
+			x1 := _get(op, 'x1', 0)
+			y1 := _get(op, 'y1', 0)
+			x2 := _get(op, 'x2', 0)
+			y2 := _get(op, 'y2', 0)
+			dash := _get(op, 'dash', ?)
+			thickness := _get(op, 'thickness', ?)
+			if dash != ? {
+				true -> deps.drawDashedLine2D(window, x1, y1, x2, y2, color, _get(dash, 'len', 6), _get(dash, 'gap', 4))
+				_ -> if thickness != ? & thickness > 1 {
+					true -> deps.drawThickLine2D(window, x1, y1, x2, y2, thickness, color)
+					_ -> if aa & deps.drawLineAA != ? {
+						true -> deps.drawLineAA(window, x1, y1, x2, y2, color, bgColor)
+						_ -> deps.drawLine(window, x1, y1, x2, y2, color)
+					}
+				}
+			}
+		}
+
+		// ---- Rectangles ----
+		:rect -> {
+			x := _get(op, 'x', 0)
+			y := _get(op, 'y', 0)
+			w := _get(op, 'width', 0)
+			h := _get(op, 'height', 0)
+			deps.drawRect2D(window, x, y, w, h, color, filled, borderColor)
+		}
+
+		// ---- Circles ----
+		:circle -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			r := _get(op, 'r', _get(op, 'radius', 0))
+			if aa {
+				true -> if filled {
+					true -> if deps.drawCircleFilledAA != ? {
+						true -> deps.drawCircleFilledAA(window, cx, cy, r, color, bgColor)
+						_ -> deps.drawCircle2D(window, cx, cy, r, color, true, borderColor)
+					}
+					_ -> if deps.drawCircleOutlineAA != ? {
+						true -> deps.drawCircleOutlineAA(window, cx, cy, r, color, bgColor)
+						_ -> deps.drawCircle2D(window, cx, cy, r, color, false, borderColor)
+					}
+				}
+				_ -> deps.drawCircle2D(window, cx, cy, r, color, filled, borderColor)
+			}
+		}
+
+		// ---- Ellipses ----
+		:ellipse -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			rx := _get(op, 'rx', 0)
+			ry := _get(op, 'ry', 0)
+			if aa & filled & deps.drawEllipseFilledAA != ? {
+				true -> deps.drawEllipseFilledAA(window, cx, cy, rx, ry, color, bgColor)
+				_ -> deps.drawEllipse2D(window, cx, cy, rx, ry, color, filled, borderColor)
+			}
+		}
+
+		// ---- Triangles ----
+		:triangle -> {
+			// Accepts either {p0, p1, p2} point objects or {x1,y1, x2,y2, x3,y3} scalars
+			p0 := _get(op, 'p0', ?)
+			if p0 != ? {
+				true -> {
+					p1 := _get(op, 'p1', { x: 0, y: 0 })
+					p2 := _get(op, 'p2', { x: 0, y: 0 })
+					if aa & filled & deps.drawTriangleFilledAA != ? {
+						true -> deps.drawTriangleFilledAA(window, p0, p1, p2, color, bgColor)
+						_ -> deps.drawPolygon2D(window, [p0, p1, p2], color, filled, borderColor)
+					}
+				}
+				_ -> {
+					x1 := _get(op, 'x1', 0)
+					y1 := _get(op, 'y1', 0)
+					x2 := _get(op, 'x2', 0)
+					y2 := _get(op, 'y2', 0)
+					x3 := _get(op, 'x3', 0)
+					y3 := _get(op, 'y3', 0)
+					deps.drawTriangle2D(window, x1, y1, x2, y2, x3, y3, color, filled, borderColor)
+				}
+			}
+		}
+
+		// ---- Rounded Rectangles ----
+		:roundedRect -> {
+			x := _get(op, 'x', 0)
+			y := _get(op, 'y', 0)
+			w := _get(op, 'width', 0)
+			h := _get(op, 'height', 0)
+			r := _get(op, 'radius', 4)
+			if aa & filled & deps.drawRoundedRectFilledAA != ? {
+				true -> deps.drawRoundedRectFilledAA(window, x, y, w, h, r, color, bgColor)
+				_ -> deps.drawRoundedRect2D(window, x, y, w, h, r, color, filled, borderColor)
+			}
+		}
+
+		// ---- Polygons ----
+		:polygon -> {
+			points := _get(op, 'points', [])
+			deps.drawPolygon2D(window, points, color, filled, borderColor)
+		}
+
+		// ---- Polylines ----
+		:polyline -> {
+			points := _get(op, 'points', [])
+			closed := _get(op, 'closed', false)
+			deps.drawPolyline2D(window, points, color, closed)
+		}
+
+		// ---- Arcs ----
+		:arc -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			r := _get(op, 'r', _get(op, 'radius', 0))
+			startAngle := _get(op, 'startAngle', 0)
+			endAngle := _get(op, 'endAngle', 360)
+			deps.drawArc2D(window, cx, cy, r, startAngle, endAngle, color)
+		}
+
+		// ---- Stars ----
+		:star -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			outerR := _get(op, 'outerR', 0)
+			innerR := _get(op, 'innerR', 0)
+			pts := _get(op, 'points', 5)
+			deps.drawStar2D(window, cx, cy, outerR, innerR, pts, color, filled, borderColor)
+		}
+
+		// ---- Bezier Curves ----
+		:bezier -> {
+			points := _get(op, 'points', [])
+			steps := _get(op, 'steps', ?)
+			deps.drawBezier2D(window, points, color, steps)
+		}
+
+		// ---- Rings ----
+		:ring -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			outerR := _get(op, 'outerR', 0)
+			innerR := _get(op, 'innerR', 0)
+			deps.drawRing2D(window, cx, cy, outerR, innerR, color)
+		}
+
+		// ---- Crosses ----
+		:cross -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			size := _get(op, 'size', 0)
+			thickness := _get(op, 'thickness', 2)
+			deps.drawCross2D(window, cx, cy, size, thickness, color, filled)
+		}
+
+		// ---- Diamonds ----
+		:diamond -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			w := _get(op, 'width', 0)
+			h := _get(op, 'height', 0)
+			deps.drawDiamond2D(window, cx, cy, w, h, color, filled)
+		}
+
+		// ---- Arrows ----
+		:arrow -> {
+			x1 := _get(op, 'x1', 0)
+			y1 := _get(op, 'y1', 0)
+			x2 := _get(op, 'x2', 0)
+			y2 := _get(op, 'y2', 0)
+			headSize := _get(op, 'headSize', ?)
+			deps.drawArrow2D(window, x1, y1, x2, y2, color, headSize)
+		}
+
+		// ---- Capsules ----
+		:capsule -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			w := _get(op, 'width', 0)
+			h := _get(op, 'height', 0)
+			deps.drawCapsule2D(window, cx, cy, w, h, color, filled)
+		}
+
+		// ---- Sectors ----
+		:sector -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			r := _get(op, 'r', _get(op, 'radius', 0))
+			startAngle := _get(op, 'startAngle', 0)
+			endAngle := _get(op, 'endAngle', 360)
+			deps.drawSector2D(window, cx, cy, r, startAngle, endAngle, color, filled)
+		}
+
+		// ---- Regular Polygons ----
+		:regularPolygon -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			r := _get(op, 'r', _get(op, 'radius', 0))
+			sides := _get(op, 'sides', 6)
+			deps.drawRegularPolygon2D(window, cx, cy, r, sides, color, filled)
+		}
+
+		// ---- Spirals ----
+		:spiral -> {
+			cx := _get(op, 'cx', 0)
+			cy := _get(op, 'cy', 0)
+			startRadius := _get(op, 'startRadius', 0)
+			growth := _get(op, 'growth', 1)
+			turns := _get(op, 'turns', 3)
+			deps.drawSpiral2D(window, cx, cy, startRadius, growth, turns, color)
+		}
+
+		// ---- Grids ----
+		:grid -> {
+			spacing := _get(op, 'spacing', 32)
+			originX := _get(op, 'originX', 0)
+			originY := _get(op, 'originY', 0)
+			deps.drawGrid2D(window, spacing, color, originX, originY)
+		}
+
+		// ---- Text ----
+		:text -> {
+			x := _get(op, 'x', 0)
+			y := _get(op, 'y', 0)
+			text := _get(op, 'text', '')
+			deps.drawText(window, x, y, text, color)
+		}
+
+		// ---- 3D Mesh (Solid / Lit) ----
+		:mesh -> {
+			mesh := _get(op, 'mesh', ?)
+			transform := _get(op, 'transform', ?)
+			camera := _get(op, 'camera', ?)
+			lighting := _get(op, 'lighting', ?)
+			material := _get(op, 'material', ?)
+			light := _get(op, 'light', ?)
+			if lighting != ? & deps.drawMeshLit != ? {
+				true -> deps.drawMeshLit(window, mesh, transform, camera, color, lighting, material, borderColor)
+				_ -> deps.drawMeshSolid(window, mesh, transform, camera, color, light, borderColor)
+			}
+		}
+
+		// ---- 3D Mesh (Wireframe) ----
+		:meshWire -> {
+			mesh := _get(op, 'mesh', ?)
+			transform := _get(op, 'transform', ?)
+			camera := _get(op, 'camera', ?)
+			deps.drawMeshWireframe(window, mesh, transform, camera, color)
+		}
+
+		_ -> _OK
+	}
+}
+
+// ---------------------------------------------------------------------------
+// drawBatch — draw multiple operations in sequence.
+// ops is a list of op objects (same format as draw()).
+// ---------------------------------------------------------------------------
+fn drawBatch(deps, window, ops) {
+	n := len(ops)
+	fn _step(i) if i < n {
+		true -> {
+			draw(deps, window, ops.(i))
+			_step(i + 1)
+		}
+		_ -> _OK
+	}
+	_step(0)
+}

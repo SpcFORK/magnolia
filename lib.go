@@ -307,6 +307,12 @@ var libguiaudio string
 //go:embed lib/gui-gamepad.oak
 var libguigamepad string
 
+//go:embed lib/gui-aa.oak
+var libguiaa string
+
+//go:embed lib/gui-draw-ops.oak
+var libguidrawops string
+
 //go:embed lib/gui-gpu-info.oak
 var libguigpuinfo string
 
@@ -592,6 +598,8 @@ var stdlibs = map[string]string{
 	"gui-clipboard":                   libguiclipboard,
 	"gui-filedrop":                    libguifiledrop,
 	"gui-gamepad":                     libguigamepad,
+	"gui-aa":                          libguiaa,
+	"gui-draw-ops":                    libguidrawops,
 	"gui-gpu-info":                    libguigpuinfo,
 	"gui-leak-detect":                 libguileakdetect,
 	"gui-menus":                       libguimenus,

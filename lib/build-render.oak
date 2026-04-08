@@ -16,22 +16,46 @@ format := fmt.format
 
 buildRenderNode := import('build-render-node')
 
-fn renderVfsOak(vfsFiles) '
+fn renderVfsOak(vfsFiles, encodeJSON) '
 // Embedded Virtual FS
 Virtual := import(\'Virtual\')
 __Oak_VFS := Virtual.createVirtualFS(' << encodeJSON(vfsFiles) << ')
 '
 
-fn renderVfsJs(vfsFiles) '
+fn renderVfsJs(vfsFiles, encodeJSON) '
 // Embedded Virtual FS
 const __Oak_VFS_Data = ' << encodeJSON(vfsFiles) << ';
-let __Oak_VFS = null;
-function __oak_get_vfs() {
-	if (!__Oak_VFS) {
-		const Virtual = __oak_module_import(\'Virtual\');
-		__Oak_VFS = Virtual.createVirtualFS(__Oak_VFS_Data);
+let __Oak_VFS_Cache = null;
+function ___packed_vfs() {
+	if (!__Oak_VFS_Cache) {
+		const _f = __Oak_VFS_Data;
+		function _normPath(p) { return p.replace(/\\\\/g, "/").replace(/\\/\\//g, "/"); }
+		__Oak_VFS_Cache = {
+			files: _f,
+			readFile: function(path, cb) {
+				var c = _f[_normPath(path)]; if (c === undefined) c = null;
+				return typeof cb === "function" ? cb(c) : c;
+			},
+			writeFile: function(path, content, cb) {
+				_f[_normPath(path)] = content;
+				return typeof cb === "function" ? cb(true) : true;
+			},
+			statFile: function(path, cb) {
+				var np = _normPath(path), c = _f[np], r = null;
+				if (c != null) r = { name: __as_oak_string(np), size: c.length || 0, dir: false, mod: 0 };
+				return typeof cb === "function" ? cb(r) : r;
+			},
+			listFiles: function(cb) {
+				var ks = Object.getOwnPropertyNames(_f).map(__as_oak_string);
+				return typeof cb === "function" ? cb(ks) : ks;
+			},
+			deleteFile: function(path, cb) {
+				var np = _normPath(path), ok = _f[np] != null; if (ok) delete _f[np];
+				return typeof cb === "function" ? cb(ok) : ok;
+			},
+		};
 	}
-	return __Oak_VFS;
+	return __Oak_VFS_Cache;
 }
 '
 
@@ -40,7 +64,7 @@ fn renderOakBundle(bundleNode, vfsFiles, encodeJSON, oakNativeRuntime, formatIde
 
 	vfsInit := if len(vfsFiles |> keys()) {
 		0 -> ''
-		_ -> renderVfsOak(vfsFiles)
+		_ -> renderVfsOak(vfsFiles, encodeJSON)
 	}
 
 	'// oak build' << oakNativeRuntime << vfsInit << renderNode(bundleNode)
@@ -243,7 +267,7 @@ fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, c
 
 	vfsInit := if len(vfsFiles |> keys()) {
 		0 -> ''
-		_ -> renderVfsJs(vfsFiles)
+		_ -> renderVfsJs(vfsFiles, encodeJSON)
 	}
 
 	'/* oak build --web */' << oakJSRuntime << vfsInit << renderNode(bundleNode)

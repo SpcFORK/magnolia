@@ -4,6 +4,7 @@ std := import('std')
 default := std.default
 map := std.map
 filter := std.filter
+reduce := std.reduce
 
 str := import('str')
 split := str.split
@@ -12,13 +13,29 @@ endsWith? := str.endsWith?
 path := import('path')
 resolve := path.resolve
 
+// All recognized Oak/Magnolia source file extensions, matching env.go supportedExts
+SupportedExts := ['.oak', '.ok', '.mag', '.mg']
+
+fn hasOakExt?(path) SupportedExts |> reduce(false, fn(found, ext) found | endsWith?(path, ext))
+
+// resolveImportFile tries each supported extension against basePath using checkFn.
+// checkFn(candidatePath) should return true if the candidate exists.
+// Returns the first match, or basePath + '.oak' as fallback.
+fn resolveImportFile(basePath, checkFn) {
+	fn tryExt(i) if i >= len(SupportedExts) {
+		true -> basePath + '.oak'
+		_ -> if checkFn(basePath + SupportedExts.(i)) {
+			true -> basePath + SupportedExts.(i)
+			_ -> tryExt(i + 1)
+		}
+	}
+	tryExt(0)
+}
+
 fn normalizeIncludePath(pathSpec) {
 	resolved := resolve(pathSpec)
-	if {
-		endsWith?(resolved, '.oak')
-		endsWith?(resolved, '.ok')
-		endsWith?(resolved, '.mag')
-		endsWith?(resolved, '.mg') -> resolved
+	if hasOakExt?(resolved) {
+		true -> resolved
 		_ -> resolved + '.oak'
 	}
 }
@@ -44,6 +61,9 @@ fn parseIncludes(specs) if type(specs) {
 }
 
 {
+	SupportedExts: SupportedExts
+	hasOakExt?: hasOakExt?
+	resolveImportFile: resolveImportFile
 	parseInclude: parseInclude
 	parseIncludes: parseIncludes
 }
