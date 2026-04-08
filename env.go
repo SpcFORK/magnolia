@@ -1454,6 +1454,9 @@ func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
 	// scopes.
 	fork := c.forkContext()
 
+	// Mark the engine as concurrent so that new scopes allocate mutexes.
+	c.eng.concurrent = true
+
 	c.eng.Add(1)
 	go func() {
 		defer c.eng.Done()

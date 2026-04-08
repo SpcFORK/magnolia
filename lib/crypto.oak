@@ -11,6 +11,9 @@
 {
 	join: join
 } := import('str')
+{
+	pmap: pmap
+} := import('thread')
 
 // _hexChars is a lookup table for lowercase hexadecimal encoding.
 _hexChars := '0123456789abcdef'
@@ -221,4 +224,25 @@ fn sha256(data) {
 	hv := processBlock(_sha256H0, 0)
 	hv |> map(fn(w) _byteToHex((w >> 24) & 0xFF) << _byteToHex((w >> 16) & 0xFF) << _byteToHex((w >> 8) & 0xFF) << _byteToHex(w & 0xFF)) |> join('')
 }
+
+// pbatchSha256 computes SHA-256 digests for a list of inputs in parallel.
+// Each input is hashed independently in a separate goroutine.
+//
+// Example:
+//   pbatchSha256(['hello', 'world'])
+//   // => ['2cf24d...', '486ea4...']
+fn pbatchSha256(inputs) pmap(inputs, sha256)
+
+// pbatchRandomBytes generates multiple random byte strings in parallel.
+// Returns a list of `count` hex-encoded random byte strings, each of length `n` bytes.
+//
+// Example:
+//   pbatchRandomBytes(4, 16)  // => ['a3f2...', 'b1c9...', '7d4e...', 'f0a8...']
+fn pbatchRandomBytes(count, n) pmap(range(count), fn(_) randomBytes(n))
+
+// pbatchUuid generates multiple UUIDs in parallel.
+//
+// Example:
+//   pbatchUuid(10)  // => list of 10 UUID v4 strings
+fn pbatchUuid(count) pmap(range(count), fn(_) uuid())
 

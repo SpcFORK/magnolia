@@ -1,8 +1,18 @@
 // libcompression provides a facade over the available compression codecs.
+// Includes parallel (threaded) variants for compressing large inputs faster
+// by splitting into blocks and processing them concurrently.
 
 {
 	default: default
+	slice: slice
+	map: map
+	reduce: reduce
+	range: range
+	each: each
 } := import('std')
+{
+	pmap: pmap
+} := import('thread')
 
 rle := import('compression-rle')
 huffman := import('compression-huffman')
@@ -48,22 +58,150 @@ fn compressed?(encoded, algorithm) if algorithm {
 	_ -> false
 }
 
-{
-	Marker: Marker
-	RunPrefix: RunPrefix
-	RunSep: RunSep
-	HuffmanMagic: HuffmanMagic
-	LZWMagic: LZWMagic
-	rleCompress: rleCompress
-	rleDecompress: rleDecompress
-	rleCompressed?: rleCompressed?
-	huffmanCompress: huffmanCompress
-	huffmanDecompress: huffmanDecompress
-	huffmanCompressed?: huffmanCompressed?
-	lzwCompress: lzwCompress
-	lzwDecompress: lzwDecompress
-	lzwCompressed?: lzwCompressed?
-	compress: compress
-	decompress: decompress
-	compressed?: compressed?
+// ParMagic identifies a parallel-block compressed payload.
+ParMagic := 'MPAR'
+
+// _splitBlocks divides input string into n roughly equal chunks.
+fn _splitBlocks(input, n) {
+	inputLen := len(input)
+	if inputLen {
+		0 -> ['']
+		_ -> {
+			n := if n < 1 { true -> 1, _ -> if n > inputLen { true -> inputLen, _ -> n } }
+			blockSize := int(inputLen / n)
+			remainder := inputLen - blockSize * n
+
+			fn sub(i, offset, acc) if i {
+				n -> acc
+				_ -> {
+					sz := blockSize + if i < remainder { true -> 1, _ -> 0 }
+					sub(i + 1, offset + sz, acc << slice(input, offset, offset + sz))
+				}
+			}
+			sub(0, 0, [])
+		}
+	}
+}
+
+// _joinBlocks concatenates a list of strings.
+fn _joinBlocks(blocks) blocks |> reduce('', fn(acc, b) acc << b)
+
+// _encodeParallel packs compressed blocks into the parallel format:
+//   MPAR<algByte><blockCount>,<len1>,<len2>,...|<block1><block2>...
+fn _encodeParallel(compressedBlocks, algByte) {
+	header := '' + ParMagic + algByte + string(len(compressedBlocks))
+	lengths := compressedBlocks |> map(fn(b) string(len(b)))
+	lengthHeader := lengths |> reduce('', fn(acc, l) if acc { '' -> l, _ -> acc + ',' + l })
+	header + ',' + lengthHeader + '|' + _joinBlocks(compressedBlocks)
+}
+
+// _decodeParallel parses the parallel format, returning [algByte, blocks] or :error.
+fn _decodeParallel(encoded) {
+	if slice(encoded, 0, 4) != ParMagic -> :error
+	algByte := encoded.(4)
+	// Find the '|' separator
+	fn findSep(i) if i { len(encoded) -> :error, _ -> if encoded.(i) { '|' -> i, _ -> findSep(i + 1) } }
+	sepIdx := findSep(5)
+	if sepIdx = :error -> :error
+
+	// Parse block count and lengths from header: "count,len1,len2,...|"
+	headerStr := slice(encoded, 5, sepIdx)
+	// Split on commas
+	fn splitCommas(s) {
+		fn sub(i, cur, acc) if i {
+			len(s) -> acc << cur
+			_ -> if s.(i) {
+				',' -> sub(i + 1, '', acc << cur)
+				_ -> sub(i + 1, cur << s.(i), acc)
+			}
+		}
+		sub(0, '', [])
+	}
+	parts := splitCommas(headerStr)
+	if len(parts) < 2 -> :error
+
+	blockCount := int(parts.0)
+	lengths := slice(parts, 1) |> map(fn(p) int(p))
+
+	// Extract blocks
+	fn extractBlocks(i, offset, acc) if i {
+		blockCount -> acc
+		_ -> {
+			blen := lengths.(i)
+			extractBlocks(i + 1, offset + blen, acc << slice(encoded, offset, offset + blen))
+		}
+	}
+	blocks := extractBlocks(0, sepIdx + 1, [])
+	[algByte, blocks]
+}
+
+// _algByte returns a single character identifying the algorithm.
+fn _algByte(algorithm) if default(algorithm, :rle) {
+	:rle, 'rle' -> 'R'
+	:huffman, 'huffman' -> 'H'
+	:lzw, 'lzw' -> 'L'
+	_ -> ?
+}
+
+// _compressorFor returns the compress function for an algorithm byte.
+fn _compressorFor(algByte) if algByte {
+	'R' -> rleCompress
+	'H' -> huffmanCompress
+	'L' -> lzwCompress
+	_ -> ?
+}
+
+// _decompressorFor returns the decompress function for an algorithm byte.
+fn _decompressorFor(algByte) if algByte {
+	'R' -> rleDecompress
+	'H' -> huffmanDecompress
+	'L' -> lzwDecompress
+	_ -> ?
+}
+
+// pcompress compresses input using block-level parallelism.
+// Splits the input into numBlocks chunks (default 4), compresses each
+// concurrently in separate threads, and packs the results.
+fn pcompress(input, algorithm, numBlocks) {
+	input := string(default(input, ''))
+	numBlocks := default(numBlocks, 4)
+	ab := _algByte(algorithm)
+	if ab = ? -> :error
+
+	compressFn := _compressorFor(ab)
+	blocks := _splitBlocks(input, numBlocks)
+	compressed := pmap(blocks, compressFn)
+
+	// Check for any block errors
+	fn anyError(i) if i {
+		len(compressed) -> false
+		_ -> if compressed.(i) = :error { true -> true, _ -> anyError(i + 1) }
+	}
+	if anyError(0) { true -> :error, _ -> _encodeParallel(compressed, ab) }
+}
+
+// pdecompress decompresses a parallel-block compressed payload.
+// Each block is decompressed concurrently in separate threads.
+fn pdecompress(encoded) {
+	encoded := string(default(encoded, ''))
+	result := _decodeParallel(encoded)
+	if result = :error -> :error
+
+	[algByte, blocks] := result
+	decompressFn := _decompressorFor(algByte)
+	if decompressFn = ? -> :error
+
+	decompressed := pmap(blocks, decompressFn)
+
+	fn anyError(i) if i {
+		len(decompressed) -> false
+		_ -> if decompressed.(i) = :error { true -> true, _ -> anyError(i + 1) }
+	}
+	if anyError(0) { true -> :error, _ -> _joinBlocks(decompressed) }
+}
+
+// pcompressed? checks if encoded data is in parallel-block format.
+fn pcompressed?(encoded) {
+	encoded := string(default(encoded, ''))
+	slice(encoded, 0, 4) = ParMagic
 }

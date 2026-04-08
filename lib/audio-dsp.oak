@@ -14,6 +14,9 @@
 	cos: cos
 	Pi: Pi
 } := import('math')
+{
+	pmapConcurrent: pmapConcurrent
+} := import('thread')
 
 // TwoPi is 2π, commonly used for window phase math.
 TwoPi := 2 * Pi
@@ -67,6 +70,21 @@ fn convolve(signal, kernel) {
 	kLen := len(kernel)
 	outLen := sLen + kLen - 1
 	range(outLen) |> map(fn(n) _convolveAt(signal, kernel, n, sLen, kLen))
+}
+
+// pconvolve computes the full linear convolution of signal and kernel using
+// bounded parallelism. Each output sample is independent, making this ideal
+// for large signals. numWorkers defaults to 4.
+//
+// Example:
+//   pconvolve([1, 2, 3], [0.5, 0.5])           // same as convolve, 4 workers
+//   pconvolve(longSignal, firKernel, 8)         // 8 concurrent workers
+fn pconvolve(signal, kernel, numWorkers) {
+	sLen := len(signal)
+	kLen := len(kernel)
+	outLen := sLen + kLen - 1
+	numWorkers := default(numWorkers, 4)
+	pmapConcurrent(range(outLen), fn(n) _convolveAt(signal, kernel, n, sLen, kLen), numWorkers)
 }
 
 // _sincNorm returns the normalised sinc: sin(π x) / (π x).

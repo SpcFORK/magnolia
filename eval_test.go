@@ -1566,3 +1566,149 @@ func TestAsyncEventBusAsyncEmit(t *testing.T) {
 		t.Fatalf("Expected async emit done callback to receive dispatched count 1, got %s", doneCount)
 	}
 }
+
+func TestConcurrentListPush(t *testing.T) {
+	prevMaxProcs := runtime.GOMAXPROCS(0)
+	if prevMaxProcs < 4 {
+		runtime.GOMAXPROCS(4)
+		defer runtime.GOMAXPROCS(prevMaxProcs)
+	}
+
+	list := &ListValue{}
+	const workers = 8
+	const iterations = 500
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				mu := listLock(list)
+				*list = append(*list, IntValue(id*iterations+i))
+				mu.Unlock()
+			}
+		}(w)
+	}
+
+	close(start)
+	wg.Wait()
+
+	if len(*list) != workers*iterations {
+		t.Fatalf("Expected list length %d, got %d", workers*iterations, len(*list))
+	}
+}
+
+func TestConcurrentStringPush(t *testing.T) {
+	prevMaxProcs := runtime.GOMAXPROCS(0)
+	if prevMaxProcs < 4 {
+		runtime.GOMAXPROCS(4)
+		defer runtime.GOMAXPROCS(prevMaxProcs)
+	}
+
+	s := MakeString("")
+	const workers = 8
+	const iterations = 500
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				mu := strLock(s)
+				*s = append(*s, byte('a'))
+				mu.Unlock()
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if len(*s) != workers*iterations {
+		t.Fatalf("Expected string length %d, got %d", workers*iterations, len(*s))
+	}
+}
+
+func TestConcurrentObjectWrite(t *testing.T) {
+	prevMaxProcs := runtime.GOMAXPROCS(0)
+	if prevMaxProcs < 4 {
+		runtime.GOMAXPROCS(4)
+		defer runtime.GOMAXPROCS(prevMaxProcs)
+	}
+
+	obj := ObjectValue{}
+	const workers = 8
+	const iterations = 500
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				key := fmt.Sprintf("w%d_%d", id, i)
+				mu := objLock(obj)
+				obj[key] = IntValue(id*iterations + i)
+				mu.Unlock()
+			}
+		}(w)
+	}
+
+	close(start)
+	wg.Wait()
+
+	mu := objRLock(obj)
+	count := len(obj)
+	mu.RUnlock()
+	if count != workers*iterations {
+		t.Fatalf("Expected object size %d, got %d", workers*iterations, count)
+	}
+}
+
+func TestConcurrentScopeFastWithConcurrentFlag(t *testing.T) {
+	// Verify that newScopeFastConcurrent creates scopes with mutexes
+	parent := newScope(nil)
+	parent.put("x", IntValue(0))
+
+	sc := newScopeFastConcurrent(&parent, 4)
+	if sc.mu == nil {
+		t.Fatal("Expected newScopeFastConcurrent to allocate a mutex")
+	}
+
+	const workers = 8
+	const iterations = 1000
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				sc.put("x", IntValue(id*iterations+i))
+				sc.get("x")
+			}
+		}(w)
+	}
+
+	close(start)
+	wg.Wait()
+
+	// No race detector failures means success
+	if _, err := sc.get("x"); err != nil {
+		t.Fatalf("Expected x to be readable after concurrent access: %v", err)
+	}
+}

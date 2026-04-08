@@ -29,6 +29,10 @@
 	split: split
 	slice?: slice?
 } := import('str')
+{
+	pmap: pmap
+	pmapConcurrent: pmapConcurrent
+} := import('thread')
 
 // ============================================================================
 // Vector Operations & Embeddings
@@ -456,15 +460,15 @@ fn topK(items, k) {
 
 // kosineSimilaritySearch finds the most similar embeddings in a database
 // using cosine similarity. Returns top K matches.
+// Computes similarities in parallel for large embedding sets.
 //
 // Example:
 //   embeddings := [[1, 0], [0, 1], [1, 1]]
 //   query := [1, 0]
 //   kosineSimilaritySearch(embeddings, query, 2)
 fn kosineSimilaritySearch(embeddings, queryEmbedding, k) {
-	similarities := embeddings |> map(fn(emb, idx) {
-		[idx, cosineSimilarity(emb, queryEmbedding)]
-	}) |> map(fn(pair, _) pair)
+	scores := pmap(embeddings, fn(emb) cosineSimilarity(emb, queryEmbedding))
+	similarities := scores |> map(fn(score, idx) [idx, score])
 	topK(similarities, k)
 }
 
@@ -587,53 +591,17 @@ fn entropy(probabilities) {
 	h(0, 0)
 }
 
-// Export public interface
-{
-	// Vector operations
-	dotProduct: dotProduct
-	magnitude: magnitude
-	normalize: normalize
-	cosineSimilarity: cosineSimilarity
-	euclideanDistance: euclideanDistance
-	manhattanDistance: manhattanDistance
+// pbatchNormalize normalizes a list of vectors in parallel.
+// Each vector is normalized independently using pmap.
+//
+// Example:
+//   pbatchNormalize([[3, 4], [5, 12]])  // => [[0.6, 0.8], [0.384..., 0.923...]]
+fn pbatchNormalize(vectors) pmap(vectors, normalize)
 
-	// Normalization
-	minMaxScale: minMaxScale
-	zScore: zScore
-
-	// Attention & Transformers
-	softmax: softmax
-	scaledDotProductAttention: scaledDotProductAttention
-
-	// Activations
-	relu: relu
-	leakyRelu: leakyRelu
-	sigmoid: sigmoid
-	tanh: tanh
-	gelu: gelu
-
-	// Loss functions
-	crossEntropyLoss: crossEntropyLoss
-	meanSquaredError: meanSquaredError
-
-	// Tokenization
-	tokenizeSimple: tokenizeSimple
-	tokenCount: tokenCount
-
-	// Configuration
-	ModelConfig: ModelConfig
-
-	// Embeddings & Retrieval
-	topK: topK
-	kosineSimilaritySearch: kosineSimilaritySearch
-
-	// Batch processing
-	batchify: batchify
-	padSequence: padSequence
-
-	// Statistics
-	mean: mean
-	variance: variance
-	stddev: stddev
-	entropy: entropy
-}
+// pbatchCosineSimilarity computes cosine similarity between a query vector
+// and each vector in a list, in parallel. Returns a list of similarity scores.
+//
+// Example:
+//   pbatchCosineSimilarity([[1, 0], [0, 1], [1, 1]], [1, 0])
+//   // => [1.0, 0.0, 0.707...]
+fn pbatchCosineSimilarity(vectors, query) pmap(vectors, fn(v) cosineSimilarity(v, query))

@@ -937,7 +937,16 @@ func (co *compiler) compileFunction(n *fnNode) {
 	// Fresh locals for the function body
 	co.locals = co.locals[:0]
 	for _, arg := range n.args {
-		co.declareLocal(arg)
+		if arg == "" {
+			// Empty args (_) must each occupy their own slot even though
+			// they share the same "" name. declareLocal would deduplicate
+			// them, causing localCount < arity and an index panic.
+			idx := len(co.locals)
+			co.locals = append(co.locals, "")
+			_ = idx
+		} else {
+			co.declareLocal(arg)
+		}
 	}
 	if n.restArg != "" {
 		co.declareLocal(n.restArg)
@@ -2995,15 +3004,21 @@ func vmConcat(left, right Value) Value {
 		}
 	case *StringValue:
 		if rv, ok := right.(*StringValue); ok {
+			mu := strLock(lv)
 			*lv = append(*lv, *rv...)
+			mu.Unlock()
 			return lv
 		}
 		if rv, ok := right.(IntValue); ok {
+			mu := strLock(lv)
 			*lv = append(*lv, byte(rv))
+			mu.Unlock()
 			return lv
 		}
 	case *ListValue:
+		mu := listLock(lv)
 		*lv = append(*lv, right)
+		mu.Unlock()
 		return lv
 	}
 	return null
@@ -3067,7 +3082,9 @@ func vmSetProp(obj Value, key Value, val Value) {
 		if idx, ok := key.(IntValue); ok {
 			i := int(idx)
 			if i >= 0 && i < len(*o) {
+				mu := listLock(o)
 				(*o)[i] = val
+				mu.Unlock()
 			}
 		}
 	case ObjectValue:
@@ -3080,13 +3097,17 @@ func vmSetProp(obj Value, key Value, val Value) {
 		default:
 			keyStr = key.String()
 		}
+		mu := objLock(o)
 		o[keyStr] = val
+		mu.Unlock()
 	case *StringValue:
 		if idx, ok := key.(IntValue); ok {
 			i := int(idx)
 			if i >= 0 && i < len(*o) {
 				if bv, ok := val.(IntValue); ok {
+					mu := strLock(o)
 					(*o)[i] = byte(bv)
+					mu.Unlock()
 				}
 			}
 		}

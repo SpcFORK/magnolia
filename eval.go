@@ -274,6 +274,48 @@ func objRLock(m ObjectValue) *sync.RWMutex {
 	return mu
 }
 
+// Striped RWMutex pool for concurrent ListValue access.
+const listMuN = 32
+
+var listMu [listMuN]sync.RWMutex
+
+// listLock acquires an exclusive lock for the given *ListValue and
+// returns the mutex so the caller can Unlock it.
+func listLock(l *ListValue) *sync.RWMutex {
+	mu := &listMu[reflect.ValueOf(l).Pointer()/8%listMuN]
+	mu.Lock()
+	return mu
+}
+
+// listRLock acquires a shared read lock for the given *ListValue and
+// returns the mutex so the caller can RUnlock it.
+func listRLock(l *ListValue) *sync.RWMutex {
+	mu := &listMu[reflect.ValueOf(l).Pointer()/8%listMuN]
+	mu.RLock()
+	return mu
+}
+
+// Striped RWMutex pool for concurrent StringValue access.
+const strMuN = 32
+
+var strMu [strMuN]sync.RWMutex
+
+// strLock acquires an exclusive lock for the given *StringValue and
+// returns the mutex so the caller can Unlock it.
+func strLock(s *StringValue) *sync.RWMutex {
+	mu := &strMu[reflect.ValueOf(s).Pointer()/8%strMuN]
+	mu.Lock()
+	return mu
+}
+
+// strRLock acquires a shared read lock for the given *StringValue and
+// returns the mutex so the caller can RUnlock it.
+func strRLock(s *StringValue) *sync.RWMutex {
+	mu := &strMu[reflect.ValueOf(s).Pointer()/8%strMuN]
+	mu.RLock()
+	return mu
+}
+
 // only used for efficient serialization to string
 type serializedObjEntry struct {
 	key  string
@@ -483,11 +525,22 @@ func newScopeN(parent *scope, n int) scope {
 }
 
 // newScopeFast creates a scope without a mutex for single-threaded hot paths.
-// Use only in function call paths where concurrent access is not expected.
+// When the engine is in concurrent mode (after the first go() call), it falls
+// back to allocating a mutex to protect against cross-goroutine access.
 func newScopeFast(parent *scope, n int) scope {
 	return scope{
 		parent: parent,
 		vars:   make(map[string]Value, n),
+	}
+}
+
+// newScopeFastConcurrent is like newScopeFast but always allocates a mutex.
+// Used when the engine knows goroutines are active.
+func newScopeFastConcurrent(parent *scope, n int) scope {
+	return scope{
+		parent: parent,
+		vars:   make(map[string]Value, n),
+		mu:     muPool.Get().(*sync.RWMutex),
 	}
 }
 
@@ -849,12 +902,17 @@ func normalizeCallArgs(paramCount int, args []Value) []Value {
 	return normalized
 }
 
-func bindCallScope(parent *scope, params []string, restArg string, args []Value) scope {
+func bindCallScope(parent *scope, params []string, restArg string, args []Value, concurrent bool) scope {
 	n := len(params)
 	if restArg != "" {
 		n++
 	}
-	callScope := newScopeFast(parent, n)
+	var callScope scope
+	if concurrent {
+		callScope = newScopeFastConcurrent(parent, n)
+	} else {
+		callScope = newScopeFast(parent, n)
+	}
 
 	for i, argName := range params {
 		if argName != "" {
@@ -897,7 +955,7 @@ func mergeObjectValue(dst ObjectValue, src ObjectValue) {
 
 func (c *Context) constructClassValue(class ClassValue, args ...Value) (Value, *runtimeError) {
 	args = normalizeCallArgs(len(class.defn.args), args)
-	constructorScope := bindCallScope(&class.scope, class.defn.args, class.defn.restArg, args)
+	constructorScope := bindCallScope(&class.scope, class.defn.args, class.defn.restArg, args, c.eng.concurrent)
 
 	if len(class.defn.parents) == 0 {
 		val, err := c.evalExpr(class.defn.body, constructorScope)
@@ -1021,7 +1079,7 @@ func (c *Context) forkContext() *Context {
 func (c *Context) evalFnCall(maybeFn Value, thunkable bool, args []Value) (Value, *runtimeError) {
 	if fn, ok := maybeFn.(FnValue); ok {
 		args = normalizeCallArgs(len(fn.defn.args), args)
-		fnScope := bindCallScope(&fn.scope, fn.defn.args, fn.defn.restArg, args)
+		fnScope := bindCallScope(&fn.scope, fn.defn.args, fn.defn.restArg, args, c.eng.concurrent)
 
 		if thunkable {
 			return thunkValue{
@@ -1593,6 +1651,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					}
 				}
 
+				mu := strLock(target)
 				if byteIndex == len(*target) {
 					// append
 					*target = append(*target, *assignedString...)
@@ -1605,6 +1664,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 						}
 					}
 				}
+				mu.Unlock()
 			case *ListValue:
 				listIndexVal, ok := assignRight.(IntValue)
 				if !ok {
@@ -1622,11 +1682,13 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 					}
 				}
 
+				mu := listLock(target)
 				if listIndex == len(*target) {
 					*target = append(*target, assignedValue)
 				} else {
 					(*target)[listIndex] = assignedValue
 				}
+				mu.Unlock()
 			case ObjectValue:
 				var objKeyString string
 				if objKey, ok := assignRight.(*StringValue); ok {
@@ -2048,7 +2110,9 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 				resStr := StringValue(res)
 				return &resStr, nil
 			case pushArrow:
+				mu := strLock(left)
 				*left = append(*left, *right...)
+				mu.Unlock()
 				return left, nil
 			case greater:
 				return BoolValue(bytes.Compare(*left, *right) > 0), nil
@@ -2077,7 +2141,9 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		case *ListValue:
 			switch n.op {
 			case pushArrow:
+				mu := listLock(left)
 				*left = append(*left, rightComputed)
+				mu.Unlock()
 				return left, nil
 			}
 			return nil, incompatibleError(n.op, leftComputed, rightComputed, n.pos())

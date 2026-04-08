@@ -8,7 +8,11 @@
 	identity: id
 	map: map
 	clone: clone
+	slice: slice
 } := import('std')
+{
+	parallel: parallel
+} := import('thread')
 
 // sort! sorts items in the list `xs` by each item's `pred` value, using the
 // Hoare partitioning strategy. If `pred` is not given, each item is sorted by
@@ -80,4 +84,47 @@ fn sort!(xs, pred) {
 //   people := [{name: 'Bob', age: 30}, {name: 'Alice', age: 25}]
 //   byAge := sort(people, fn(p) p.age)
 fn sort(xs, pred) xs |> clone() |> sort!(pred)
+
+// _mergeSorted merges two pre-sorted lists into a single sorted list.
+// Both lists must be sorted by the same `pred` key function.
+fn _mergeSorted(a, b, pred) {
+	aKeys := a |> map(pred)
+	bKeys := b |> map(pred)
+	result := []
+	fn sub(i, j) if {
+		i >= len(a) & j >= len(b) -> result
+		i >= len(a) -> {
+			fn restB(k) if k < len(b) { true -> { result << b.(k), restB(k + 1) }, _ -> result }
+			restB(j)
+		}
+		j >= len(b) -> {
+			fn restA(k) if k < len(a) { true -> { result << a.(k), restA(k + 1) }, _ -> result }
+			restA(i)
+		}
+		aKeys.(i) <= bKeys.(j) -> { result << a.(i), sub(i + 1, j) }
+		_ -> { result << b.(j), sub(i, j + 1) }
+	}
+	sub(0, 0)
+}
+
+// psort returns a sorted copy of `xs` using parallel merge-sort.
+// For small lists (<=256 elements), falls back to sequential sort.
+// For large lists, splits in half, sorts each half concurrently, and merges.
+//
+// Example:
+//   psort([3, 1, 4, 1, 5])  // => [1, 1, 3, 4, 5]
+//   psort(people, fn(p) p.age)
+fn psort(xs, pred) {
+	pred := default(pred, id)
+	n := len(xs)
+	if n <= 256 -> xs |> clone() |> sort!(pred)
+
+	mid := int(n / 2)
+	halves := parallel([
+		fn() psort(slice(xs, 0, mid), pred)
+		fn() psort(slice(xs, mid), pred)
+	])
+
+	_mergeSorted(halves.0, halves.1, pred)
+}
 
