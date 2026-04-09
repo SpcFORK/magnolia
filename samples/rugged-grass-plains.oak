@@ -1,7 +1,14 @@
 // Rugged Grass Plains - first-person sample
 // WASD movement: W/S forward/back, A/D strafe, Q/E (or arrows) turn camera
+//
+// Features used:
+//   PlaneMesh     — auto-generates grid topology (vertices + quad faces)
+//   shaderFbm     — fractal Brownian motion for natural terrain height
+//   shaderDEG2RAD — constant for degree→radian conversion
+//   each          — mutate PlaneMesh vertices in-place with height displacement
+//   DirectionalLight + Material + renderMeshLit — per-face lit rendering
 
-{ println: println, string: string, int: int } := import('std')
+{ println: println, string: string, int: int, each: each } := import('std')
 
 gui := import('GUI')
 
@@ -15,58 +22,40 @@ window := gui.createWindow('Rugged Grass Plains', 1024, 720, {
 
 if window.type {
 	:ok -> {
-		// sky blue background
+		// Structured lighting: directional sun + grass material
+		lightScene := gui.LightScene({
+			lights: [gui.DirectionalLight({
+				x: 0.4, y: 0.8, z: -0.6
+				intensity: 1.0
+				colorR: 255, colorG: 250, colorB: 230
+			})]
+		})
+		grassMaterial := gui.Material({
+			ambient: 0.35
+			diffuse: 0.65
+			specular: 0.05
+			shininess: 8
+		})
+
 		renderer := gui.Renderer3D(window, {
 			camera: { z: 0, fov: 88, backfaceCulling: true }
 			drawDistance: 40
 			background: gui.rgb(135, 206, 235)
 			lineColor: gui.rgb(80, 200, 90)
 			light: { x: 0.4, y: 0.8, z: -0.6, ambient: 0.35, diffuse: 0.65 }
+			lightScene: lightScene
+			material: grassMaterial
 		})
 
-		// Build a procedural terrain mesh (height field)
-		fn buildTerrain(gridN, step, amp, freq) {
-			// vertices: row-major order (x from 0..gridN-1, z from 0..gridN-1)
-			fn height(x, z) {
-				nx := (x - gridN / 2) * step
-				nz := (z - gridN / 2) * step
-				(sin(nx * freq) * cos(nz * freq) + sin(nx * freq * 0.6) * cos(nz * freq * 0.8) * 0.6) * amp
-			}
-
-			fn buildRow(x, z, verts) if x >= gridN {
-				true -> verts
-				_ -> {
-					h := height(x, z)
-					vx := gui.Vec3((x - gridN / 2) * step, h, (z - gridN / 2) * step)
-					buildRow(x + 1, z, verts << vx)
-				}
-			}
-
-			fn buildAll(z, verts) if z >= gridN {
-				true -> verts
-				_ -> buildAll(z + 1, buildRow(0, z, verts))
-			}
-
-			verts := buildAll(0, [])
-
-			// build triangular faces (two tris per grid cell)
-			fn facesForCell(x, z, acc) if x >= gridN - 1 {
-				true -> acc
-				_ -> facesForCell(x + 1, z, acc << [z * gridN + x, z * gridN + x + 1, (z + 1) * gridN + x] << [(z * gridN + x + 1), ((z + 1) * gridN + x + 1), ((z + 1) * gridN + x)])
-			}
-
-			fn buildFaceRows(z, acc) if z >= gridN - 1 {
-				true -> acc
-				_ -> buildFaceRows(z + 1, facesForCell(0, z, acc))
-			}
-
-			faces := buildFaceRows(0, [])
-
-			{ vertices: verts, faces: faces }
-		}
-
-		// reduce resolution to lower startup cost and avoid crashes on fast loads
-		terrain := buildTerrain(48, 0.6, 1.6, 0.25)
+		// Build terrain: PlaneMesh for topology, fbm for natural height
+		terrainSize := 28.8
+		terrainSubs := 47
+		terrain := gui.PlaneMesh(terrainSize, terrainSize, terrainSubs, terrainSubs)
+		amp := 1.6
+		freq := 0.25
+		each(terrain.vertices, fn(v) {
+			v.y <- gui.shaderFbm(v.x * freq, v.z * freq, 4) * amp
+		})
 
 		gui.show(window)
 
@@ -128,7 +117,7 @@ if window.type {
 			if dtSec > 0.050 -> dtSec <- 0.050
 
 			// movement: W/S forward-back, A/D strafe, Q/E (or arrows) turn yaw
-			yawRad := cam.yaw * 3.141592653589793 / 180.0
+			yawRad := cam.yaw * gui.shaderDEG2RAD
 			forwardX := sin(yawRad)
 			forwardZ := cos(yawRad)
 			rightX := cos(yawRad)
@@ -165,11 +154,9 @@ if window.type {
 
 			// Build a single world transform that represents the inverse of the camera
 			worldTransform := {
-				// translate world by negative camera position
 				tx: 0 - cam.x
 				ty: 0 - cam.y
 				tz: 0 - cam.z
-				// rotate world by negative camera angles (pitch then yaw)
 				rx: 0 - cam.pitch
 				ry: 0 - cam.yaw
 				rz: 0
@@ -182,8 +169,8 @@ if window.type {
 				// ground plane grid (wireframe) for reference
 				renderer.renderGrid(40, 1, worldTransform, colGrid)
 
-				// render terrain solid
-				renderer.renderMeshSolid(terrain, worldTransform, colTerrain)
+				// render terrain with per-face lit shading
+				renderer.renderMeshLit(terrain, worldTransform, colTerrain)
 
 				// small marker at player's feet
 				xfMarker.ty <- 0 - cam.y + 0.12

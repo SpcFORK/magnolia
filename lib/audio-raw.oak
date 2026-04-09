@@ -1,0 +1,235 @@
+// libaudio-raw provides headerless raw PCM encoding and parsing helpers
+// for libaudio.
+//
+// Raw PCM is the simplest audio format: just sample bytes with no header.
+// All format parameters (sample rate, channels, bit depth, endianness)
+// must be specified explicitly. This is useful for inter-process piping,
+// hardware I/O, and embedding audio data in custom containers.
+//
+// Samples are normalised floats in [-1, 1].
+
+{
+	map: map
+	default: default
+	range: range
+} := import('std')
+{
+	join: join
+} := import('str')
+{
+	pmap: pmap
+} := import('thread')
+
+// ---- clamp -----------------------------------------------------------
+
+fn _clipF32(s) if {
+	s > 1 -> 1
+	s < -1 -> -1
+	_ -> s
+}
+
+// ---- sample conversions ----------------------------------------------
+
+fn _f32ToU8(s) int((s + 1) / 2 * 255)
+fn _u8ToF32(s) s / 127.5 - 1
+
+fn _f32ToI8(s) {
+	v := int(s * 127)
+	if v < -128 { true -> -128, _ -> if v > 127 { true -> 127, _ -> v } }
+}
+fn _i8ToF32(s) s / 128
+
+fn _f32ToI16(s) int(s * 32767)
+fn _i16ToF32(s) s / 32768
+
+fn _f32ToI32(s) int(s * 2147483647)
+fn _i32ToF32(s) s / 2147483648
+
+// ---- byte utilities -------------------------------------------------
+
+fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
+
+// Little-endian
+fn _i16LE(n) {
+	u := if n < 0 { true -> int(n) + 65536, _ -> int(n) }
+	[u % 256, int(u / 256) % 256]
+}
+fn _i32LE(n) {
+	u := if n < 0 { true -> int(n) + 4294967296, _ -> int(n) }
+	[u % 256, int(u / 256) % 256, int(u / 65536) % 256, int(u / 16777216) % 256]
+}
+
+// Big-endian
+fn _i16BE(n) {
+	u := if n < 0 { true -> int(n) + 65536, _ -> int(n) }
+	[int(u / 256) % 256, u % 256]
+}
+fn _i32BE(n) {
+	u := if n < 0 { true -> int(n) + 4294967296, _ -> int(n) }
+	[int(u / 16777216) % 256, int(u / 65536) % 256, int(u / 256) % 256, u % 256]
+}
+
+// Reading - Little-endian
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readI8(s, off) {
+	u := _readU8(s, off)
+	if u > 127 { true -> u - 256, _ -> u }
+}
+
+fn _readI16LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	u := b0 + b1 * 256
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+fn _readI32LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	u := b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+	if u > 2147483647 { true -> u - 4294967296, _ -> u }
+}
+
+// Reading - Big-endian
+fn _readI16BE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	u := b0 * 256 + b1
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+fn _readI32BE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	u := b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+	if u > 2147483647 { true -> u - 4294967296, _ -> u }
+}
+
+// ---- raw PCM encoding -----------------------------------------------
+
+// _rawSampleBytes encodes one sample into bytes.
+// `signed` is true for signed PCM, false for unsigned (only affects 8-bit).
+// `endian` is :le or :be.
+fn _rawSampleBytes(sample, bitDepth, signed, endian) {
+	sc := _clipF32(sample)
+	if bitDepth {
+		8 -> if signed {
+			true -> {
+				v := _f32ToI8(sc)
+				_byteStr([if v < 0 { true -> v + 256, _ -> v }])
+			}
+			_ -> _byteStr([_f32ToU8(sc)])
+		}
+		16 -> {
+			v := _f32ToI16(sc)
+			if endian {
+				:be -> _byteStr(_i16BE(v))
+				_ -> _byteStr(_i16LE(v))
+			}
+		}
+		32 -> {
+			v := _f32ToI32(sc)
+			if endian {
+				:be -> _byteStr(_i32BE(v))
+				_ -> _byteStr(_i32LE(v))
+			}
+		}
+		_ -> {
+			v := _f32ToI16(sc)
+			if endian {
+				:be -> _byteStr(_i16BE(v))
+				_ -> _byteStr(_i16LE(v))
+			}
+		}
+	}
+}
+
+// rawEncode encodes a list of normalised float samples into a raw PCM
+// binary string with no header.
+//
+// Options:
+//   bitDepth  — 8, 16, or 32 (default 16)
+//   signed    — true for signed PCM, false for unsigned (default true;
+//               only affects 8-bit since 16/32 are always signed)
+//   endian    — :le or :be (default :le)
+//
+// Example:
+//   rawEncode(samples, { bitDepth: 16, endian: :le })
+fn rawEncode(samples, opts) {
+	opts := default(opts, {})
+	bitDepth := default(opts.bitDepth, 16)
+	signed := default(opts.signed, true)
+	endian := default(opts.endian, :le)
+
+	samples |> map(fn(s) _rawSampleBytes(s, bitDepth, signed, endian)) |> join('')
+}
+
+// ---- raw PCM decoding -----------------------------------------------
+
+fn _rawReadSample(data, off, bitDepth, signed, endian) if bitDepth {
+	8 -> if signed {
+		true -> _i8ToF32(_readI8(data, off))
+		_ -> _u8ToF32(_readU8(data, off))
+	}
+	16 -> if endian {
+		:be -> _i16ToF32(_readI16BE(data, off))
+		_ -> _i16ToF32(_readI16LE(data, off))
+	}
+	32 -> if endian {
+		:be -> _i32ToF32(_readI32BE(data, off))
+		_ -> _i32ToF32(_readI32LE(data, off))
+	}
+	_ -> if endian {
+		:be -> _i16ToF32(_readI16BE(data, off))
+		_ -> _i16ToF32(_readI16LE(data, off))
+	}
+}
+
+// rawDecode decodes a raw PCM binary string into a list of normalised
+// float samples. Since raw PCM has no header, all format parameters must
+// be specified.
+//
+// Options:
+//   bitDepth  — 8, 16, or 32 (default 16)
+//   signed    — true for signed PCM, false for unsigned (default true)
+//   endian    — :le or :be (default :le)
+//
+// Returns { samples } (no metadata since raw has no header, but callers
+// know the format they requested).
+//
+// Example:
+//   r := rawDecode(data, { bitDepth: 16, endian: :le })
+//   r.samples  // => list of normalised floats
+fn rawDecode(data, opts) {
+	opts := default(opts, {})
+	bitDepth := default(opts.bitDepth, 16)
+	signed := default(opts.signed, true)
+	endian := default(opts.endian, :le)
+
+	bytesPerSample := int(bitDepth / 8)
+	totalSamples := int(len(data) / bytesPerSample)
+
+	fn sub(acc, i) if i >= totalSamples {
+		true -> acc
+		_ -> {
+			off := i * bytesPerSample
+			s := _rawReadSample(data, off, bitDepth, signed, endian)
+			sub(acc << s, i + 1)
+		}
+	}
+
+	{ samples: sub([], 0) }
+}
+
+// pbatchRawEncode encodes multiple sample lists into raw PCM byte strings
+// in parallel. Each spec is { samples, opts? }.
+fn pbatchRawEncode(specs) pmap(specs, fn(s) rawEncode(s.samples, s.opts))
+
+// pbatchRawDecode decodes multiple raw PCM byte strings in parallel.
+// Each spec is { data, opts? }.
+fn pbatchRawDecode(specs) pmap(specs, fn(s) rawDecode(s.data, s.opts))

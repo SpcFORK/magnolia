@@ -11,10 +11,15 @@
 	default: default
 	clone: clone
 	reduce: reduce
+	slice: slice
 } := import('std')
 {
 	abs: abs
 } := import('math')
+{
+	pmapConcurrent: pmapConcurrent
+	parallel: parallel
+} := import('thread')
 
 // ---- low-level helpers ----------------------------------------------
 
@@ -296,3 +301,71 @@ fn sampleFrame(frames, timeSeconds, fps) {
 		}
 	}
 }
+
+// ---- parallel pixel processing --------------------------------------
+
+// pmapPixels applies mapper(pixel, x, y) in parallel using bounded concurrency.
+// Each row is processed as an independent unit of work.
+//
+// Example:
+//   bright := pmapPixels(f, fn(px, x, y) [px.0 + 30, px.1 + 30, px.2 + 30], 4)
+fn pmapPixels(f, mapper, numWorkers) {
+	numWorkers := default(numWorkers, 4)
+	ch := f.channels
+	w := f.width
+
+	// Process each row in parallel, return flat pixel arrays per row
+	rowPixels := pmapConcurrent(range(f.height), fn(y) {
+		rowOut := []
+		range(w) |> each(fn(x) {
+			src := range(ch) |> map(fn(c) f.pixels.(_pixelIndexRaw(w, ch, x, y, c)))
+			dst := default(mapper(src, x, y), src)
+			range(ch) |> each(fn(c) rowOut << clampByte(default(dst.(c), 0)))
+		})
+		rowOut
+	}, numWorkers)
+
+	// Flatten rows into single pixel list
+	pixels := []
+	rowPixels |> each(fn(row) row |> each(fn(v) pixels << v))
+
+	{
+		width: f.width
+		height: f.height
+		channels: f.channels
+		pixels: pixels
+	}
+}
+
+// presizeNearest rescales a frame using nearest-neighbor sampling with
+// parallel row processing.
+//
+// Example:
+//   scaled := presizeNearest(f, 1920, 1080, 4)
+fn presizeNearest(f, newWidth, newHeight, numWorkers) {
+	newWidth := _max(1, int(newWidth))
+	newHeight := _max(1, int(newHeight))
+	numWorkers := default(numWorkers, 4)
+	ch := f.channels
+
+	rowPixels := pmapConcurrent(range(newHeight), fn(y) {
+		sy := _min(f.height - 1, int(y * f.height / newHeight))
+		range(newWidth * ch) |> map(fn(i) {
+			x := int(i / ch)
+			c := i % ch
+			sx := _min(f.width - 1, int(x * f.width / newWidth))
+			f.pixels.(_pixelIndexRaw(f.width, ch, sx, sy, c))
+		})
+	}, numWorkers)
+
+	pixels := []
+	rowPixels |> each(fn(row) row |> each(fn(v) pixels << v))
+
+	frame(newWidth, newHeight, pixels, ch)
+}
+
+// pmapFrames applies fn(frame, index) over a sequence of frames in parallel.
+//
+// Example:
+//   processed := pmapFrames(frames, fn(f, i) toGrayscale(f))
+fn pmapFrames(frames, f) parallel(frames |> map(fn(frm, i) fn() f(frm, i)))

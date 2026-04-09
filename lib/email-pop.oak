@@ -1,0 +1,316 @@
+// libemail-pop provides a POP3 client/server subset on top of libsocket.
+
+{
+	default: default
+	each: each
+	map: map
+	filter: filter
+	slice: slice
+	reduce: reduce
+} := import('std')
+{
+	split: split
+	join: join
+	startsWith?: startsWith?
+	trim: trim
+	trimEnd: trimEnd
+	upper: upper
+	cut: cut
+} := import('str')
+
+thread := import('thread')
+sock := import('socket')
+
+fn _singleLine(ok?, text) {
+	line := default(text, '')
+	{
+		type: if ok? {
+			true -> :ok
+			_ -> :error
+		}
+		ok?: ok?
+		text: line
+		lines: [line]
+	}
+}
+
+fn _readStatus(socket) {
+	evt := sock.recvLine(socket)
+	if evt.type {
+		:data -> if startsWith?(evt.data, '+OK') {
+			true -> _singleLine(true, trim(slice(evt.data, 3), ' '))
+			_ -> _singleLine(false, trim(slice(evt.data, 4), ' '))
+		}
+		_ -> evt
+	}
+}
+
+fn _readMulti(socket) {
+	status := _readStatus(socket)
+	if !default(status.ok?, false) -> status
+	lines := []
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> if evt.data {
+				'.' -> {
+					status.lines <- lines
+					status
+				}
+				_ -> {
+					line := if startsWith?(evt.data, '..') {
+						true -> slice(evt.data, 1)
+						_ -> evt.data
+					}
+					lines << line
+					loop()
+				}
+			}
+			_ -> evt
+		}
+	}
+	loop()
+}
+
+fn _sendMulti(socket, ok?, text, lines) {
+	sock.sendLine(socket, if ok? {
+		true -> '+OK ' + default(text, '')
+		_ -> '-ERR ' + default(text, '')
+	})
+	default(lines, []) |> each(fn(line) {
+		clean := if startsWith?(line, '.') {
+			true -> '.' + line
+			_ -> line
+		}
+		sock.sendLine(socket, clean)
+	})
+	sock.sendLine(socket, '.')
+}
+
+fn _client(socket) {
+	fn command(line) {
+		sock.sendLine(socket, line)
+		_readStatus(socket)
+	}
+	fn commandMulti(line) {
+		sock.sendLine(socket, line)
+		_readMulti(socket)
+	}
+	{
+		type: :pop_client
+		socket: socket
+		user: fn(name) command('USER ' + name)
+		pass: fn(password) command('PASS ' + password)
+		login: fn(name, password) {
+			userResp := command('USER ' + name)
+			if default(userResp.ok?, false) {
+				true -> command('PASS ' + password)
+				_ -> userResp
+			}
+		}
+		capa: fn() commandMulti('CAPA')
+		stat: fn() command('STAT')
+		list: fn(index) if index {
+			? -> commandMulti('LIST')
+			_ -> command('LIST ' + string(index))
+		}
+		uidl: fn(index) if index {
+			? -> commandMulti('UIDL')
+			_ -> command('UIDL ' + string(index))
+		}
+		retr: fn(index) commandMulti('RETR ' + string(index))
+		top: fn(index, lines) commandMulti('TOP ' + string(index) + ' ' + string(lines))
+		dele: fn(index) command('DELE ' + string(index))
+		rset: fn() command('RSET')
+		noop: fn() command('NOOP')
+		startTLS: fn(options) {
+			resp := command('STLS')
+			if default(resp.ok?, false) {
+				true -> sock.startTLS(socket, options)
+				_ -> resp
+			}
+		}
+		quit: fn() {
+			resp := command('QUIT')
+			sock.close(socket)
+			resp
+		}
+	}
+}
+
+fn connect(address, options) {
+	connected := sock.connect(address, options)
+	if connected.type {
+		:ok -> {
+			banner := _readStatus(connected.socket)
+			if default(banner.ok?, false) {
+				true -> { type: :ok, banner: banner, client: _client(connected.socket) }
+				_ -> banner
+			}
+		}
+		_ -> connected
+	}
+}
+
+fn _messageSize(message) len(default(message.data, ''))
+
+fn _loadMessages(handlers, authState) {
+	loader := default(handlers.messages, fn(_) [])
+	default(loader, fn(_) [])(authState) |> map(fn(message, i) {
+		data := default(message.data, '')
+		{
+			id: i + 1
+			uid: default(message.uid, 'msg-' + string(i + 1))
+			data: data
+			deleted?: false
+		}
+	})
+}
+
+fn _serve(socket, handlers, opts) {
+	authState := ?
+	username := ?
+	messages := []
+	tlsEnabled? := default(opts.startTLS?, false)
+	sock.sendLine(socket, '+OK Magnolia POP3 ready')
+
+	fn activeMessages() messages |> filter(fn(m) !default(m.deleted?, false))
+	fn lookup(id) activeMessages() |> filter(fn(m) m.id = id)
+	fn one(id) if len(lookup(id)) {
+		0 -> ?
+		_ -> lookup(id).0
+	}
+
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> {
+				line := evt.data
+				[name, rest] := cut(line, ' ')
+				cmd := upper(name)
+				if cmd {
+					'CAPA' -> {
+						caps := ['USER']
+						if tlsEnabled? -> caps << 'STLS'
+						_sendMulti(socket, true, 'Capability list follows', caps)
+						loop()
+					}
+					'USER' -> {
+						username <- rest
+						sock.sendLine(socket, '+OK user accepted')
+						loop()
+					}
+					'PASS' -> {
+						authFn := default(handlers.auth, fn(_, _) true)
+						auth := authFn(username, rest)
+						if auth {
+							false -> sock.sendLine(socket, '-ERR auth failed')
+							_ -> {
+								authState <- auth
+								messages <- _loadMessages(handlers, auth)
+								sock.sendLine(socket, '+OK maildrop locked')
+							}
+						}
+						loop()
+					}
+					'STLS' -> {
+						if tlsEnabled? {
+							true -> {
+								sock.sendLine(socket, '+OK begin TLS negotiation')
+								sock.startTLS(socket, {
+									server: true
+									certFile: default(opts.certFile, '')
+									keyFile: default(opts.keyFile, '')
+								})
+							}
+							_ -> sock.sendLine(socket, '-ERR STLS not available')
+						}
+						loop()
+					}
+					'STAT' -> {
+						live := activeMessages()
+						total := live |> map(_messageSize) |> reduce(0, fn(acc, n) acc + n)
+						sock.sendLine(socket, '+OK ' + string(len(live)) + ' ' + string(total))
+						loop()
+					}
+					'LIST' -> {
+						if rest {
+							'' -> _sendMulti(socket, true, 'scan listing follows', activeMessages() |> map(fn(m) string(m.id) + ' ' + string(_messageSize(m))))
+							_ -> if msg := one(int(rest)) {
+								? -> sock.sendLine(socket, '-ERR no such message')
+								_ -> sock.sendLine(socket, '+OK ' + string(msg.id) + ' ' + string(_messageSize(msg)))
+							}
+						}
+						loop()
+					}
+					'UIDL' -> {
+						if rest {
+							'' -> _sendMulti(socket, true, 'unique-id listing follows', activeMessages() |> map(fn(m) string(m.id) + ' ' + m.uid))
+							_ -> if msg := one(int(rest)) {
+								? -> sock.sendLine(socket, '-ERR no such message')
+								_ -> sock.sendLine(socket, '+OK ' + string(msg.id) + ' ' + msg.uid)
+							}
+						}
+						loop()
+					}
+					'RETR' -> {
+						if msg := one(int(rest)) {
+							? -> sock.sendLine(socket, '-ERR no such message')
+							_ -> _sendMulti(socket, true, string(_messageSize(msg)) + ' octets', split(msg.data, '\n') |> map(fn(line) trimEnd(line, '\r')))
+						}
+						loop()
+					}
+					'TOP' -> {
+						parts := split(rest, ' ')
+						if len(parts) >= 2 {
+							true -> if msg := one(int(parts.0)) {
+								? -> sock.sendLine(socket, '-ERR no such message')
+								_ -> _sendMulti(socket, true, 'top of message follows', msg.data |> split('\n') |> map(fn(line) trimEnd(line, '\r')) |> slice(0, int(parts.1) + 1))
+							}
+							_ -> sock.sendLine(socket, '-ERR TOP requires message and line count')
+						}
+						loop()
+					}
+					'DELE' -> {
+						if msg := one(int(rest)) {
+							? -> sock.sendLine(socket, '-ERR no such message')
+							_ -> {
+								msg.deleted? := true
+								sock.sendLine(socket, '+OK deleted')
+							}
+						}
+						loop()
+					}
+					'RSET' -> {
+						messages |> each(fn(m) m.deleted? := false)
+						sock.sendLine(socket, '+OK reset')
+						loop()
+					}
+					'NOOP' -> {
+						sock.sendLine(socket, '+OK')
+						loop()
+					}
+					'QUIT' -> {
+						sock.sendLine(socket, '+OK bye')
+						sock.close(socket)
+					}
+					_ -> {
+						sock.sendLine(socket, '-ERR unknown command')
+						loop()
+					}
+				}
+			}
+			_ -> sock.close(socket)
+		}
+	}
+	loop()
+}
+
+fn listen(address, handlers, options) {
+	h := default(handlers, {})
+	opts := default(options, {})
+	sock.listen(address, fn(evt) if evt.type {
+		:connect -> thread.spawn(_serve, evt.socket, h, opts)
+		_ -> ?
+	}, opts)
+}

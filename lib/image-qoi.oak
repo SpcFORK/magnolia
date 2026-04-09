@@ -1,0 +1,285 @@
+// libqoi implements the Quite OK Image (QOI) format encoder and decoder.
+// See https://qoiformat.org/qoi-specification.pdf
+//
+// QOI achieves lossless compression with very simple logic, making it
+// ideal for an Oak-native implementation. It supports RGB and RGBA images.
+
+{
+	map: map
+	range: range
+	slice: slice
+	default: default
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// ---- helpers --------------------------------------------------------
+
+fn bytes(parts) parts |> map(fn(n) char(n % 256)) |> join('')
+
+fn clampByte(n) if {
+	n < 0 -> 0
+	n > 255 -> 255
+	_ -> int(n)
+}
+
+fn _mod(a, b) {
+	r := a % b
+	if r < 0 { true -> r + b, _ -> r }
+}
+
+// intToBytesBE converts n to a big-endian byte list of the given width.
+fn intToBytesBE(n, width) {
+	tmp := []
+	fn extract(i, p) if i {
+		0 -> ?
+		_ -> {
+			tmp << (p % 256)
+			extract(i - 1, int(p / 256))
+		}
+	}
+	extract(width, n)
+	out := []
+	fn rev(i) if i {
+		0 -> ?
+		_ -> {
+			out << tmp.(i - 1)
+			rev(i - 1)
+		}
+	}
+	rev(len(tmp))
+	out
+}
+
+// QOI op tags
+_OP_INDEX := 0
+_OP_DIFF  := 64
+_OP_LUMA  := 128
+_OP_RUN   := 192
+_OP_RGB   := 254
+_OP_RGBA  := 255
+
+fn _hash(r, g, b, a) _mod(r * 3 + g * 5 + b * 7 + a * 11, 64)
+
+fn _signed(v) if v > 127 { true -> v - 256, _ -> v }
+
+fn _mkIndex() range(64) |> map(fn(_) [0, 0, 0, 0])
+
+// ---- QOI encoder ----------------------------------------------------
+
+// qoi encodes a QOI image and returns the full file string.
+// pixels is a flat row-major list of [r, g, b] or [r, g, b, a] lists.
+// channels: 3 (RGB) or 4 (RGBA). Default 3.
+fn qoi(width, height, pixels, channels) {
+	channels := default(channels, 3)
+	w := int(width)
+	h := int(height)
+
+	buf := ''
+	last := { off: 0 }
+	fn appd(part) {
+		buf.(last.off) := part
+		last.off <- len(buf)
+	}
+
+	appd('qoif')
+	appd(bytes(intToBytesBE(w, 4)))
+	appd(bytes(intToBytesBE(h, 4)))
+	appd(char(channels))
+	appd(char(0))
+
+	index := _mkIndex()
+	prev := { r: 0, g: 0, b: 0, a: 255 }
+	run := { count: 0 }
+	count := w * h
+
+	fn flushRun() if run.count > 0 {
+		true -> {
+			appd(char(_OP_RUN + run.count - 1))
+			run.count <- 0
+		}
+		_ -> ?
+	}
+
+	fn encodePixel(i) if i {
+		count -> flushRun()
+		_ -> {
+			px := pixels.(i)
+			r := clampByte(default(px.(0), 0))
+			g := clampByte(default(px.(1), 0))
+			b := clampByte(default(px.(2), 0))
+			a := clampByte(default(px.(3), 255))
+
+			if r = prev.r & g = prev.g & b = prev.b & a = prev.a {
+				true -> {
+					run.count <- run.count + 1
+					if run.count = 62 {
+						true -> flushRun()
+						_ -> ?
+					}
+				}
+				_ -> {
+					flushRun()
+					hashIdx := _hash(r, g, b, a)
+					cached := index.(hashIdx)
+
+					if cached.(0) = r & cached.(1) = g & cached.(2) = b & cached.(3) = a {
+						true -> appd(char(hashIdx))
+						_ -> {
+							index.(hashIdx) := [r, g, b, a]
+							if a = prev.a {
+								true -> {
+									sdr := _signed(_mod(r - prev.r + 256, 256))
+									sdg := _signed(_mod(g - prev.g + 256, 256))
+									sdb := _signed(_mod(b - prev.b + 256, 256))
+
+									if sdr >= -2 & sdr <= 1 & sdg >= -2 & sdg <= 1 & sdb >= -2 & sdb <= 1 {
+										true -> appd(char(_OP_DIFF + (sdr + 2) * 16 + (sdg + 2) * 4 + (sdb + 2)))
+										_ -> {
+											sDrDg := _signed(_mod(sdr - sdg + 256, 256))
+											sDbDg := _signed(_mod(sdb - sdg + 256, 256))
+											if sdg >= -32 & sdg <= 31 & sDrDg >= -8 & sDrDg <= 7 & sDbDg >= -8 & sDbDg <= 7 {
+												true -> {
+													appd(char(_OP_LUMA + (sdg + 32)))
+													appd(char((sDrDg + 8) * 16 + (sDbDg + 8)))
+												}
+												_ -> {
+													appd(char(_OP_RGB))
+													appd(char(r))
+													appd(char(g))
+													appd(char(b))
+												}
+											}
+										}
+									}
+								}
+								_ -> {
+									appd(char(_OP_RGBA))
+									appd(char(r))
+									appd(char(g))
+									appd(char(b))
+									appd(char(a))
+								}
+							}
+						}
+					}
+					prev.r <- r
+					prev.g <- g
+					prev.b <- b
+					prev.a <- a
+				}
+			}
+			encodePixel(i + 1)
+		}
+	}
+	encodePixel(0)
+
+	appd(bytes([0, 0, 0, 0, 0, 0, 0, 1]))
+	buf
+}
+
+// ---- QOI decoder ----------------------------------------------------
+
+// decodeQOI decodes a QOI file string into { width, height, channels, pixels }.
+fn decodeQOI(data) {
+	if slice(data, 0, 4) != 'qoif' {
+		true -> ?
+		_ -> {
+			w := codepoint(data.(4)) * 16777216 + codepoint(data.(5)) * 65536 +
+				codepoint(data.(6)) * 256 + codepoint(data.(7))
+			h := codepoint(data.(8)) * 16777216 + codepoint(data.(9)) * 65536 +
+				codepoint(data.(10)) * 256 + codepoint(data.(11))
+			channels := codepoint(data.(12))
+
+			index := _mkIndex()
+			pixels := []
+			count := w * h
+			prev := { r: 0, g: 0, b: 0, a: 255 }
+
+			fn emitPixel() if channels {
+				3 -> pixels << [prev.r, prev.g, prev.b]
+				_ -> pixels << [prev.r, prev.g, prev.b, prev.a]
+			}
+
+			fn decode(off, n) if {
+				n >= count -> ?
+				_ -> {
+					b1 := codepoint(data.(off))
+
+					if b1 = _OP_RGB {
+						true -> {
+							prev.r <- codepoint(data.(off + 1))
+							prev.g <- codepoint(data.(off + 2))
+							prev.b <- codepoint(data.(off + 3))
+							index.(_hash(prev.r, prev.g, prev.b, prev.a)) := [prev.r, prev.g, prev.b, prev.a]
+							emitPixel()
+							decode(off + 4, n + 1)
+						}
+						_ -> if b1 = _OP_RGBA {
+							true -> {
+								prev.r <- codepoint(data.(off + 1))
+								prev.g <- codepoint(data.(off + 2))
+								prev.b <- codepoint(data.(off + 3))
+								prev.a <- codepoint(data.(off + 4))
+								index.(_hash(prev.r, prev.g, prev.b, prev.a)) := [prev.r, prev.g, prev.b, prev.a]
+								emitPixel()
+								decode(off + 5, n + 1)
+							}
+							_ -> {
+								tag2 := int(b1 / 64)
+								if tag2 = 0 {
+									true -> {
+										cached := index.(b1 % 64)
+										prev.r <- cached.(0)
+										prev.g <- cached.(1)
+										prev.b <- cached.(2)
+										prev.a <- cached.(3)
+										emitPixel()
+										decode(off + 1, n + 1)
+									}
+									_ -> if tag2 = 1 {
+										true -> {
+											prev.r <- _mod(prev.r + int(b1 / 16) % 4 - 2, 256)
+											prev.g <- _mod(prev.g + int(b1 / 4) % 4 - 2, 256)
+											prev.b <- _mod(prev.b + b1 % 4 - 2, 256)
+											index.(_hash(prev.r, prev.g, prev.b, prev.a)) := [prev.r, prev.g, prev.b, prev.a]
+											emitPixel()
+											decode(off + 1, n + 1)
+										}
+										_ -> if tag2 = 2 {
+											true -> {
+												b2 := codepoint(data.(off + 1))
+												dg := (b1 % 64) - 32
+												prev.r <- _mod(prev.r + dg + int(b2 / 16) - 8, 256)
+												prev.g <- _mod(prev.g + dg, 256)
+												prev.b <- _mod(prev.b + dg + (b2 % 16) - 8, 256)
+												index.(_hash(prev.r, prev.g, prev.b, prev.a)) := [prev.r, prev.g, prev.b, prev.a]
+												emitPixel()
+												decode(off + 2, n + 1)
+											}
+											_ -> {
+												runLen := (b1 % 64) + 1
+												fn rep(k) if k {
+													runLen -> ?
+													_ -> {
+														emitPixel()
+														rep(k + 1)
+													}
+												}
+												rep(0)
+												decode(off + 1, n + runLen)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			decode(14, 0)
+			{ width: w, height: h, channels: channels, pixels: pixels }
+		}
+	}
+}

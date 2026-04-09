@@ -157,3 +157,11 @@ All-in-one: analyzes source text, prints the histogram, and prints a summary lin
 - `opts` — histogram options (same as `renderHistogram()`)
 
 **Returns:** same as `analyze()`
+
+### `panalyze(texts)`
+
+Performs full column analysis on multiple source texts in parallel. Returns a list of `{ cols, freqs, stats }` results.
+
+```oak
+codecolsResults := panalyze([source1, source2, source3])
+```

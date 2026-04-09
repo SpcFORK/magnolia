@@ -11,6 +11,7 @@
 {
 	floor: floor
 } := import('math')
+guiThread := import('gui-thread')
 
 // ─── GPU information via PowerShell/WMI ──────────────────────────────────────
 
@@ -159,5 +160,49 @@ fn gpuCapabilityDump() {
 	mon := getMonitorInfo()
 	report <- report + default(mon, 'No monitor info available') + '\n'
 
+	report
+}
+
+// gpuCapabilityDumpParallel — same as gpuCapabilityDump but runs all
+// independent system queries concurrently using gui-thread futures.
+fn gpuCapabilityDumpParallel() {
+	// Launch all three independent queries as concurrent goroutines
+	adaptersCh := make_chan()
+	flCh := make_chan()
+	monCh := make_chan()
+	go(fn {
+		chan_send(adaptersCh, getGPUAdaptersParsed())
+	})
+	go(fn {
+		chan_send(flCh, getD3DFeatureLevel())
+	})
+	go(fn {
+		chan_send(monCh, getMonitorInfo())
+	})
+	// Collect results
+	adapters := chan_recv(adaptersCh)
+	fl := chan_recv(flCh)
+	mon := chan_recv(monCh)
+
+	report := '=== GPU Capability Dump (parallel) ===\n\n'
+	report <- report + '--- GPU Adapters ---\n'
+	fn subA(i) if i < len(adapters) {
+		true -> {
+			a := adapters.(i)
+			report <- report + 'Adapter ' + string(i) + ': ' + default(a.name, '?') + '\n'
+			report <- report + '  Driver: ' + default(a.driverVersion, '?') + '\n'
+			report <- report + '  VRAM: ' + string(default(a.vramMB, 0)) + ' MB\n'
+			report <- report + '  Status: ' + default(a.status, '?') + '\n'
+			report <- report + '  Resolution: ' + string(default(a.currentHRes, 0)) + 'x' + string(default(a.currentVRes, 0))
+			report <- report + ' @ ' + string(default(a.currentRefreshRate, 0)) + 'Hz'
+			report <- report + ' (' + string(default(a.currentBitsPerPixel, 0)) + 'bpp)\n'
+			subA(i + 1)
+		}
+	}
+	subA(0)
+	report <- report + '\n--- Direct3D Feature Level ---\n'
+	report <- report + trim(fl, ' \t\r\n') + '\n'
+	report <- report + '\n--- Monitors ---\n'
+	report <- report + default(mon, 'No monitor info available') + '\n'
 	report
 }

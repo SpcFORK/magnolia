@@ -304,6 +304,43 @@ if content {
 - No file permissions/mode support beyond basic stat info
 - Character encoding is assumed to be UTF-8
 
+## Parallel Batch I/O
+
+### `readFiles(paths)`
+
+Reads multiple files in parallel and returns a list of results. Each result is the file contents string on success, or `?` on error. Order matches the input paths.
+
+```oak
+contents := fs.readFiles(['a.txt', 'b.txt', 'c.txt'])
+```
+
+### `readFilesConcurrent(paths, maxOpen)`
+
+Reads multiple files with bounded concurrency, limiting the number of simultaneous open files.
+
+```oak
+contents := fs.readFilesConcurrent(['a.txt', 'b.txt', ...], 4)
+```
+
+### `writeFiles(pairs)`
+
+Writes multiple path/content pairs in parallel. Each entry should be `{ path, content }`. Returns a list of results (`true` on success, `?` on error).
+
+```oak
+fs.writeFiles([
+    {path: 'a.txt', content: 'hello'}
+    {path: 'b.txt', content: 'world'}
+])
+```
+
+### `statFiles(paths)`
+
+Stats multiple paths in parallel.
+
+```oak
+infos := fs.statFiles(['a.txt', 'b.txt'])
+```
+
 ## See Also
 
 - `path` library - For path manipulation

@@ -70,6 +70,18 @@ var libhttp string
 //go:embed lib/socket.oak
 var libsocket string
 
+//go:embed lib/email-smtp.oak
+var libemailsmtp string
+
+//go:embed lib/email-pop.oak
+var libemailpop string
+
+//go:embed lib/email-imap.oak
+var libemailimap string
+
+//go:embed lib/email.oak
+var libemail string
+
 //go:embed lib/smtp.oak
 var libsmtp string
 
@@ -100,11 +112,23 @@ var libcrypto string
 //go:embed lib/bitwise.oak
 var libbitwise string
 
-//go:embed lib/bmp.oak
-var libbmp string
+//go:embed lib/image-bmp.oak
+var libimagebmp string
 
-//go:embed lib/ico.oak
-var libico string
+//go:embed lib/image-ico.oak
+var libimageico string
+
+//go:embed lib/image-ppm.oak
+var libimageppm string
+
+//go:embed lib/image-tga.oak
+var libimagetga string
+
+//go:embed lib/image-qoi.oak
+var libimageqoi string
+
+//go:embed lib/image.oak
+var libimage string
 
 //go:embed lib/gpu.oak
 var libgpu string
@@ -436,6 +460,9 @@ var libguiform string
 //go:embed lib/gui-loop.oak
 var libguiloop string
 
+//go:embed lib/gui-thread.oak
+var libguithread string
+
 //go:embed lib/ai.oak
 var libai string
 
@@ -453,6 +480,15 @@ var libaudiodsp string
 
 //go:embed lib/audio-wav.oak
 var libaudiowav string
+
+//go:embed lib/audio-aiff.oak
+var libaudioaiff string
+
+//go:embed lib/audio-au.oak
+var libaudioau string
+
+//go:embed lib/audio-raw.oak
+var libaudioraw string
 
 //go:embed lib/video.oak
 var libvideo string
@@ -477,6 +513,24 @@ var liblinuxfonts string
 
 //go:embed lib/codecols.oak
 var libcodecols string
+
+//go:embed lib/data-csv.oak
+var libdatacsv string
+
+//go:embed lib/data-toml.oak
+var libdatatoml string
+
+//go:embed lib/data-xml.oak
+var libdataxml string
+
+//go:embed lib/data-ini.oak
+var libdataini string
+
+//go:embed lib/data-yaml.oak
+var libdatayaml string
+
+//go:embed lib/data.oak
+var libdata string
 
 var stdlibs = map[string]string{
 	"std":                             libstd,
@@ -505,6 +559,10 @@ var stdlibs = map[string]string{
 	"dataprot":                        libdataprot,
 	"http":                            libhttp,
 	"socket":                          libsocket,
+	"email-smtp":                      libemailsmtp,
+	"email-pop":                       libemailpop,
+	"email-imap":                      libemailimap,
+	"email":                           libemail,
 	"smtp":                            libsmtp,
 	"pop":                             libpop,
 	"imap":                            libimap,
@@ -514,8 +572,17 @@ var stdlibs = map[string]string{
 	"md":                              libmd,
 	"crypto":                          libcrypto,
 	"bitwise":                         libbitwise,
-	"bmp":                             libbmp,
-	"ico":                             libico,
+	"bmp":                             libimagebmp,
+	"ico":                             libimageico,
+	"ppm":                             libimageppm,
+	"tga":                             libimagetga,
+	"qoi":                             libimageqoi,
+	"image-bmp":                       libimagebmp,
+	"image-ico":                       libimageico,
+	"image-ppm":                       libimageppm,
+	"image-tga":                       libimagetga,
+	"image-qoi":                       libimageqoi,
+	"image":                           libimage,
 	"gpu":                             libgpu,
 	"gpus":                            libgpus,
 	"syntax":                          libsyntax,
@@ -616,6 +683,7 @@ var stdlibs = map[string]string{
 	"gui-graph":                       libguigraph,
 	"gui-form":                        libguiform,
 	"gui-loop":                        libguiloop,
+	"gui-thread":                      libguithread,
 	"GUI":                             libgui,
 	"gui":                             libgui,
 	"ai":                              libai,
@@ -624,6 +692,9 @@ var stdlibs = map[string]string{
 	"audio-fft":                       libaudiofft,
 	"audio-dsp":                       libaudiodsp,
 	"audio-wav":                       libaudiowav,
+	"audio-aiff":                      libaudioaiff,
+	"audio-au":                        libaudioau,
+	"audio-raw":                       libaudioraw,
 	"video":                           libvideo,
 	"gui-video":                       libguivideo,
 	"async/event-bus":                 libasynceventbus,
@@ -638,6 +709,12 @@ var stdlibs = map[string]string{
 	"windows-fonts":                   libwindowsfonts,
 	"linux-fonts":                     liblinuxfonts,
 	"codecols":                        libcodecols,
+	"data-csv":                        libdatacsv,
+	"data-toml":                       libdatatoml,
+	"data-xml":                        libdataxml,
+	"data-ini":                        libdataini,
+	"data-yaml":                       libdatayaml,
+	"data":                            libdata,
 }
 
 var stdlibAutoLoadOrder = []string{

@@ -1,0 +1,314 @@
+// libaudio-aiff provides AIFF (Audio Interchange File Format) encoding
+// and parsing helpers for libaudio.
+//
+// AIFF is Apple's standard uncompressed audio format. It uses big-endian
+// byte order and supports 8-bit, 16-bit, and 32-bit signed integer PCM.
+// Samples are normalised floats in [-1, 1].
+
+{
+	map: map
+	default: default
+	range: range
+} := import('std')
+{
+	join: join
+} := import('str')
+{
+	floor: floor
+	pow: pow
+	log: log
+} := import('math')
+{
+	pmap: pmap
+} := import('thread')
+
+// ---- clamp -----------------------------------------------------------
+
+fn _clipF32(s) if {
+	s > 1 -> 1
+	s < -1 -> -1
+	_ -> s
+}
+
+// ---- sample conversions (same as WAV, but signed for 8-bit) ----------
+
+fn _f32ToI8(s) {
+	v := int(s * 127)
+	if v < -128 { true -> -128, _ -> if v > 127 { true -> 127, _ -> v } }
+}
+
+fn _i8ToF32(s) s / 128
+
+fn _f32ToI16(s) int(s * 32767)
+fn _i16ToF32(s) s / 32768
+
+fn _f32ToI32(s) int(s * 2147483647)
+fn _i32ToF32(s) s / 2147483648
+
+// ---- big-endian byte utilities --------------------------------------
+
+fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
+
+fn _u16BE(n) {
+	n := int(n)
+	[int(n / 256) % 256, n % 256]
+}
+
+fn _i16BE(n) {
+	n := int(n)
+	u := if n < 0 { true -> n + 65536, _ -> n }
+	_u16BE(u)
+}
+
+fn _u32BE(n) {
+	n := int(n)
+	b3 := n % 256
+	b2 := int(n / 256) % 256
+	b1 := int(n / 65536) % 256
+	b0 := int(n / 16777216) % 256
+	[b0, b1, b2, b3]
+}
+
+fn _i32BE(n) {
+	n := int(n)
+	u := if n < 0 { true -> n + 4294967296, _ -> n }
+	_u32BE(u)
+}
+
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readI8(s, off) {
+	u := _readU8(s, off)
+	if u > 127 { true -> u - 256, _ -> u }
+}
+
+fn _readU16BE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b0 * 256 + b1
+}
+
+fn _readI16BE(s, off) {
+	u := _readU16BE(s, off)
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+fn _readU32BE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+}
+
+fn _readI32BE(s, off) {
+	u := _readU32BE(s, off)
+	if u > 2147483647 { true -> u - 4294967296, _ -> u }
+}
+
+// ---- IEEE 754 80-bit extended float (big-endian) --------------------
+// AIFF stores sample rate as 80-bit extended. We support common rates
+// via encode/decode of the subset needed for integer sample rates.
+
+fn _encodeExtended80(val) {
+	// Handle zero
+	if val = 0 -> _byteStr([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+	sign := if val < 0 { true -> 1, _ -> 0 }
+	v := if val < 0 { true -> 0 - val, _ -> val }
+
+	// exponent bias for 80-bit extended is 16383
+	exp := int(floor(log(v) / log(2)))
+	mantissa := v / pow(2, exp)
+	// mantissa is in [1, 2), the integer bit is explicit in extended
+	biasedExp := exp + 16383
+
+	// encode sign + exponent (15 bits) into 2 bytes
+	expWord := sign * 32768 + biasedExp
+	eByte0 := int(expWord / 256) % 256
+	eByte1 := expWord % 256
+
+	// encode mantissa as 64-bit unsigned integer
+	// mantissa * 2^63 gives us the full 64-bit significand with integer bit
+	mHigh := mantissa * 2147483648 // mantissa * 2^31
+	mHighInt := int(floor(mHigh))
+	mLow := (mHigh - mHighInt) * 4294967296 // remainder * 2^32
+	mLowInt := int(floor(mLow))
+
+	_byteStr([eByte0, eByte1]) + _byteStr(_u32BE(mHighInt)) + _byteStr(_u32BE(mLowInt)) + _byteStr([0, 0])
+}
+
+fn _decodeExtended80(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+
+	sign := if int(b0 / 128) = 1 { true -> -1, _ -> 1 }
+	biasedExp := (b0 % 128) * 256 + b1
+	exp := biasedExp - 16383
+
+	mHigh := _readU32BE(s, off + 2)
+	mLow := _readU32BE(s, off + 6)
+
+	// reconstruct mantissa: mHigh * 2^(-31) + mLow * 2^(-63) approximately
+	mantissa := mHigh / 2147483648 + mLow / 2147483648 / 4294967296
+
+	sign * mantissa * pow(2, exp)
+}
+
+// ---- AIFF sample encoding -------------------------------------------
+
+fn _aiffSampleBytes(sample, bitDepth) {
+	sc := _clipF32(sample)
+	if bitDepth {
+		8 -> _byteStr([if _f32ToI8(sc) < 0 { true -> _f32ToI8(sc) + 256, _ -> _f32ToI8(sc) }])
+		16 -> _byteStr(_i16BE(_f32ToI16(sc)))
+		32 -> _byteStr(_i32BE(_f32ToI32(sc)))
+		_ -> _byteStr(_i16BE(_f32ToI16(sc)))
+	}
+}
+
+fn _aiffDataChunk(samples, bitDepth) {
+	samples |> map(fn(s) _aiffSampleBytes(s, bitDepth)) |> join('')
+}
+
+// ---- AIFF encoding --------------------------------------------------
+
+// aiff encodes a list of normalised float samples into an AIFF binary string.
+// `samples` must already be interleaved when channels > 1.
+//
+// Example:
+//   s := sine(440, 44100, 44100)
+//   data := aiff(s, 44100, 1, 16)
+fn aiff(samples, sampleRate, channels, bitDepth) {
+	sampleRate := default(sampleRate, 44100)
+	channels := default(channels, 1)
+	bitDepth := default(bitDepth, 16)
+
+	bytesPerSample := int(bitDepth / 8)
+	numFrames := int(len(samples) / channels)
+	soundDataSize := len(samples) * bytesPerSample
+	// SSND chunk: 8 (header) + 8 (offset+blockSize) + soundDataSize
+	ssndChunkSize := 8 + soundDataSize
+	// COMM chunk size is always 18 for standard AIFF
+	commChunkSize := 18
+	// FORM size: 4 (AIFF) + 8+commChunkSize + 8+ssndChunkSize
+	formSize := 4 + 8 + commChunkSize + 8 + ssndChunkSize
+
+	sampleData := _aiffDataChunk(samples, bitDepth)
+	extSR := _encodeExtended80(sampleRate)
+
+	// FORM header
+	'FORM' +
+		_byteStr(_u32BE(formSize)) +
+		'AIFF' +
+		// COMM chunk
+		'COMM' +
+		_byteStr(_u32BE(commChunkSize)) +
+		_byteStr(_u16BE(channels)) +
+		_byteStr(_u32BE(numFrames)) +
+		_byteStr(_u16BE(bitDepth)) +
+		extSR +
+		// SSND chunk
+		'SSND' +
+		_byteStr(_u32BE(ssndChunkSize)) +
+		_byteStr(_u32BE(0)) +  // offset
+		_byteStr(_u32BE(0)) +  // blockSize
+		sampleData
+}
+
+// ---- AIFF parsing ---------------------------------------------------
+
+fn _aiffReadSample(data, off, bitDepth) if bitDepth {
+	8 -> _i8ToF32(_readI8(data, off))
+	16 -> _i16ToF32(_readI16BE(data, off))
+	32 -> _i32ToF32(_readI32BE(data, off))
+	_ -> _i16ToF32(_readI16BE(data, off))
+}
+
+fn _aiffReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth) {
+	fn sub(acc, i) if i >= totalSamples {
+		true -> acc
+		_ -> {
+			off := dataOff + i * bytesPerSample
+			s := _aiffReadSample(data, off, bitDepth)
+			sub(acc << s, i + 1)
+		}
+	}
+	sub([], 0)
+}
+
+fn _aiffFindChunk(data, off, endOff, tag) if off + 8 > endOff {
+	true -> ?
+	_ -> {
+		t := data.(off) + data.(off + 1) + data.(off + 2) + data.(off + 3)
+		chunkSize := _readU32BE(data, off + 4)
+		if t = tag {
+			true -> { off: off + 8, size: chunkSize }
+			_ -> {
+				// chunks are padded to even length
+				skip := chunkSize + if chunkSize % 2 = 1 { true -> 1, _ -> 0 }
+				_aiffFindChunk(data, off + 8 + skip, endOff, tag)
+			}
+		}
+	}
+}
+
+// parseAiff parses an AIFF binary string and returns:
+//   { sampleRate, channels, bitDepth, samples }
+// where `samples` is a list of normalised floats. Returns ? on error.
+//
+// Example:
+//   r := parseAiff(fileBytes)
+//   r.sampleRate  // => 44100
+fn parseAiff(data) {
+	if len(data) < 12 {
+		true -> ?
+		_ -> {
+			form := data.(0) + data.(1) + data.(2) + data.(3)
+			aiffTag := data.(8) + data.(9) + data.(10) + data.(11)
+			if !(form = 'FORM' & aiffTag = 'AIFF') {
+				true -> ?
+				_ -> {
+					formSize := _readU32BE(data, 4)
+					endOff := 8 + formSize
+
+					commChunk := _aiffFindChunk(data, 12, endOff, 'COMM')
+					if commChunk = ? {
+						true -> ?
+						_ -> {
+							channels := _readU16BE(data, commChunk.off)
+							numFrames := _readU32BE(data, commChunk.off + 2)
+							bitDepth := _readU16BE(data, commChunk.off + 6)
+							sampleRate := _decodeExtended80(data, commChunk.off + 8)
+
+							ssndChunk := _aiffFindChunk(data, 12, endOff, 'SSND')
+							if ssndChunk = ? {
+								true -> ?
+								_ -> {
+									ssndOffset := _readU32BE(data, ssndChunk.off)
+									dataOff := ssndChunk.off + 8 + ssndOffset
+									bytesPerSample := int(bitDepth / 8)
+									totalSamples := numFrames * channels
+
+									{
+										sampleRate: int(sampleRate)
+										channels: channels
+										bitDepth: bitDepth
+										samples: _aiffReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// pbatchAiff encodes multiple sample lists into AIFF byte strings in parallel.
+// Each spec is { samples, sampleRate?, channels?, bitDepth? }.
+fn pbatchAiff(specs) pmap(specs, fn(s) aiff(s.samples, s.sampleRate, s.channels, s.bitDepth))
+
+// pbatchParseAiff decodes multiple AIFF byte strings in parallel.
+fn pbatchParseAiff(dataList) pmap(dataList, parseAiff)

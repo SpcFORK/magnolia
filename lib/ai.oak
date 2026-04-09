@@ -605,3 +605,724 @@ fn pbatchNormalize(vectors) pmap(vectors, normalize)
 //   pbatchCosineSimilarity([[1, 0], [0, 1], [1, 1]], [1, 0])
 //   // => [1.0, 0.0, 0.707...]
 fn pbatchCosineSimilarity(vectors, query) pmap(vectors, fn(v) cosineSimilarity(v, query))
+
+// ============================================================================
+// Matrix Operations
+// ============================================================================
+
+// matZeros creates an m x n matrix filled with zeros.
+//
+// Example:
+//   matZeros(2, 3)  // => [[0, 0, 0], [0, 0, 0]]
+fn matZeros(rows, cols) {
+	fn makeRow(r, acc) if r >= rows {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= cols {
+				true -> row
+				_ -> makeCol(c + 1, row << 0)
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matIdentity creates an n x n identity matrix.
+//
+// Example:
+//   matIdentity(3)  // => [[1,0,0],[0,1,0],[0,0,1]]
+fn matIdentity(n) {
+	fn makeRow(r, acc) if r >= n {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= n {
+				true -> row
+				_ -> makeCol(c + 1, row << if c = r { true -> 1, _ -> 0 })
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matTranspose transposes a matrix (swaps rows and columns).
+//
+// Example:
+//   matTranspose([[1, 2], [3, 4], [5, 6]])  // => [[1, 3, 5], [2, 4, 6]]
+fn matTranspose(mat) {
+	rows := len(mat)
+	if rows = 0 {
+		true -> []
+		_ -> {
+			cols := len(mat.(0))
+			fn makeRow(c, acc) if c >= cols {
+				true -> acc
+				_ -> {
+					fn makeCol(r, row) if r >= rows {
+						true -> row
+						_ -> makeCol(r + 1, row << mat.(r).(c))
+					}
+					matRow := makeCol(0, [])
+					makeRow(c + 1, acc << matRow)
+				}
+			}
+			makeRow(0, [])
+		}
+	}
+}
+
+// matMul multiplies two matrices A (m x n) and B (n x p), returning an m x p matrix.
+//
+// Example:
+//   matMul([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[19, 22], [43, 50]]
+fn matMul(a, b) {
+	rowsA := len(a)
+	colsB := len(b.(0))
+	colsA := len(a.(0))
+	fn makeRow(r, acc) if r >= rowsA {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= colsB {
+				true -> row
+				_ -> {
+					fn dot(k, sum) if k >= colsA {
+						true -> sum
+						_ -> dot(k + 1, sum + a.(r).(k) * b.(k).(c))
+					}
+					makeCol(c + 1, row << dot(0, 0))
+				}
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matAdd adds two matrices element-wise.
+//
+// Example:
+//   matAdd([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[6, 8], [10, 12]]
+fn matAdd(a, b) {
+	fn makeRow(r, acc) if r >= len(a) {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= len(a.(r)) {
+				true -> row
+				_ -> makeCol(c + 1, row << (a.(r).(c) + b.(r).(c)))
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matScale multiplies every element in a matrix by a scalar.
+//
+// Example:
+//   matScale([[1, 2], [3, 4]], 3)  // => [[3, 6], [9, 12]]
+fn matScale(mat, scalar) mat |> map(fn(row) row |> map(fn(x) x * scalar))
+
+// vecAdd adds two vectors element-wise.
+//
+// Example:
+//   vecAdd([1, 2, 3], [4, 5, 6])  // => [5, 7, 9]
+fn vecAdd(v1, v2) {
+	fn add(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> add(i + 1, acc << (v1.(i) + v2.(i)))
+	}
+	add(0, [])
+}
+
+// vecSub subtracts v2 from v1 element-wise.
+//
+// Example:
+//   vecSub([4, 5, 6], [1, 2, 3])  // => [3, 3, 3]
+fn vecSub(v1, v2) {
+	fn sub(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> sub(i + 1, acc << (v1.(i) - v2.(i)))
+	}
+	sub(0, [])
+}
+
+// vecScale multiplies every element of a vector by a scalar.
+//
+// Example:
+//   vecScale([1, 2, 3], 2)  // => [2, 4, 6]
+fn vecScale(v, scalar) v |> map(fn(x) x * scalar)
+
+// ============================================================================
+// Classification Metrics
+// ============================================================================
+
+// accuracy computes the fraction of correct predictions.
+//
+// Example:
+//   accuracy([1, 0, 1, 1], [1, 0, 0, 1])  // => 0.75
+fn accuracy(predicted, actual) {
+	n := len(predicted)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			fn countCorrect(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					correct := if predicted.(i) = actual.(i) { true -> 1, _ -> 0 }
+					countCorrect(i + 1, acc + correct)
+				}
+			}
+			countCorrect(0, 0) / n
+		}
+	}
+}
+
+// precisionScore computes precision for a binary classifier.
+// precision = truePositives / (truePositives + falsePositives)
+//
+// Example:
+//   precisionScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.666...
+fn precisionScore(predicted, actual, positiveLabel) {
+	n := len(predicted)
+	fn count(i, tp, fp) if i >= n {
+		true -> if tp + fp = 0 {
+			true -> 0
+			_ -> tp / (tp + fp)
+		}
+		_ -> if predicted.(i) = positiveLabel {
+			true -> if actual.(i) = positiveLabel {
+				true -> count(i + 1, tp + 1, fp)
+				_ -> count(i + 1, tp, fp + 1)
+			}
+			_ -> count(i + 1, tp, fp)
+		}
+	}
+	count(0, 0, 0)
+}
+
+// recallScore computes recall for a binary classifier.
+// recall = truePositives / (truePositives + falseNegatives)
+//
+// Example:
+//   recallScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 1.0
+fn recallScore(predicted, actual, positiveLabel) {
+	n := len(predicted)
+	fn count(i, tp, fneg) if i >= n {
+		true -> if tp + fneg = 0 {
+			true -> 0
+			_ -> tp / (tp + fneg)
+		}
+		_ -> if actual.(i) = positiveLabel {
+			true -> if predicted.(i) = positiveLabel {
+				true -> count(i + 1, tp + 1, fneg)
+				_ -> count(i + 1, tp, fneg + 1)
+			}
+			_ -> count(i + 1, tp, fneg)
+		}
+	}
+	count(0, 0, 0)
+}
+
+// f1Score computes the F1 score (harmonic mean of precision and recall).
+//
+// Example:
+//   f1Score([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.8
+fn f1Score(predicted, actual, positiveLabel) {
+	p := precisionScore(predicted, actual, positiveLabel)
+	r := recallScore(predicted, actual, positiveLabel)
+	if p + r = 0 {
+		true -> 0
+		_ -> 2 * p * r / (p + r)
+	}
+}
+
+// confusionMatrix builds a confusion matrix for integer class labels 0..numClasses-1.
+// Returns a numClasses x numClasses matrix where mat[actual][predicted] = count.
+//
+// Example:
+//   confusionMatrix([0, 1, 1, 2], [0, 1, 2, 2], 3)
+//   // => [[1,0,0],[0,1,0],[0,1,1]]  (rows=actual, cols=predicted)
+fn confusionMatrix(predicted, actual, numClasses) {
+	mat := matZeros(numClasses, numClasses)
+	fn fill(i) if i >= len(predicted) {
+		true -> mat
+		_ -> {
+			a := int(actual.(i))
+			p := int(predicted.(i))
+			mat.(a).(p) <- mat.(a).(p) + 1
+			fill(i + 1)
+		}
+	}
+	fill(0)
+}
+
+// ============================================================================
+// Data Preprocessing
+// ============================================================================
+
+// oneHotEncode encodes an integer label as a one-hot vector of given length.
+//
+// Example:
+//   oneHotEncode(2, 5)  // => [0, 0, 1, 0, 0]
+fn oneHotEncode(label, numClasses) {
+	fn build(i, acc) if i >= numClasses {
+		true -> acc
+		_ -> build(i + 1, acc << if i = label { true -> 1, _ -> 0 })
+	}
+	build(0, [])
+}
+
+// oneHotDecode returns the index of the maximum value in a one-hot vector.
+// Works as argmax for any numeric vector.
+//
+// Example:
+//   oneHotDecode([0, 0, 1, 0])  // => 2
+//   oneHotDecode([0.1, 0.7, 0.2])  // => 1
+fn oneHotDecode(v) {
+	fn findMax(i, bestIdx, bestVal) if i >= len(v) {
+		true -> bestIdx
+		_ -> if v.(i) > bestVal {
+			true -> findMax(i + 1, i, v.(i))
+			_ -> findMax(i + 1, bestIdx, bestVal)
+		}
+	}
+	if len(v) = 0 {
+		true -> ?
+		_ -> findMax(1, 0, v.(0))
+	}
+}
+
+// shuffleIndices returns a list of indices [0..n-1] in pseudo-random order
+// using a simple linear congruential generator seeded by seed.
+//
+// Example:
+//   shuffleIndices(5, 42)  // => [3, 0, 4, 1, 2] (deterministic for seed)
+fn shuffleIndices(n, seed) {
+	indices := range(n)
+	// Fisher-Yates using LCG: next = (a*prev + c) mod m
+	fn swap(i, rng, arr) if i < 1 {
+		true -> arr
+		_ -> {
+			nextRng := int(abs((1103515245 * rng + 12345))) % 2147483648
+			j := nextRng % (i + 1)
+			// swap arr[i] and arr[j]
+			tmp := arr.(i)
+			arr.(i) <- arr.(j)
+			arr.(j) <- tmp
+			swap(i - 1, nextRng, arr)
+		}
+	}
+	swap(n - 1, seed, indices)
+}
+
+// trainTestSplit splits data and labels into train and test sets.
+// ratio is the fraction used for training (e.g. 0.8).
+// Returns {trainData, trainLabels, testData, testLabels}.
+//
+// Example:
+//   trainTestSplit([[1],[2],[3],[4],[5]], [0,1,0,1,0], 0.6, 42)
+fn trainTestSplit(data, labels, ratio, seed) {
+	n := len(data)
+	indices := shuffleIndices(n, seed)
+	splitIdx := int(n * ratio)
+	fn gather(idxList) {
+		fn g(i, dAcc, lAcc) if i >= len(idxList) {
+			true -> { data: dAcc, labels: lAcc }
+			_ -> {
+				idx := idxList.(i)
+				g(i + 1, dAcc << data.(idx), lAcc << labels.(idx))
+			}
+		}
+		g(0, [], [])
+	}
+	trainIdx := indices |> slice(0, splitIdx)
+	testIdx := indices |> slice(splitIdx, n)
+	train := gather(trainIdx)
+	test := gather(testIdx)
+	{
+		trainData: train.data
+		trainLabels: train.labels
+		testData: test.data
+		testLabels: test.labels
+	}
+}
+
+// kFoldIndices generates k folds of train/test index splits for cross-validation.
+// Returns a list of {train: [...indices], test: [...indices]} objects.
+//
+// Example:
+//   kFoldIndices(10, 5)  // => [{train: [2..9], test: [0,1]}, ...]
+fn kFoldIndices(n, k) {
+	foldSize := int(n / k)
+	fn makeFold(f, acc) if f >= k {
+		true -> acc
+		_ -> {
+			testStart := f * foldSize
+			testEnd := if f = k - 1 { true -> n, _ -> testStart + foldSize }
+			testIdx := range(testStart, testEnd)
+			trainIdx := {
+				left := range(testStart)
+				right := range(testEnd, n)
+				fn cat(i, out) if i >= len(right) {
+					true -> out
+					_ -> cat(i + 1, out << right.(i))
+				}
+				cat(0, left)
+			}
+			makeFold(f + 1, acc << { train: trainIdx, test: testIdx })
+		}
+	}
+	makeFold(0, [])
+}
+
+// ============================================================================
+// K-Nearest Neighbors
+// ============================================================================
+
+// knn classifies a query point using k-nearest neighbors from a labeled dataset.
+// data is a list of feature vectors, labels is a parallel list of class labels.
+// Returns the most common label among the k nearest neighbors (by Euclidean distance).
+//
+// Example:
+//   knn([[0,0],[1,1],[2,2],[3,3]], [:a,:a,:b,:b], [1.5,1.5], 3)  // => :a
+fn knn(data, labels, query, k) {
+	// Compute distances
+	distances := data |> map(fn(point, idx) [idx, euclideanDistance(point, query)])
+	// Get top-k closest
+	closest := distances |> sort(fn(pair) pair.(1)) |> slice(0, k)
+	// Majority vote
+	fn vote(i, counts) if i >= len(closest) {
+		true -> {
+			// Find label with highest count
+			fn best(j, bestLabel, bestCount) if j >= len(closest) {
+				true -> bestLabel
+				_ -> {
+					lbl := labels.(closest.(j).(0))
+					fn countLabel(m, c) if m >= len(closest) {
+						true -> c
+						_ -> if labels.(closest.(m).(0)) = lbl {
+							true -> countLabel(m + 1, c + 1)
+							_ -> countLabel(m + 1, c)
+						}
+					}
+					c := countLabel(0, 0)
+					if c > bestCount {
+						true -> best(j + 1, lbl, c)
+						_ -> best(j + 1, bestLabel, bestCount)
+					}
+				}
+			}
+			best(0, ?, 0)
+		}
+		_ -> vote(i + 1, counts)
+	}
+	vote(len(closest), {})
+}
+
+// ============================================================================
+// Positional Encoding (Transformer)
+// ============================================================================
+
+// positionalEncoding generates sinusoidal positional encodings as used in
+// the original Transformer architecture ("Attention Is All You Need").
+// Returns a seqLen x dModel matrix.
+//
+// Example:
+//   positionalEncoding(4, 8)  // => 4x8 matrix of positional encodings
+fn positionalEncoding(seqLen, dModel) {
+	fn makeRow(pos, acc) if pos >= seqLen {
+		true -> acc
+		_ -> {
+			fn makeCol(i, row) if i >= dModel {
+				true -> row
+				_ -> {
+					angle := pos / pow(10000, (2 * int(i / 2)) / dModel)
+					val := if i % 2 = 0 {
+						true -> sin(angle)
+						_ -> cos(angle)
+					}
+					makeCol(i + 1, row << val)
+				}
+			}
+			matRow := makeCol(0, [])
+			makeRow(pos + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// ============================================================================
+// Layer Normalization
+// ============================================================================
+
+// layerNorm applies layer normalization to a vector.
+// Normalizes to zero mean and unit variance, then applies scale (gamma)
+// and shift (beta) parameters.
+//
+// Example:
+//   layerNorm([1, 2, 3, 4], 1, 0)  // => [-1.34, -0.45, 0.45, 1.34] (approx)
+fn layerNorm(v, gamma, beta) {
+	m := mean(v)
+	epsilon := 0.00001
+	v2 := variance(v)
+	denom := sqrt(v2 + epsilon)
+	v |> map(fn(x) gamma * ((x - m) / denom) + beta)
+}
+
+// ============================================================================
+// Learning Rate Scheduling
+// ============================================================================
+
+// lrConstant returns a constant learning rate regardless of step.
+fn lrConstant(baseLr, _step) baseLr
+
+// lrStepDecay returns a learning rate that decays by decayFactor every stepSize steps.
+//
+// Example:
+//   lrStepDecay(0.01, 25, 10, 0.5)  // => 0.0025 (decayed twice: steps 10 and 20)
+fn lrStepDecay(baseLr, step, stepSize, decayFactor) {
+	numDecays := int(step / stepSize)
+	baseLr * pow(decayFactor, numDecays)
+}
+
+// lrExponentialDecay returns a learning rate with exponential decay.
+//
+// Example:
+//   lrExponentialDecay(0.01, 100, 0.96)  // => 0.01 * 0.96^100
+fn lrExponentialDecay(baseLr, step, decayRate) baseLr * pow(decayRate, step)
+
+// lrCosineAnnealing returns a learning rate following a cosine annealing schedule.
+// Smoothly decreases from baseLr to minLr over totalSteps.
+//
+// Example:
+//   lrCosineAnnealing(0.01, 50, 100, 0.0001)  // => ~0.005
+fn lrCosineAnnealing(baseLr, step, totalSteps, minLr) {
+	progress := if step >= totalSteps { true -> 1, _ -> step / totalSteps }
+	minLr + 0.5 * (baseLr - minLr) * (1 + cos(Pi * progress))
+}
+
+// lrWarmupLinear implements linear warmup followed by constant or linear decay.
+// During warmup, lr increases linearly from 0 to baseLr over warmupSteps.
+// After warmup, lr decays linearly to 0 over the remaining steps.
+//
+// Example:
+//   lrWarmupLinear(0.01, 5, 10, 100)   // => 0.005 (in warmup)
+//   lrWarmupLinear(0.01, 50, 10, 100)  // => 0.0055... (in decay)
+fn lrWarmupLinear(baseLr, step, warmupSteps, totalSteps) {
+	if step < warmupSteps {
+		true -> baseLr * step / warmupSteps
+		_ -> {
+			remaining := totalSteps - warmupSteps
+			if remaining <= 0 {
+				true -> baseLr
+				_ -> baseLr * (totalSteps - step) / remaining
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Weight Initialization
+// ============================================================================
+
+// initUniform generates a vector of n values uniformly distributed in [lo, hi]
+// using a deterministic LCG seeded by seed.
+//
+// Example:
+//   initUniform(5, -1, 1, 42)  // => [0.39, -0.72, ...] (deterministic)
+fn initUniform(n, lo, hi, seed) {
+	range := hi - lo
+	fn gen(i, rng, acc) if i >= n {
+		true -> acc
+		_ -> {
+			nextRng := int(abs((1103515245 * rng + 12345))) % 2147483648
+			val := lo + range * (nextRng / 2147483648)
+			gen(i + 1, nextRng, acc << val)
+		}
+	}
+	gen(0, seed, [])
+}
+
+// initXavier generates a vector using Xavier/Glorot uniform initialization.
+// Suitable for layers with fanIn inputs and fanOut outputs.
+//
+// Example:
+//   initXavier(10, 128, 64, 42)  // => 10 values in [-limit, limit]
+fn initXavier(n, fanIn, fanOut, seed) {
+	limit := sqrt(6 / (fanIn + fanOut))
+	initUniform(n, -1 * limit, limit, seed)
+}
+
+// initHe generates a vector using He (Kaiming) uniform initialization.
+// Suitable for ReLU-activated layers.
+//
+// Example:
+//   initHe(10, 128, seed)  // => 10 values scaled for ReLU
+fn initHe(n, fanIn, seed) {
+	limit := sqrt(6 / fanIn)
+	initUniform(n, -1 * limit, limit, seed)
+}
+
+// ============================================================================
+// Gradient Descent Helpers
+// ============================================================================
+
+// sgdStep performs a single SGD update on a parameter vector.
+// params and grads are vectors of the same length.
+//
+// Example:
+//   sgdStep([1, 2, 3], [0.1, 0.2, 0.1], 0.01)  // => [0.999, 1.998, 2.999]
+fn sgdStep(params, grads, lr) {
+	fn step(i, acc) if i >= len(params) {
+		true -> acc
+		_ -> step(i + 1, acc << (params.(i) - lr * grads.(i)))
+	}
+	step(0, [])
+}
+
+// sgdMomentumStep performs an SGD step with momentum.
+// velocity is the previous momentum vector (initially zeros).
+// Returns {params: updatedParams, velocity: updatedVelocity}.
+//
+// Example:
+//   sgdMomentumStep([1,2], [0.1,0.2], [0,0], 0.01, 0.9)
+fn sgdMomentumStep(params, grads, velocity, lr, momentum) {
+	fn step(i, pAcc, vAcc) if i >= len(params) {
+		true -> { params: pAcc, velocity: vAcc }
+		_ -> {
+			newV := momentum * velocity.(i) - lr * grads.(i)
+			newP := params.(i) + newV
+			step(i + 1, pAcc << newP, vAcc << newV)
+		}
+	}
+	step(0, [], [])
+}
+
+// clipGradNorm scales a gradient vector so its L2 norm does not exceed maxNorm.
+// Returns the original gradients if the norm is within bounds.
+//
+// Example:
+//   clipGradNorm([3, 4], 1)  // => [0.6, 0.8]
+fn clipGradNorm(grads, maxNorm) {
+	norm := magnitude(grads)
+	if norm <= maxNorm {
+		true -> grads
+		_ -> grads |> map(fn(g) g * maxNorm / norm)
+	}
+}
+
+// ============================================================================
+// Sampling & Decoding
+// ============================================================================
+
+// argmax returns the index of the largest element in a vector.
+//
+// Example:
+//   argmax([0.1, 0.7, 0.2])  // => 1
+fn argmax(v) oneHotDecode(v)
+
+// temperatureScale applies temperature scaling to logits before softmax.
+// Lower temperature sharpens the distribution, higher temperature flattens it.
+//
+// Example:
+//   temperatureScale([1, 2, 3], 0.5)  // => [2, 4, 6]
+fn temperatureScale(logits, temperature) {
+	t := if temperature <= 0 { true -> 0.0001, _ -> temperature }
+	logits |> map(fn(x) x / t)
+}
+
+// topPFilter filters logits to keep only tokens whose cumulative softmax
+// probability mass is <= p (nucleus sampling). Returns filtered logits with
+// rejected positions set to a large negative value.
+//
+// Example:
+//   topPFilter([1, 2, 3, 0.5], 0.9)
+fn topPFilter(logits, p) {
+	probs := softmax(logits)
+	n := len(probs)
+	// Build index-prob pairs and sort descending by prob
+	pairs := probs |> map(fn(prob, idx) [idx, prob])
+	sorted := pairs |> sort(fn(pair) pair.(1) * -1)
+	// Accumulate until cumulative prob exceeds p
+	fn accumulate(i, cumSum, kept) if i >= n {
+		true -> kept
+		_ -> {
+			newCum := cumSum + sorted.(i).(1)
+			if cumSum >= p {
+				true -> kept
+				_ -> accumulate(i + 1, newCum, kept << sorted.(i).(0))
+			}
+		}
+	}
+	keepSet := accumulate(0, 0, [])
+	// Rebuild logits, masking out non-kept indices
+	fn isKept(idx) {
+		fn check(j) if j >= len(keepSet) {
+			true -> false
+			_ -> if keepSet.(j) = idx {
+				true -> true
+				_ -> check(j + 1)
+			}
+		}
+		check(0)
+	}
+	logits |> map(fn(x, idx) if isKept(idx) { true -> x, _ -> -100000 })
+}
+
+// ============================================================================
+// Embedding Lookup
+// ============================================================================
+
+// embeddingLookup retrieves embedding vectors for a list of token indices
+// from an embedding matrix (list of vectors).
+//
+// Example:
+//   table := [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+//   embeddingLookup(table, [2, 0])  // => [[0.5, 0.6], [0.1, 0.2]]
+fn embeddingLookup(table, indices) indices |> map(fn(idx) table.(idx))
+
+// ============================================================================
+// Parallel Higher-Order Utilities
+// ============================================================================
+
+// pmatMul multiplies two matrices with parallelism across rows.
+//
+// Example:
+//   pmatMul([[1,2],[3,4]], [[5,6],[7,8]])  // => [[19,22],[43,50]]
+fn pmatMul(a, b) {
+	colsB := len(b.(0))
+	colsA := len(a.(0))
+	pmap(a, fn(rowA) {
+		fn makeCol(c, row) if c >= colsB {
+			true -> row
+			_ -> {
+				fn dot(k, sum) if k >= colsA {
+					true -> sum
+					_ -> dot(k + 1, sum + rowA.(k) * b.(k).(c))
+				}
+				makeCol(c + 1, row << dot(0, 0))
+			}
+		}
+		makeCol(0, [])
+	})
+}
+
+// pbatchSoftmax applies softmax to each vector in a list, in parallel.
+//
+// Example:
+//   pbatchSoftmax([[1,2,3],[4,5,6]])
+fn pbatchSoftmax(vectors) pmap(vectors, softmax)
+
+// pbatchMeanSquaredError computes MSE between corresponding pairs from
+// two lists of vectors, in parallel.
+//
+// Example:
+//   pbatchMeanSquaredError([[1,2],[3,4]], [[1.1,2.1],[3.2,3.8]])
+fn pbatchMeanSquaredError(predictedBatch, actualBatch) {
+	pmap(predictedBatch, fn(pred, idx) meanSquaredError(pred, actualBatch.(idx)))
+}

@@ -69,6 +69,26 @@ phases := phase(spectrum.re, spectrum.im)
 // phases.(i) = atan2(im(i), re(i))
 ```
 
+## Parallel Batch Operations
+
+### `pbatchFFT(signals)`
+
+Computes forward FFT on multiple signals in parallel. Each signal is an independent real-valued sample list.
+
+```oak
+pbatchFFT([signal1, signal2, signal3])
+// => [{ re: [...], im: [...] }, ...]
+```
+
+### `pbatchPowerSpectrum(signals)`
+
+Computes power spectrum for multiple signals in parallel.
+
+```oak
+pbatchPowerSpectrum([signal1, signal2])
+// => [[mag1, mag2, ...], [mag1, mag2, ...]]
+```
+
 ## Notes
 
 - Input length must be a power of 2; pad or truncate before calling.

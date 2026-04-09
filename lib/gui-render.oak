@@ -1,6 +1,8 @@
 // gui-render builds the high-level 3D renderer API used by GUI.
 
 { _default: _default } := import('gui-common')
+guiThread := import('gui-thread')
+threadLib := import('thread')
 
 fn Renderer3D(deps, window, options) {
 	opts := _default(options, {})
@@ -342,6 +344,92 @@ fn Renderer3D(deps, window, options) {
 			instanceCache <- {}
 			instanceCacheOrder <- []
 			{ type: :ok }
+		}
+
+		// ─── Threaded rendering helpers ──────────────────────────────────
+		// These methods perform mesh preparation and transform computation
+		// in parallel using the thread library, then draw on the main thread.
+
+		// flushQueueParallel processes the render queue using parallel sort
+		// and batched dispatch.  Mesh transforms are computed in worker
+		// threads; actual GDI/GPU draw calls run on the main thread.
+		flushQueueParallel: fn(numWorkers) {
+			n := len(renderQueue)
+			if n < 1 -> {
+				renderQueue <- []
+				{ type: :ok }
+			}
+			// For small queues, fall back to serial flush.
+			if n < 8 {
+				true -> {
+					_queueFlushByOrder(0)
+					renderQueue <- []
+					{ type: :ok }
+				}
+				_ -> {
+					// Parallel: pre-compute mesh data in workers, draw serially.
+					// Workers prepare cache keys and resolve meshes.
+					workers := _default(numWorkers, 4)
+					prepared := threadLib.pmapConcurrent(renderQueue, fn(e) {
+						m := _getCachedTransformMarker(e.mesh, e.transform)
+						{
+							kind: e.kind
+							mesh: m.mesh
+							transform: e.transform
+							color: e.color
+							cacheHit: m.cacheHit
+						}
+					}, workers)
+					// Draw calls must be serial (GDI/GPU is not thread-safe).
+					fn _drawPrepared(i) if i < len(prepared) -> {
+						e := prepared.(i)
+						if e.kind = 'solid' {
+							true -> deps.drawMeshSolid(window, e.mesh, e.transform, camera, e.color, light)
+							_ -> deps.drawMeshWireframe(window, e.mesh, e.transform, camera, e.color)
+						}
+						_drawPrepared(i + 1)
+					}
+					_drawPrepared(0)
+					renderQueue <- []
+					{ type: :ok }
+				}
+			}
+		}
+
+		// enqueueMeshBatch enqueues multiple meshes at once from a list of
+		// {mesh, transform, color, kind} objects.
+		enqueueMeshBatch: fn(entries) {
+			fn _pushAll(i) if i < len(entries) -> {
+				e := entries.(i)
+				renderQueue << {
+					kind: _default(e.kind, 'solid')
+					mesh: e.mesh
+					transform: e.transform
+					color: _default(e.color, lineColor)
+				}
+				_pushAll(i + 1)
+			}
+			_pushAll(0)
+			{ type: :ok }
+		}
+
+		// prepareMeshesAsync pre-computes mesh geometry in the background.
+		// Returns a Future whose .get() yields the list of prepared meshes.
+		prepareMeshesAsync: fn(meshSpecs) {
+			threadLib.Future(fn() {
+				meshSpecs |> threadLib.pmap(fn(spec) {
+					mesh := _cached(
+						_mk1(_default(spec.typeId, 0), _default(spec.param, 0))
+						fn() spec.createFn()
+					)
+					{
+						mesh: mesh
+						transform: spec.transform
+						color: _default(spec.color, lineColor)
+						kind: _default(spec.kind, 'solid')
+					}
+				})
+			})
 		}
 	}
 }

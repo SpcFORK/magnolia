@@ -3,6 +3,7 @@
 // Pseudo-random hashing and value noise (noise2D, fbm).
 
 m := import('gui-shader-math')
+threadLib := import('thread')
 
 {
 	fract: fract
@@ -49,4 +50,91 @@ fn fbm(x, y, octaves?) {
 		}
 	}
 	_layer(0, 0.0, 0.5, 1.0)
+}
+
+// noiseGrid2DParallel — generate a 2D grid of noise values in parallel.
+// Returns a flat list of length w*h with noise values for each (x,y) cell.
+// scaleFn(col, row) should return [sx, sy] — the scaled coordinates to sample.
+fn noiseGrid2DParallel(w, h, scaleFn, numWorkers) {
+	nw := if numWorkers { ? -> 4, _ -> numWorkers }
+	// Build row indices
+	rows := []
+	fn _buildRows(r) if r < h {
+		true -> {
+			rows <- rows << r
+			_buildRows(r + 1)
+		}
+	}
+	_buildRows(0)
+	// Compute each row in parallel
+	rowResults := threadLib.pmap(rows, fn(row) {
+		rowData := []
+		fn _col(c) if c < w {
+			true -> {
+				coords := scaleFn(c, row)
+				rowData <- rowData << noise2D(coords.0, coords.1)
+				_col(c + 1)
+			}
+		}
+		_col(0)
+		rowData
+	}, nw)
+	// Flatten rows into a single list
+	result := []
+	fn _flatten(i) if i < len(rowResults) {
+		true -> {
+			rowData := rowResults.(i)
+			fn _app(j) if j < len(rowData) {
+				true -> {
+					result <- result << rowData.(j)
+					_app(j + 1)
+				}
+			}
+			_app(0)
+			_flatten(i + 1)
+		}
+	}
+	_flatten(0)
+	result
+}
+
+// fbmGrid2DParallel — generate a 2D grid of fbm values in parallel.
+fn fbmGrid2DParallel(w, h, scaleFn, octaves, numWorkers) {
+	nw := if numWorkers { ? -> 4, _ -> numWorkers }
+	rows := []
+	fn _buildRows(r) if r < h {
+		true -> {
+			rows <- rows << r
+			_buildRows(r + 1)
+		}
+	}
+	_buildRows(0)
+	rowResults := threadLib.pmap(rows, fn(row) {
+		rowData := []
+		fn _col(c) if c < w {
+			true -> {
+				coords := scaleFn(c, row)
+				rowData <- rowData << fbm(coords.0, coords.1, octaves)
+				_col(c + 1)
+			}
+		}
+		_col(0)
+		rowData
+	}, nw)
+	result := []
+	fn _flatten(i) if i < len(rowResults) {
+		true -> {
+			rowData := rowResults.(i)
+			fn _app(j) if j < len(rowData) {
+				true -> {
+					result <- result << rowData.(j)
+					_app(j + 1)
+				}
+			}
+			_app(0)
+			_flatten(i + 1)
+		}
+	}
+	_flatten(0)
+	result
 }

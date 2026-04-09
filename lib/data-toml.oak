@@ -1,0 +1,270 @@
+// libdata-toml implements a TOML (v1.0) parser and serializer for Oak values.
+//
+// Supports basic types, tables, arrays of tables, inline tables, and dotted keys.
+
+{
+	default: default
+	slice: slice
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	entries: entries
+} := import('std')
+{
+	digit?: digit?
+	letter?: letter?
+	join: join
+	split: split
+	trim: trim
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+	contains?: contains?
+	replace: replace
+} := import('str')
+
+fn _esc(s) s |> map(fn(c) if c {
+	'\t' -> '\\t'
+	'\n' -> '\\n'
+	'\r' -> '\\r'
+	'"' -> '\\"'
+	'\\' -> '\\\\'
+	_ -> c
+})
+
+fn _bareKey?(key) key |> split() |> with reduce(true) fn(ok, c, _) ok & (letter?(c) | digit?(c) | c = '-' | c = '_')
+
+fn _key(k) if _bareKey?(k) { true -> k, _ -> '"' << _esc(k) << '"' }
+
+fn _val(v) if type(v) {
+	:null, :empty -> '""'
+	:bool -> if v { true -> 'true', _ -> 'false' }
+	:int, :float -> string(v)
+	:string -> '"' << _esc(v) << '"'
+	:atom -> '"' << string(v) << '"'
+	:list -> '[' << v |> map(_val) |> join(', ') << ']'
+	:object -> '{' << entries(v) |> map(fn(e) _key(e.0) << ' = ' << _val(e.1)) |> join(', ') << '}'
+}
+
+// serialize converts an Oak object to TOML.
+fn serialize(obj) _serTbl(obj, '')
+
+fn _serTbl(obj, prefix) {
+	simple := []
+	tables := []
+	entries(obj) |> each(fn(e) {
+		fk := if prefix { '' -> e.0, _ -> prefix << '.' << e.0 }
+		if type(e.1) {
+			:object -> tables << [fk, e.1]
+			:list -> if len(e.1) > 0 & type(e.1.0) = :object {
+				true -> tables << [fk, e.1]
+				_ -> simple << _key(e.0) << ' = ' << _val(e.1)
+			}
+			_ -> simple << _key(e.0) << ' = ' << _val(e.1)
+		}
+	})
+	parts := []
+	if len(simple) > 0 -> {
+		if prefix != '' -> parts << '[' << prefix << ']\n'
+		simple |> each(fn(l) parts << l << '\n')
+	}
+	tables |> each(fn(e) if type(e.1) = :list {
+		true -> e.1 |> each(fn(item) {
+			parts << '\n[[' << e.0 << ']]\n'
+			parts << _serTbl(item, '')
+		})
+		_ -> { parts << '\n', parts << _serTbl(e.1, e.0) }
+	})
+	parts |> join('')
+}
+
+// --- parser helpers ---
+
+fn _skipStr(s, target) {
+	inQ := false
+	qc := ''
+	max := len(s)
+	fn sub(i) if i {
+		max -> -1
+		_ -> {
+			c := s.(i)
+			if inQ {
+				true -> if c = qc { true -> { inQ <- false, sub(i + 1) }, _ -> sub(i + 1) }
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, sub(i + 1) }
+					_ -> if c = target { true -> i, _ -> sub(i + 1) }
+				}
+			}
+		}
+	}
+	sub(0)
+}
+
+fn _stripCmt(line) {
+	inQ := false
+	qc := ''
+	max := len(line)
+	fn sub(i) if i {
+		max -> line
+		_ -> {
+			c := line.(i)
+			if inQ {
+				true -> if c = qc { true -> { inQ <- false, sub(i + 1) }, _ -> sub(i + 1) }
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, sub(i + 1) }
+					'#' -> line |> slice(0, i)
+					_ -> sub(i + 1)
+				}
+			}
+		}
+	}
+	sub(0)
+}
+
+fn _trimSuf(s, suf) if endsWith?(s, suf) { true -> s |> slice(0, len(s) - len(suf)), _ -> s }
+
+fn _splitTL(s, sep) {
+	depth := 0
+	parts := ['']
+	max := len(s)
+	inQ := false
+	qc := ''
+	fn sub(i) if i {
+		max -> parts
+		_ -> {
+			c := s.(i)
+			if inQ {
+				true -> {
+					parts.(len(parts) - 1) << c
+					if c = qc -> inQ <- false
+					sub(i + 1)
+				}
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, parts.(len(parts) - 1) << c, sub(i + 1) }
+					'[', '{' -> { depth <- depth + 1, parts.(len(parts) - 1) << c, sub(i + 1) }
+					']', '}' -> { depth <- depth - 1, parts.(len(parts) - 1) << c, sub(i + 1) }
+					_ -> if c = sep & depth = 0 {
+						true -> { parts << '', sub(i + 1) }
+						_ -> { parts.(len(parts) - 1) << c, sub(i + 1) }
+					}
+				}
+			}
+		}
+	}
+	sub(0)
+	parts |> filter(fn(p) trim(p) != '')
+}
+
+fn _unesc(chars) {
+	max := len(chars)
+	fn sub(i, acc) if i {
+		max -> acc
+		_ -> if chars.(i) {
+			'\\' -> sub(i + 2, acc << if chars.(i + 1) {
+				't' -> '\t'
+				'n' -> '\n'
+				'r' -> '\r'
+				'"' -> '"'
+				'\\' -> '\\'
+				_ -> chars.(i + 1)
+			})
+			_ -> sub(i + 1, acc << chars.(i))
+		}
+	}
+	sub(0, '')
+}
+
+fn _pStr(s) s |> slice(1, len(s) - 1) |> _unesc()
+fn _pLit(s) s |> slice(1, len(s) - 1)
+fn _pNum(s) {
+	s := replace(s, '_', '')
+	if contains?(s, '.') {
+		true -> if v := float(s) { ? -> s, _ -> v }
+		_ -> if v := int(s) { ? -> s, _ -> v }
+	}
+}
+
+fn _pVal(s) {
+	s := trim(s)
+	if {
+		s = 'true' -> true
+		s = 'false' -> false
+		startsWith?(s, '"') -> _pStr(s)
+		startsWith?(s, '\'') -> _pLit(s)
+		startsWith?(s, '[') -> _pArr(s)
+		startsWith?(s, '{') -> _pTbl(s)
+		_ -> _pNum(s)
+	}
+}
+
+fn _pArr(s) {
+	inner := s |> slice(1, len(s) - 1) |> trim()
+	if inner = '' { true -> [], _ -> _splitTL(inner, ',') |> map(fn(i) _pVal(trim(i))) }
+}
+
+fn _pTbl(s) {
+	inner := s |> slice(1, len(s) - 1) |> trim()
+	if inner = '' {
+		true -> {}
+		_ -> _splitTL(inner, ',') |> with reduce({}) fn(obj, part, _) {
+			part := trim(part)
+			eq := _skipStr(part, '=')
+			if eq > 0 -> obj.(part |> slice(0, eq) |> trim()) := _pVal(part |> slice(eq + 1) |> trim())
+		}
+	}
+}
+
+fn _dotKey(s) s |> split('.') |> map(fn(p) {
+	p := trim(p)
+	if startsWith?(p, '"') & endsWith?(p, '"') { true -> p |> slice(1, len(p) - 1), _ -> p }
+})
+
+fn _ensPath(obj, parts) parts |> with reduce(obj) fn(n, p, _) {
+	if n.(p) { ? -> n.(p) := {} }
+	n.(p)
+}
+
+// parse takes a TOML string and returns an Oak object.
+fn parse(text) {
+	lines := text |> split('\n')
+	root := {}
+	cur := root
+	arrT := {}
+
+	lines |> each(fn(line) {
+		s := _stripCmt(line) |> trim()
+		if {
+			s = '' -> ?
+			startsWith?(s, '[[') -> {
+				inner := s |> slice(2) |> _trimSuf(']]') |> trim()
+				parts := _dotKey(inner)
+				tbl := {}
+				key := join(parts, '.')
+				ex := arrT.(key)
+				if ex { ? -> { arr := [tbl], _setPath(root, parts, arr), arrT.(key) := arr }, _ -> ex << tbl }
+				cur <- tbl
+			}
+			startsWith?(s, '[') -> {
+				parts := _dotKey(s |> slice(1) |> _trimSuf(']') |> trim())
+				cur <- _ensPath(root, parts)
+			}
+			_ -> {
+				eq := _skipStr(s, '=')
+				if eq > 0 -> {
+					kParts := _dotKey(s |> slice(0, eq) |> trim())
+					v := s |> slice(eq + 1) |> trim()
+					if len(kParts) > 1 {
+						true -> _ensPath(cur, kParts |> slice(0, len(kParts) - 1)).(kParts.(len(kParts) - 1)) := _pVal(v)
+						_ -> cur.(kParts.0) := _pVal(v)
+					}
+				}
+			}
+		}
+	})
+	root
+}
+
+fn _setPath(obj, parts, val) {
+	parent := if len(parts) > 1 { true -> _ensPath(obj, parts |> slice(0, len(parts) - 1)), _ -> obj }
+	parent.(parts.(len(parts) - 1)) := val
+}

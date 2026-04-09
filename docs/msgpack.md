@@ -107,3 +107,22 @@ msgpack := import('msgpack')
 msgpack.serializeSafe(3.14) // => :error
 msgpack.serialize(3.14)     // => byte string [0xC0]
 ```
+
+## Parallel Batch Operations
+
+### `pbatchSerialize(values)`
+
+Serializes a list of values into MessagePack byte strings in parallel.
+
+```oak
+msgpack.pbatchSerialize([{a: 1}, {b: 2}, 'hello'])
+```
+
+### `pbatchParse(packets)`
+
+Parses multiple MessagePack byte strings in parallel.
+
+```oak
+msgpack.pbatchParse([packed1, packed2])
+// => [value1, value2]
+```

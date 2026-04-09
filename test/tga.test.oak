@@ -1,0 +1,113 @@
+tga := import('image-tga')
+{
+	slice: slice
+	reduce: reduce
+} := import('std')
+
+fn bytesOf(s) s |> reduce([], fn(acc, c) acc << codepoint(c))
+
+fn run(t) {
+	// ---- 24-bit uncompressed ----
+
+	image24 := tga.tga(2, 1, [[255, 0, 0], [0, 255, 0]], 24)
+
+	'tga 24-bit header length' |> t.eq(
+		len(image24)
+		// 18 header + 2*3 pixel bytes
+		24
+	)
+
+	'tga 24-bit image type is 2' |> t.eq(
+		image24 |> slice(2, 3) |> bytesOf()
+		[2]
+	)
+
+	'tga 24-bit dimensions in header' |> t.eq(
+		[
+			image24 |> slice(12, 14) |> bytesOf()
+			image24 |> slice(14, 16) |> bytesOf()
+		]
+		[
+			[2, 0]
+			[1, 0]
+		]
+	)
+
+	'tga 24-bit bpp in header' |> t.eq(
+		image24 |> slice(16, 17) |> bytesOf()
+		[24]
+	)
+
+	'tga 24-bit pixel data' |> t.eq(
+		image24 |> slice(18, 24) |> bytesOf()
+		[255, 0, 0, 0, 255, 0]
+	)
+
+	// ---- 32-bit uncompressed ----
+
+	image32 := tga.tga(1, 1, [[10, 20, 30, 40]], 32)
+
+	'tga 32-bit file size' |> t.eq(
+		len(image32)
+		22
+	)
+
+	'tga 32-bit bpp' |> t.eq(
+		image32 |> slice(16, 17) |> bytesOf()
+		[32]
+	)
+
+	'tga 32-bit pixel data' |> t.eq(
+		image32 |> slice(18, 22) |> bytesOf()
+		[10, 20, 30, 40]
+	)
+
+	// ---- 8-bit grayscale ----
+
+	imageGray := tga.tga(2, 2, [0, 85, 170, 255], 8)
+
+	'tga 8-bit image type is 3' |> t.eq(
+		imageGray |> slice(2, 3) |> bytesOf()
+		[3]
+	)
+
+	'tga 8-bit pixel data' |> t.eq(
+		imageGray |> slice(18, 22) |> bytesOf()
+		[0, 85, 170, 255]
+	)
+
+	// ---- decode roundtrip (24-bit) ----
+
+	pixels24 := [[100, 150, 200], [50, 75, 25]]
+	enc24 := tga.tga(2, 1, pixels24, 24)
+	dec24 := tga.decodeTGA(enc24)
+
+	'decodeTGA 24-bit roundtrips width' |> t.eq(dec24.width, 2)
+	'decodeTGA 24-bit roundtrips height' |> t.eq(dec24.height, 1)
+	'decodeTGA 24-bit roundtrips bpp' |> t.eq(dec24.bpp, 24)
+	'decodeTGA 24-bit roundtrips pixels' |> t.eq(dec24.pixels, pixels24)
+
+	// ---- decode roundtrip (32-bit) ----
+
+	pixels32 := [[10, 20, 30, 255], [40, 50, 60, 128]]
+	enc32 := tga.tga(1, 2, pixels32, 32)
+	dec32 := tga.decodeTGA(enc32)
+
+	'decodeTGA 32-bit roundtrips width' |> t.eq(dec32.width, 1)
+	'decodeTGA 32-bit roundtrips height' |> t.eq(dec32.height, 2)
+	'decodeTGA 32-bit roundtrips pixels' |> t.eq(dec32.pixels, pixels32)
+
+	// ---- RLE roundtrip ----
+
+	rlePixels := [[255, 0, 0], [255, 0, 0], [255, 0, 0], [0, 255, 0]]
+	encRLE := tga.tgaRLE(4, 1, rlePixels, 24)
+	decRLE := tga.decodeTGA(encRLE)
+
+	'decodeTGA RLE roundtrips width' |> t.eq(decRLE.width, 4)
+	'decodeTGA RLE roundtrips pixels' |> t.eq(decRLE.pixels, rlePixels)
+
+	'tgaRLE is smaller than uncompressed for runs' |> t.eq(
+		len(encRLE) < len(tga.tga(4, 1, rlePixels, 24))
+		true
+	)
+}

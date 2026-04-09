@@ -1,0 +1,336 @@
+// libppm provides encode/decode helpers for the Netpbm family of image formats:
+//   PPM (P6 binary / P3 plain — RGB color)
+//   PGM (P5 binary / P2 plain — grayscale)
+//   PBM (P4 binary / P1 plain — bitmap)
+//
+// All encoders accept row-major pixel data and produce binary strings.
+// Decoders accept a binary string and return { width, height, pixels }.
+
+{
+	default: default
+	slice: slice
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// ---- helpers --------------------------------------------------------
+
+fn clampByte(n) if {
+	n < 0 -> 0
+	n > 255 -> 255
+	_ -> int(n)
+}
+
+fn _mkHeader(magic, width, height, maxVal) {
+	s := magic + char(10) + string(int(width)) + ' ' + string(int(height)) + char(10)
+	if maxVal {
+		? -> s
+		_ -> s + string(maxVal) + char(10)
+	}
+}
+
+fn _mkBuf(header) {
+	buf := header
+	last := { off: len(buf) }
+	fn appd(part) {
+		buf.(last.off) := part
+		last.off <- len(buf)
+	}
+	{ buf: buf, appd: appd }
+}
+
+// ---- PPM encoder (P6 binary) ----------------------------------------
+
+// ppm encodes a P6 (binary) PPM image and returns the full file string.
+// pixels is a flat row-major list of [r, g, b] lists or 3-byte strings.
+fn ppm(width, height, pixels) {
+	b := _mkBuf(_mkHeader('P6', width, height, 255))
+	count := int(width) * int(height)
+	fn sub(i) if i {
+		count -> ?
+		_ -> {
+			px := pixels.(i)
+			if type(px) {
+				:list -> {
+					b.appd(char(clampByte(default(px.(0), 0))))
+					b.appd(char(clampByte(default(px.(1), 0))))
+					b.appd(char(clampByte(default(px.(2), 0))))
+				}
+				:string -> b.appd(slice(px, 0, 3))
+				_ -> {
+					b.appd(char(0))
+					b.appd(char(0))
+					b.appd(char(0))
+				}
+			}
+			sub(i + 1)
+		}
+	}
+	sub(0)
+	b.buf
+}
+
+// ppmPlain encodes a P3 (plain/ASCII) PPM image.
+fn ppmPlain(width, height, pixels) {
+	header := _mkHeader('P3', width, height, 255)
+	count := int(width) * int(height)
+	rows := []
+	fn sub(i) if i {
+		count -> ?
+		_ -> {
+			px := pixels.(i)
+			r := clampByte(default(px.(0), 0))
+			g := clampByte(default(px.(1), 0))
+			b := clampByte(default(px.(2), 0))
+			rows << (string(r) + ' ' + string(g) + ' ' + string(b))
+			sub(i + 1)
+		}
+	}
+	sub(0)
+	header + (rows |> join(char(10))) + char(10)
+}
+
+// ---- PGM encoder (P5 binary) ----------------------------------------
+
+// pgm encodes a P5 (binary) PGM grayscale image.
+// pixels is a flat row-major list of integers [0..255].
+fn pgm(width, height, pixels) {
+	b := _mkBuf(_mkHeader('P5', width, height, 255))
+	count := int(width) * int(height)
+	fn sub(i) if i {
+		count -> ?
+		_ -> {
+			b.appd(char(clampByte(default(pixels.(i), 0))))
+			sub(i + 1)
+		}
+	}
+	sub(0)
+	b.buf
+}
+
+// pgmPlain encodes a P2 (plain/ASCII) PGM image.
+fn pgmPlain(width, height, pixels) {
+	header := _mkHeader('P2', width, height, 255)
+	count := int(width) * int(height)
+	vals := []
+	fn sub(i) if i {
+		count -> ?
+		_ -> {
+			vals << string(clampByte(default(pixels.(i), 0)))
+			sub(i + 1)
+		}
+	}
+	sub(0)
+	header + (vals |> join(' ')) + char(10)
+}
+
+// ---- PBM encoder (P4 binary) ----------------------------------------
+
+// pbm encodes a P4 (binary) PBM bitmap image.
+// pixels is a flat row-major list of 0 (white) or 1 (black).
+fn pbm(width, height, pixels) {
+	b := _mkBuf(_mkHeader('P4', width, height, ?))
+	rowBytes := int((int(width) + 7) / 8)
+	h := int(height)
+	w := int(width)
+	fn rowLoop(y) if y {
+		h -> ?
+		_ -> {
+			fn byteLoop(bi) if bi {
+				rowBytes -> ?
+				_ -> {
+					fn bitLoop(bit, acc) if bit {
+						8 -> acc
+						_ -> {
+							x := bi * 8 + bit
+							v := if x < w {
+								true -> if pixels.(y * w + x) {
+									0 -> 0
+									_ -> 1
+								}
+								_ -> 0
+							}
+							bitLoop(bit + 1, acc * 2 + v)
+						}
+					}
+					b.appd(char(bitLoop(0, 0)))
+					byteLoop(bi + 1)
+				}
+			}
+			byteLoop(0)
+			rowLoop(y + 1)
+		}
+	}
+	rowLoop(0)
+	b.buf
+}
+
+// pbmPlain encodes a P1 (plain/ASCII) PBM image.
+fn pbmPlain(width, height, pixels) {
+	header := _mkHeader('P1', width, height, ?)
+	w := int(width)
+	h := int(height)
+	rows := []
+	fn sub(y) if y {
+		h -> ?
+		_ -> {
+			row := []
+			fn cols(x) if x {
+				w -> ?
+				_ -> {
+					row << if pixels.(y * w + x) {
+						0 -> '0'
+						_ -> '1'
+					}
+					cols(x + 1)
+				}
+			}
+			cols(0)
+			rows << (row |> join(' '))
+			sub(y + 1)
+		}
+	}
+	sub(0)
+	header + (rows |> join(char(10))) + char(10)
+}
+
+// ---- Decoder helpers ------------------------------------------------
+
+// _skipWS advances idx past whitespace and # comments.
+fn _skipWS(data, idx) {
+	maxLen := len(data)
+	fn sub(i) if {
+		i >= maxLen -> i
+		_ -> {
+			c := data.(i)
+			if {
+				c = ' ' | c = char(9) | c = char(10) | c = char(13) -> sub(i + 1)
+				c = '#' -> {
+					fn eol(j) if {
+						j >= maxLen -> j
+						data.(j) = char(10) -> j + 1
+						_ -> eol(j + 1)
+					}
+					sub(eol(i + 1))
+				}
+				_ -> i
+			}
+		}
+	}
+	sub(idx)
+}
+
+// _readToken reads the next whitespace-delimited token.
+fn _readToken(data, idx) {
+	maxLen := len(data)
+	start := _skipWS(data, idx)
+	fn sub(i) if {
+		i >= maxLen -> { val: slice(data, start, i), next: i }
+		_ -> {
+			c := data.(i)
+			if c = ' ' | c = char(9) | c = char(10) | c = char(13) {
+				true -> { val: slice(data, start, i), next: i }
+				_ -> sub(i + 1)
+			}
+		}
+	}
+	sub(start)
+}
+
+fn _readHeader(data) {
+	magic := _readToken(data, 0)
+	wTok := _readToken(data, magic.next)
+	hTok := _readToken(data, wTok.next)
+	maxTok := _readToken(data, hTok.next)
+	{
+		magic: magic.val
+		w: int(wTok.val)
+		h: int(hTok.val)
+		maxVal: int(maxTok.val)
+		next: maxTok.next
+	}
+}
+
+// ---- PPM decoder (P6 / P3) ------------------------------------------
+
+// decodePPM decodes a P3 or P6 PPM file string into { width, height, pixels }.
+// pixels is a list of [r, g, b] lists.
+fn decodePPM(data) {
+	hdr := _readHeader(data)
+	count := hdr.w * hdr.h
+
+	if hdr.magic {
+		'P6' -> {
+			offset := hdr.next + 1
+			pixels := []
+			fn sub(i) if i {
+				count -> ?
+				_ -> {
+					base := offset + i * 3
+					pixels << [
+						codepoint(data.(base))
+						codepoint(data.(base + 1))
+						codepoint(data.(base + 2))
+					]
+					sub(i + 1)
+				}
+			}
+			sub(0)
+			{ width: hdr.w, height: hdr.h, pixels: pixels }
+		}
+		'P3' -> {
+			pixels := []
+			fn sub(i, idx) if i {
+				count -> ?
+				_ -> {
+					rT := _readToken(data, idx)
+					gT := _readToken(data, rT.next)
+					bT := _readToken(data, gT.next)
+					pixels << [int(rT.val), int(gT.val), int(bT.val)]
+					sub(i + 1, bT.next)
+				}
+			}
+			sub(0, hdr.next)
+			{ width: hdr.w, height: hdr.h, pixels: pixels }
+		}
+		_ -> ?
+	}
+}
+
+// decodePGM decodes a P2 or P5 PGM file string into { width, height, pixels }.
+// pixels is a flat list of integers [0..255].
+fn decodePGM(data) {
+	hdr := _readHeader(data)
+	count := hdr.w * hdr.h
+
+	if hdr.magic {
+		'P5' -> {
+			offset := hdr.next + 1
+			pixels := []
+			fn sub(i) if i {
+				count -> ?
+				_ -> {
+					pixels << codepoint(data.(offset + i))
+					sub(i + 1)
+				}
+			}
+			sub(0)
+			{ width: hdr.w, height: hdr.h, pixels: pixels }
+		}
+		'P2' -> {
+			pixels := []
+			fn sub(i, idx) if i {
+				count -> ?
+				_ -> {
+					tok := _readToken(data, idx)
+					pixels << int(tok.val)
+					sub(i + 1, tok.next)
+				}
+			}
+			sub(0, hdr.next)
+			{ width: hdr.w, height: hdr.h, pixels: pixels }
+		}
+		_ -> ?
+	}
+}

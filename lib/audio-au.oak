@@ -1,0 +1,243 @@
+// libaudio-au provides AU (Sun/NeXT) audio format encoding and parsing
+// helpers for libaudio.
+//
+// AU is a simple big-endian audio format originating from Sun Microsystems.
+// It supports 8-bit, 16-bit, and 32-bit signed linear PCM.
+// The header is compact (minimum 28 bytes) with an optional annotation field.
+// Samples are normalised floats in [-1, 1].
+
+{
+	map: map
+	default: default
+	range: range
+} := import('std')
+{
+	join: join
+} := import('str')
+{
+	pmap: pmap
+} := import('thread')
+
+// ---- clamp -----------------------------------------------------------
+
+fn _clipF32(s) if {
+	s > 1 -> 1
+	s < -1 -> -1
+	_ -> s
+}
+
+// ---- sample conversions (signed for all bit depths) ------------------
+
+fn _f32ToI8(s) {
+	v := int(s * 127)
+	if v < -128 { true -> -128, _ -> if v > 127 { true -> 127, _ -> v } }
+}
+fn _i8ToF32(s) s / 128
+
+fn _f32ToI16(s) int(s * 32767)
+fn _i16ToF32(s) s / 32768
+
+fn _f32ToI32(s) int(s * 2147483647)
+fn _i32ToF32(s) s / 2147483648
+
+// ---- big-endian byte utilities --------------------------------------
+
+fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
+
+fn _u32BE(n) {
+	n := int(n)
+	b3 := n % 256
+	b2 := int(n / 256) % 256
+	b1 := int(n / 65536) % 256
+	b0 := int(n / 16777216) % 256
+	[b0, b1, b2, b3]
+}
+
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readI8(s, off) {
+	u := _readU8(s, off)
+	if u > 127 { true -> u - 256, _ -> u }
+}
+
+fn _readU32BE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+}
+
+fn _readI16BE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	u := b0 * 256 + b1
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+fn _readI32BE(s, off) {
+	u := _readU32BE(s, off)
+	if u > 2147483647 { true -> u - 4294967296, _ -> u }
+}
+
+// ---- AU encoding constants ------------------------------------------
+// AU encoding IDs for linear PCM
+_AU_FMT_PCM8  := 2   // 8-bit signed linear
+_AU_FMT_PCM16 := 3   // 16-bit signed linear
+_AU_FMT_PCM32 := 5   // 32-bit signed linear
+
+// ---- AU sample encoding ---------------------------------------------
+
+fn _auSampleBytes(sample, bitDepth) {
+	sc := _clipF32(sample)
+	if bitDepth {
+		8 -> _byteStr([if _f32ToI8(sc) < 0 { true -> _f32ToI8(sc) + 256, _ -> _f32ToI8(sc) }])
+		16 -> {
+			v := _f32ToI16(sc)
+			u := if v < 0 { true -> v + 65536, _ -> v }
+			_byteStr([int(u / 256) % 256, u % 256])
+		}
+		32 -> {
+			v := _f32ToI32(sc)
+			u := if v < 0 { true -> v + 4294967296, _ -> v }
+			_byteStr(_u32BE(u))
+		}
+		_ -> {
+			v := _f32ToI16(sc)
+			u := if v < 0 { true -> v + 65536, _ -> v }
+			_byteStr([int(u / 256) % 256, u % 256])
+		}
+	}
+}
+
+fn _auDataChunk(samples, bitDepth) {
+	samples |> map(fn(s) _auSampleBytes(s, bitDepth)) |> join('')
+}
+
+// ---- AU encoding ----------------------------------------------------
+
+// au encodes a list of normalised float samples into an AU binary string.
+// `samples` must already be interleaved when channels > 1.
+//
+// Example:
+//   s := sine(440, 44100, 44100)
+//   data := au(s, 44100, 1, 16)
+fn au(samples, sampleRate, channels, bitDepth) {
+	sampleRate := default(sampleRate, 44100)
+	channels := default(channels, 1)
+	bitDepth := default(bitDepth, 16)
+
+	encoding := if bitDepth {
+		8 -> _AU_FMT_PCM8
+		16 -> _AU_FMT_PCM16
+		32 -> _AU_FMT_PCM32
+		_ -> _AU_FMT_PCM16
+	}
+
+	bytesPerSample := int(bitDepth / 8)
+	dataSize := len(samples) * bytesPerSample
+	headerSize := 28 // minimum: 24 bytes header + 4 bytes empty annotation (padded)
+
+	sampleData := _auDataChunk(samples, bitDepth)
+
+	// AU header: magic, data offset, data size, encoding, sample rate, channels
+	_byteStr([0x2e, 0x73, 0x6e, 0x64]) +  // '.snd' magic
+		_byteStr(_u32BE(headerSize)) +          // data offset
+		_byteStr(_u32BE(dataSize)) +            // data size
+		_byteStr(_u32BE(encoding)) +            // encoding
+		_byteStr(_u32BE(sampleRate)) +          // sample rate
+		_byteStr(_u32BE(channels)) +            // channels
+		_byteStr(_u32BE(0)) +                   // 4 bytes annotation padding
+		sampleData
+}
+
+// ---- AU parsing -----------------------------------------------------
+
+fn _auReadSample(data, off, encoding) if encoding {
+	2 -> _i8ToF32(_readI8(data, off))
+	3 -> _i16ToF32(_readI16BE(data, off))
+	5 -> _i32ToF32(_readI32BE(data, off))
+	_ -> ?
+}
+
+fn _auBytesPerSample(encoding) if encoding {
+	2 -> 1
+	3 -> 2
+	5 -> 4
+	_ -> ?
+}
+
+fn _auEncodingBitDepth(encoding) if encoding {
+	2 -> 8
+	3 -> 16
+	5 -> 32
+	_ -> ?
+}
+
+fn _auReadSamples(data, dataOff, totalSamples, bytesPerSample, encoding) {
+	fn sub(acc, i) if i >= totalSamples {
+		true -> acc
+		_ -> {
+			off := dataOff + i * bytesPerSample
+			s := _auReadSample(data, off, encoding)
+			sub(acc << s, i + 1)
+		}
+	}
+	sub([], 0)
+}
+
+// parseAu parses an AU binary string and returns:
+//   { sampleRate, channels, bitDepth, samples }
+// where `samples` is a list of normalised floats. Returns ? on error.
+// Only linear PCM encodings (8, 16, 32-bit) are supported.
+//
+// Example:
+//   r := parseAu(fileBytes)
+//   r.sampleRate  // => 44100
+fn parseAu(data) {
+	if len(data) < 24 {
+		true -> ?
+		_ -> {
+			// Check magic number '.snd' (0x2e736e64)
+			magic := _readU32BE(data, 0)
+			if magic != 779316836 {
+				true -> ?
+				_ -> {
+					dataOffset := _readU32BE(data, 4)
+					dataSize := _readU32BE(data, 8)
+					encoding := _readU32BE(data, 12)
+					sampleRate := _readU32BE(data, 16)
+					channels := _readU32BE(data, 20)
+
+					bytesPerSample := _auBytesPerSample(encoding)
+					bitDepth := _auEncodingBitDepth(encoding)
+
+					if bytesPerSample = ? {
+						true -> ?
+						_ -> {
+							actualDataSize := if dataSize = 4294967295 {
+								true -> len(data) - dataOffset
+								_ -> dataSize
+							}
+							totalSamples := int(actualDataSize / bytesPerSample)
+
+							{
+								sampleRate: sampleRate
+								channels: channels
+								bitDepth: bitDepth
+								samples: _auReadSamples(data, dataOffset, totalSamples, bytesPerSample, encoding)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// pbatchAu encodes multiple sample lists into AU byte strings in parallel.
+// Each spec is { samples, sampleRate?, channels?, bitDepth? }.
+fn pbatchAu(specs) pmap(specs, fn(s) au(s.samples, s.sampleRate, s.channels, s.bitDepth))
+
+// pbatchParseAu decodes multiple AU byte strings in parallel.
+fn pbatchParseAu(dataList) pmap(dataList, parseAu)

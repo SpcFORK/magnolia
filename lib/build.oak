@@ -49,6 +49,9 @@ buildRender := import('build-render')
 buildConfig := import('build-config')
 buildImports := import('build-imports')
 
+threadLib := import('thread')
+pmap := threadLib.pmap
+
 runtimeCodegen := import('runtime-codegen')
 OakNativeRuntime := runtimeCodegen.OakNativeRuntime
 OakJSRuntime := runtimeCodegen.OakJSRuntime
@@ -778,10 +781,9 @@ fn run(config) {
 
 	// compile the import map into a bundle with an entrypoint and render to
 	// bundle program text
-	BundleFile := ModuleNodes |>
-		keys() |>
-		sort!() |>
-		map(fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()]) |>
+	moduleKeys := ModuleNodes |> keys() |> sort!()
+	compiledModules := pmap(moduleKeys, fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()])
+	BundleFile := compiledModules |>
 		wrapBundle(AbsoluteEntry) |>
 		renderBundle()
 

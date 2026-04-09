@@ -1,4 +1,6 @@
 // gui-draw-ops — Unified drawing dispatcher for the Magnolia GUI.
+// Threading-aware: supports parallel dispatch for batch operations.
+
 //
 // Provides a single `draw(deps, window, op)` function that accepts an options
 // object describing WHAT to draw and HOW to draw it, merging shape geometry,
@@ -19,6 +21,8 @@
 // unified entry point on top.
 
 { _default: _default, _clamp: _clamp } := import('gui-common')
+guiThread := import('gui-thread')
+threadLib := import('thread')
 
 _OK := { type: :ok }
 
@@ -26,6 +30,27 @@ _OK := { type: :ok }
 fn _get(op, key, fallback) {
 	v := op.(key)
 	if v { ? -> fallback, _ -> v }
+}
+
+// ---------------------------------------------------------------------------
+// _postOrExec — if the window has a threading command queue and the op
+// requests async execution, post the closure to the queue for main-thread
+// execution.  Otherwise execute inline.
+// ---------------------------------------------------------------------------
+fn _postOrExec(window, asyncFlag, execFn) {
+	if asyncFlag & guiThread.threadingEnabled?(window) {
+		true -> {
+			q := guiThread.commandQueue(window)
+			if q != ? {
+				true -> {
+					q.post(execFn)
+					_OK
+				}
+				_ -> execFn()
+			}
+		}
+		_ -> execFn()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -81,8 +106,37 @@ fn draw(deps, window, op) {
 	filled := _get(op, 'filled', true)
 	aa := _get(op, 'aa', false)
 	bgColor := _get(op, 'bgColor', 0)
+	asyncDraw := _get(op, 'async', false)
 
-	if shape {
+	// --- Precompute phase (safe for any thread) ---
+	// If the op carries a .compute fn, run it and merge results into the op
+	// before dispatching to the drawing phase.  This is the hook that lets
+	// workers pre-calculate geometry, colors, transforms, etc.
+	if type(op.compute) = :function -> {
+		result := op.compute()
+		if type(result) = :object -> {
+			ks := keys(result)
+			fn _merge(i) if i < len(ks) {
+				true -> {
+					op.(ks.(i)) <- result.(ks.(i))
+					_merge(i + 1)
+				}
+			}
+			_merge(0)
+			// Re-read fields that compute may have changed
+			color <- _get(op, 'color', color)
+			borderColor <- _get(op, 'borderColor', borderColor)
+			filled <- _get(op, 'filled', filled)
+			aa <- _get(op, 'aa', aa)
+			bgColor <- _get(op, 'bgColor', bgColor)
+		}
+	}
+
+	// --- Draw phase (main-thread only when async=true) ---
+	// _doDraw is a zero-arg closure capturing all resolved state.
+	// If async=true it is posted to the window's command queue for
+	// later execution on the main thread; otherwise it runs inline.
+	fn _doDraw() if shape {
 		// ---- Lines ----
 		:line -> {
 			x1 := _get(op, 'x1', 0)
@@ -337,6 +391,30 @@ fn draw(deps, window, op) {
 
 		_ -> _OK
 	}
+
+	// Dispatch: post to command queue or run inline
+	_postOrExec(window, asyncDraw, _doDraw)
+}
+
+// ---------------------------------------------------------------------------
+// drawThreaded — always posts the draw op to the window's command queue
+// for deferred main-thread execution.  Safe to call from any worker thread.
+// Falls back to synchronous draw() if threading is not enabled.
+// ---------------------------------------------------------------------------
+fn drawThreaded(deps, window, op) {
+	if guiThread.threadingEnabled?(window) {
+		true -> {
+			q := guiThread.commandQueue(window)
+			if q != ? {
+				true -> {
+					q.post(fn() draw(deps, window, op))
+					_OK
+				}
+				_ -> draw(deps, window, op)
+			}
+		}
+		_ -> draw(deps, window, op)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -353,4 +431,99 @@ fn drawBatch(deps, window, ops) {
 		_ -> _OK
 	}
 	_step(0)
+}
+
+// ---------------------------------------------------------------------------
+// drawBatchParallel — pre-compute op data in parallel, then draw on main thread.
+// Accepts ops with an optional .compute field: fn() that returns computed data
+// merged into the op before drawing. Workers run .compute in parallel,
+// main thread draws sequentially (Win32/GDI must be called from main thread).
+// ---------------------------------------------------------------------------
+fn drawBatchParallel(deps, window, ops, numWorkers) {
+	nw := if numWorkers { ? -> 4, _ -> numWorkers }
+	// Split ops into those needing compute and those that don't.
+	computed := threadLib.pmap(ops, fn(op) if type(op.compute) = :function {
+		true -> {
+			result := op.compute()
+			// Merge computed fields into op copy
+			merged := op
+			if type(result) = :object -> {
+				ks := keys(result)
+				fn _merge(i) if i < len(ks) {
+					true -> {
+						merged.(ks.(i)) <- result.(ks.(i))
+						_merge(i + 1)
+					}
+				}
+				_merge(0)
+			}
+			merged
+		}
+		_ -> op
+	}, nw)
+	// Draw all (now-computed) ops on the main thread sequentially.
+	drawBatch(deps, window, computed)
+}
+
+// ---------------------------------------------------------------------------
+// drawBatchThreaded — enqueue an entire batch of draw ops to the window's
+// command queue.  Each op is drawn sequentially on the main thread when the
+// queue is flushed.  Safe to call from any worker thread.
+// ---------------------------------------------------------------------------
+fn drawBatchThreaded(deps, window, ops) {
+	if guiThread.threadingEnabled?(window) {
+		true -> {
+			q := guiThread.commandQueue(window)
+			if q != ? {
+				true -> {
+					q.post(fn() drawBatch(deps, window, ops))
+					_OK
+				}
+				_ -> drawBatch(deps, window, ops)
+			}
+		}
+		_ -> drawBatch(deps, window, ops)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// drawBatchParallelThreaded — pre-compute op data in parallel on workers,
+// then enqueue the resolved batch to the command queue for main-thread draw.
+// Combines parallel compute with threaded draw for full worker-safety.
+// ---------------------------------------------------------------------------
+fn drawBatchParallelThreaded(deps, window, ops, numWorkers) {
+	nw := if numWorkers { ? -> 4, _ -> numWorkers }
+	// Run compute phase in parallel on workers (no GDI calls)
+	computed := threadLib.pmap(ops, fn(op) if type(op.compute) = :function {
+		true -> {
+			result := op.compute()
+			merged := op
+			if type(result) = :object -> {
+				ks := keys(result)
+				fn _merge(i) if i < len(ks) {
+					true -> {
+						merged.(ks.(i)) <- result.(ks.(i))
+						_merge(i + 1)
+					}
+				}
+				_merge(0)
+			}
+			merged
+		}
+		_ -> op
+	}, nw)
+	// Post resolved batch to command queue
+	if guiThread.threadingEnabled?(window) {
+		true -> {
+			q := guiThread.commandQueue(window)
+			if q != ? {
+				true -> {
+					q.post(fn() drawBatch(deps, window, computed))
+					_OK
+				}
+				_ -> drawBatch(deps, window, computed)
+			}
+		}
+		_ -> drawBatch(deps, window, computed)
+	}
 }

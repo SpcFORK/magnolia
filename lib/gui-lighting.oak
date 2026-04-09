@@ -14,6 +14,7 @@
 // to a face and returns a packed RGB color.
 
 { _default: _default, _clamp: _clamp } := import('gui-common')
+threadLib := import('thread')
 
 PI := 3.141592653589793
 
@@ -609,4 +610,15 @@ fn shadeFaceColorFast(rgbFn, baseColor, prep, pa3, pb3, pc3) {
 			)
 		}
 	}
+}
+
+// ─── Parallel face shading ─────────────────────────────────────────────────
+// Shade multiple faces in parallel.  Each face is { baseColor, pa3, pb3, pc3 }.
+// Returns a list of computed RGB colors in the same order.
+// Safe for worker threads: only performs math, no GDI/GPU calls.
+
+fn shadeFacesBatchParallel(rgbFn, faces, prepared, numWorkers) {
+	threadLib.pmapConcurrent(faces, fn(face) {
+		shadeFaceColorFast(rgbFn, face.baseColor, prepared, face.pa3, face.pb3, face.pc3)
+	}, if numWorkers { ? -> 4, _ -> numWorkers })
 }

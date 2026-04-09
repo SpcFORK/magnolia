@@ -1,0 +1,107 @@
+ppm := import('image-ppm')
+{
+	slice: slice
+	reduce: reduce
+} := import('std')
+
+fn bytesOf(s) s |> reduce([], fn(acc, c) acc << codepoint(c))
+
+fn run(t) {
+	// ---- PPM P6 binary ----
+
+	image := ppm.ppm(2, 1, [[255, 0, 0], [0, 255, 0]])
+
+	'ppm P6 starts with magic and dimensions' |> t.eq(
+		image |> slice(0, 3)
+		'P6' + char(10)
+	)
+
+	'ppm P6 encodes correct total length' |> t.eq(
+		len(image)
+		// header: "P6\n2 1\n255\n" = 11 bytes, pixels: 2*3 = 6 bytes
+		17
+	)
+
+	'ppm P6 pixel data contains correct bytes' |> t.eq(
+		image |> slice(11, 17) |> bytesOf()
+		[255, 0, 0, 0, 255, 0]
+	)
+
+	// ---- PPM P3 plain ----
+
+	plain := ppm.ppmPlain(1, 2, [[10, 20, 30], [40, 50, 60]])
+
+	'ppmPlain P3 starts with magic' |> t.eq(
+		plain |> slice(0, 3)
+		'P3' + char(10)
+	)
+
+	// ---- PGM P5 binary ----
+
+	gray := ppm.pgm(2, 2, [0, 85, 170, 255])
+
+	'pgm P5 starts with magic' |> t.eq(
+		gray |> slice(0, 3)
+		'P5' + char(10)
+	)
+
+	headerEnd := 11  // "P5\n2 2\n255\n"
+	'pgm P5 encodes 4 gray bytes' |> t.eq(
+		gray |> slice(headerEnd, headerEnd + 4) |> bytesOf()
+		[0, 85, 170, 255]
+	)
+
+	// ---- PGM P2 plain ----
+
+	grayPlain := ppm.pgmPlain(2, 1, [100, 200])
+
+	'pgmPlain P2 starts with magic' |> t.eq(
+		grayPlain |> slice(0, 3)
+		'P2' + char(10)
+	)
+
+	// ---- PBM P4 binary ----
+
+	bitmap := ppm.pbm(3, 1, [1, 0, 1])
+
+	'pbm P4 starts with magic' |> t.eq(
+		bitmap |> slice(0, 3)
+		'P4' + char(10)
+	)
+
+	// 3 bits packed: 1,0,1 + 5 padding zeros = 0b10100000 = 160
+	headerLen := 7  // "P4\n3 1\n"
+	'pbm P4 packs bits correctly' |> t.eq(
+		bitmap |> slice(headerLen, headerLen + 1) |> bytesOf()
+		[160]
+	)
+
+	// ---- PBM P1 plain ----
+
+	bitmapPlain := ppm.pbmPlain(2, 1, [0, 1])
+
+	'pbmPlain P1 starts with magic' |> t.eq(
+		bitmapPlain |> slice(0, 3)
+		'P1' + char(10)
+	)
+
+	// ---- PPM roundtrip ----
+
+	original := [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]]
+	encoded := ppm.ppm(2, 2, original)
+	decoded := ppm.decodePPM(encoded)
+
+	'decodePPM roundtrips width' |> t.eq(decoded.width, 2)
+	'decodePPM roundtrips height' |> t.eq(decoded.height, 2)
+	'decodePPM roundtrips pixels' |> t.eq(decoded.pixels, original)
+
+	// ---- PGM roundtrip ----
+
+	grayOrig := [10, 20, 30, 40]
+	grayEnc := ppm.pgm(2, 2, grayOrig)
+	grayDec := ppm.decodePGM(grayEnc)
+
+	'decodePGM roundtrips width' |> t.eq(grayDec.width, 2)
+	'decodePGM roundtrips height' |> t.eq(grayDec.height, 2)
+	'decodePGM roundtrips pixels' |> t.eq(grayDec.pixels, grayOrig)
+}

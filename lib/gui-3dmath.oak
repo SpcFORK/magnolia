@@ -1,6 +1,7 @@
 // gui-3dmath contains reusable 3D transform and projection helpers.
 
 { _default: _default } := import('gui-common')
+threadLib := import('thread')
 
 PI := 3.141592653589793
 
@@ -682,3 +683,37 @@ fn aabb3HalfExtents(box) Vec3(
 	(box.maxZ - box.minZ) / 2
 )
 
+// ─── Parallel vertex transforms ─────────────────────────────────────────────
+// Transform a list of vertices in parallel using worker goroutines.
+// Each vertex is transformed independently (rotation, scale, translation).
+// Safe for worker threads: pure math only.
+
+fn parallelTransformVertices(vertices, transform, numWorkers) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	rx := degToRad(_default(ts.rx, 0))
+	ry := degToRad(_default(ts.ry, 0))
+	rz := degToRad(_default(ts.rz, 0))
+	cxr := cos(rx)
+	sxr := sin(rx)
+	cyr := cos(ry)
+	syr := sin(ry)
+	czr := cos(rz)
+	szr := sin(rz)
+
+	threadLib.pmap(vertices, fn(v) {
+		x0 := v.x * scale
+		y0 := v.y * scale
+		z0 := v.z * scale
+		y1 := y0 * cxr - z0 * sxr
+		z1 := y0 * sxr + z0 * cxr
+		x2 := x0 * cyr + z1 * syr
+		z2 := 0 - x0 * syr + z1 * cyr
+		x3 := x2 * czr - y1 * szr
+		y3 := x2 * szr + y1 * czr
+		Vec3(x3 + tx, y3 + ty, z2 + tz)
+	})
+}

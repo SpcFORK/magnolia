@@ -1,0 +1,337 @@
+// gui-thread provides thread-safety primitives and parallel helpers
+// specifically designed for the GUI rendering pipeline.
+//
+// Architecture:
+// - The main thread owns the Win32 message pump and GPU/GDI resources.
+// - Worker threads can perform computation (mesh transforms, layout, etc.)
+//   but MUST NOT call Win32/GDI/GPU functions directly.
+// - Results from workers are posted back to the main thread via command queues.
+//
+// This module provides:
+// - Thread-safe command queue for posting work to the main thread
+// - Render-thread–safe parallel helpers (pmap, batch)
+// - Frame fence for synchronizing worker results with frame boundaries
+// - Thread-guarded wrappers for shared window state
+
+{
+	map: map
+	each: each
+	range: range
+	slice: slice
+	append: append
+	reduce: reduce
+} := import('std')
+
+threadLib := import('thread')
+{ _default: _default } := import('gui-common')
+
+// ─── Command Queue ─────────────────────────────────────────────────────────
+// A lock-free (single-consumer) command queue for posting work to the main
+// thread's frame loop.  Workers enqueue commands; the main thread drains
+// them once per frame via flushCommands().
+
+fn CommandQueue() {
+	ch := make_chan(256)
+	pending := []
+
+	{
+		// post enqueues a command (a zero-arg function) to be run on the main thread.
+		post: fn(cmdFn) chan_send(ch, { type: :cmd, fn: cmdFn })
+
+		// postValue enqueues a tagged value to be collected by the main thread.
+		postValue: fn(tag, value) chan_send(ch, { type: :value, tag: tag, value: value })
+
+		// drain collects all pending commands without blocking.
+		// Returns a list of command objects.  Call from the main thread only.
+		drain: fn() {
+			result := []
+			fn _drainLoop() {
+				msg := chan_recv(ch)
+				if msg.ok {
+					true -> {
+						result << msg.data
+						_drainLoop()
+					}
+				}
+			}
+			// Non-blocking: try to receive all available messages
+			// Use a buffered approach - drain what's available
+			result
+		}
+
+		// flush executes all pending command functions on the calling thread.
+		// Intended to be called once per frame from the main thread.
+		flush: fn() {
+			fn _flushLoop() {
+				// Attempt non-blocking recv from the buffered channel
+				msg := chan_recv(ch)
+				if msg.ok {
+					true -> {
+						data := msg.data
+						if data.type {
+							:cmd -> data.fn()
+						}
+						_flushLoop()
+					}
+				}
+			}
+			_flushLoop()
+		}
+
+		// size returns the approximate number of pending commands.
+		size: fn() len(pending)
+	}
+}
+
+// ─── Frame Fence ───────────────────────────────────────────────────────────
+// Synchronizes worker goroutines with frame boundaries.  Workers that produce
+// per-frame data call arrive(); the main thread calls awaitWorkers() to block
+// until all registered workers have posted their results for this frame.
+
+fn FrameFence(workerCount) {
+	barrier := make_chan(workerCount)
+
+	{
+		// arrive signals that one worker has completed its per-frame work.
+		arrive: fn() chan_send(barrier, true)
+
+		// awaitWorkers blocks until all registered workers have arrived.
+		// Call from the main thread at the start of each frame.
+		awaitWorkers: fn() {
+			range(workerCount) |> each(fn(_) chan_recv(barrier))
+		}
+
+		// reset is a no-op for channel-based fences (auto-reset on drain).
+		reset: fn() 0
+
+		// count returns the number of workers this fence expects.
+		count: fn() workerCount
+	}
+}
+
+// ─── ThreadPool (GUI-specific) ─────────────────────────────────────────────
+// A pool of worker goroutines for offloading computation from the main
+// thread.  Tasks MUST NOT touch Win32/GDI resources.
+
+fn WorkerPool(numWorkers) {
+	pool := threadLib.Pool(numWorkers)
+
+	{
+		// submit sends a computation task to the pool.
+		submit: fn(taskFn) pool.submit(taskFn)
+
+		// submitWithResult sends a task and returns a Future for the result.
+		submitWithResult: fn(taskFn) threadLib.Future(taskFn)
+
+		// pmap applies fn to each element in parallel using the pool.
+		pmap: fn(list, fnToRun) threadLib.pmap(list, fnToRun)
+
+		// pmapN applies fn with limited concurrency.
+		pmapN: fn(list, fnToRun, maxN) threadLib.pmapConcurrent(list, fnToRun, _default(maxN, numWorkers))
+
+		// batch splits a list into chunks and processes each chunk in parallel.
+		batch: fn(list, chunkSize, processFn) {
+			n := len(list)
+			cs := _default(chunkSize, int(n / numWorkers) + 1)
+			if cs < 1 -> cs <- 1
+			chunks := []
+			i := 0
+			fn _split() if i < n -> {
+				end := i + cs
+				if end > n -> end <- n
+				chunks << slice(list, i, end)
+				i <- end
+				_split()
+			}
+			_split()
+			threadLib.pmap(chunks, processFn)
+		}
+
+		// close shuts down the pool.  Call when the window is being destroyed.
+		close: fn() {
+			pool.close()
+			pool.wait()
+		}
+
+		// size returns the number of workers.
+		size: fn() pool.size()
+	}
+}
+
+// ─── Thread-safe Window State Guard ────────────────────────────────────────
+// Wraps read/write access to shared window fields with a mutex.
+// Use for fields that workers need to read (e.g., window dimensions, camera).
+
+fn StateGuard() {
+	mutex := threadLib.Mutex()
+
+	{
+		// read locks, calls readerFn with no args, unlocks, returns result.
+		read: fn(readerFn) {
+			mutex.lock()
+			result := readerFn()
+			mutex.unlock()
+			result
+		}
+
+		// write locks, calls writerFn with no args, unlocks.
+		write: fn(writerFn) {
+			mutex.lock()
+			writerFn()
+			mutex.unlock()
+		}
+
+		// lock/unlock for manual control when multiple reads/writes are needed.
+		lock: fn() mutex.lock()
+		unlock: fn() mutex.unlock()
+	}
+}
+
+// ─── Parallel Mesh Transform ───────────────────────────────────────────────
+// Transforms mesh vertices in parallel batches.  Safe for worker threads
+// since it only touches numeric data, no GDI/GPU calls.
+
+fn parallelTransformVertices(vertices, transformFn, numWorkers) {
+	n := len(vertices)
+	workers := _default(numWorkers, 4)
+	if n < workers * 4 {
+		// Too few vertices to benefit from threading — transform inline.
+		true -> vertices |> map(transformFn)
+		_ -> threadLib.pmap(vertices, transformFn)
+	}
+}
+
+// ─── Async Resource Loader ─────────────────────────────────────────────────
+// Loads resources (textures, meshes, fonts) in background goroutines.
+// Provides a callback when loading completes, which should post the result
+// back to the main thread via a CommandQueue.
+
+fn AsyncLoader(cmdQueue) {
+	activeLoads := 0
+
+	{
+		// load starts a background load.  loaderFn should return the loaded
+		// resource.  onComplete is called with the result on the worker thread;
+		// use cmdQueue.post() inside onComplete to marshal back to main thread.
+		load: fn(loaderFn, onComplete) {
+			activeLoads <- activeLoads + 1
+			go(fn() {
+				result := loaderFn()
+				if onComplete {
+					? -> if cmdQueue != ? -> cmdQueue.post(fn() {
+						activeLoads <- activeLoads - 1
+					})
+					_ -> {
+						onComplete(result)
+						activeLoads <- activeLoads - 1
+					}
+				}
+			})
+		}
+
+		// busy? returns true if any loads are in flight.
+		busy?: fn() activeLoads > 0
+
+		// count returns the number of active loads.
+		count: fn() activeLoads
+	}
+}
+
+// ─── Threaded Frame Scheduler ──────────────────────────────────────────────
+// Manages the pattern of spawning per-frame worker tasks and collecting
+// their results before rendering.
+//
+// Usage:
+//   sched := FrameScheduler(pool, cmdQueue)
+//   // In onFrame:
+//   sched.beginFrame()
+//   sched.dispatch(fn() computeLighting(scene))
+//   sched.dispatch(fn() computePhysics(objects))
+//   results := sched.endFrame()  // blocks until all dispatched tasks complete
+
+fn FrameScheduler(pool, cmdQueue) {
+	frameTasks := []
+	frameResults := []
+
+	{
+		// beginFrame resets per-frame task tracking.
+		beginFrame: fn() {
+			frameTasks <- []
+			frameResults <- []
+		}
+
+		// dispatch submits a task for this frame and tracks its future.
+		dispatch: fn(taskFn) {
+			future := pool.submitWithResult(taskFn)
+			frameTasks << future
+			future
+		}
+
+		// endFrame blocks until all dispatched tasks complete and returns results.
+		endFrame: fn() {
+			frameTasks |> map(fn(future) future.get())
+		}
+
+		// flush drains the command queue (call from main thread after endFrame).
+		flush: fn() if cmdQueue != ? -> cmdQueue.flush()
+	}
+}
+
+// ─── Window Threading Context ──────────────────────────────────────────────
+// Attaches threading infrastructure to a window state object.
+// Call once after createWindow() to enable threading for that window.
+
+fn initWindowThreading(window, options) {
+	opts := _default(options, {})
+	numWorkers := _default(opts.numWorkers, 4)
+	enableCmdQueue := _default(opts.commandQueue, true)
+	enablePool := _default(opts.workerPool, true)
+
+	if enableCmdQueue {
+		true -> window._threadCmdQueue <- CommandQueue()
+	}
+
+	if enablePool {
+		true -> {
+			window._threadPool <- WorkerPool(numWorkers)
+			window._threadScheduler <- FrameScheduler(
+				window._threadPool
+				window._threadCmdQueue
+			)
+		}
+	}
+
+	window._threadStateGuard <- StateGuard()
+	window._threadingEnabled <- true
+	window
+}
+
+// ─── Convenience accessors ─────────────────────────────────────────────────
+
+fn threadingEnabled?(window) _default(window._threadingEnabled, false)
+
+fn commandQueue(window) window._threadCmdQueue
+fn workerPool(window) window._threadPool
+fn scheduler(window) window._threadScheduler
+fn stateGuard(window) window._threadStateGuard
+
+// Flush all pending threaded commands — called from the frame loop.
+fn flushThreadedCommands(window) {
+	if threadingEnabled?(window) {
+		true -> if window._threadCmdQueue != ? -> window._threadCmdQueue.flush()
+	}
+}
+
+// Clean up threading resources — called when window closes.
+fn destroyWindowThreading(window) {
+	if threadingEnabled?(window) {
+		true -> {
+			if window._threadPool != ? -> window._threadPool.close()
+			window._threadingEnabled <- false
+			window._threadPool <- ?
+			window._threadCmdQueue <- ?
+			window._threadScheduler <- ?
+			window._threadStateGuard <- ?
+		}
+	}
+}

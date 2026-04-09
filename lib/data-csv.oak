@@ -1,0 +1,108 @@
+// libdata-csv implements a CSV (RFC 4180) parser and serializer for Oak values.
+//
+// Supports quoted fields, embedded newlines, and configurable delimiters.
+
+{
+	default: default
+	slice: slice
+	map: map
+	reduce: reduce
+} := import('std')
+{
+	join: strJoin
+	contains?: contains?
+	replace: replace
+} := import('str')
+
+fn _quoteField(field, delim) {
+	if contains?(field, delim) | contains?(field, '"') | contains?(field, '\n') | contains?(field, '\r') {
+		true -> '"' << replace(field, '"', '""') << '"'
+		_ -> field
+	}
+}
+
+// serialize takes a list of rows (each a list of field values) and returns a
+// CSV-formatted string.
+fn serialize(rows, opts) {
+	opts := default(opts, {})
+	delim := default(opts.delimiter, ',')
+	nl := default(opts.newline, '\r\n')
+	rows |> map(fn(row) row |> map(fn(f) _quoteField(string(f), delim)) |> strJoin(delim)) |> strJoin(nl) << nl
+}
+
+// parse takes a CSV string and returns a list of rows (lists of strings).
+fn parse(text, opts) {
+	opts := default(opts, {})
+	delim := default(opts.delimiter, ',')
+	rows := []
+	row := ['']
+	max := len(text)
+
+	fn sub(i, inQ) if i {
+		max -> if len(row) > 1 | row.0 != '' -> rows << row
+		_ -> {
+			c := text.(i)
+			if inQ {
+				true -> if c {
+					'"' -> if text.(i + 1) {
+						'"' -> {
+							row.(len(row) - 1) << '"'
+							sub(i + 2, true)
+						}
+						_ -> sub(i + 1, false)
+					}
+					_ -> {
+						row.(len(row) - 1) << c
+						sub(i + 1, true)
+					}
+				}
+				_ -> if c {
+					'"' -> sub(i + 1, true)
+					'\r' -> {
+						rows << row
+						row <- ['']
+						sub(if text.(i + 1) = '\n' { true -> i + 2, _ -> i + 1 }, false)
+					}
+					'\n' -> {
+						rows << row
+						row <- ['']
+						sub(i + 1, false)
+					}
+					_ -> if c = delim {
+						true -> {
+							row << ''
+							sub(i + 1, false)
+						}
+						_ -> {
+							row.(len(row) - 1) << c
+							sub(i + 1, false)
+						}
+					}
+				}
+			}
+		}
+	}
+	sub(0, false)
+	rows
+}
+
+// parseWithHeader parses CSV using the first row as column headers.
+fn parseWithHeader(text, opts) {
+	rows := parse(text, opts)
+	if len(rows) < 2 {
+		true -> []
+		_ -> {
+			headers := rows.0
+			rows |> slice(1) |> map(fn(row) {
+				headers |> with reduce({}) fn(obj, h, i) obj.(h) := row.(i)
+			})
+		}
+	}
+}
+
+// serializeWithHeader serializes a list of objects with header row.
+fn serializeWithHeader(records, headers, opts) {
+	rows := [headers]
+	records |> with reduce(rows) fn(acc, rec, _) acc << headers |> map(fn(h) default(rec.(h), ''))
+	serialize(rows, opts)
+}

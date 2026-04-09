@@ -1,6 +1,7 @@
 // gui-mesh contains reusable 3D mesh/voxel builders used by GUI.
 
 { _default: _default } := import('gui-common')
+threadLib := import('thread')
 
 fn Vec3(x, y, z) {
 	{
@@ -1085,4 +1086,25 @@ fn IcosphereMesh(radius) {
 			[4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
 		]
 	}
+}
+
+// ─── Parallel mesh generation ───────────────────────────────────────────────
+// Generate multiple meshes in parallel using the thread library.
+// specs is a list of { type: :cube/:sphere/..., params... } objects.
+// Returns a list of generated Mesh objects in the same order.
+
+fn parallelMeshGenerate(specs) {
+	threadLib.pmap(specs, fn(spec) if spec.type {
+		:cube -> CubeMesh(_default(spec.size, 2))
+		:grid -> GridMesh(_default(spec.size, 10), _default(spec.step, 1))
+		:sphere -> SphereMesh(_default(spec.radius, 1), _default(spec.segments, 16), _default(spec.rings, 8))
+		:pyramid -> PyramidMesh(_default(spec.base, 2), _default(spec.height, 2))
+		:cylinder -> CylinderMesh(_default(spec.radius, 1), _default(spec.height, 2), _default(spec.segments, 16))
+		:cone -> ConeMesh(_default(spec.radius, 1), _default(spec.height, 2), _default(spec.segments, 16))
+		:torus -> TorusMesh(_default(spec.majorRadius, 1.5), _default(spec.minorRadius, 0.5), _default(spec.majorSegments, 16), _default(spec.minorSegments, 12))
+		:plane -> PlaneMesh(_default(spec.width, 4), _default(spec.depth, 4), _default(spec.subdivisionsW, 1), _default(spec.subdivisionsD, 1))
+		:hemisphere -> HemisphereMesh(_default(spec.radius, 1), _default(spec.segments, 16), _default(spec.rings, 8))
+		:icosphere -> IcosphereMesh(_default(spec.radius, 1))
+		_ -> ?
+	})
 }

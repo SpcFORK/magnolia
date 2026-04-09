@@ -1,0 +1,337 @@
+// libemail-smtp provides a practical SMTP client/server subset on top of libsocket.
+
+{
+	default: default
+	each: each
+	map: map
+	entries: entries
+	filter: filter
+	keys: keys
+	slice: slice
+} := import('std')
+{
+	split: split
+	join: join
+	startsWith?: startsWith?
+	trim: trim
+	trimStart: trimStart
+	trimEnd: trimEnd
+	upper: upper
+	cut: cut
+	contains?: contains?
+	replace: replace
+} := import('str')
+
+thread := import('thread')
+sock := import('socket')
+
+fn _okLine(code, text) string(code) + ' ' + default(text, 'OK')
+fn _moreLine(code, text) string(code) + '-' + default(text, '')
+fn _resp(code, lines) {
+	ls := default(lines, [])
+	{
+		code: code
+		lines: ls
+		ok?: code < 400
+		text: if len(ls) {
+			0 -> ''
+			_ -> ls.(len(ls) - 1)
+		}
+	}
+}
+
+fn _readResponse(socket) {
+	lines := []
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> {
+				line := evt.data
+				lines << line
+				if len(line) >= 4 & line.3 = '-' {
+					true -> loop()
+					_ -> _resp(int(slice(line, 0, 3)), lines)
+				}
+			}
+			_ -> evt
+		}
+	}
+	loop()
+}
+
+fn _textLines(response) response.lines |> map(fn(line) if len(line) >= 4 {
+	true -> slice(line, 4)
+	_ -> line
+})
+
+fn _dotStuff(body) body |>
+	split('\n') |>
+	map(fn(line) {
+		clean := trimEnd(line, '\r')
+		if startsWith?(clean, '.') {
+			true -> '.' + clean
+			_ -> clean
+		}
+	}) |>
+	join('\r\n')
+
+fn _renderMessage(message) if message.raw {
+	? -> {
+		body := default(message.body, '')
+		headers := default(message.headers, {})
+		headerText := headers |> entries() |> map(fn(entry) entry.0 + ': ' + string(entry.1)) |> join('\r\n')
+		if headerText {
+			'' -> body
+			_ -> headerText + '\r\n\r\n' + body
+		}
+	}
+	_ -> message.raw
+}
+
+fn _smtpClient(socket, greeting, options) {
+	hostname := default(options.hostname, 'localhost')
+	capabilities := []
+
+	fn command(line) {
+		sock.sendLine(socket, line)
+		_readResponse(socket)
+	}
+
+	fn ehlo(name) {
+		resp := command('EHLO ' + default(name, hostname))
+		if resp.ok? -> capabilities <- _textLines(resp) |> slice(1)
+		resp
+	}
+
+	fn helo(name) command('HELO ' + default(name, hostname))
+
+	fn startTLS(tlsOptions) {
+		resp := command('STARTTLS')
+		if resp.ok? {
+			true -> {
+				sock.startTLS(socket, tlsOptions)
+				capabilities <- []
+				ehlo(hostname)
+			}
+			_ -> resp
+		}
+	}
+
+	fn mail(from) command('MAIL FROM:<' + from + '>')
+	fn rcpt(to) command('RCPT TO:<' + to + '>')
+
+	fn data(body) {
+		resp := command('DATA')
+		if resp.ok? {
+			true -> {
+				sock.send(socket, _dotStuff(body) + '\r\n.\r\n')
+				_readResponse(socket)
+			}
+			_ -> resp
+		}
+	}
+
+	fn sendMessage(message) {
+		from := default(message.from, '')
+		toList := if type(default(message.to, [])) {
+			:string -> [message.to]
+			_ -> default(message.to, [])
+		}
+		mailResp := mail(from)
+		if !mailResp.ok? -> mailResp
+		toList |> each(fn(recipient) rcpt(recipient))
+		data(_renderMessage(message))
+	}
+
+	{
+		type: :smtp_client
+		socket: socket
+		greeting: greeting
+		capabilities: fn() capabilities
+		command: command
+		ehlo: ehlo
+		helo: helo
+		startTLS: startTLS
+		mail: mail
+		rcpt: rcpt
+		data: data
+		send: sendMessage
+		quit: fn() {
+			resp := command('QUIT')
+			sock.close(socket)
+			resp
+		}
+		close: fn() sock.close(socket)
+	}
+}
+
+fn connect(address, options) {
+	opts := default(options, {})
+	connected := sock.connect(address, opts)
+	if connected.type {
+		:ok -> {
+			greeting := _readResponse(connected.socket)
+			if greeting.ok? {
+				true -> {
+					{
+						type: :ok
+						client: _smtpClient(connected.socket, greeting, opts)
+						greeting: greeting
+					}
+				}
+				_ -> greeting
+			}
+		}
+		_ -> connected
+	}
+}
+
+fn _pathValue(line, prefix) line |>
+	slice(len(prefix)) |>
+	trim(' ') |>
+	trimStart('<') |>
+	trimEnd('>')
+
+fn _sessionState(socket, handlers, options) {
+	{
+		socket: socket
+		hostname: default(handlers.hostname, 'localhost')
+		mailFrom: ?
+		to: []
+		tls?: false
+		seenHelo?: false
+	}
+}
+
+fn _smtpReply(socket, code, text) sock.sendLine(socket, _okLine(code, text))
+
+fn _smtpMultiline(socket, code, lines) {
+	lines |> each(fn(line, i) if i + 1 < len(lines) {
+		true -> sock.sendLine(socket, _moreLine(code, line))
+		_ -> sock.sendLine(socket, _okLine(code, line))
+	})
+}
+
+fn _handleData(socket) {
+	lines := []
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> if evt.data {
+				'.' -> lines |> join('\r\n')
+				_ -> {
+					line := if startsWith?(evt.data, '..') {
+						true -> slice(evt.data, 1)
+						_ -> evt.data
+					}
+					lines << line
+					loop()
+				}
+			}
+			_ -> ''
+		}
+	}
+	loop()
+}
+
+fn _serveClient(socket, handlers, opts) {
+	state := _sessionState(socket, handlers, opts)
+	tlsEnabled? := default(opts.startTLS?, false)
+	_smtpReply(socket, 220, state.hostname + ' Magnolia SMTP ready')
+
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> {
+				line := evt.data
+				upperLine := upper(line)
+				if true {
+					startsWith?(upperLine, 'EHLO ') -> {
+						state.seenHelo? <- true
+						caps := ['Magnolia SMTP'] << 'PIPELINING'
+						if tlsEnabled? -> caps << 'STARTTLS'
+						_smtpMultiline(socket, 250, caps)
+						loop()
+					}
+					startsWith?(upperLine, 'HELO ') -> {
+						state.seenHelo? <- true
+						_smtpReply(socket, 250, 'Hello')
+						loop()
+					}
+					upperLine = 'NOOP' -> {
+						_smtpReply(socket, 250, 'OK')
+						loop()
+					}
+					upperLine = 'RSET' -> {
+						state.mailFrom <- ?
+						state.to <- []
+						_smtpReply(socket, 250, 'Reset')
+						loop()
+					}
+					upperLine = 'QUIT' -> {
+						_smtpReply(socket, 221, 'Bye')
+						sock.close(socket)
+					}
+					upperLine = 'STARTTLS' & tlsEnabled? -> {
+						_smtpReply(socket, 220, 'Ready to start TLS')
+						sock.startTLS(socket, {
+							server: true
+							certFile: default(opts.certFile, '')
+							keyFile: default(opts.keyFile, '')
+						})
+						state.tls? <- true
+						state.seenHelo? <- false
+						loop()
+					}
+					startsWith?(upperLine, 'MAIL FROM:') -> {
+						state.mailFrom <- _pathValue(line, 'MAIL FROM:')
+						state.to <- []
+						_smtpReply(socket, 250, 'Sender OK')
+						loop()
+					}
+					startsWith?(upperLine, 'RCPT TO:') -> {
+						state.to <- state.to << _pathValue(line, 'RCPT TO:')
+						_smtpReply(socket, 250, 'Recipient OK')
+						loop()
+					}
+					upperLine = 'DATA' -> {
+						_smtpReply(socket, 354, 'End with <CRLF>.<CRLF>')
+						body := _handleData(socket)
+						onMsg := default(handlers.onMessage, ?)
+						result := if onMsg {
+							? -> { ok?: true, message: 'queued' }
+							_ -> onMsg({
+								from: state.mailFrom
+								to: state.to
+								body: body
+								tls?: state.tls?
+							})
+						}
+						if default(result.ok?, true) {
+							true -> _smtpReply(socket, default(result.code, 250), default(result.message, 'queued'))
+							_ -> _smtpReply(socket, default(result.code, 550), default(result.message, 'rejected'))
+						}
+						state.mailFrom <- ?
+						state.to <- []
+						loop()
+					}
+					_ -> {
+						_smtpReply(socket, 500, 'Command not recognized')
+						loop()
+					}
+				}
+			}
+			_ -> sock.close(socket)
+		}
+	}
+	loop()
+}
+
+fn listen(address, handlers, options) {
+	h := default(handlers, {})
+	opts := default(options, {})
+	sock.listen(address, fn(evt) if evt.type {
+		:connect -> thread.spawn(_serveClient, evt.socket, h, opts)
+		_ -> ?
+	}, opts)
+}

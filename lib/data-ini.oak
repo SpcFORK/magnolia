@@ -1,0 +1,147 @@
+// libdata-ini implements an INI file parser and serializer for Oak values.
+//
+// Supports sections, key-value pairs, comments (# and ;), and quoted values.
+
+{
+	default: default
+	slice: slice
+	map: map
+	each: each
+	reduce: reduce
+	entries: entries
+} := import('std')
+{
+	join: join
+	split: split
+	trim: trim
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+	indexOf: indexOf
+} := import('str')
+
+fn _escStr(s) s |> map(fn(c) if c {
+	'\\' -> '\\\\'
+	'"' -> '\\"'
+	'\n' -> '\\n'
+	'\r' -> '\\r'
+	'\t' -> '\\t'
+	_ -> c
+})
+
+fn _needsQ?(s) {
+	max := len(s)
+	fn sub(i) if i {
+		max -> false
+		_ -> if s.(i) {
+			'"', '\\', '\n', '\r', '#', ';', '=' -> true
+			_ -> sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+fn _valStr(v) if type(v) {
+	:null, :empty -> ''
+	:bool -> if v { true -> 'true', _ -> 'false' }
+	:int, :float -> string(v)
+	:atom -> string(v)
+	:string -> if _needsQ?(v) {
+		true -> '"' << _escStr(v) << '"'
+		_ -> v
+	}
+	_ -> string(v)
+}
+
+// serialize converts an Oak object to INI format.
+fn serialize(obj) {
+	parts := []
+	entries(obj) |> each(fn(e) if type(e.1) != :object -> parts << e.0 << '=' << _valStr(e.1) << '\n')
+	entries(obj) |> each(fn(e) if type(e.1) = :object -> {
+		parts << '\n[' << e.0 << ']\n'
+		entries(e.1) |> each(fn(ie) parts << ie.0 << '=' << _valStr(ie.1) << '\n')
+	})
+	parts |> join('')
+}
+
+fn _stripIC(s) {
+	max := len(s)
+	inQ := false
+	qc := ''
+	fn sub(i) if i {
+		max -> s
+		_ -> {
+			c := s.(i)
+			if inQ {
+				true -> if c = qc { true -> { inQ <- false, sub(i + 1) }, _ -> sub(i + 1) }
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, sub(i + 1) }
+					'#', ';' -> s |> slice(0, i)
+					_ -> sub(i + 1)
+				}
+			}
+		}
+	}
+	sub(0)
+}
+
+fn _unesc(s) {
+	max := len(s)
+	fn sub(i, acc) if i {
+		max -> acc
+		_ -> if s.(i) {
+			'\\' -> sub(i + 2, acc << if s.(i + 1) {
+				'n' -> '\n'
+				'r' -> '\r'
+				't' -> '\t'
+				'"' -> '"'
+				'\\' -> '\\'
+				_ -> s.(i + 1)
+			})
+			_ -> sub(i + 1, acc << s.(i))
+		}
+	}
+	sub(0, '')
+}
+
+fn _parseVal(s) {
+	s := trim(s)
+	if {
+		s = '' -> ''
+		s = 'true' -> true
+		s = 'false' -> false
+		startsWith?(s, '"') & endsWith?(s, '"') -> _unesc(s |> slice(1, len(s) - 1))
+		startsWith?(s, '\'') & endsWith?(s, '\'') -> s |> slice(1, len(s) - 1)
+		_ -> if n := int(s) {
+			? -> if f := float(s) { ? -> s, _ -> f }
+			_ -> n
+		}
+	}
+}
+
+// parse takes an INI string and returns an Oak object.
+fn parse(text) {
+	lines := text |> split('\n')
+	root := {}
+	sec := ''
+	lines |> each(fn(raw) {
+		line := trim(raw)
+		if {
+			line = '' -> ?
+			startsWith?(line, '#') -> ?
+			startsWith?(line, ';') -> ?
+			startsWith?(line, '[') & endsWith?(line, ']') -> {
+				sec <- line |> slice(1, len(line) - 1) |> trim()
+				if root.(sec) = ? -> root.(sec) := {}
+			}
+			_ -> {
+				eq := indexOf(line, '=')
+				if eq > 0 -> {
+					k := line |> slice(0, eq) |> trim()
+					v := line |> slice(eq + 1) |> _stripIC() |> trim()
+					if sec { '' -> root.(k) := _parseVal(v), _ -> root.(sec).(k) := _parseVal(v) }
+				}
+			}
+		}
+	})
+	root
+}

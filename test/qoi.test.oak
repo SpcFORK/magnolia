@@ -1,0 +1,90 @@
+qoi := import('image-qoi')
+{
+	slice: slice
+	reduce: reduce
+} := import('std')
+
+fn bytesOf(s) s |> reduce([], fn(acc, c) acc << codepoint(c))
+
+fn run(t) {
+	// ---- basic 3-channel encode ----
+
+	pixels := [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]]
+	encoded := qoi.qoi(2, 2, pixels, 3)
+
+	'qoi starts with magic bytes' |> t.eq(
+		encoded |> slice(0, 4)
+		'qoif'
+	)
+
+	'qoi header encodes width in big-endian' |> t.eq(
+		encoded |> slice(4, 8) |> bytesOf()
+		[0, 0, 0, 2]
+	)
+
+	'qoi header encodes height in big-endian' |> t.eq(
+		encoded |> slice(8, 12) |> bytesOf()
+		[0, 0, 0, 2]
+	)
+
+	'qoi header encodes channels' |> t.eq(
+		encoded |> slice(12, 13) |> bytesOf()
+		[3]
+	)
+
+	'qoi ends with 8-byte end marker' |> t.eq(
+		encoded |> slice(len(encoded) - 8, len(encoded)) |> bytesOf()
+		[0, 0, 0, 0, 0, 0, 0, 1]
+	)
+
+	// ---- roundtrip 3-channel ----
+
+	decoded := qoi.decodeQOI(encoded)
+
+	'decodeQOI roundtrips width' |> t.eq(decoded.width, 2)
+	'decodeQOI roundtrips height' |> t.eq(decoded.height, 2)
+	'decodeQOI roundtrips channels' |> t.eq(decoded.channels, 3)
+	'decodeQOI roundtrips pixels' |> t.eq(decoded.pixels, pixels)
+
+	// ---- roundtrip 4-channel ----
+
+	pixels4 := [[255, 0, 0, 255], [0, 255, 0, 128], [0, 0, 255, 64], [0, 0, 0, 0]]
+	enc4 := qoi.qoi(2, 2, pixels4, 4)
+	dec4 := qoi.decodeQOI(enc4)
+
+	'decodeQOI 4-ch roundtrips width' |> t.eq(dec4.width, 2)
+	'decodeQOI 4-ch roundtrips pixels' |> t.eq(dec4.pixels, pixels4)
+
+	// ---- run-length encoding: repeated pixels ----
+
+	runPixels := [
+		[100, 100, 100]
+		[100, 100, 100]
+		[100, 100, 100]
+		[100, 100, 100]
+	]
+	encRun := qoi.qoi(4, 1, runPixels, 3)
+
+	'qoi with runs is compact' |> t.eq(
+		// header(14) + 1 RGB op(4) + 1 run op(1) + end(8) = 27
+		// much smaller than 14 + 4*4 + 8 = 38
+		len(encRun) < 30
+		true
+	)
+
+	decRun := qoi.decodeQOI(encRun)
+	'decodeQOI roundtrips run pixels' |> t.eq(decRun.pixels, runPixels)
+
+	// ---- single pixel ----
+
+	enc1 := qoi.qoi(1, 1, [[42, 43, 44]], 3)
+	dec1 := qoi.decodeQOI(enc1)
+	'decodeQOI single pixel' |> t.eq(dec1.pixels, [[42, 43, 44]])
+
+	// ---- invalid magic returns null ----
+
+	'decodeQOI rejects invalid magic' |> t.eq(
+		qoi.decodeQOI('notqoi' + encoded |> slice(4, len(encoded)))
+		?
+	)
+}

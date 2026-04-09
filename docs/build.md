@@ -230,6 +230,10 @@ template := Virtual.readFile('templates/index.html')
 - No source maps generated
 - Tree shaking requires explicit imports
 
+## Parallel Module Compilation
+
+The build pipeline now uses `pmap` from the `thread` library to compile modules in parallel. Module keys are sorted and then each module is parsed, transformed, transpiled, analyzed, and wrapped concurrently, improving build times on multi-core systems.
+
 ## See Also
 
 - [pack.md](pack.md) - Create standalone executables

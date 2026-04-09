@@ -49,6 +49,22 @@
 	wav: _wavFromModule
 	parseWav: _parseWavFromModule
 } := import('audio-wav')
+{
+	aiff: _aiffFromModule
+	parseAiff: _parseAiffFromModule
+} := import('audio-aiff')
+{
+	au: _auFromModule
+	parseAu: _parseAuFromModule
+} := import('audio-au')
+{
+	rawEncode: _rawEncodeFromModule
+	rawDecode: _rawDecodeFromModule
+} := import('audio-raw')
+{
+	parallel: parallel
+	pmapConcurrent: pmapConcurrent
+} := import('thread')
 
 // ---- constants -------------------------------------------------------
 
@@ -152,6 +168,83 @@ fn wav(samples, sampleRate, channels, bitDepth) _wavFromModule(samples, sampleRa
 //   r.sampleRate  // => 44100
 //   r.samples.(0) // => first normalised sample
 fn parseWav(data) _parseWavFromModule(data)
+
+// ---- AIFF encoding --------------------------------------------------
+
+// aiff encodes a list of normalised float samples into an AIFF binary string.
+// AIFF (Audio Interchange File Format) is Apple's standard uncompressed
+// audio format using big-endian byte order and signed integer PCM.
+// `samples` must already be interleaved when channels > 1.
+//
+// Example:
+//   s := sine(440, 44100, 44100)
+//   data := aiff(s, 44100, 1, 16)  // 44.1 kHz, mono, 16-bit AIFF
+fn aiff(samples, sampleRate, channels, bitDepth) _aiffFromModule(samples, sampleRate, channels, bitDepth)
+
+// ---- AIFF parsing ---------------------------------------------------
+
+// parseAiff parses an AIFF binary string and returns:
+//   { sampleRate, channels, bitDepth, samples }
+// where `samples` is a list of normalised floats. Returns ? on error.
+//
+// Example:
+//   r := parseAiff(fileBytes)
+//   r.sampleRate  // => 44100
+fn parseAiff(data) _parseAiffFromModule(data)
+
+// ---- AU encoding ----------------------------------------------------
+
+// au encodes a list of normalised float samples into an AU (Sun/NeXT)
+// binary string. AU is a simple big-endian format supporting 8/16/32-bit
+// signed linear PCM. `samples` must already be interleaved when channels > 1.
+//
+// Example:
+//   s := sine(440, 44100, 44100)
+//   data := au(s, 44100, 1, 16)  // 44.1 kHz, mono, 16-bit AU
+fn au(samples, sampleRate, channels, bitDepth) _auFromModule(samples, sampleRate, channels, bitDepth)
+
+// ---- AU parsing -----------------------------------------------------
+
+// parseAu parses an AU binary string and returns:
+//   { sampleRate, channels, bitDepth, samples }
+// where `samples` is a list of normalised floats. Returns ? on error.
+// Only linear PCM encodings (8, 16, 32-bit) are supported.
+//
+// Example:
+//   r := parseAu(fileBytes)
+//   r.sampleRate  // => 44100
+fn parseAu(data) _parseAuFromModule(data)
+
+// ---- raw PCM encoding -----------------------------------------------
+
+// rawEncode encodes a list of normalised float samples into a headerless
+// raw PCM binary string. Useful for inter-process piping, hardware I/O,
+// and embedding audio data in custom containers.
+//
+// Options (passed as an object):
+//   bitDepth  — 8, 16, or 32 (default 16)
+//   signed    — true for signed, false for unsigned (default true)
+//   endian    — :le or :be (default :le)
+//
+// Example:
+//   rawEncode(samples, { bitDepth: 16, endian: :le })
+fn rawEncode(samples, opts) _rawEncodeFromModule(samples, opts)
+
+// ---- raw PCM decoding -----------------------------------------------
+
+// rawDecode decodes a raw PCM binary string into normalised float samples.
+// Since raw PCM has no header, all format parameters must be specified.
+// Returns { samples }.
+//
+// Options (passed as an object):
+//   bitDepth  — 8, 16, or 32 (default 16)
+//   signed    — true for signed, false for unsigned (default true)
+//   endian    — :le or :be (default :le)
+//
+// Example:
+//   r := rawDecode(data, { bitDepth: 16, endian: :le })
+//   r.samples  // => list of normalised floats
+fn rawDecode(data, opts) _rawDecodeFromModule(data, opts)
 
 // ---- oscillators ----------------------------------------------------
 
@@ -484,3 +577,62 @@ fn dbToLinear(db) pow(10, db / 20)
 //   linearToDb(0.5)  // => ~-6.02
 //   linearToDb(1.0)  // => 0.0
 fn linearToDb(g) _linearToDbFromModule(g)
+
+// ---- parallel helpers ------------------------------------------------
+
+// pmixTracks mixes a list of equal-length sample lists into one by
+// summing them element-wise in parallel. Each track pair is summed
+// concurrently, then the results are merged pairwise.
+//
+// Example:
+//   pmixTracks([sine(440, 44100, N), sine(880, 44100, N), noise(N)])
+fn pmixTracks(tracks) {
+	if len(tracks) = 0 -> []
+	if len(tracks) = 1 -> tracks.0
+
+	// pairwise parallel addition
+	fn mergePairs(ts) if len(ts) <= 1 {
+		true -> ts
+		_ -> {
+			pairs := []
+			fn sub(i) if {
+				i + 1 < len(ts) -> {
+					pairs << [ts.(i), ts.(i + 1)]
+					sub(i + 2)
+				}
+				i < len(ts) -> pairs << [ts.(i), ?]
+			}
+			sub(0)
+			merged := parallel(pairs |> map(fn(pair) fn() if pair.1 {
+				? -> pair.0
+				_ -> add(pair.0, pair.1)
+			}))
+			mergePairs(merged)
+		}
+	}
+	mergePairs(tracks).0
+}
+
+// psynthesize generates multiple oscillators in parallel and mixes them.
+// Each entry in `specs` should be { type, freq, gain } where type is
+// :sine, :square, :sawtooth, or :triangle.
+//
+// Example:
+//   psynthesize(44100, 44100, [
+//       { type: :sine, freq: 440, gain: 0.5 }
+//       { type: :square, freq: 220, gain: 0.3 }
+//   ])
+fn psynthesize(sampleRate, length, specs) {
+	tracks := parallel(specs |> map(fn(spec) fn() {
+		samples := if spec.type {
+			:sine -> sine(spec.freq, sampleRate, length)
+			:square -> square(spec.freq, sampleRate, length)
+			:sawtooth -> sawtooth(spec.freq, sampleRate, length)
+			:triangle -> triangle(spec.freq, sampleRate, length)
+			_ -> sine(spec.freq, sampleRate, length)
+		}
+		g := default(spec.gain, 1)
+		if g = 1 { true -> samples, _ -> gain(samples, g) }
+	}))
+	pmixTracks(tracks)
+}

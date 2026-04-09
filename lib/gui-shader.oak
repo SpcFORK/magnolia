@@ -20,6 +20,7 @@
 } := import('std')
 
 _draw := import('gui-draw')
+threadLib := import('thread')
 
 // Import sub-modules
 m := import('gui-shader-math')
@@ -146,6 +147,8 @@ fn hash2(a, b) noise.hash2(a, b)
 fn hash3(a, b, c) noise.hash3(a, b, c)
 fn noise2D(x, y) noise.noise2D(x, y)
 fn fbm(x, y, octaves?) noise.fbm(x, y, octaves?)
+fn noiseGrid2DParallel(w, h, scaleFn, numWorkers) noise.noiseGrid2DParallel(w, h, scaleFn, numWorkers)
+fn fbmGrid2DParallel(w, h, scaleFn, octaves, numWorkers) noise.fbmGrid2DParallel(w, h, scaleFn, octaves, numWorkers)
 
 // =========================================================================
 // Re-export: gui-shader-sdf
@@ -513,4 +516,93 @@ fn renderShaderToBuffer(buf, shader) {
 		_row(ry + res)
 	}
 	_row(0)
+}
+
+// ─── Parallel shader rendering ──────────────────────────────────────────────
+// Splits the framebuffer into horizontal bands and evaluates the fragment
+// shader in parallel using worker goroutines.
+
+fn renderShaderToBufferParallel(buf, shader, numWorkers) {
+	t := elapsed(shader)
+	w := buf.width
+	h := buf.height
+	u := shader.uniforms
+	res := shader.resolution
+	workers := if numWorkers { ? -> 4, _ -> numWorkers }
+
+	// Split into horizontal bands
+	bandH := int(h / workers) + 1
+	bands := []
+	startY := 0
+	fn _makeBands() if startY < h -> {
+		endY := startY + bandH
+		if endY > h -> endY <- h
+		bands << { startY: startY, endY: endY }
+		startY <- endY
+		_makeBands()
+	}
+	_makeBands()
+
+	// Each worker computes pixels for its band into a local results list
+	bandResults := threadLib.pmap(bands, fn(band) {
+		results := []
+		fn _row(ry) if ry < band.endY -> {
+			fn _col(rx) if rx < w -> {
+				c := shader.fragment(rx, ry, w, h, t, u)
+				if c != ? -> results << { x: rx, y: ry, c: c }
+				_col(rx + res)
+			}
+			_col(0)
+			_row(ry + res)
+		}
+		_row(band.startY)
+		results
+	})
+
+	// Merge results back into the buffer (serial, fast writes)
+	with each(bandResults) fn(results) {
+		with each(results) fn(px) setPixel(buf, px.x, px.y, px.c)
+	}
+}
+
+// renderParallel evaluates a shader and draws directly to the window
+// using parallel horizontal band computation.
+fn renderParallel(window, shader, x, y, w, h, numWorkers) {
+	t := elapsed(shader)
+	u := shader.uniforms
+	res := default(shader.resolution, 1)
+	workers := if numWorkers { ? -> 4, _ -> numWorkers }
+
+	bandH := int(h / workers) + 1
+	bands := []
+	startY := 0
+	fn _mkB() if startY < h -> {
+		endY := startY + bandH
+		if endY > h -> endY <- h
+		bands << { startY: startY, endY: endY }
+		startY <- endY
+		_mkB()
+	}
+	_mkB()
+
+	// Compute pixel colors in parallel (pure math, no GDI)
+	bandPixels := threadLib.pmap(bands, fn(band) {
+		pixels := []
+		fn _row(ry) if ry < band.endY -> {
+			fn _col(rx) if rx < w -> {
+				c := shader.fragment(rx, ry, w, h, t, u)
+				if c != ? -> pixels << { x: x + rx, y: y + ry, c: c }
+				_col(rx + res)
+			}
+			_col(0)
+			_row(ry + res)
+		}
+		_row(band.startY)
+		pixels
+	})
+
+	// Replay all pixels on the main thread (serial GDI)
+	with each(bandPixels) fn(pixels) {
+		with each(pixels) fn(px) _draw.fillRect(window, px.x, px.y, res, res, px.c)
+	}
 }

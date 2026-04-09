@@ -539,3 +539,29 @@ wavData := audio.wav(normalized, 44100, 1, 16)
 
 // (save wavData to file...)
 ```
+
+## Parallel Helpers
+
+### `pmixTracks(tracks)`
+
+Mixes a list of equal-length sample lists into one by summing them element-wise in parallel. Track pairs are summed concurrently, then merged pairwise.
+
+```oak
+audio := import('audio')
+mixed := audio.pmixTracks([
+    audio.sine(440, 44100, 44100)
+    audio.sine(880, 44100, 44100)
+])
+```
+
+### `psynthesize(sampleRate, length, specs)`
+
+Generates multiple oscillators in parallel and mixes them. Each entry in `specs` should be `{ type, freq, gain }` where `type` is `:sine`, `:square`, `:sawtooth`, or `:triangle`.
+
+```oak
+audio := import('audio')
+samples := audio.psynthesize(44100, 44100, [
+    { type: :sine, freq: 440, gain: 0.5 }
+    { type: :square, freq: 220, gain: 0.3 }
+])
+```

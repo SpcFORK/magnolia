@@ -17,6 +17,11 @@
 // ReadBufSize := 4096 // 4 KiB
 ReadBufSize := 1048576 // 1 MiB
 
+{
+	pmap: pmap
+	pmapConcurrent: pmapConcurrent
+} := import('thread')
+
 fn readFileSync(path) {
 	evt := open(path, :readonly)
 	if evt.type {
@@ -195,4 +200,35 @@ fn listFiles(path, withFiles) if withFiles {
 	? -> listFilesSync(path)
 	_ -> listFilesAsync(path, withFiles)
 }
+
+// ---- parallel batch I/O helpers -------------------------------------
+
+// readFiles reads multiple files in parallel and returns a list of results.
+// Each result is the file contents string on success, or ? on error.
+// The order of results corresponds to the order of paths.
+//
+// Example:
+//   contents := readFiles(['a.txt', 'b.txt', 'c.txt'])
+fn readFiles(paths) pmap(paths, readFileSync)
+
+// readFilesConcurrent reads multiple files with bounded concurrency.
+// Limits the number of simultaneous open files.
+//
+// Example:
+//   contents := readFilesConcurrent(['a.txt', 'b.txt', ...], 4)
+fn readFilesConcurrent(paths, maxOpen) pmapConcurrent(paths, readFileSync, maxOpen)
+
+// writeFiles writes multiple path/content pairs in parallel.
+// Each entry in `pairs` should be { path, content }.
+// Returns a list of results (true on success, ? on error).
+//
+// Example:
+//   writeFiles([{path: 'a.txt', content: 'hello'}, {path: 'b.txt', content: 'world'}])
+fn writeFiles(pairs) pmap(pairs, fn(p) writeFileSyncWithFlag(p.path, p.content, :truncate))
+
+// statFiles stats multiple paths in parallel.
+//
+// Example:
+//   infos := statFiles(['a.txt', 'b.txt'])
+fn statFiles(paths) pmap(paths, statFileSync)
 

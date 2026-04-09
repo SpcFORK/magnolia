@@ -7,6 +7,9 @@
 {
 	join: join
 } := import('str')
+{
+	pmap: pmap
+} := import('thread')
 
 // _clipF32 clamps a float sample to [-1, 1].
 fn _clipF32(s) if {
@@ -155,6 +158,16 @@ fn _wavReadSamples(data, dataOff, totalSamples, bytesPerSample, bitDepth) {
 	}
 	readSamples([], 0)
 }
+
+// pbatchWav encodes multiple sample lists into WAV byte strings in parallel.
+// Each spec is { samples, sampleRate?, channels?, bitDepth? }.
+//   pbatchWav([{ samples: s1 }, { samples: s2, bitDepth: 32 }])
+fn pbatchWav(specs) pmap(specs, fn(s) wav(s.samples, s.sampleRate, s.channels, s.bitDepth))
+
+// pbatchParseWav decodes multiple WAV byte strings in parallel.
+//   pbatchParseWav([wavData1, wavData2])
+//   // => [{ sampleRate, channels, bitDepth, samples }, ...]
+fn pbatchParseWav(dataList) pmap(dataList, parseWav)
 
 fn parseWav(data) {
 	if len(data) < 44 {

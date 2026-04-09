@@ -1,0 +1,249 @@
+// libdata-xml implements an XML parser and serializer for Oak values.
+//
+// Supports elements, attributes, text, CDATA, comments, and self-closing tags.
+
+{
+	default: default
+	slice: slice
+	map: map
+	each: each
+	reduce: reduce
+	entries: entries
+} := import('std')
+{
+	space?: space?
+	letter?: letter?
+	digit?: digit?
+	join: join
+	replace: replace
+} := import('str')
+
+// --- constructors ---
+
+fn element(tag, attrs, children) {
+	{ type: :element, tag: tag, attrs: default(attrs, {}), children: default(children, []) }
+}
+fn text(content) { type: :text, content: content }
+fn cdata(content) { type: :cdata, content: content }
+fn comment(content) { type: :comment, content: content }
+
+// --- escape helpers ---
+
+fn _escText(s) s |> map(fn(c) if c { '&' -> '&amp;', '<' -> '&lt;', '>' -> '&gt;', _ -> c })
+fn _escAttr(s) s |> map(fn(c) if c { '&' -> '&amp;', '<' -> '&lt;', '>' -> '&gt;', '"' -> '&quot;', '\'' -> '&apos;', _ -> c })
+fn _unesc(s) s |> replace('&amp;', '&') |> replace('&lt;', '<') |> replace('&gt;', '>') |> replace('&quot;', '"') |> replace('&apos;', '\'')
+
+// --- serialize ---
+
+fn serialize(node) if type(node) {
+	:list -> node |> map(serialize) |> join('')
+	_ -> _serNode(node)
+}
+
+fn _serNode(node) if node.type {
+	:text -> _escText(node.content)
+	:cdata -> '<![CDATA[' << node.content << ']]>'
+	:comment -> '<!--' << node.content << '-->'
+	:element -> {
+		t := node.tag
+		a := if len(keys(node.attrs)) {
+			0 -> ''
+			_ -> entries(node.attrs) |> map(fn(e) ' ' << e.0 << '="' << _escAttr(string(e.1)) << '"') |> join('')
+		}
+		if len(node.children) {
+			0 -> '<' << t << a << '/>'
+			_ -> '<' << t << a << '>' << serialize(node.children) << '</' << t << '>'
+		}
+	}
+}
+
+// --- parse ---
+
+fn parse(text) {
+	idx := [0]
+	max := len(text)
+	fn pk text.(idx.0)
+	fn adv { idx.0 <- idx.0 + 1, text.(idx.0 - 1) }
+	fn at(i) text.(i)
+
+	fn skipSp {
+		fn sub if idx.0 < max & space?(pk()) { true -> { idx.0 <- idx.0 + 1, sub() } }
+		sub()
+	}
+
+	fn readName {
+		s := idx.0
+		fn sub if idx.0 < max {
+			true -> {
+				c := pk()
+				if letter?(c) | digit?(c) | c = '-' | c = '_' | c = ':' | c = '.' {
+					true -> { idx.0 <- idx.0 + 1, sub() }
+				}
+			}
+		}
+		sub()
+		text |> slice(s, idx.0)
+	}
+
+	fn readAttrVal {
+		q := adv()
+		s := idx.0
+		fn sub if idx.0 < max & pk() != q { true -> { idx.0 <- idx.0 + 1, sub() } }
+		sub()
+		v := text |> slice(s, idx.0)
+		idx.0 <- idx.0 + 1
+		_unesc(v)
+	}
+
+	fn readAttrs {
+		attrs := {}
+		fn sub {
+			skipSp()
+			if idx.0 < max & pk() != '>' & pk() != '/' & pk() != '?' {
+				true -> {
+					nm := readName()
+					if nm != '' -> {
+						skipSp()
+						if pk() = '=' -> { idx.0 <- idx.0 + 1, skipSp(), attrs.(nm) := readAttrVal() }
+					}
+					sub()
+				}
+			}
+		}
+		sub()
+		attrs
+	}
+
+	fn readText {
+		s := idx.0
+		fn sub if idx.0 < max & pk() != '<' { true -> { idx.0 <- idx.0 + 1, sub() } }
+		sub()
+		_unesc(text |> slice(s, idx.0))
+	}
+
+	fn matchStr(str) if text |> slice(idx.0, idx.0 + len(str)) {
+		str -> { idx.0 <- idx.0 + len(str), true }
+		_ -> false
+	}
+
+	fn readCDATA {
+		s := idx.0
+		fn sub if idx.0 + 2 < max {
+			true -> if at(idx.0) = ']' & at(idx.0 + 1) = ']' & at(idx.0 + 2) = '>' {
+				true -> { c := text |> slice(s, idx.0), idx.0 <- idx.0 + 3, cdata(c) }
+				_ -> { idx.0 <- idx.0 + 1, sub() }
+			}
+		}
+		sub()
+	}
+
+	fn readComment {
+		s := idx.0
+		fn sub if idx.0 + 2 < max {
+			true -> if at(idx.0) = '-' & at(idx.0 + 1) = '-' & at(idx.0 + 2) = '>' {
+				true -> { c := text |> slice(s, idx.0), idx.0 <- idx.0 + 3, comment(c) }
+				_ -> { idx.0 <- idx.0 + 1, sub() }
+			}
+		}
+		sub()
+	}
+
+	fn eatTo(ch) {
+		fn sub if idx.0 < max & pk() != ch { true -> { idx.0 <- idx.0 + 1, sub() } }
+		sub()
+		if idx.0 < max -> idx.0 <- idx.0 + 1
+	}
+
+	fn parseNodes(_stopTag) {
+		nodes := []
+		fn sub {
+			if idx.0 >= max -> nodes
+			if pk() {
+				'<' -> {
+					idx.0 <- idx.0 + 1
+					if pk() {
+						'/' -> {
+							idx.0 <- idx.0 + 1
+							readName()
+							eatTo('>')
+							nodes
+						}
+						'!' -> if at(idx.0 + 1) = '-' & at(idx.0 + 2) = '-' {
+							true -> { idx.0 <- idx.0 + 3, nodes << readComment(), sub() }
+							_ -> if matchStr('![CDATA[') {
+								true -> { nodes << readCDATA(), sub() }
+								_ -> { eatTo('>'), sub() }
+							}
+						}
+						'?' -> {
+							fn eatPI if idx.0 + 1 < max {
+								true -> if at(idx.0) = '?' & at(idx.0 + 1) = '>' {
+									true -> idx.0 <- idx.0 + 2
+									_ -> { idx.0 <- idx.0 + 1, eatPI() }
+								}
+							}
+							eatPI()
+							sub()
+						}
+						_ -> {
+							tag := readName()
+							attrs := readAttrs()
+							skipSp()
+							if pk() = '/' {
+								true -> { idx.0 <- idx.0 + 1, if idx.0 < max -> idx.0 <- idx.0 + 1, nodes << element(tag, attrs, []) }
+								_ -> { if idx.0 < max -> idx.0 <- idx.0 + 1, nodes << element(tag, attrs, parseNodes(tag)) }
+							}
+							sub()
+						}
+					}
+				}
+				_ -> {
+					c := readText()
+					if c != '' -> nodes << text(c)
+					sub()
+				}
+			}
+		}
+		sub()
+	}
+
+	parseNodes('')
+}
+
+// --- query helpers ---
+
+fn querySelector(nodes, sel) {
+	fn search(list) {
+		fn sub(i) if i < len(list) {
+			true -> {
+				n := list.(i)
+				if n.type = :element {
+					true -> if n.tag = sel { true -> n, _ -> if r := search(n.children) { ? -> sub(i + 1), _ -> r } }
+					_ -> sub(i + 1)
+				}
+			}
+		}
+		sub(0)
+	}
+	if type(nodes) { :list -> search(nodes), _ -> search([nodes]) }
+}
+
+fn querySelectorAll(nodes, sel) {
+	results := []
+	fn search(list) list |> each(fn(n) if n.type = :element -> {
+		if n.tag = sel -> results << n
+		search(n.children)
+	})
+	if type(nodes) { :list -> search(nodes), _ -> search([nodes]) }
+	results
+}
+
+fn textContent(node) if type(node) {
+	:list -> node |> map(textContent) |> join('')
+	_ -> if node.type {
+		:text -> node.content
+		:cdata -> node.content
+		:element -> node.children |> map(textContent) |> join('')
+		_ -> ''
+	}
+}

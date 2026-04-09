@@ -6,6 +6,8 @@ linux := import('linux')
 { _default: _default, _err: _err } := import('gui-common')
 guiFonts := import('gui-fonts')
 { writeU32: writeU32 } := import('writes')
+guiThread := import('gui-thread')
+threadLib := import('thread')
 
 // Shared success sentinel — avoids per-call { type: :ok } allocation.
 _OK := { type: :ok }
@@ -897,4 +899,106 @@ fn drawLinesBatch(window, segs, color, defaultColor) if window.type {
 		}
 	}
 	_ -> ?
+}
+
+// ─── Threaded Draw Queue ────────────────────────────────────────────────────
+// DrawQueue collects draw commands from any thread and replays them on the
+// main thread.  Worker goroutines call enqueue* methods; the main thread
+// calls flush() once per frame (after beginFrame, before endFrame).
+//
+// This is safe because the actual GDI/GPU calls happen only during flush(),
+// which runs on the main thread.
+
+fn DrawQueue() {
+	commands := []
+	mutex := threadLib.Mutex()
+
+	{
+		// enqueueRect adds a fillRect command to the queue (thread-safe).
+		enqueueRect: fn(x, y, w, h, color, borderColor) {
+			mutex.lock()
+			commands << { op: :rect, x: x, y: y, w: w, h: h, color: color, borderColor: borderColor }
+			mutex.unlock()
+		}
+
+		// enqueueLine adds a drawLine command to the queue (thread-safe).
+		enqueueLine: fn(x1, y1, x2, y2, color) {
+			mutex.lock()
+			commands << { op: :line, x1: x1, y1: y1, x2: x2, y2: y2, color: color }
+			mutex.unlock()
+		}
+
+		// enqueueText adds a drawText command to the queue (thread-safe).
+		enqueueText: fn(x, y, text, color) {
+			mutex.lock()
+			commands << { op: :text, x: x, y: y, text: text, color: color }
+			mutex.unlock()
+		}
+
+		// enqueueEllipse adds a fillEllipse command to the queue (thread-safe).
+		enqueueEllipse: fn(cx, cy, rx, ry, fillColor, borderColor) {
+			mutex.lock()
+			commands << { op: :ellipse, cx: cx, cy: cy, rx: rx, ry: ry, fillColor: fillColor, borderColor: borderColor }
+			mutex.unlock()
+		}
+
+		// enqueueCustom adds an arbitrary draw function to the queue (thread-safe).
+		// The function receives (window) as its only argument.
+		enqueueCustom: fn(drawFn) {
+			mutex.lock()
+			commands << { op: :custom, fn: drawFn }
+			mutex.unlock()
+		}
+
+		// flush replays all queued draw commands on the calling thread.
+		// Call from the main thread only (after beginFrame).
+		flush: fn(window) {
+			mutex.lock()
+			snapshot := commands
+			commands <- []
+			mutex.unlock()
+
+			fn _replay(i) if i < len(snapshot) -> {
+				cmd := snapshot.(i)
+				if cmd.op {
+					:rect -> fillRect(window, cmd.x, cmd.y, cmd.w, cmd.h, cmd.color, ?, cmd.borderColor)
+					:line -> drawLine(window, cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.color)
+					:text -> drawText(window, cmd.x, cmd.y, cmd.text, cmd.color)
+					:ellipse -> fillEllipse(window, cmd.cx, cmd.cy, cmd.rx, cmd.ry, cmd.fillColor, cmd.borderColor)
+					:custom -> cmd.fn(window)
+				}
+				_replay(i + 1)
+			}
+			_replay(0)
+		}
+
+		// size returns the approximate number of queued commands.
+		size: fn() len(commands)
+
+		// clear discards all queued commands without executing them.
+		clear: fn() {
+			mutex.lock()
+			commands <- []
+			mutex.unlock()
+		}
+	}
+}
+
+// parallelFillRects fills multiple rectangles using parallel coordinate
+// computation.  coords is a list of {x, y, w, h, color} objects.
+// Coordinates may be computed in parallel; actual fill calls are serial.
+fn parallelFillRects(window, coords, computeFn, numWorkers) {
+	workers := _default(numWorkers, 4)
+	// Compute rect parameters in parallel (e.g., layout, transforms)
+	computed := if computeFn {
+		? -> coords
+		_ -> threadLib.pmapConcurrent(coords, computeFn, workers)
+	}
+	// Draw serially on the main thread
+	fn _draw(i) if i < len(computed) -> {
+		r := computed.(i)
+		fillRect(window, r.x, r.y, r.w, r.h, r.color)
+		_draw(i + 1)
+	}
+	_draw(0)
 }

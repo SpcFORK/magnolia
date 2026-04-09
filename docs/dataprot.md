@@ -258,3 +258,22 @@ dataprot.ldpcCorrect(broken, H)
 - The additive checksum helpers are straight modular sums, not Internet checksum or Fletcher/Adler variants.
 - `crc16Ccitt` and `crc32` expose optional tuning arguments so alternate seeds or polynomials can be reused without duplicating the core loop.
 - `ldpcCorrect` performs only single-bit syndrome correction. It is not a general LDPC decoder and does not implement belief propagation or iterative soft decisions.
+
+## Parallel Batch Operations
+
+### `pbatchCrc32(payloads)`
+
+Computes CRC-32 for a list of data payloads in parallel.
+
+```oak
+dataprot.pbatchCrc32(['hello', 'world'])
+// => [0x3610A686, 0x3E0C8623]
+```
+
+### `pbatchLdpcCheck(words, parityMatrix)`
+
+Runs LDPC parity-check on a list of codewords in parallel.
+
+```oak
+dataprot.pbatchLdpcCheck([word1, word2], parityMatrix)
+```

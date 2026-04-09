@@ -6,6 +6,28 @@ windows := import('windows')
 eventBusLib := import('async/event-bus')
 { _default: _default } := import('gui-common')
 guiInput := import('gui-input')
+guiThread := import('gui-thread')
+
+// ─── Thread-safe event emission ─────────────────────────────────────────────
+// emitThreadSafe posts an event to the window's command queue so it is
+// processed on the main thread during the next frame flush.  Use this from
+// worker goroutines that must not call Win32/GDI functions directly.
+
+fn emitThreadSafe(window, event, payload) {
+	if guiThread.threadingEnabled?(window) {
+		true -> {
+			cmdQueue := guiThread.commandQueue(window)
+			if cmdQueue != ? {
+				true -> cmdQueue.post(fn() emit(window, event, payload))
+				_ -> emit(window, event, payload)
+			}
+		}
+		_ -> emit(window, event, payload)
+	}
+}
+
+// emitFromWorker is an alias for emitThreadSafe — clearer intent in worker code.
+fn emitFromWorker(window, event, payload) emitThreadSafe(window, event, payload)
 
 // ─── Mouse coordinate transform helper ──────────────────────────────────────
 // When a design resolution is active (window._res exists), raw Win32 mouse

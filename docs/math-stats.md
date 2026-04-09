@@ -97,3 +97,21 @@ round(2.5)        // => 3
 round(-2.5)       // => -3
 round(123.456, 0) // => 123
 ```
+
+## Parallel Batch Operations
+
+### `pbatchMean(datasets)`
+
+Computes mean of multiple datasets in parallel.
+
+```oak
+pbatchMean([[1, 2, 3], [4, 5, 6]])  // => [2, 5]
+```
+
+### `pbatchStddev(datasets)`
+
+Computes standard deviation of multiple datasets in parallel.
+
+```oak
+pbatchStddev([[1, 2, 3], [4, 5, 6]])
+```

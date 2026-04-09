@@ -306,7 +306,7 @@ func TestIMAPLibStartTLSFetchBody(t *testing.T) {
 }
 
 func TestMailLibSourcesLoad(t *testing.T) {
-	for _, name := range []string{"socket", "smtp", "pop", "imap"} {
+	for _, name := range []string{"socket", "smtp", "pop", "imap", "email-smtp", "email-pop", "email-imap", "email"} {
 		if _, ok := stdlibs[name]; !ok {
 			t.Fatalf("Expected stdlib %s to be registered", name)
 		}

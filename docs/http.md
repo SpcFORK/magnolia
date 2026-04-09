@@ -432,3 +432,21 @@ The `req` parameter passed to handlers contains:
 - `fs` - For reading static files
 - `fmt` - For formatted logging
 - `str` - For string manipulation
+
+## Parallel Batch Operations
+
+### `pbatchQueryEncode(paramSets)`
+
+Encodes multiple parameter objects into query strings in parallel.
+
+```oak
+http.pbatchQueryEncode([{a: 1}, {b: 2}])  // => ['a=1', 'b=2']
+```
+
+### `pbatchQueryDecode(queryStrings)`
+
+Decodes multiple query strings into parameter objects in parallel.
+
+```oak
+http.pbatchQueryDecode(['a=1', 'b=2'])  // => [{a: '1'}, {b: '2'}]
+```

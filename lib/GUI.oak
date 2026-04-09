@@ -52,6 +52,7 @@ guiMenus := import('gui-menus')
 guiPrint := import('gui-print')
 guiTheme := import('gui-theme')
 guiSystray := import('gui-systray')
+guiThread := import('gui-thread')
 _guiImportT4 := nanotime()
 
 // Module-import timing exposed for diagnostics.
@@ -161,6 +162,14 @@ fn createWindow(title, width, height, options) {
 				guiResolution.setDesignResolution(created, opts.designWidth, opts.designHeight, {
 					scaleMode: opts.scaleMode
 					pixelPerfect: opts.pixelPerfect
+				})
+			}
+			// Auto-init threading when threading options are specified.
+			if _default(opts.threading, false) {
+				true -> guiThread.initWindowThreading(created, {
+					numWorkers: _default(opts.threadWorkers, 4)
+					commandQueue: true
+					workerPool: true
 				})
 			}
 			created
@@ -1300,6 +1309,26 @@ fn drawBatch(window, ops) {
 	guiDrawOps.drawBatch(_drawOpsDeps, window, ops)
 }
 
+fn drawBatchParallel(window, ops, numWorkers) {
+	if _drawOpsDeps = ? -> _initDrawOpsDeps()
+	guiDrawOps.drawBatchParallel(_drawOpsDeps, window, ops, numWorkers)
+}
+
+fn drawThreaded(window, op) {
+	if _drawOpsDeps = ? -> _initDrawOpsDeps()
+	guiDrawOps.drawThreaded(_drawOpsDeps, window, op)
+}
+
+fn drawBatchThreaded(window, ops) {
+	if _drawOpsDeps = ? -> _initDrawOpsDeps()
+	guiDrawOps.drawBatchThreaded(_drawOpsDeps, window, ops)
+}
+
+fn drawBatchParallelThreaded(window, ops, numWorkers) {
+	if _drawOpsDeps = ? -> _initDrawOpsDeps()
+	guiDrawOps.drawBatchParallelThreaded(_drawOpsDeps, window, ops, numWorkers)
+}
+
 fn CubeMesh(size) {
 	hs := _default(size, 2) / 2
 	{
@@ -1561,6 +1590,40 @@ fn close(window) if window.type {
 }
 
 // =========================================================================
+// Re-export: gui-thread (Threading infrastructure)
+// =========================================================================
+
+// Initialize threading for a window manually (auto-init via createWindow
+// options.threading = true is preferred).
+fn initThreading(window, options) guiThread.initWindowThreading(window, options)
+fn destroyThreading(window) guiThread.destroyWindowThreading(window)
+fn threadingEnabled?(window) guiThread.threadingEnabled?(window)
+
+// Thread-safe command queue access
+fn threadCommandQueue(window) guiThread.commandQueue(window)
+fn threadWorkerPool(window) guiThread.workerPool(window)
+fn threadScheduler(window) guiThread.scheduler(window)
+fn threadStateGuard(window) guiThread.stateGuard(window)
+fn flushThreadedCommands(window) guiThread.flushThreadedCommands(window)
+
+// Thread-safe event emission (safe to call from worker goroutines)
+fn emitThreadSafe(window, event, payload) guiEvents.emitThreadSafe(window, event, payload)
+fn emitFromWorker(window, event, payload) guiEvents.emitFromWorker(window, event, payload)
+
+// Draw queue for thread-safe drawing
+fn DrawQueue() guiDraw.DrawQueue()
+fn parallelFillRects(window, coords, computeFn, numWorkers) guiDraw.parallelFillRects(window, coords, computeFn, numWorkers)
+
+// Thread-safe state guard constructors
+fn CommandQueue() guiThread.CommandQueue()
+fn WorkerPool(numWorkers) guiThread.WorkerPool(numWorkers)
+fn FrameFence(workerCount) guiThread.FrameFence(workerCount)
+fn FrameScheduler(pool, cmdQueue) guiThread.FrameScheduler(pool, cmdQueue)
+fn StateGuard() guiThread.StateGuard()
+fn AsyncLoader(cmdQueue) guiThread.AsyncLoader(cmdQueue)
+fn parallelTransformVertices(vertices, transformFn, numWorkers) guiThread.parallelTransformVertices(vertices, transformFn, numWorkers)
+
+// =========================================================================
 // Re-export: gui-shader (CPU shader engine)
 // =========================================================================
 
@@ -1677,6 +1740,8 @@ fn shaderHash2(a, b) guiShader.hash2(a, b)
 fn shaderHash3(a, b, c) guiShader.hash3(a, b, c)
 fn shaderNoise2D(x, y) guiShader.noise2D(x, y)
 fn shaderFbm(x, y, octaves?) guiShader.fbm(x, y, octaves?)
+fn shaderNoiseGrid2DParallel(w, h, scaleFn, numWorkers) guiShader.noiseGrid2DParallel(w, h, scaleFn, numWorkers)
+fn shaderFbmGrid2DParallel(w, h, scaleFn, octaves, numWorkers) guiShader.fbmGrid2DParallel(w, h, scaleFn, octaves, numWorkers)
 
 // --- SDF
 fn shaderSdCircle(px, py, cx, cy, r) guiShader.sdCircle(px, py, cx, cy, r)
@@ -1924,6 +1989,7 @@ fn getD3DFeatureLevel guiGpuInfo.getD3DFeatureLevel()
 fn getDisplayModes guiGpuInfo.getDisplayModes()
 fn getMonitorInfo guiGpuInfo.getMonitorInfo()
 fn gpuCapabilityDump guiGpuInfo.gpuCapabilityDump()
+fn gpuCapabilityDumpParallel guiGpuInfo.gpuCapabilityDumpParallel()
 
 // ─── Memory / handle leak detector ──────────────────────────────────────────
 fn getGDIObjectCount guiLeakDetect.getGDIObjectCount()
@@ -1935,6 +2001,7 @@ fn getWorkingSetSize guiLeakDetect.getWorkingSetSize()
 fn getPeakWorkingSetSize guiLeakDetect.getPeakWorkingSetSize()
 fn leakDetectorState guiLeakDetect.leakDetectorState()
 fn leakSnapshot(state) guiLeakDetect.leakSnapshot(state)
+fn leakSnapshotParallel(state) guiLeakDetect.leakSnapshotParallel(state)
 fn leakCheck(state) guiLeakDetect.leakCheck(state)
 fn leakReport(state) guiLeakDetect.leakReport(state)
 fn leakSetThresholds(state, thresholds) guiLeakDetect.leakSetThresholds(state, thresholds)

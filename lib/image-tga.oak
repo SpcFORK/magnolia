@@ -1,0 +1,294 @@
+// libtga provides encode/decode helpers for Truevision TGA (TARGA) images.
+//
+// Supports:
+//   - 24-bit uncompressed RGB (type 2)
+//   - 32-bit uncompressed RGBA (type 2)
+//   - 8-bit uncompressed grayscale (type 3)
+//   - 24-bit RLE compressed RGB (type 10)
+//   - 32-bit RLE compressed RGBA (type 10)
+//
+// All encoders accept row-major pixel data and produce binary strings.
+
+{
+	map: map
+	slice: slice
+	default: default
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// ---- helpers --------------------------------------------------------
+
+fn bytes(parts) parts |> map(fn(n) char(n % 256)) |> join('')
+
+fn intToBytes(n, width) {
+	fn sub(i, p, acc) if i {
+		width -> acc
+		_ -> sub(i + 1, int(p / 256), acc << (p % 256))
+	}
+	sub(0, n, [])
+}
+
+fn clampByte(n) if {
+	n < 0 -> 0
+	n > 255 -> 255
+	_ -> int(n)
+}
+
+fn _mkBuf() {
+	buf := ''
+	last := { off: 0 }
+	fn appd(part) {
+		buf.(last.off) := part
+		last.off <- len(buf)
+	}
+	{ buf: buf, appd: appd }
+}
+
+fn _writeHeader(appd, w, h, bpp, imageType) {
+	appd(char(0))
+	appd(char(0))
+	appd(char(imageType))
+	appd(bytes([0, 0, 0, 0, 0]))
+	appd(bytes(intToBytes(0, 2)))
+	appd(bytes(intToBytes(0, 2)))
+	appd(bytes(intToBytes(w, 2)))
+	appd(bytes(intToBytes(h, 2)))
+	appd(char(bpp))
+	appd(char(if bpp { 32 -> 40, _ -> 32 }))
+}
+
+fn _writePixel(appd, px, bpp) if bpp {
+	8 -> appd(char(clampByte(if type(px) { :int -> px, _ -> default(px.(0), 0) })))
+	24 -> if type(px) {
+		:list -> {
+			appd(char(clampByte(default(px.(0), 0))))
+			appd(char(clampByte(default(px.(1), 0))))
+			appd(char(clampByte(default(px.(2), 0))))
+		}
+		:string -> appd(slice(px, 0, 3))
+		_ -> appd(bytes([0, 0, 0]))
+	}
+	32 -> if type(px) {
+		:list -> {
+			appd(char(clampByte(default(px.(0), 0))))
+			appd(char(clampByte(default(px.(1), 0))))
+			appd(char(clampByte(default(px.(2), 0))))
+			appd(char(clampByte(default(px.(3), 255))))
+		}
+		:string -> appd(slice(px, 0, 4))
+		_ -> appd(bytes([0, 0, 0, 255]))
+	}
+	_ -> ?
+}
+
+fn _pixelEqual(a, b, bpp, bytesPerPixel) if bpp {
+	8 -> a = b
+	_ -> if type(a) {
+		:list -> {
+			eq := true
+			fn cmp(c) if c {
+				bytesPerPixel -> ?
+				_ -> if default(a.(c), 0) != default(b.(c), 0) {
+					true -> eq <- false
+					_ -> cmp(c + 1)
+				}
+			}
+			cmp(0)
+			eq
+		}
+		_ -> a = b
+	}
+}
+
+// ---- TGA encoder (uncompressed) -------------------------------------
+
+// tga encodes an uncompressed TGA image and returns the full file string.
+// bpp is bits per pixel: 8 (grayscale), 24 (RGB), or 32 (RGBA). Default 24.
+fn tga(width, height, pixels, bpp) {
+	bpp := default(bpp, 24)
+	w := int(width)
+	h := int(height)
+	imageType := if bpp { 8 -> 3, _ -> 2 }
+
+	b := _mkBuf()
+	_writeHeader(b.appd, w, h, bpp, imageType)
+
+	count := w * h
+	fn sub(i) if i {
+		count -> ?
+		_ -> {
+			_writePixel(b.appd, pixels.(i), bpp)
+			sub(i + 1)
+		}
+	}
+	sub(0)
+	b.buf
+}
+
+// tgaRLE encodes a run-length encoded TGA image (type 10 for color, type 11 for grayscale).
+fn tgaRLE(width, height, pixels, bpp) {
+	bpp := default(bpp, 24)
+	w := int(width)
+	h := int(height)
+	bytesPerPixel := int(bpp / 8)
+	imageType := if bpp { 8 -> 11, _ -> 10 }
+
+	b := _mkBuf()
+	_writeHeader(b.appd, w, h, bpp, imageType)
+
+	count := w * h
+	fn rleLoop(i) if {
+		i >= count -> ?
+		_ -> {
+			cur := pixels.(i)
+			fn countRun(j) if {
+				j >= count -> j
+				j - i >= 128 -> j
+				_ -> if _pixelEqual(cur, pixels.(j), bpp, bytesPerPixel) {
+					true -> countRun(j + 1)
+					_ -> j
+				}
+			}
+			runEnd := countRun(i + 1)
+			runLen := runEnd - i
+
+			if runLen > 1 {
+				true -> {
+					b.appd(char(128 + runLen - 1))
+					_writePixel(b.appd, cur, bpp)
+					rleLoop(runEnd)
+				}
+				_ -> {
+					fn countRaw(j) if {
+						j >= count -> j
+						j - i >= 128 -> j
+						j + 1 >= count -> j + 1
+						_ -> if _pixelEqual(pixels.(j), pixels.(j + 1), bpp, bytesPerPixel) {
+							true -> j
+							_ -> countRaw(j + 1)
+						}
+					}
+					rawEnd := countRaw(i + 1)
+					rawLen := rawEnd - i
+					b.appd(char(rawLen - 1))
+					fn writeRaw(k) if k {
+						rawEnd -> ?
+						_ -> {
+							_writePixel(b.appd, pixels.(k), bpp)
+							writeRaw(k + 1)
+						}
+					}
+					writeRaw(i)
+					rleLoop(rawEnd)
+				}
+			}
+		}
+	}
+	rleLoop(0)
+	b.buf
+}
+
+// ---- TGA decoder ----------------------------------------------------
+
+// decodeTGA decodes an uncompressed or RLE-compressed TGA file string.
+// Returns { width, height, bpp, pixels }.
+fn decodeTGA(data) {
+	idLen := codepoint(data.(0))
+	imageType := codepoint(data.(2))
+	w := codepoint(data.(12)) + codepoint(data.(13)) * 256
+	h := codepoint(data.(14)) + codepoint(data.(15)) * 256
+	bpp := codepoint(data.(16))
+	descriptor := codepoint(data.(17))
+	bytesPerPixel := int(bpp / 8)
+	topDown := int(descriptor / 32) % 2 = 1
+	offset := 18 + idLen
+	count := w * h
+
+	fn readPixelAt(off) if bpp {
+		8 -> codepoint(data.(off))
+		24 -> [codepoint(data.(off)), codepoint(data.(off + 1)), codepoint(data.(off + 2))]
+		32 -> [codepoint(data.(off)), codepoint(data.(off + 1)), codepoint(data.(off + 2)), codepoint(data.(off + 3))]
+		_ -> ?
+	}
+
+	pixels := if {
+		imageType = 2 | imageType = 3 -> {
+			px := []
+			fn sub(i) if i {
+				count -> ?
+				_ -> {
+					px << readPixelAt(offset + i * bytesPerPixel)
+					sub(i + 1)
+				}
+			}
+			sub(0)
+			px
+		}
+		imageType = 10 | imageType = 11 -> {
+			px := []
+			fn rle(off, n) if {
+				n >= count -> ?
+				_ -> {
+					hdr := codepoint(data.(off))
+					if hdr >= 128 {
+						true -> {
+							runLen := hdr - 128 + 1
+							pixel := readPixelAt(off + 1)
+							fn rep(k) if k {
+								runLen -> ?
+								_ -> {
+									px << pixel
+									rep(k + 1)
+								}
+							}
+							rep(0)
+							rle(off + 1 + bytesPerPixel, n + runLen)
+						}
+						_ -> {
+							rawLen := hdr + 1
+							fn raw(k, o) if k {
+								rawLen -> rle(o, n + rawLen)
+								_ -> {
+									px << readPixelAt(o)
+									raw(k + 1, o + bytesPerPixel)
+								}
+							}
+							raw(0, off + 1)
+						}
+					}
+				}
+			}
+			rle(offset, 0)
+			px
+		}
+		_ -> []
+	}
+
+	finalPixels := if topDown {
+		true -> pixels
+		_ -> {
+			flipped := []
+			fn flipRow(y) if y {
+				0 -> ?
+				_ -> {
+					rowStart := (y - 1) * w
+					fn copyCol(x) if x {
+						w -> ?
+						_ -> {
+							flipped << pixels.(rowStart + x)
+							copyCol(x + 1)
+						}
+					}
+					copyCol(0)
+					flipRow(y - 1)
+				}
+			}
+			flipRow(h)
+			flipped
+		}
+	}
+
+	{ width: w, height: h, bpp: bpp, pixels: finalPixels }
+}

@@ -1,0 +1,332 @@
+// libdata-yaml implements a YAML parser and serializer for Oak values.
+//
+// Supports scalars, mappings, sequences, multi-line strings (| and >), flow
+// syntax, and nested structures. Does not support anchors/aliases or tags.
+
+{
+	default: default
+	slice: slice
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	entries: entries
+} := import('std')
+{
+	space?: space?
+	join: join
+	split: split
+	trim: trim
+	trimEnd: trimEnd
+	trimStart: trimStart
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+	contains?: contains?
+	replace: replace
+	indexOf: indexOf
+} := import('str')
+
+// --- serialize ---
+
+fn _ind(n) {
+	fn sub(i, a) if i { 0 -> a, _ -> sub(i - 1, a << '  ') }
+	sub(n, '')
+}
+
+fn _escS(s) s |> map(fn(c) if c {
+	'\\' -> '\\\\'
+	'"' -> '\\"'
+	'\t' -> '\\t'
+	'\n' -> '\\n'
+	'\r' -> '\\r'
+	_ -> c
+})
+
+fn _needsQ?(s) if s = '' | s = 'null' | s = 'true' | s = 'false' | s = '~' {
+	true -> true
+	_ -> {
+		f := s.0
+		if f = '\'' | f = '"' | f = '{' | f = '[' | f = '>' | f = '|' | f = '*' | f = '&' | f = '#' | f = '?' | f = '-' | f = ':' {
+			true -> true
+			_ -> contains?(s, ': ') | contains?(s, ' #') | endsWith?(s, ':')
+		}
+	}
+}
+
+fn _serStr(s) if contains?(s, '\n') {
+	true -> '|\n' << s |> split('\n') |> map(fn(l) '  ' << l) |> join('\n')
+	_ -> if _needsQ?(s) { true -> '"' << _escS(s) << '"', _ -> s }
+}
+
+fn _serKey(k) {
+	bad := contains?(k, ':') | contains?(k, '#') | contains?(k, '{') | contains?(k, '}') |
+		contains?(k, '[') | contains?(k, ']') | contains?(k, ',') | contains?(k, '&') |
+		contains?(k, '*') | startsWith?(k, '- ')
+	if bad { true -> '\'' << replace(k, '\'', '\'\'') << '\'', _ -> k }
+}
+
+fn _serV(v, lv, top) if type(v) {
+	:null, :empty -> 'null'
+	:bool -> if v { true -> 'true', _ -> 'false' }
+	:int, :float -> string(v)
+	:atom -> string(v)
+	:string -> _serStr(v)
+	:list -> if len(v) {
+		0 -> '[]'
+		_ -> {
+			pfx := if top { true -> '', _ -> '\n' }
+			pfx << v |> map(fn(it) _ind(lv) << '- ' << _serV(it, lv + 1, false)) |> join('\n')
+		}
+	}
+	:object -> if len(keys(v)) {
+		0 -> '{}'
+		_ -> {
+			pfx := if top { true -> '', _ -> '\n' }
+			pfx << entries(v) |> map(fn(e) {
+				if type(e.1) = :object | (type(e.1) = :list & len(e.1) > 0) {
+					true -> _ind(lv) << _serKey(e.0) << ':' << _serV(e.1, lv + 1, false)
+					_ -> _ind(lv) << _serKey(e.0) << ': ' << _serV(e.1, lv + 1, false)
+				}
+			}) |> join('\n')
+		}
+	}
+}
+
+fn serialize(val) _serV(val, 0, true) << '\n'
+
+// --- parse ---
+
+fn _lineInd(line) {
+	fn sub(i) if i < len(line) & line.(i) = ' ' { true -> sub(i + 1), _ -> i }
+	sub(0)
+}
+
+fn _stripCmt(line) {
+	inQ := false
+	qc := ''
+	max := len(line)
+	fn sub(i) if i {
+		max -> line
+		_ -> {
+			c := line.(i)
+			if inQ {
+				true -> if c = qc { true -> { inQ <- false, sub(i + 1) }, _ -> sub(i + 1) }
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, sub(i + 1) }
+					'#' -> if i > 0 & line.(i - 1) = ' ' { true -> line |> slice(0, i), _ -> sub(i + 1) }
+					_ -> sub(i + 1)
+				}
+			}
+		}
+	}
+	trimEnd(sub(0))
+}
+
+fn _findColon(s) {
+	inQ := false
+	qc := ''
+	max := len(s)
+	fn sub(i) if i {
+		max -> -1
+		_ -> {
+			c := s.(i)
+			if inQ {
+				true -> if c = qc { true -> { inQ <- false, sub(i + 1) }, _ -> sub(i + 1) }
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, sub(i + 1) }
+					':' -> if i + 1 >= max | s.(i + 1) = ' ' | s.(i + 1) = ? { true -> i, _ -> sub(i + 1) }
+					_ -> sub(i + 1)
+				}
+			}
+		}
+	}
+	sub(0)
+}
+
+fn _unqKey(k) if startsWith?(k, '\'') & endsWith?(k, '\'') {
+	true -> k |> slice(1, len(k) - 1)
+	_ -> if startsWith?(k, '"') & endsWith?(k, '"') { true -> k |> slice(1, len(k) - 1), _ -> k }
+}
+
+fn _unesc(s) {
+	max := len(s)
+	fn sub(i, a) if i {
+		max -> a
+		_ -> if s.(i) {
+			'\\' -> sub(i + 2, a << if s.(i + 1) { 'n' -> '\n', 'r' -> '\r', 't' -> '\t', '"' -> '"', '\\' -> '\\', _ -> s.(i + 1) })
+			_ -> sub(i + 1, a << s.(i))
+		}
+	}
+	sub(0, '')
+}
+
+fn _splitFlow(s) {
+	depth := 0
+	parts := ['']
+	max := len(s)
+	inQ := false
+	qc := ''
+	fn sub(i) if i {
+		max -> parts
+		_ -> {
+			c := s.(i)
+			if inQ {
+				true -> { parts.(len(parts) - 1) << c, if c = qc -> inQ <- false, sub(i + 1) }
+				_ -> if c {
+					'"', '\'' -> { inQ <- true, qc <- c, parts.(len(parts) - 1) << c, sub(i + 1) }
+					'[', '{' -> { depth <- depth + 1, parts.(len(parts) - 1) << c, sub(i + 1) }
+					']', '}' -> { depth <- depth - 1, parts.(len(parts) - 1) << c, sub(i + 1) }
+					',' -> if depth = 0 { true -> { parts << '', sub(i + 1) }, _ -> { parts.(len(parts) - 1) << c, sub(i + 1) } }
+					_ -> { parts.(len(parts) - 1) << c, sub(i + 1) }
+				}
+			}
+		}
+	}
+	sub(0)
+	parts |> filter(fn(p) trim(p) != '')
+}
+
+fn _pScalar(s) {
+	s := trim(s)
+	if {
+		s = '' | s = 'null' | s = '~' -> ?
+		s = 'true' -> true
+		s = 'false' -> false
+		startsWith?(s, '\'') & endsWith?(s, '\'') -> s |> slice(1, len(s) - 1)
+		startsWith?(s, '"') & endsWith?(s, '"') -> _unesc(s |> slice(1, len(s) - 1))
+		startsWith?(s, '[') -> {
+			inner := s |> slice(1, len(s) - 1) |> trim()
+			if inner = '' { true -> [], _ -> _splitFlow(inner) |> map(fn(i) _pScalar(trim(i))) }
+		}
+		startsWith?(s, '{') -> {
+			inner := s |> slice(1, len(s) - 1) |> trim()
+			if inner = '' {
+				true -> {}
+				_ -> _splitFlow(inner) |> with reduce({}) fn(obj, p, _) {
+					ci := indexOf(p, ':')
+					if ci > 0 -> obj.(_unqKey(p |> slice(0, ci) |> trim())) := _pScalar(p |> slice(ci + 1) |> trim())
+				}
+			}
+		}
+		_ -> if n := int(s) { ? -> if f := float(s) { ? -> s, _ -> f }, _ -> n }
+	}
+}
+
+fn _collectBlk(lines, si, pi) {
+	blk := []
+	fn sub(i) if i < len(lines) {
+		true -> {
+			l := lines.(i)
+			if trim(l) = '' { true -> { blk << '', sub(i + 1) }, _ -> if _lineInd(l) > pi { true -> { blk << l, sub(i + 1) }, _ -> [blk, i] } }
+		}
+		_ -> [blk, len(lines)]
+	}
+	sub(si)
+}
+
+fn _collectBlkInc(lines, si, pi) {
+	blk := [lines.(si)]
+	fn sub(i) if i < len(lines) {
+		true -> {
+			l := lines.(i)
+			if trim(l) = '' { true -> { blk << '', sub(i + 1) }, _ -> if _lineInd(l) > pi { true -> { blk << l, sub(i + 1) }, _ -> [blk, i] } }
+		}
+		_ -> [blk, len(lines)]
+	}
+	sub(si + 1)
+}
+
+fn _pBlock(lines, _baseInd) {
+	if len(lines) = 0 -> ?
+	fn findFirst(i) if i < len(lines) {
+		true -> {
+			s := trim(lines.(i))
+			if s = '' | startsWith?(s, '#') { true -> findFirst(i + 1), _ -> i }
+		}
+	}
+	fi := findFirst(0)
+	if fi = ? -> ?
+	ft := lines.(fi) |> _stripCmt() |> trimStart()
+	if startsWith?(ft, '- ') | ft = '-' {
+		true -> _pSeq(lines, fi, _lineInd(lines.(fi)))
+		_ -> if contains?(ft, ': ') | endsWith?(ft, ':') { true -> _pMap(lines, fi, _lineInd(lines.(fi))), _ -> _pScalar(ft) }
+	}
+}
+
+fn _pMap(lines, si, bi) {
+	result := {}
+	fn sub(i) if i < len(lines) {
+		true -> {
+			l := lines.(i)
+			s := trim(l)
+			if s = '' | startsWith?(s, '#') { true -> sub(i + 1) } ->
+			if _lineInd(l) < bi { true -> result } ->
+			if _lineInd(l) = bi {
+				true -> {
+					cl := _stripCmt(l) |> trimStart()
+					ci := _findColon(cl)
+					if ci > 0 -> {
+						k := _unqKey(cl |> slice(0, ci) |> trim())
+						rest := cl |> slice(ci + 1) |> trim()
+						if rest = '' | rest = '|' | rest = '>' {
+							true -> {
+								[val, ni] := _collectBlk(lines, i + 1, bi)
+								if rest = '|' { true -> result.(k) := val |> join('\n') } ->
+								if rest = '>' { true -> result.(k) := val |> join(' ') } ->
+								result.(k) := _pBlock(val, 0)
+								sub(ni)
+							}
+							_ -> { result.(k) := _pScalar(rest), sub(i + 1) }
+						}
+					}
+				}
+				_ -> sub(i + 1)
+			}
+		}
+		_ -> result
+	}
+	sub(si)
+}
+
+fn _pSeq(lines, si, bi) {
+	result := []
+	fn sub(i) if i < len(lines) {
+		true -> {
+			l := lines.(i)
+			s := trim(l)
+			if s = '' | startsWith?(s, '#') { true -> sub(i + 1) } ->
+			if _lineInd(l) < bi { true -> result } ->
+			if _lineInd(l) = bi {
+				true -> {
+					cl := _stripCmt(l) |> trimStart()
+					if startsWith?(cl, '- ') {
+						true -> {
+							rest := cl |> slice(2) |> trim()
+							if rest = '' {
+								true -> { [blk, ni] := _collectBlk(lines, i + 1, bi), result << _pBlock(blk, 0), sub(ni) }
+								_ -> if contains?(rest, ': ') | endsWith?(rest, ':') {
+									true -> {
+										[blk, ni] := _collectBlkInc(lines, i, bi)
+										ml := blk |> map(fn(x, idx) if idx { 0 -> '  ' << rest, _ -> x })
+										result << _pBlock(ml, 0)
+										sub(ni)
+									}
+									_ -> { result << _pScalar(rest), sub(i + 1) }
+								}
+							}
+						}
+						_ -> if cl = '-' {
+							true -> { [blk, ni] := _collectBlk(lines, i + 1, bi), result << _pBlock(blk, 0), sub(ni) }
+							_ -> sub(i + 1)
+						}
+					}
+				}
+				_ -> sub(i + 1)
+			}
+		}
+		_ -> result
+	}
+	sub(si)
+}
+
+fn parse(text) text |> split('\n') |> _pBlock(0)

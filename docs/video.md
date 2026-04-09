@@ -123,6 +123,34 @@ edge := video.frameDiff(grayscale, mixed)
 frameAtTime := video.sampleFrame([base, mixed, grayscale], 0.08, 30)
 ```
 
+## Parallel Pixel Processing
+
+### `pmapPixels(frame, mapper, numWorkers?)`
+
+Applies `mapper(pixel, x, y)` in parallel using bounded concurrency. Each row is processed as an independent unit of work. `numWorkers` defaults to 4.
+
+```oak
+bright := video.pmapPixels(f, fn(px, x, y) [
+    px.0 + 30, px.1 + 30, px.2 + 30
+], 4)
+```
+
+### `presizeNearest(frame, newWidth, newHeight, numWorkers?)`
+
+Rescales a frame using nearest-neighbor sampling with parallel row processing.
+
+```oak
+scaled := video.presizeNearest(f, 1920, 1080, 4)
+```
+
+### `pmapFrames(frames, f)`
+
+Applies `f(frame, index)` over a sequence of frames in parallel.
+
+```oak
+processed := video.pmapFrames(frames, fn(f, i) video.toGrayscale(f))
+```
+
 ## Notes
 
 - Channel and byte values are clamped where appropriate.

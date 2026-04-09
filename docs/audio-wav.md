@@ -48,3 +48,21 @@ The output conforms to standard PCM WAV (format tag 1, little-endian). The file 
 | 8         | Unsigned byte   |
 | 16        | Signed 16-bit   |
 | 32        | Signed 32-bit   |
+## Parallel Batch Operations
+
+### `pbatchWav(specs)`
+
+Encodes multiple sample lists into WAV byte strings in parallel. Each spec is `{ samples, sampleRate?, channels?, bitDepth? }`.
+
+```oak
+pbatchWav([{ samples: s1 }, { samples: s2, bitDepth: 32 }])
+```
+
+### `pbatchParseWav(dataList)`
+
+Decodes multiple WAV byte strings in parallel.
+
+```oak
+pbatchParseWav([wavData1, wavData2])
+// => [{ sampleRate, channels, bitDepth, samples }, ...]
+```

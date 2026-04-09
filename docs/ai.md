@@ -448,3 +448,347 @@ topDocs := ai.kosineSimilaritySearch(docs, queryEmbed, 5)
 - [json](json.md) - JSON serialization
 - [build](build.md) - Build system
 
+## Matrix Operations
+
+### matZeros(rows, cols)
+
+Creates an `m × n` matrix filled with zeros.
+
+```oak
+ai.matZeros(2, 3)  // => [[0, 0, 0], [0, 0, 0]]
+```
+
+### matIdentity(n)
+
+Creates an `n × n` identity matrix.
+
+```oak
+ai.matIdentity(3)  // => [[1,0,0],[0,1,0],[0,0,1]]
+```
+
+### matTranspose(mat)
+
+Transposes a matrix (swaps rows and columns).
+
+```oak
+ai.matTranspose([[1, 2], [3, 4], [5, 6]])  // => [[1, 3, 5], [2, 4, 6]]
+```
+
+### matMul(a, b)
+
+Multiplies two matrices `A (m × n)` and `B (n × p)`, returning an `m × p` matrix.
+
+```oak
+ai.matMul([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[19, 22], [43, 50]]
+```
+
+### matAdd(a, b)
+
+Adds two matrices element-wise.
+
+```oak
+ai.matAdd([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[6, 8], [10, 12]]
+```
+
+### matScale(mat, scalar)
+
+Multiplies every element in a matrix by a scalar.
+
+```oak
+ai.matScale([[1, 2], [3, 4]], 3)  // => [[3, 6], [9, 12]]
+```
+
+### vecAdd(v1, v2)
+
+Adds two vectors element-wise.
+
+```oak
+ai.vecAdd([1, 2, 3], [4, 5, 6])  // => [5, 7, 9]
+```
+
+### vecSub(v1, v2)
+
+Subtracts `v2` from `v1` element-wise.
+
+```oak
+ai.vecSub([4, 5, 6], [1, 2, 3])  // => [3, 3, 3]
+```
+
+### vecScale(v, scalar)
+
+Multiplies every element of a vector by a scalar.
+
+```oak
+ai.vecScale([1, 2, 3], 2)  // => [2, 4, 6]
+```
+
+## Classification Metrics
+
+### accuracy(predicted, actual)
+
+Computes the fraction of correct predictions.
+
+```oak
+ai.accuracy([1, 0, 1, 1], [1, 0, 0, 1])  // => 0.75
+```
+
+### precisionScore(predicted, actual, positiveLabel)
+
+Computes precision for a binary classifier: `TP / (TP + FP)`.
+
+```oak
+ai.precisionScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.666...
+```
+
+### recallScore(predicted, actual, positiveLabel)
+
+Computes recall for a binary classifier: `TP / (TP + FN)`.
+
+```oak
+ai.recallScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 1.0
+```
+
+### f1Score(predicted, actual, positiveLabel)
+
+Computes the F1 score (harmonic mean of precision and recall).
+
+```oak
+ai.f1Score([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.8
+```
+
+### confusionMatrix(predicted, actual, numClasses)
+
+Builds a confusion matrix for integer class labels `0..numClasses-1`. Returns a `numClasses × numClasses` matrix where `mat[actual][predicted] = count`.
+
+```oak
+ai.confusionMatrix([0, 1, 1, 2], [0, 1, 2, 2], 3)
+// => [[1,0,0],[0,1,0],[0,1,1]]
+```
+
+## Data Preprocessing
+
+### oneHotEncode(label, numClasses)
+
+Encodes an integer label as a one-hot vector of given length.
+
+```oak
+ai.oneHotEncode(2, 5)  // => [0, 0, 1, 0, 0]
+```
+
+### oneHotDecode(v)
+
+Returns the index of the maximum value in a vector (argmax).
+
+```oak
+ai.oneHotDecode([0, 0, 1, 0])    // => 2
+ai.oneHotDecode([0.1, 0.7, 0.2]) // => 1
+```
+
+### shuffleIndices(n, seed)
+
+Returns a list of indices `[0..n-1]` in pseudo-random order using a deterministic LCG seeded by `seed`.
+
+```oak
+ai.shuffleIndices(5, 42)  // => [3, 0, 4, 1, 2] (deterministic)
+```
+
+### trainTestSplit(data, labels, ratio, seed)
+
+Splits data and labels into train and test sets. `ratio` is the fraction used for training (e.g. 0.8). Returns `{trainData, trainLabels, testData, testLabels}`.
+
+```oak
+ai.trainTestSplit([[1],[2],[3],[4],[5]], [0,1,0,1,0], 0.6, 42)
+```
+
+### kFoldIndices(n, k)
+
+Generates `k` folds of train/test index splits for cross-validation. Returns a list of `{train: [...], test: [...]}` objects.
+
+```oak
+ai.kFoldIndices(10, 5)  // => [{train: [2..9], test: [0,1]}, ...]
+```
+
+## K-Nearest Neighbors
+
+### knn(data, labels, query, k)
+
+Classifies a query point using k-nearest neighbors from a labeled dataset. Returns the most common label among the `k` nearest neighbors (by Euclidean distance).
+
+```oak
+ai.knn([[0,0],[1,1],[2,2],[3,3]], [:a,:a,:b,:b], [1.5,1.5], 3)  // => :a
+```
+
+## Positional Encoding (Transformer)
+
+### positionalEncoding(seqLen, dModel)
+
+Generates sinusoidal positional encodings as used in the original Transformer architecture ("Attention Is All You Need"). Returns a `seqLen × dModel` matrix.
+
+```oak
+ai.positionalEncoding(4, 8)  // => 4x8 matrix of positional encodings
+```
+
+## Layer Normalization
+
+### layerNorm(v, gamma, beta)
+
+Applies layer normalization to a vector. Normalizes to zero mean and unit variance, then applies scale (`gamma`) and shift (`beta`) parameters.
+
+```oak
+ai.layerNorm([1, 2, 3, 4], 1, 0)  // => [-1.34, -0.45, 0.45, 1.34] (approx)
+```
+
+## Learning Rate Scheduling
+
+### lrConstant(baseLr, step)
+
+Returns a constant learning rate regardless of step.
+
+### lrStepDecay(baseLr, step, stepSize, decayFactor)
+
+Returns a learning rate that decays by `decayFactor` every `stepSize` steps.
+
+```oak
+ai.lrStepDecay(0.01, 25, 10, 0.5)  // => 0.0025
+```
+
+### lrExponentialDecay(baseLr, step, decayRate)
+
+Returns a learning rate with exponential decay.
+
+```oak
+ai.lrExponentialDecay(0.01, 100, 0.96)  // => 0.01 * 0.96^100
+```
+
+### lrCosineAnnealing(baseLr, step, totalSteps, minLr)
+
+Returns a learning rate following a cosine annealing schedule. Smoothly decreases from `baseLr` to `minLr` over `totalSteps`.
+
+```oak
+ai.lrCosineAnnealing(0.01, 50, 100, 0.0001)  // => ~0.005
+```
+
+### lrWarmupLinear(baseLr, step, warmupSteps, totalSteps)
+
+Linear warmup followed by linear decay. During warmup, `lr` increases linearly from 0 to `baseLr`.
+
+```oak
+ai.lrWarmupLinear(0.01, 5, 10, 100)   // => 0.005 (in warmup)
+ai.lrWarmupLinear(0.01, 50, 10, 100)  // => ~0.0055 (in decay)
+```
+
+## Weight Initialization
+
+### initUniform(n, lo, hi, seed)
+
+Generates a vector of `n` values uniformly distributed in `[lo, hi]` using a deterministic LCG.
+
+```oak
+ai.initUniform(5, -1, 1, 42)
+```
+
+### initXavier(n, fanIn, fanOut, seed)
+
+Xavier/Glorot uniform initialization. Suitable for layers with `fanIn` inputs and `fanOut` outputs.
+
+```oak
+ai.initXavier(10, 128, 64, 42)
+```
+
+### initHe(n, fanIn, seed)
+
+He (Kaiming) uniform initialization. Suitable for ReLU-activated layers.
+
+```oak
+ai.initHe(10, 128, 42)
+```
+
+## Gradient Descent Helpers
+
+### sgdStep(params, grads, lr)
+
+Performs a single SGD update on a parameter vector.
+
+```oak
+ai.sgdStep([1, 2, 3], [0.1, 0.2, 0.1], 0.01)  // => [0.999, 1.998, 2.999]
+```
+
+### sgdMomentumStep(params, grads, velocity, lr, momentum)
+
+Performs an SGD step with momentum. Returns `{params, velocity}`.
+
+```oak
+ai.sgdMomentumStep([1,2], [0.1,0.2], [0,0], 0.01, 0.9)
+```
+
+### clipGradNorm(grads, maxNorm)
+
+Scales a gradient vector so its L2 norm does not exceed `maxNorm`.
+
+```oak
+ai.clipGradNorm([3, 4], 1)  // => [0.6, 0.8]
+```
+
+## Sampling & Decoding
+
+### argmax(v)
+
+Returns the index of the largest element in a vector.
+
+```oak
+ai.argmax([0.1, 0.7, 0.2])  // => 1
+```
+
+### temperatureScale(logits, temperature)
+
+Applies temperature scaling to logits before softmax. Lower temperature sharpens the distribution.
+
+```oak
+ai.temperatureScale([1, 2, 3], 0.5)  // => [2, 4, 6]
+```
+
+### topPFilter(logits, p)
+
+Nucleus sampling: filters logits to keep only tokens whose cumulative softmax probability mass is ≤ `p`. Rejected positions are set to a large negative value.
+
+```oak
+ai.topPFilter([1, 2, 3, 0.5], 0.9)
+```
+
+## Embedding Lookup
+
+### embeddingLookup(table, indices)
+
+Retrieves embedding vectors for a list of token indices from an embedding matrix.
+
+```oak
+table := [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+ai.embeddingLookup(table, [2, 0])  // => [[0.5, 0.6], [0.1, 0.2]]
+```
+
+## Parallel Utilities
+
+### pmatMul(a, b)
+
+Multiplies two matrices with parallelism across rows.
+
+```oak
+ai.pmatMul([[1,2],[3,4]], [[5,6],[7,8]])  // => [[19,22],[43,50]]
+```
+
+### pbatchSoftmax(vectors)
+
+Applies softmax to each vector in a list, in parallel.
+
+```oak
+ai.pbatchSoftmax([[1,2,3],[4,5,6]])
+```
+
+### pbatchMeanSquaredError(predictedBatch, actualBatch)
+
+Computes MSE between corresponding pairs from two lists of vectors, in parallel.
+
+```oak
+ai.pbatchMeanSquaredError([[1,2],[3,4]], [[1.1,2.1],[3.2,3.8]])
+```
+

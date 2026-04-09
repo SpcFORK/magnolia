@@ -10,6 +10,7 @@
 	each: each
 	range: range
 } := import('std')
+guiThread := import('gui-thread')
 {
 	max: max
 	abs: abs
@@ -132,6 +133,38 @@ fn leakSnapshot(state) {
 		handles: getHandleCount()
 		workingSetBytes: getWorkingSetSize()
 		peakWorkingSetBytes: getPeakWorkingSetSize()
+	}
+	state.snapshots <- state.snapshots << snap
+	if state.baseline = ? -> state.baseline := snap
+	state
+}
+
+// leakSnapshotParallel — same as leakSnapshot but collects all 8 Win32
+// resource counters concurrently.
+fn leakSnapshotParallel(state) {
+	ch1 := make_chan()
+	ch2 := make_chan()
+	ch3 := make_chan()
+	ch4 := make_chan()
+	ch5 := make_chan()
+	ch6 := make_chan()
+	ch7 := make_chan()
+	go(fn { chan_send(ch1, getGDIObjectCount()) })
+	go(fn { chan_send(ch2, getUserObjectCount()) })
+	go(fn { chan_send(ch3, getGDIObjectPeak()) })
+	go(fn { chan_send(ch4, getUserObjectPeak()) })
+	go(fn { chan_send(ch5, getHandleCount()) })
+	go(fn { chan_send(ch6, getWorkingSetSize()) })
+	go(fn { chan_send(ch7, getPeakWorkingSetSize()) })
+	snap := {
+		timestamp: nanotime()
+		gdiObjects: chan_recv(ch1)
+		userObjects: chan_recv(ch2)
+		gdiPeak: chan_recv(ch3)
+		userPeak: chan_recv(ch4)
+		handles: chan_recv(ch5)
+		workingSetBytes: chan_recv(ch6)
+		peakWorkingSetBytes: chan_recv(ch7)
 	}
 	state.snapshots <- state.snapshots << snap
 	if state.baseline = ? -> state.baseline := snap

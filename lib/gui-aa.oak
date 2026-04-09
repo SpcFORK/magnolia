@@ -16,6 +16,7 @@
 
 { _default: _default, _clamp: _clamp } := import('gui-common')
 guiColor := import('gui-color')
+threadLib := import('thread')
 
 _OK := { type: :ok }
 
@@ -419,4 +420,60 @@ fn drawTriangleFilledAA(deps, window, p0, p1, p2, color, bgColor) {
 		}
 	}
 	_scanY(minY)
+}
+
+// ─── Parallel AA circle fill ────────────────────────────────────────────────
+// Splits the bounding box into horizontal bands and computes coverage in
+// parallel.  Produces a list of draw commands, then replays them serially.
+
+fn drawCircleFilledAAParallel(deps, window, cx, cy, radius, color, bgColor, numWorkers) {
+	r := radius
+	bg := _default(bgColor, 0)
+	minX := int(cx - r - 1)
+	maxX := int(cx + r + 1)
+	minY := int(cy - r - 1)
+	maxY := int(cy + r + 1)
+	h := maxY - minY + 1
+	workers := _default(numWorkers, 4)
+	bandH := int(h / workers) + 1
+
+	bands := []
+	sy := minY
+	fn _mkB() if sy <= maxY -> {
+		ey := sy + bandH - 1
+		if ey > maxY -> ey <- maxY
+		bands << { startY: sy, endY: ey }
+		sy <- ey + 1
+		_mkB()
+	}
+	_mkB()
+
+	// Compute pixels in parallel (pure math)
+	bandResults := threadLib.pmap(bands, fn(band) {
+		pixels := []
+		fn _row(y) if y <= band.endY -> {
+			fn _col(x) if x <= maxX -> {
+				dx := float(x) - cx + 0.5
+				dy := float(y) - cy + 0.5
+				dist := pow(dx * dx + dy * dy, 0.5) - r
+				if dist < 1 {
+					true -> {
+						alpha := _smoothstep(0.5, -0.5, dist)
+						if alpha > 0.01 -> pixels << { x: x, y: y, c: _blendColor(color, alpha, bg) }
+					}
+				}
+				_col(x + 1)
+			}
+			_col(minX)
+			_row(y + 1)
+		}
+		_row(band.startY)
+		pixels
+	})
+
+	// Replay on main thread
+	{ each: each } := import('std')
+	with each(bandResults) fn(pixels) {
+		with each(pixels) fn(px) deps.drawLine(window, px.x, px.y, px.x, px.y, px.c)
+	}
 }

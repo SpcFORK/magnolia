@@ -1,0 +1,274 @@
+// libemail-imap provides a compact IMAP client/server subset on top of libsocket.
+
+{
+	default: default
+	each: each
+	map: map
+	filter: filter
+	slice: slice
+	reverse: reverse
+} := import('std')
+{
+	split: split
+	join: join
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+	trim: trim
+	upper: upper
+	cut: cut
+	contains?: contains?
+	replace: replace
+} := import('str')
+
+thread := import('thread')
+sock := import('socket')
+
+fn _tagLine(tag, status, text) tag + ' ' + status + ' ' + default(text, '')
+fn _untag(text) '* ' + text
+
+fn _literalSize(line) if endsWith?(line, '}') {
+	true -> {
+		[last, _] := cut(line |> reverse(), '{')
+		if last {
+			'' -> ?
+			_ -> int(last |> reverse() |> slice(0, len(last) - 1))
+		}
+	}
+	_ -> ?
+}
+
+fn _readBlock(socket, tag) {
+	entries := []
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> {
+				line := evt.data
+				entry := { line: line }
+				if literalLen := _literalSize(line) {
+					? -> ?
+					_ -> entry.literal := sock.recvExact(socket, literalLen).data
+				}
+				entries << entry
+				if startsWith?(line, tag + ' ') {
+					true -> {
+						status := upper(split(line, ' ').1)
+						{
+							tag: tag
+							status: status
+							ok?: status = 'OK'
+							entries: entries
+						}
+					}
+					_ -> loop()
+				}
+			}
+			_ -> evt
+		}
+	}
+	loop()
+}
+
+fn _client(socket) {
+	seq := 1
+	fn nextTag {
+		tag := 'A' + string(seq)
+		seq <- seq + 1
+		tag
+	}
+	fn command(text) {
+		tag := nextTag()
+		sock.sendLine(socket, tag + ' ' + text)
+		_readBlock(socket, tag)
+	}
+	{
+		type: :imap_client
+		socket: socket
+		command: command
+		capability: fn() command('CAPABILITY')
+		login: fn(user, pass) command('LOGIN "' + replace(user, '"', '\\"') + '" "' + replace(pass, '"', '\\"') + '"')
+		list: fn(reference, mailbox) command('LIST "' + default(reference, '') + '" "' + default(mailbox, '*') + '"')
+		select: fn(mailbox) command('SELECT "' + mailbox + '"')
+		fetch: fn(seqSet, section) command('FETCH ' + string(seqSet) + ' (' + default(section, 'BODY[]') + ')')
+		startTLS: fn(options) {
+			resp := command('STARTTLS')
+			if default(resp.ok?, false) {
+				true -> sock.startTLS(socket, options)
+				_ -> resp
+			}
+		}
+		noop: fn() command('NOOP')
+		logout: fn() {
+			resp := command('LOGOUT')
+			sock.close(socket)
+			resp
+		}
+	}
+}
+
+fn connect(address, options) {
+	connected := sock.connect(address, options)
+	if connected.type {
+		:ok -> {
+			greeting := sock.recvLine(connected.socket)
+			if greeting.type = :data {
+				true -> { type: :ok, greeting: greeting, client: _client(connected.socket) }
+				_ -> greeting
+			}
+		}
+		_ -> connected
+	}
+}
+
+fn _mailboxes(handlers, authState) {
+	loader := default(handlers.mailboxes, fn(_) [])
+	default(loader, fn(_) [])(authState)
+}
+
+fn _serve(socket, handlers, opts) {
+	authState := ?
+	state := {
+		selected: ?
+		tls?: false
+	}
+	tlsEnabled? := default(opts.startTLS?, false)
+	sock.sendLine(socket, '* OK Magnolia IMAP ready')
+
+	fn capabilityLines {
+		caps := ['IMAP4rev1']
+		if tlsEnabled? & !state.tls? -> caps << 'STARTTLS'
+		caps
+	}
+
+	fn mailboxByName(name) {
+		boxes := _mailboxes(handlers, authState) |> filter(fn(box) upper(box.name) = upper(name))
+		if len(boxes) {
+			0 -> ?
+			_ -> boxes.0
+		}
+	}
+
+	fn loop {
+		evt := sock.recvLine(socket)
+		if evt.type {
+			:data -> {
+				line := evt.data
+				parts := split(line, ' ')
+				tag := default(parts.0, 'A0')
+				cmd := upper(default(parts.1, ''))
+				rest := if len(parts) > 2 {
+					true -> slice(parts, 2) |> join(' ')
+					_ -> ''
+				}
+				if cmd {
+					'CAPABILITY' -> {
+						sock.sendLine(socket, _untag('CAPABILITY ' + (capabilityLines() |> join(' '))))
+						sock.sendLine(socket, _tagLine(tag, 'OK', 'CAPABILITY completed'))
+						loop()
+					}
+					'NOOP' -> {
+						sock.sendLine(socket, _tagLine(tag, 'OK', 'NOOP completed'))
+						loop()
+					}
+					'LOGOUT' -> {
+						sock.sendLine(socket, '* BYE logging out')
+						sock.sendLine(socket, _tagLine(tag, 'OK', 'LOGOUT completed'))
+						sock.close(socket)
+					}
+					'LOGIN' -> {
+						args := rest |> split(' ')
+						user := default(args.0, '') |> trim('"')
+						pass := default(args.1, '') |> trim('"')
+						authFn := default(handlers.auth, fn(_, _) true)
+						auth := authFn(user, pass)
+						if auth {
+							false -> sock.sendLine(socket, _tagLine(tag, 'NO', 'LOGIN failed'))
+							_ -> {
+								authState <- auth
+								sock.sendLine(socket, _tagLine(tag, 'OK', 'LOGIN completed'))
+							}
+						}
+						loop()
+					}
+					'STARTTLS' -> {
+						if tlsEnabled? & !state.tls? {
+							true -> {
+								sock.sendLine(socket, _tagLine(tag, 'OK', 'Begin TLS negotiation'))
+								sock.startTLS(socket, {
+									server: true
+									certFile: default(opts.certFile, '')
+									keyFile: default(opts.keyFile, '')
+								})
+								state.tls? <- true
+							}
+							_ -> sock.sendLine(socket, _tagLine(tag, 'BAD', 'STARTTLS not available'))
+						}
+						loop()
+					}
+					'LIST' -> {
+						_mailboxes(handlers, authState) |> each(fn(box) sock.sendLine(socket, '* LIST (' + default(box.flags, '\\HasNoChildren') + ') "/" "' + box.name + '"'))
+						sock.sendLine(socket, _tagLine(tag, 'OK', 'LIST completed'))
+						loop()
+					}
+					'SELECT' -> {
+						box := mailboxByName(trim(rest, '"'))
+						if box {
+							? -> sock.sendLine(socket, _tagLine(tag, 'NO', 'No such mailbox'))
+							_ -> {
+								state.selected <- box
+								msgs := default(box.messages, [])
+								sock.sendLine(socket, '* ' + string(len(msgs)) + ' EXISTS')
+								sock.sendLine(socket, '* FLAGS (\\Seen)')
+								sock.sendLine(socket, _tagLine(tag, 'OK', '[READ-WRITE] SELECT completed'))
+							}
+						}
+						loop()
+					}
+					'FETCH' -> {
+						box := state.selected
+						if box = ? {
+							true -> sock.sendLine(socket, _tagLine(tag, 'BAD', 'No mailbox selected'))
+							_ -> {
+								fetchArgs := split(rest, ' ')
+								seqNum := int(default(fetchArgs.0, '1'))
+								section := upper(default(fetchArgs.1, '(BODY[])'))
+								msgs := default(box.messages, [])
+								message := default(msgs.(seqNum - 1), ?)
+								if message {
+									? -> sock.sendLine(socket, _tagLine(tag, 'NO', 'No such message'))
+									_ -> {
+										payload := if contains?(section, 'HEADER') {
+											true -> default(message.header, '')
+											_ -> default(message.body, '')
+										}
+										sock.sendLine(socket, '* ' + string(seqNum) + ' FETCH (BODY[] {' + string(len(payload)) + '}')
+										sock.send(socket, payload)
+										sock.sendLine(socket, '')
+										sock.sendLine(socket, ')')
+										sock.sendLine(socket, _tagLine(tag, 'OK', 'FETCH completed'))
+									}
+								}
+							}
+						}
+						loop()
+					}
+					_ -> {
+						sock.sendLine(socket, _tagLine(tag, 'BAD', 'Unsupported command'))
+						loop()
+					}
+				}
+			}
+			_ -> sock.close(socket)
+		}
+	}
+	loop()
+}
+
+fn listen(address, handlers, options) {
+	h := default(handlers, {})
+	opts := default(options, {})
+	sock.listen(address, fn(evt) if evt.type {
+		:connect -> thread.spawn(_serve, evt.socket, h, opts)
+		_ -> ?
+	}, opts)
+}

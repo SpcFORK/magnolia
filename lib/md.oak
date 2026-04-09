@@ -336,6 +336,22 @@ fn oListItemLine?(line) if line {
 
 fn listItemLine?(line) uListItemLine?(line) | oListItemLine?(line)
 
+fn tableLine?(line) if line {
+	? -> false
+	_ -> startsWith?(line, '|') & endsWith?(trim(line), '|')
+}
+
+fn tableSepLine?(line) if tableLine?(line) {
+	true -> {
+		inner := line |> trim() |> slice(1, len(trim(line)) - 1)
+		inner |> split('|') |> every(fn(cell) {
+			c := trim(cell)
+			c != '' & c |> split() |> every(fn(ch) ch = '-' | ch = ':' | ch = ' ')
+		})
+	}
+	_ -> false
+}
+
 fn trimUListGetLevel(reader) {
 	level := len(reader.readUntil('-'))
 	reader.next() // '-'
@@ -384,6 +400,7 @@ fn lineNodeType(line) if {
 	startsWith?(line, '!html') -> :rawHTML
 	uListItemLine?(line) -> :ul
 	oListItemLine?(line) -> :ol
+	tableLine?(line) -> :table
 	_ -> :p
 }
 
@@ -403,6 +420,7 @@ fn parseDoc(lineReader) {
 		:blockquote -> sub(doc << parseBlockQuote(lineReader))
 		:pre -> sub(doc << parseCodeBlock(lineReader))
 		:ul, :ol -> sub(doc << parseList(lineReader, nodeType))
+		:table -> sub(doc << parseTable(lineReader))
 		:rawHTML -> sub(doc << parseRawHTML(lineReader))
 		:p -> sub(doc << parseParagraph(lineReader))
 		:hr -> {
@@ -653,6 +671,86 @@ fn parseList(lineReader, listType) {
 	}
 }
 
+fn parseTableRow(line) {
+	inner := line |> trim()
+	// strip leading and trailing pipes
+	inner <- if startsWith?(inner, '|') {
+		true -> inner |> slice(1)
+		_ -> inner
+	}
+	inner <- if endsWith?(inner, '|') {
+		true -> inner |> slice(0, len(inner) - 1)
+		_ -> inner
+	}
+	inner |> split('|') |> map(fn(cell) trim(cell))
+}
+
+fn parseTableAlign(sepLine) {
+	parseTableRow(sepLine) |> map(fn(cell) {
+		c := trim(cell)
+		if [startsWith?(c, ':'), endsWith?(c, ':')] {
+			[true, true] -> :center
+			[_, true] -> :right
+			[true, _] -> :left
+			_ -> :left
+		}
+	})
+}
+
+fn parseTable(lineReader) {
+	peek := lineReader.peek
+	next := lineReader.next
+
+	// first line is the header row
+	headerLine := next()
+	headerCells := parseTableRow(headerLine)
+
+	// second line should be the separator (---)
+	aligns := if tableSepLine?(peek()) {
+		true -> parseTableAlign(next())
+		_ -> headerCells |> map(fn() :left)
+	}
+
+	// collect body rows
+	fn collectRows(rows) if tableLine?(peek()) {
+		true -> collectRows(rows << parseTableRow(next()))
+		_ -> rows
+	}
+	bodyRows := collectRows([])
+
+	{
+		tag: :table
+		aligns: aligns
+		children: [{
+			tag: :thead
+			children: [{
+				tag: :tr
+				children: headerCells |> map(fn(cell, i) {
+					{
+						tag: :th
+						align: aligns.(i)
+						children: tokenizeText(cell) |> parseText()
+					}
+				})
+			}]
+		}, {
+			tag: :tbody
+			children: bodyRows |> map(fn(row) {
+				{
+					tag: :tr
+					children: row |> map(fn(cell, i) {
+						{
+							tag: :td
+							align: aligns.(i)
+							children: tokenizeText(cell) |> parseText()
+						}
+					})
+				}
+			})
+		}]
+	}
+}
+
 fn parseParagraph(lineReader) {
 	peek := lineReader.peek
 	next := lineReader.next
@@ -720,6 +818,20 @@ fn compileNode(node) if type(node) {
 		:p, :em, :strong, :strike
 		:h1, :h2, :h3, :h4, :h5, :h6
 		:pre, :ul, :ol, :li, :blockquote -> wrap(node.tag |> string(), node)
+		:table -> wrap('table', node)
+		:thead -> wrap('thead', node)
+		:tbody -> wrap('tbody', node)
+		:tr -> wrap('tr', node)
+		:th -> if node.align {
+			:left, ? -> wrap('th', node)
+			_ -> '<th style="text-align:{{0}}">{{1}}</th>' |>
+				format(string(node.align), compile(node.children))
+		}
+		:td -> if node.align {
+			:left, ? -> wrap('td', node)
+			_ -> '<td style="text-align:{{0}}">{{1}}</td>' |>
+				format(string(node.align), compile(node.children))
+		}
 		:a -> '<a href="{{0}}">{{1}}</a>' |> format(sanitizeURL(node.href), compile(node.children))
 		:img -> '<img alt="{{0}}" src="{{1}}"/>' |> format(sanitizeAttr(node.alt), sanitizeURL(node.src))
 		:code -> if node.lang {
