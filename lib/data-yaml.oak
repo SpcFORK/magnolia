@@ -259,28 +259,34 @@ fn _pMap(lines, si, bi) {
 		true -> {
 			l := lines.(i)
 			s := trim(l)
-			if s = '' | startsWith?(s, '#') { true -> sub(i + 1) } ->
-			if _lineInd(l) < bi { true -> result } ->
-			if _lineInd(l) = bi {
-				true -> {
-					cl := _stripCmt(l) |> trimStart()
-					ci := _findColon(cl)
-					if ci > 0 -> {
-						k := _unqKey(cl |> slice(0, ci) |> trim())
-						rest := cl |> slice(ci + 1) |> trim()
-						if rest = '' | rest = '|' | rest = '>' {
-							true -> {
-								[val, ni] := _collectBlk(lines, i + 1, bi)
-								if rest = '|' { true -> result.(k) := val |> join('\n') } ->
-								if rest = '>' { true -> result.(k) := val |> join(' ') } ->
-								result.(k) := _pBlock(val, 0)
-								sub(ni)
+			if s = '' | startsWith?(s, '#') {
+				true -> sub(i + 1)
+				_ -> if _lineInd(l) < bi {
+					true -> result
+					_ -> if _lineInd(l) = bi {
+						true -> {
+							cl := _stripCmt(l) |> trimStart()
+							ci := _findColon(cl)
+							if ci > 0 -> {
+								k := _unqKey(cl |> slice(0, ci) |> trim())
+								rest := cl |> slice(ci + 1) |> trim()
+								if rest = '' | rest = '|' | rest = '>' {
+									true -> {
+										[val, ni] := _collectBlk(lines, i + 1, bi)
+										result.(k) := if rest {
+											'|' -> val |> join('\n')
+											'>' -> val |> join(' ')
+											_ -> _pBlock(val, 0)
+										}
+										sub(ni)
+									}
+									_ -> { result.(k) := _pScalar(rest), sub(i + 1) }
+								}
 							}
-							_ -> { result.(k) := _pScalar(rest), sub(i + 1) }
 						}
+						_ -> sub(i + 1)
 					}
 				}
-				_ -> sub(i + 1)
 			}
 		}
 		_ -> result
@@ -294,34 +300,38 @@ fn _pSeq(lines, si, bi) {
 		true -> {
 			l := lines.(i)
 			s := trim(l)
-			if s = '' | startsWith?(s, '#') { true -> sub(i + 1) } ->
-			if _lineInd(l) < bi { true -> result } ->
-			if _lineInd(l) = bi {
-				true -> {
-					cl := _stripCmt(l) |> trimStart()
-					if startsWith?(cl, '- ') {
+			if s = '' | startsWith?(s, '#') {
+				true -> sub(i + 1)
+				_ -> if _lineInd(l) < bi {
+					true -> result
+					_ -> if _lineInd(l) = bi {
 						true -> {
-							rest := cl |> slice(2) |> trim()
-							if rest = '' {
-								true -> { [blk, ni] := _collectBlk(lines, i + 1, bi), result << _pBlock(blk, 0), sub(ni) }
-								_ -> if contains?(rest, ': ') | endsWith?(rest, ':') {
-									true -> {
-										[blk, ni] := _collectBlkInc(lines, i, bi)
-										ml := blk |> map(fn(x, idx) if idx { 0 -> '  ' << rest, _ -> x })
-										result << _pBlock(ml, 0)
-										sub(ni)
+							cl := _stripCmt(l) |> trimStart()
+							if startsWith?(cl, '- ') {
+								true -> {
+									rest := cl |> slice(2) |> trim()
+									if rest = '' {
+										true -> { [blk, ni] := _collectBlk(lines, i + 1, bi), result << _pBlock(blk, 0), sub(ni) }
+										_ -> if contains?(rest, ': ') | endsWith?(rest, ':') {
+											true -> {
+												[blk, ni] := _collectBlkInc(lines, i, bi)
+												ml := blk |> map(fn(x, idx) if idx { 0 -> '  ' << rest, _ -> x })
+												result << _pBlock(ml, 0)
+												sub(ni)
+											}
+											_ -> { result << _pScalar(rest), sub(i + 1) }
+										}
 									}
-									_ -> { result << _pScalar(rest), sub(i + 1) }
+								}
+								_ -> if cl = '-' {
+									true -> { [blk, ni] := _collectBlk(lines, i + 1, bi), result << _pBlock(blk, 0), sub(ni) }
+									_ -> sub(i + 1)
 								}
 							}
 						}
-						_ -> if cl = '-' {
-							true -> { [blk, ni] := _collectBlk(lines, i + 1, bi), result << _pBlock(blk, 0), sub(ni) }
-							_ -> sub(i + 1)
-						}
+						_ -> sub(i + 1)
 					}
 				}
-				_ -> sub(i + 1)
 			}
 		}
 		_ -> result

@@ -1,6 +1,7 @@
 // oak build -- compiler and bundler
 
 std := import('std')
+slice := std.slice
 default := std.default
 clone := std.clone
 map := std.map
@@ -300,24 +301,193 @@ fn renderDocBundle(bundleNode) {
 	output <- output << '_Auto-generated from Magnolia source._\n\n'
 	output <- output << '---\n\n'
 
+	// lastExpr extracts the tail expression (return value) from a body node
+	fn lastExpr(node) if node {
+		? -> ?
+		_ -> if node.type {
+			:block -> if node.exprs != ? & len(node.exprs) > 0 {
+				true -> node.exprs.(len(node.exprs) - 1)
+				_ -> ?
+			}
+			_ -> node
+		}
+	}
+
+	// inferType returns a short type descriptor string for a node
+	fn inferType(node) if node {
+		? -> ?
+		_ -> if node.type {
+			:string -> ':string'
+			:int -> ':int'
+			:float -> ':float'
+			:bool -> ':bool'
+			:atom -> ':atom'
+			:null -> '?'
+			:list -> ':list'
+			:object -> ':object'
+			:function -> ':function'
+			:class -> ':function'
+			:identifier -> ?
+			:assignment -> inferType(node.right)
+			:block -> inferType(lastExpr(node))
+			:binary -> if node.op {
+				// comparison operators
+				:equal, :notEqual, :greater, :less, :greaterEqual, :lessEqual, :and, :or -> ':bool'
+				:plus, :minus, :times, :divide, :modulus -> {
+					lt := inferType(node.left)
+					rt := inferType(node.right)
+					if lt = rt {
+						true -> lt
+						_ -> if lt != ? -> lt
+					}
+				}
+				:pushArrow -> inferType(node.left)
+				_ -> ?
+			}
+			:unary -> if node.op {
+				:exclam -> ':bool'
+				:minus -> inferType(node.right)
+				_ -> ?
+			}
+			:fnCall -> ?
+			:ifExpr -> {
+				// try inferring from the first branch body
+				if len(node.branches) {
+					0 -> ?
+					_ -> {
+						firstBranch := node.branches.(0)
+						inferType(firstBranch.body)
+					}
+				}
+			}
+			:propertyAccess -> ?
+			_ -> ?
+		}
+	}
+
+	// inferReturnType gets return type of a function/class body
+	fn inferReturnType(bodyNode) if bodyNode {
+		? -> ?
+		_ -> {
+			tail := lastExpr(bodyNode)
+			inferType(tail)
+		}
+	}
+
+	// isThunk returns true if the body's tail expression is a function or class
+	fn isThunk(bodyNode) {
+		tail := lastExpr(bodyNode)
+		if tail {
+			? -> false
+			_ -> if tail.type {
+				:function -> true
+				:class -> true
+				_ -> false
+			}
+		}
+	}
+
+	// renderConstVal produces a short display string for a constant's value
+	fn renderConstVal(node) if node.type {
+		:string -> {
+			s := node.val
+			if s = ? {
+				true -> ?
+				_ -> if len(s) > 60 {
+					true -> '\'' << slice(s, 0, 57) << '...\''
+					_ -> '\'' << s << '\''
+				}
+			}
+		}
+		:int -> string(node.val)
+		:float -> string(node.val)
+		:bool -> string(node.val)
+		:atom -> ':' << string(node.val)
+		:null -> '?'
+		:list -> if node.elems != ? {
+			true -> if len(node.elems) {
+				0 -> '[]'
+				_ -> '[' << string(len(node.elems)) << ' items]'
+			}
+			_ -> '[]'
+		}
+		:object -> if node.entries != ? {
+			true -> if len(node.entries) {
+				0 -> '{}'
+				_ -> '{' << string(len(node.entries)) << ' entries}'
+			}
+			_ -> '{}'
+		}
+		:function -> 'fn(...)'
+		:class -> 'cs(...)'
+		:fnCall -> if node.function != ? {
+			true -> if node.function.type = :identifier {
+				true -> node.function.val << '(...)'
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+
+	// formatAnnotation builds the annotation line for a function signature
+	fn formatAnnotation(bodyNode) {
+		parts := []
+		retType := inferReturnType(bodyNode)
+		thunk? := isThunk(bodyNode)
+		if thunk? {
+			true -> parts <- parts << '**thunk** '
+		}
+		if retType != ? {
+			true -> parts <- parts << 'returns `' << retType << '`'
+		}
+		if len(parts) {
+			0 -> ''
+			_ -> {
+				joined := parts |> join('')
+				'> ' << joined << '\n\n'
+			}
+		}
+	}
+
 	fn docNode(node, depth) if node.type {
 		:block -> {
 			node.exprs |> each(fn(expr) docNode(expr, depth))
 		}
 		:assignment -> if node.local? {
-			true -> if node.right.type {
-				:function -> {
-					name := node.left.val
-					args := node.right.args |> map(fn(a) a) |> join(', ')
-					restArg := node.right.restArg
-					sig := if restArg {
-						?, '' -> name << '(' << args << ')'
-						_ -> name << '(' << args << (if len(node.right.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
+			true -> if node.left.val != ? {
+				true -> if node.right.type {
+					:function -> {
+						name := node.left.val
+						args := node.right.args |> map(fn(a) a) |> join(', ')
+						restArg := node.right.restArg
+						sig := if restArg {
+							?, '' -> name << '(' << args << ')'
+							_ -> name << '(' << args << (if len(node.right.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
+						}
+						output <- output << string(depth) << '### `' << sig << '`\n\n'
+						ann := formatAnnotation(node.right.body)
+						if ann != '' -> output <- output << ann
 					}
-					output <- output << string(depth) << '### `' << sig << '`\n\n'
-				}
-				_ -> {
-					output <- output << string(depth) << '- `' << node.left.val << '` — constant\n'
+					:class -> {
+						name := node.left.val
+						args := node.right.args |> map(fn(a) a) |> join(', ')
+						restArg := node.right.restArg
+						sig := if restArg {
+							?, '' -> name << '(' << args << ')'
+							_ -> name << '(' << args << (if len(node.right.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
+						}
+						output <- output << string(depth) << '### `cs ' << sig << '`\n\n'
+						ann := formatAnnotation(node.right.body)
+						if ann != '' -> output <- output << ann
+					}
+					_ -> {
+						name := node.left.val
+						valStr := renderConstVal(node.right)
+						if valStr != ? {
+							true -> output <- output << string(depth) << '- `' << name << '` · `' << valStr << '`\n'
+							_ -> output <- output << string(depth) << '- `' << name << '` — constant\n'
+						}
+					}
 				}
 			}
 		}
@@ -330,15 +500,32 @@ fn renderDocBundle(bundleNode) {
 					_ -> node.name << '(' << args << (if len(node.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
 				}
 				output <- output << '### `' << sig << '`\n\n'
+				ann := formatAnnotation(node.body)
+				if ann != '' -> output <- output << ann
+			}
+		}
+		:class -> if node.name != '' {
+			true -> {
+				args := node.args |> map(fn(a) a) |> join(', ')
+				restArg := node.restArg
+				sig := if restArg {
+					?, '' -> node.name << '(' << args << ')'
+					_ -> node.name << '(' << args << (if len(node.args) { 0 -> '', _ -> ', ' }) << restArg << '...)'
+				}
+				output <- output << '### `cs ' << sig << '`\n\n'
+				ann := formatAnnotation(node.body)
+				if ann != '' -> output <- output << ann
 			}
 		}
 		:fnCall -> if node.function.type = :identifier & node.function.val = '__oak_modularize' {
 			true -> {
-				moduleName := node.args.0.val
+				arg0 := node.args.(0)
+				arg1 := node.args.(1)
+				moduleName := arg0.val
 				output <- output << '## Module: `' << moduleName << '`\n\n'
 				// The second arg is a function whose body contains module declarations
-				if node.args.1.type = :function {
-					true -> docNode(node.args.1.body, '')
+				if arg1.type = :function {
+					true -> docNode(arg1.body, '')
 				}
 			}
 		}

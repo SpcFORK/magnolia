@@ -124,6 +124,21 @@ if "%DO_WSL_INSTALL%"=="1" (
     wsl -u root -- sh -c "rm -f /usr/local/bin/magnolia; mv ./build/magnolia /usr/local/bin"
 )
 
+echo Generating spec docs for lib...
+if not exist "docs\spec" mkdir "docs\spec"
+set "_SPEC_OK=0"
+set "_SPEC_FAIL=0"
+for %%F in (lib\*.oak) do (
+    set "_BASE=%%~nF"
+    .\build\magnolia.exe build --entry "%%F" --doc --output "docs\spec\!_BASE!.md" >nul 2>&1
+    if errorlevel 1 (
+        set /a _SPEC_FAIL+=1
+    ) else (
+        set /a _SPEC_OK+=1
+    )
+)
+echo   Spec docs: !_SPEC_OK! generated, !_SPEC_FAIL! skipped
+
 goto :eof
 
 :make_ico

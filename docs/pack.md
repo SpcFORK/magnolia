@@ -16,8 +16,9 @@ pack := import('pack')
 - **Standalone binaries**: Creates executable files with embedded Oak runtime
 - **Dependency bundling**: Automatically includes all imported modules
 - **Virtual filesystem**: Embeds resources accessible at runtime
-- **Cross-platform**: Generates executables for target platforms
+- **Cross-platform**: Generates executables for target platforms via `--interp`
 - **Zero dependencies**: Resulting binary requires no external files
+- **Custom interpreter embedding**: Choose which Oak interpreter binary to bundle
 
 ## Functions
 
@@ -29,9 +30,14 @@ Configures the pack system.
 - `entry` - Entry point file (required)
 - `output` - Output executable path (required)
 - `includes` - Additional modules to bundle
-- `includeVFS` - Files/directories for virtual filesystem
+- `includeVFS` - Files/directories for virtual filesystem. Supports `target:source` mapping syntax (e.g., `views:templates/`), comma-separated values, and recursive directory walking
+- `interp` - Path to the Oak interpreter binary to embed in the packed output. Defaults to the currently running interpreter. Use this to cross-compile for a different platform or OS by pointing to a different-platform Oak binary
+- `oakExe` - Path to the Oak executable used to run the build subprocess. Defaults to the current process executable
+- `web?` - Experimental: web target for pack (boolean)
+- `wasm?` - Experimental: wasm target for pack (boolean)
 - `log` - Logging function
 - `abort` - Error handler
+- `exec` - Custom exec function (default: `exec` builtin)
 
 ```oak
 { configure: configure } := import('pack')
@@ -158,14 +164,16 @@ pack()
 
 ### Cross-Platform Build Script
 
+Use `--interp` to point to a different-platform Oak binary for cross-compilation:
+
 ```oak
 { configure: configure, pack: pack } := import('pack')
 { printf: printf } := import('fmt')
 
 platforms := [
-    { name: 'linux-x64', output: 'dist/app-linux' }
-    { name: 'windows-x64', output: 'dist/app-windows.exe' }
-    { name: 'darwin-x64', output: 'dist/app-macos' }
+    { name: 'linux-x64', output: 'dist/app-linux', interp: 'bin/oak-linux-amd64' }
+    { name: 'windows-x64', output: 'dist/app-windows.exe', interp: 'bin/oak-windows-amd64.exe' }
+    { name: 'darwin-x64', output: 'dist/app-macos', interp: 'bin/oak-darwin-amd64' }
 ]
 
 each(platforms, fn(platform) {
@@ -174,6 +182,7 @@ each(platforms, fn(platform) {
     configure({
         entry: 'src/main.oak'
         output: platform.output
+        interp: platform.interp
         includeVFS: 'resources/'
     })
     
@@ -230,6 +239,27 @@ configure({
     output: 'myapp.exe'  // Creates 'myapp.exe'
 })
 ```
+
+## Binary Format
+
+The packed binary consists of the Oak interpreter with appended data segments:
+
+1. **Oak bundle** — The bundled Oak source code, followed by its byte-length and the magic bytes `oak \x19\x98\x10\x15`
+2. **VFS data** — Serialized virtual filesystem contents, followed by its byte-length and magic bytes `vfs \x01\x00\x00\x00`
+
+At runtime, the interpreter detects these appended segments and loads the bundle and VFS automatically.
+
+## CLI Usage
+
+```
+oak pack --entry [src] --output [dest] [options]
+```
+
+**Options:**
+- `--entry` — Entrypoint for the bundle
+- `--output` / `-o` — Output binary path
+- `--include` — Comma-separated list of modules to include explicitly
+- `--interp` — Path to the Oak interpreter to embed (default: current process)
 
 ## Build vs Pack
 

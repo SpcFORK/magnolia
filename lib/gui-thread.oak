@@ -36,7 +36,7 @@ fn CommandQueue() {
 
 	{
 		// post enqueues a command (a zero-arg function) to be run on the main thread.
-		post: fn(cmdFn) chan_send(ch, { type: :cmd, fn: cmdFn })
+		post: fn(cmdFn) chan_send(ch, { type: :cmd, callback: cmdFn })
 
 		// postValue enqueues a tagged value to be collected by the main thread.
 		postValue: fn(tag, value) chan_send(ch, { type: :value, tag: tag, value: value })
@@ -69,7 +69,7 @@ fn CommandQueue() {
 					true -> {
 						data := msg.data
 						if data.type {
-							:cmd -> data.fn()
+							:cmd -> data.callback()
 						}
 						_flushLoop()
 					}
@@ -132,12 +132,12 @@ fn WorkerPool(numWorkers) {
 		// batch splits a list into chunks and processes each chunk in parallel.
 		batch: fn(list, chunkSize, processFn) {
 			n := len(list)
-			cs := _default(chunkSize, int(n / numWorkers) + 1)
-			if cs < 1 -> cs <- 1
+			chSz := _default(chunkSize, int(n / numWorkers) + 1)
+			if chSz < 1 -> chSz <- 1
 			chunks := []
 			i := 0
 			fn _split() if i < n -> {
-				end := i + cs
+				end := i + chSz
 				if end > n -> end <- n
 				chunks << slice(list, i, end)
 				i <- end
