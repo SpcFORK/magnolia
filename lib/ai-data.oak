@@ -1,0 +1,532 @@
+// libai-data implements data preprocessing, batching, encoding, augmentation,
+// quantization, and model configuration for the ai module.
+
+{
+	default: default
+	map: map
+	slice: slice
+	range: range
+} := import('std')
+{
+	abs: abs
+	pow: pow
+} := import('math')
+{
+	minMaxScale: minMaxScale
+} := import('ai-vec')
+{
+	matZeros: matZeros
+} := import('ai-linalg')
+
+// ============================================================================
+// Model Configuration & Metadata
+// ============================================================================
+
+// ModelConfig creates a configuration object for an AI model.
+// Works with any model type: language models, vision models, audio models,
+// reinforcement learning agents, diffusion models, multimodal systems, etc.
+// Only 'name' and 'task' are populated by default; all other fields come from
+// the caller's params object and are passed through as-is.
+//
+// Example (language model):
+//   ModelConfig({
+//     name: 'gpteehee-4-turbo'
+//     task: :language
+//     vocabSize: 100000
+//     hiddenSize: 8192
+//     numLayers: 96
+//     numHeads: 64
+//     maxSequenceLength: 128000
+//   })
+//
+// Example (vision model):
+//   ModelConfig({
+//     name: 'resnet-50'
+//     task: :vision
+//     inputShape: [3, 224, 224]
+//     numClasses: 1000
+//     numLayers: 50
+//   })
+//
+// Example (reinforcement learning):
+//   ModelConfig({
+//     name: 'ppo-agent'
+//     task: :rl
+//     observationSize: 84
+//     actionSize: 6
+//     gamma: 0.99
+//   })
+fn ModelConfig(params) {
+	// Start with caller's full params, then overlay defaults for core fields
+	base := {
+		name: default(params.name, 'unnamed-model')
+		task: default(params.task, :generic)
+		learningRate: default(params.learningRate, 0.0001)
+		batchSize: default(params.batchSize, 32)
+		trainable: default(params.trainable, true)
+		precision: default(params.precision, 'float32')
+		dropoutRate: default(params.dropoutRate, 0.1)
+	}
+
+	// Merge all user-provided params on top of base defaults.
+	// This lets callers add any domain-specific keys (vocabSize, inputShape,
+	// numClasses, gamma, actionSize, etc.) without the library needing to
+	// know about them in advance.
+	fn mergeKeys(i, out, keys) if i >= len(keys) {
+		true -> out
+		_ -> {
+			k := keys.(i)
+			mergeKeys(i + 1, out.(k) <- params.(k), keys)
+		}
+	}
+	mergeKeys(0, base, keys(params))
+}
+
+// ============================================================================
+// Data Preprocessing
+// ============================================================================
+
+// oneHotEncode encodes an integer label as a one-hot vector of given length.
+//
+// Example:
+//   oneHotEncode(2, 5)  // => [0, 0, 1, 0, 0]
+fn oneHotEncode(label, numClasses) {
+	fn build(i, acc) if i >= numClasses {
+		true -> acc
+		_ -> build(i + 1, acc << if i = label { true -> 1, _ -> 0 })
+	}
+	build(0, [])
+}
+
+// oneHotDecode returns the index of the maximum value in a one-hot vector.
+// Works as argmax for any numeric vector.
+//
+// Example:
+//   oneHotDecode([0, 0, 1, 0])  // => 2
+//   oneHotDecode([0.1, 0.7, 0.2])  // => 1
+fn oneHotDecode(v) {
+	fn findMax(i, bestIdx, bestVal) if i >= len(v) {
+		true -> bestIdx
+		_ -> if v.(i) > bestVal {
+			true -> findMax(i + 1, i, v.(i))
+			_ -> findMax(i + 1, bestIdx, bestVal)
+		}
+	}
+	if len(v) = 0 {
+		true -> ?
+		_ -> findMax(1, 0, v.(0))
+	}
+}
+
+// shuffleIndices returns a list of indices [0..n-1] in pseudo-random order
+// using a simple linear congruential generator seeded by seed.
+//
+// Example:
+//   shuffleIndices(5, 42)  // => [3, 0, 4, 1, 2] (deterministic for seed)
+fn shuffleIndices(n, seed) {
+	indices := range(n)
+	// Fisher-Yates using LCG: next = (a*prev + c) mod m
+	fn swap(i, rng, arr) if i < 1 {
+		true -> arr
+		_ -> {
+			nextRng := int(abs((1103515245 * rng + 12345))) % 2147483648
+			j := nextRng % (i + 1)
+			// swap arr[i] and arr[j]
+			tmp := arr.(i)
+			arr.(i) <- arr.(j)
+			arr.(j) <- tmp
+			swap(i - 1, nextRng, arr)
+		}
+	}
+	swap(n - 1, seed, indices)
+}
+
+// trainTestSplit splits data and labels into train and test sets.
+// ratio is the fraction used for training (e.g. 0.8).
+// Returns {trainData, trainLabels, testData, testLabels}.
+//
+// Example:
+//   trainTestSplit([[1],[2],[3],[4],[5]], [0,1,0,1,0], 0.6, 42)
+fn trainTestSplit(data, labels, ratio, seed) {
+	n := len(data)
+	indices := shuffleIndices(n, seed)
+	splitIdx := int(n * ratio)
+	fn gather(idxList) {
+		fn g(i, dAcc, lAcc) if i >= len(idxList) {
+			true -> { data: dAcc, labels: lAcc }
+			_ -> {
+				idx := idxList.(i)
+				g(i + 1, dAcc << data.(idx), lAcc << labels.(idx))
+			}
+		}
+		g(0, [], [])
+	}
+	trainIdx := indices |> slice(0, splitIdx)
+	testIdx := indices |> slice(splitIdx, n)
+	train := gather(trainIdx)
+	test := gather(testIdx)
+	{
+		trainData: train.data
+		trainLabels: train.labels
+		testData: test.data
+		testLabels: test.labels
+	}
+}
+
+// kFoldIndices generates k folds of train/test index splits for cross-validation.
+// Returns a list of {train: [...indices], test: [...indices]} objects.
+//
+// Example:
+//   kFoldIndices(10, 5)  // => [{train: [2..9], test: [0,1]}, ...]
+fn kFoldIndices(n, k) {
+	foldSize := int(n / k)
+	fn makeFold(f, acc) if f >= k {
+		true -> acc
+		_ -> {
+			testStart := f * foldSize
+			testEnd := if f = k - 1 { true -> n, _ -> testStart + foldSize }
+			testIdx := range(testStart, testEnd)
+			trainIdx := {
+				left := range(testStart)
+				right := range(testEnd, n)
+				fn cat(i, out) if i >= len(right) {
+					true -> out
+					_ -> cat(i + 1, out << right.(i))
+				}
+				cat(0, left)
+			}
+			makeFold(f + 1, acc << { train: trainIdx, test: testIdx })
+		}
+	}
+	makeFold(0, [])
+}
+
+// ============================================================================
+// Batch Processing & Utilities
+// ============================================================================
+
+// batchify creates batches from a list of items.
+// Useful for processing data in batches during training/inference.
+//
+// Example:
+//   batchify([1, 2, 3, 4, 5], 2)  // => [[1, 2], [3, 4], [5]]
+fn batchify(items, batchSize) {
+	fn makeBatch(idx, acc) if idx >= len(items) {
+		true -> acc
+		_ -> {
+			endIdx := if idx + batchSize > len(items) {
+				true -> len(items)
+				_ -> idx + batchSize
+			}
+			batch := items |> slice(idx, endIdx)
+			makeBatch(endIdx, acc << batch)
+		}
+	}
+	makeBatch(0, [])
+}
+
+// padSequence pads a sequence to a target length with a padding token.
+// Used in preparing variable-length sequences for models.
+//
+// Example:
+//   padSequence([1, 2, 3], 5, 0)  // => [1, 2, 3, 0, 0]
+fn padSequence(sequence, targetLength, padToken) {
+	currentLen := len(sequence)
+	if currentLen >= targetLength {
+		true -> sequence |> slice(0, targetLength)
+		_ -> {
+			fn addPadding(i, acc) if i >= targetLength {
+				true -> acc
+				_ -> {
+					elem := if i < currentLen {
+						true -> sequence.(i)
+						_ -> padToken
+					}
+					addPadding(i + 1, acc << elem)
+				}
+			}
+			addPadding(0, [])
+		}
+	}
+}
+
+// ============================================================================
+// Feature Scaling & Encoding
+// ============================================================================
+
+// labelEncode maps a list of category values to integer indices.
+// Returns {encoded: [int...], classes: {value: index...}}.
+//
+// Example:
+//   labelEncode([:cat, :dog, :cat, :bird])
+//   // => {encoded: [0, 1, 0, 2], classes: {cat: 0, dog: 1, bird: 2}}
+fn labelEncode(labels) {
+	fn build(i, classes, nextIdx, encoded) if i >= len(labels) {
+		true -> { encoded: encoded, classes: classes }
+		_ -> {
+			key := string(labels.(i))
+			if classes.(key) != ? {
+				true -> build(i + 1, classes, nextIdx, encoded << classes.(key))
+				_ -> {
+					classes := classes.(key) <- nextIdx
+					build(i + 1, classes, nextIdx + 1, encoded << nextIdx)
+				}
+			}
+		}
+	}
+	build(0, {}, 0, [])
+}
+
+// polynomialFeatures generates polynomial features up to degree d for a vector.
+// For a 1D input [x], degree 3 produces [x, x^2, x^3].
+// For multi-dimensional input, produces all individual powers (no cross terms).
+//
+// Example:
+//   polynomialFeatures([2, 3], 3)  // => [2, 4, 8, 3, 9, 27]
+fn polynomialFeatures(features, degree) {
+	fn build(f, acc) if f >= len(features) {
+		true -> acc
+		_ -> {
+			fn powers(d, acc2) if d > degree {
+				true -> acc2
+				_ -> powers(d + 1, acc2 << pow(features.(f), d))
+			}
+			build(f + 1, powers(1, acc))
+		}
+	}
+	build(0, [])
+}
+
+// ============================================================================
+// Classification Metrics
+// ============================================================================
+
+// accuracy computes the fraction of correct predictions.
+//
+// Example:
+//   accuracy([1, 0, 1, 1], [1, 0, 0, 1])  // => 0.75
+fn accuracy(predicted, actual) {
+	n := len(predicted)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			fn countCorrect(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					correct := if predicted.(i) = actual.(i) { true -> 1, _ -> 0 }
+					countCorrect(i + 1, acc + correct)
+				}
+			}
+			countCorrect(0, 0) / n
+		}
+	}
+}
+
+// precisionScore computes precision for a binary classifier.
+// precision = truePositives / (truePositives + falsePositives)
+//
+// Example:
+//   precisionScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.666...
+fn precisionScore(predicted, actual, positiveLabel) {
+	n := len(predicted)
+	fn count(i, tp, fp) if i >= n {
+		true -> if tp + fp = 0 {
+			true -> 0
+			_ -> tp / (tp + fp)
+		}
+		_ -> if predicted.(i) = positiveLabel {
+			true -> if actual.(i) = positiveLabel {
+				true -> count(i + 1, tp + 1, fp)
+				_ -> count(i + 1, tp, fp + 1)
+			}
+			_ -> count(i + 1, tp, fp)
+		}
+	}
+	count(0, 0, 0)
+}
+
+// recallScore computes recall for a binary classifier.
+// recall = truePositives / (truePositives + falseNegatives)
+//
+// Example:
+//   recallScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 1.0
+fn recallScore(predicted, actual, positiveLabel) {
+	n := len(predicted)
+	fn count(i, tp, fneg) if i >= n {
+		true -> if tp + fneg = 0 {
+			true -> 0
+			_ -> tp / (tp + fneg)
+		}
+		_ -> if actual.(i) = positiveLabel {
+			true -> if predicted.(i) = positiveLabel {
+				true -> count(i + 1, tp + 1, fneg)
+				_ -> count(i + 1, tp, fneg + 1)
+			}
+			_ -> count(i + 1, tp, fneg)
+		}
+	}
+	count(0, 0, 0)
+}
+
+// f1Score computes the F1 score (harmonic mean of precision and recall).
+//
+// Example:
+//   f1Score([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.8
+fn f1Score(predicted, actual, positiveLabel) {
+	p := precisionScore(predicted, actual, positiveLabel)
+	r := recallScore(predicted, actual, positiveLabel)
+	if p + r = 0 {
+		true -> 0
+		_ -> 2 * p * r / (p + r)
+	}
+}
+
+// confusionMatrix builds a confusion matrix for integer class labels 0..numClasses-1.
+// Returns a numClasses x numClasses matrix where mat[actual][predicted] = count.
+//
+// Example:
+//   confusionMatrix([0, 1, 1, 2], [0, 1, 2, 2], 3)
+//   // => [[1,0,0],[0,1,0],[0,1,1]]  (rows=actual, cols=predicted)
+fn confusionMatrix(predicted, actual, numClasses) {
+	mat := matZeros(numClasses, numClasses)
+	fn fill(i) if i >= len(predicted) {
+		true -> mat
+		_ -> {
+			a := int(actual.(i))
+			p := int(predicted.(i))
+			mat.(a).(p) <- mat.(a).(p) + 1
+			fill(i + 1)
+		}
+	}
+	fill(0)
+}
+
+// rSquared computes the R² (coefficient of determination) for regression.
+// 1 = perfect fit, 0 = no better than mean, negative = worse than mean.
+//
+// Example:
+//   rSquared([1, 2, 3], [1.1, 2.0, 2.9])  // => ~0.99
+fn rSquared(actual, predicted) {
+	m := {
+		n := len(actual)
+		if n = 0 {
+			true -> 0
+			_ -> {
+				fn sum(i, acc) if i >= n {
+					true -> acc
+					_ -> sum(i + 1, acc + actual.(i))
+				}
+				sum(0, 0) / n
+			}
+		}
+	}
+	fn ssRes(i, acc) if i >= len(actual) {
+		true -> acc
+		_ -> {
+			diff := actual.(i) - predicted.(i)
+			ssRes(i + 1, acc + diff * diff)
+		}
+	}
+	fn ssTot(i, acc) if i >= len(actual) {
+		true -> acc
+		_ -> {
+			diff := actual.(i) - m
+			ssTot(i + 1, acc + diff * diff)
+		}
+	}
+	tot := ssTot(0, 0)
+	if tot = 0 { true -> 1, _ -> 1 - ssRes(0, 0) / tot }
+}
+
+// ============================================================================
+// Data Augmentation
+// ============================================================================
+
+// addNoise adds Gaussian-like noise to a vector using a deterministic LCG.
+// scale controls the noise magnitude.
+//
+// Example:
+//   addNoise([1, 2, 3], 0.1, 42)  // => [1.03, 1.95, 3.08] (approx)
+fn addNoise(v, scale, seed) {
+	fn gen(i, rng, acc) if i >= len(v) {
+		true -> acc
+		_ -> {
+			r1 := (1103515245 * rng + 12345) % 2147483648
+			r2 := (1103515245 * r1 + 12345) % 2147483648
+			// Box-Muller-like approximation: map uniform to roughly normal
+			u := r1 / 2147483648 - 0.5
+			noise := u * 2 * scale
+			gen(i + 1, r2, acc << (v.(i) + noise))
+		}
+	}
+	gen(0, seed, [])
+}
+
+// mixup performs mixup data augmentation between two samples.
+// lambda controls interpolation: 0 = pure sample2, 1 = pure sample1.
+//
+// Example:
+//   mixup([1, 0], [0, 1], 0.7)  // => [0.7, 0.3]
+fn mixup(sample1, sample2, lambda) {
+	fn mix(i, acc) if i >= len(sample1) {
+		true -> acc
+		_ -> mix(i + 1, acc << (lambda * sample1.(i) + (1 - lambda) * sample2.(i)))
+	}
+	mix(0, [])
+}
+
+// ============================================================================
+// Quantization
+// ============================================================================
+
+// quantize maps floating-point values to discrete levels in [0, numLevels-1].
+// Useful for model compression and integer quantization.
+//
+// Example:
+//   quantize([0.1, 0.5, 0.9], 4)  // => [0, 1, 2] (approx)
+fn quantize(values, numLevels) {
+	scaled := minMaxScale(values)
+	scaled.data |> map(fn(x) {
+		level := int(x * (numLevels - 1) + 0.5)
+		if level >= numLevels { true -> numLevels - 1, _ -> level }
+	})
+}
+
+// dequantize converts quantized integer levels back to [0, 1] range.
+//
+// Example:
+//   dequantize([0, 1, 2, 3], 4)  // => [0, 0.333, 0.666, 1]
+fn dequantize(levels, numLevels) {
+	levels |> map(fn(l) l / (numLevels - 1))
+}
+
+// ============================================================================
+// Mini-Batch Gradient Descent Loop
+// ============================================================================
+
+// trainLoop runs a simple training loop over batches for a given number of epochs.
+// updateFn(params, batch) => {params: newParams, loss: batchLoss}
+// Returns {params: finalParams, losses: [avgLossPerEpoch]}.
+//
+// Example:
+//   trainLoop(initParams, data, 32, 5, fn(p, batch) { params: p, loss: 0.1 })
+fn trainLoop(params, data, batchSize, epochs, updateFn) {
+	batches := batchify(data, batchSize)
+	fn epoch(e, p, losses) if e >= epochs {
+		true -> { params: p, losses: losses }
+		_ -> {
+			fn batch(b, curP, totalLoss) if b >= len(batches) {
+				true -> {
+					avgLoss := totalLoss / len(batches)
+					epoch(e + 1, curP, losses << avgLoss)
+				}
+				_ -> {
+					result := updateFn(curP, batches.(b))
+					batch(b + 1, result.params, totalLoss + result.loss)
+				}
+			}
+			batch(0, p, 0)
+		}
+	}
+	epoch(0, params, [])
+}

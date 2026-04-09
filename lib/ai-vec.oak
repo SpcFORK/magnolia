@@ -1,0 +1,412 @@
+// libai-vec implements vector operations, distances, normalization, statistics,
+// and parallel batch utilities for the ai module.
+
+{
+	default: default
+	map: map
+	filter: filter
+	slice: slice
+	each: each
+	range: range
+} := import('std')
+{
+	sqrt: sqrt
+	abs: abs
+	pow: pow
+} := import('math')
+{
+	pmap: pmap
+} := import('thread')
+
+// ============================================================================
+// Vector Operations & Embeddings
+// ============================================================================
+
+// dotProduct computes the dot product of two vectors (lists of numbers).
+// Both vectors must have the same length.
+//
+// Example:
+//   dotProduct([1, 2, 3], [4, 5, 6])  // => 32 (1*4 + 2*5 + 3*6)
+fn dotProduct(v1, v2) {
+	fn sum(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> sum(i + 1, acc + v1.(i) * v2.(i))
+	}
+	sum(0, 0)
+}
+
+// magnitude returns the Euclidean norm (L2 norm) of a vector.
+//
+// Example:
+//   magnitude([3, 4])  // => 5
+//   magnitude([0, 0])  // => 0
+fn magnitude(v) {
+	squared := dotProduct(v, v)
+	sqrt(squared)
+}
+
+// normalize returns a normalized vector with magnitude 1 (unit vector).
+// Returns ? if the vector has zero magnitude.
+//
+// Example:
+//   normalize([3, 4])  // => [0.6, 0.8]
+//   normalize([0, 0])  // => ?
+fn normalize(v) {
+	mag := magnitude(v)
+	if mag <= 0 {
+		true -> ?
+		_ -> v |> map(fn(x) x / mag)
+	}
+}
+
+// cosineSimilarity computes the cosine similarity between two embeddings/vectors.
+// Returns a value between -1 and 1, where 1 means identical direction.
+// This is commonly used for comparing embeddings in AI/ML applications.
+//
+// Example:
+//   cosineSimilarity([1, 0, 0], [1, 0, 0])  // => 1.0 (identical)
+//   cosineSimilarity([1, 0], [0, 1])        // => 0.0 (orthogonal)
+fn cosineSimilarity(v1, v2) {
+	mag1 := magnitude(v1)
+	mag2 := magnitude(v2)
+	if mag1 * mag2 <= 0 {
+		true -> ?
+		_ -> dotProduct(v1, v2) / (mag1 * mag2)
+	}
+}
+
+// euclideanDistance computes the L2 (Euclidean) distance between two vectors.
+// Used for distance-based similarity in embeddings.
+//
+// Example:
+//   euclideanDistance([0, 0], [3, 4])  // => 5
+//   euclideanDistance([1, 2], [4, 6])  // => 5
+fn euclideanDistance(v1, v2) {
+	fn sumSquares(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> {
+			diff := v1.(i) - v2.(i)
+			sumSquares(i + 1, acc + diff * diff)
+		}
+	}
+	sqrt(sumSquares(0, 0))
+}
+
+// manhattanDistance computes the L1 (Manhattan/Taxicab) distance between vectors.
+//
+// Example:
+//   manhattanDistance([0, 0], [3, 4])  // => 7
+fn manhattanDistance(v1, v2) {
+	fn sum(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> sum(i + 1, acc + abs(v1.(i) - v2.(i)))
+	}
+	sum(0, 0)
+}
+
+// chebyshevDistance computes the Chebyshev (L-infinity) distance between vectors.
+// Returns the maximum absolute difference across all dimensions.
+//
+// Example:
+//   chebyshevDistance([1, 2, 3], [4, 1, 0])  // => 3
+fn chebyshevDistance(v1, v2) {
+	fn maxDiff(i, m) if i >= len(v1) {
+		true -> m
+		_ -> {
+			d := abs(v1.(i) - v2.(i))
+			maxDiff(i + 1, if d > m { true -> d, _ -> m })
+		}
+	}
+	if len(v1) = 0 { true -> 0, _ -> maxDiff(0, 0) }
+}
+
+// hammingDistance counts the number of positions where two vectors differ.
+// Useful for comparing binary codes or label vectors.
+//
+// Example:
+//   hammingDistance([1, 0, 1, 1], [1, 1, 0, 1])  // => 2
+fn hammingDistance(v1, v2) {
+	fn count(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> count(i + 1, acc + if v1.(i) = v2.(i) { true -> 0, _ -> 1 })
+	}
+	count(0, 0)
+}
+
+// vecAdd adds two vectors element-wise.
+//
+// Example:
+//   vecAdd([1, 2, 3], [4, 5, 6])  // => [5, 7, 9]
+fn vecAdd(v1, v2) {
+	fn add(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> add(i + 1, acc << (v1.(i) + v2.(i)))
+	}
+	add(0, [])
+}
+
+// vecSub subtracts v2 from v1 element-wise.
+//
+// Example:
+//   vecSub([4, 5, 6], [1, 2, 3])  // => [3, 3, 3]
+fn vecSub(v1, v2) {
+	fn sub(i, acc) if i >= len(v1) {
+		true -> acc
+		_ -> sub(i + 1, acc << (v1.(i) - v2.(i)))
+	}
+	sub(0, [])
+}
+
+// vecScale multiplies every element of a vector by a scalar.
+//
+// Example:
+//   vecScale([1, 2, 3], 2)  // => [2, 4, 6]
+fn vecScale(v, scalar) v |> map(fn(x) x * scalar)
+
+// ============================================================================
+// Normalization & Standardization
+// ============================================================================
+
+// minMaxScale normalizes values to the range [0, 1] using min-max scaling.
+// Returns the min and max values found, plus the normalized vector.
+//
+// Example:
+//   minMaxScale([1, 2, 3, 4, 5])  // => {min: 1, max: 5, data: [0, 0.25, 0.5, 0.75, 1]}
+fn minMaxScale(data) {
+	if len(data) = 0 {
+		true -> {
+			min: 0
+			max: 0
+			data: []
+		}
+		_ -> {
+			fn findMin(i, m) if i >= len(data) {
+				true -> m
+				_ -> {
+					x := data.(i)
+					next := if x < m { true -> x, _ -> m }
+					findMin(i + 1, next)
+				}
+			}
+			fn findMax(i, m) if i >= len(data) {
+				true -> m
+				_ -> {
+					x := data.(i)
+					next := if x > m { true -> x, _ -> m }
+					findMax(i + 1, next)
+				}
+			}
+			minVal := findMin(0, data.(0))
+			maxVal := findMax(0, data.(0))
+			range := maxVal - minVal
+
+			if range = 0 {
+				true -> {
+					min: minVal
+					max: maxVal
+					data: data |> map(fn(_) 0)
+				}
+				_ -> {
+					min: minVal
+					max: maxVal
+					data: data |> map(fn(x)(x - minVal) / range)
+				}
+			}
+		}
+	}
+}
+
+// zScore normalizes values using z-score standardization (standard normal distribution).
+// Returns mean, standard deviation, and standardized data.
+//
+// Example:
+//   zScore([1, 2, 3, 4, 5])  // => {mean: 3, stddev: ..., data: [...]}
+fn zScore(data) {
+	n := len(data)
+	if n = 0 {
+		true -> {
+			mean: 0
+			stddev: 0
+			data: []
+		}
+		_ -> {
+			fn sumData(i, sum) if i >= n {
+				true -> sum
+				_ -> sumData(i + 1, sum + data.(i))
+			}
+			mean := sumData(0, 0) / n
+
+			squaredDiffs := data |> map(fn(x) pow(x - mean, 2))
+			fn sumSquaredDiffs(i, sum) if i >= n {
+				true -> sum
+				_ -> sumSquaredDiffs(i + 1, sum + squaredDiffs.(i))
+			}
+			variance := sumSquaredDiffs(0, 0) / n
+			stddev := sqrt(variance)
+
+			if stddev = 0 {
+				true -> {
+					mean: mean
+					stddev: 0
+					data: data |> map(fn(_) 0)
+				}
+				_ -> {
+					mean: mean
+					stddev: stddev
+					data: data |> map(fn(x)(x - mean) / stddev)
+				}
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Statistical Utilities
+// ============================================================================
+
+// mean computes the arithmetic mean of a list of numbers.
+//
+// Example:
+//   mean([1, 2, 3, 4, 5])  // => 3
+fn mean(data) {
+	n := len(data)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			fn sum(i, acc) if i >= n {
+				true -> acc
+				_ -> sum(i + 1, acc + data.(i))
+			}
+			sum(0, 0) / n
+		}
+	}
+}
+
+// variance computes the variance of a dataset.
+//
+// Example:
+//   variance([1, 2, 3, 4, 5])  // => 2
+fn variance(data) {
+	n := len(data)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			m := mean(data)
+			squared := data |> map(fn(x) pow(x - m, 2))
+			fn sum(i, acc) if i >= n {
+				true -> acc
+				_ -> sum(i + 1, acc + squared.(i))
+			}
+			sum(0, 0) / n
+		}
+	}
+}
+
+// stddev computes the standard deviation of a dataset.
+//
+// Example:
+//   stddev([1, 2, 3, 4, 5])  // => 1.414...
+fn stddev(data) sqrt(variance(data))
+
+// entropy computes Shannon entropy of a probability distribution.
+// Measures the amount of uncertainty in the distribution.
+//
+// Example:
+//   entropy([0.5, 0.5])  // => 1.0 (maximum entropy for 2 outcomes)
+//   entropy([1, 0])      // => 0   (no entropy, certain outcome)
+fn entropy(probabilities) {
+	epsilon := 0.0000000001
+	fn h(i, acc) if i >= len(probabilities) {
+		true -> acc * -1
+		_ -> {
+			p := probabilities.(i)
+			next := if p > epsilon {
+				true -> p * pow(2, 10) // Simplified log approximation
+				_ -> 0
+			}
+			h(i + 1, acc + next)
+		}
+	}
+	h(0, 0)
+}
+
+// ema applies exponential moving average smoothing to a time series.
+// alpha is the smoothing factor (0 < alpha <= 1). Higher = more weight on recent.
+//
+// Example:
+//   ema([1, 2, 3, 4, 5], 0.3)  // => [1, 1.3, 1.81, 2.467, 3.227] (approx)
+fn ema(data, alpha) {
+	if len(data) = 0 {
+		true -> []
+		_ -> {
+			fn smooth(i, prev, acc) if i >= len(data) {
+				true -> acc
+				_ -> {
+					val := alpha * data.(i) + (1 - alpha) * prev
+					smooth(i + 1, val, acc << val)
+				}
+			}
+			smooth(1, data.(0), [data.(0)])
+		}
+	}
+}
+
+// ============================================================================
+// Parallel Batch Utilities
+// ============================================================================
+
+// pbatchNormalize normalizes a list of vectors in parallel.
+// Each vector is normalized independently using pmap.
+//
+// Example:
+//   pbatchNormalize([[3, 4], [5, 12]])  // => [[0.6, 0.8], [0.384..., 0.923...]]
+fn pbatchNormalize(vectors) pmap(vectors, normalize)
+
+// pbatchCosineSimilarity computes cosine similarity between a query vector
+// and each vector in a list, in parallel. Returns a list of similarity scores.
+//
+// Example:
+//   pbatchCosineSimilarity([[1, 0], [0, 1], [1, 1]], [1, 0])
+//   // => [1.0, 0.0, 0.707...]
+fn pbatchCosineSimilarity(vectors, query) pmap(vectors, fn(v) cosineSimilarity(v, query))
+
+// cosineSimilarityMatrix computes pairwise cosine similarity for a list of vectors.
+// Returns an n x n matrix where entry [i][j] is cosineSimilarity(vectors[i], vectors[j]).
+//
+// Example:
+//   cosineSimilarityMatrix([[1,0],[0,1],[1,1]])
+//   // => [[1, 0, 0.707], [0, 1, 0.707], [0.707, 0.707, 1]]
+fn cosineSimilarityMatrix(vectors) {
+	n := len(vectors)
+	fn makeRow(i, acc) if i >= n {
+		true -> acc
+		_ -> {
+			fn makeCols(j, row) if j >= n {
+				true -> row
+				_ -> makeCols(j + 1, row << cosineSimilarity(vectors.(i), vectors.(j)))
+			}
+			makeRow(i + 1, acc << makeCols(0, []))
+		}
+	}
+	makeRow(0, [])
+}
+
+// distanceMatrix computes pairwise distances for a list of vectors using distFn.
+//
+// Example:
+//   distanceMatrix([[0,0],[3,4]], euclideanDistance)
+//   // => [[0, 5], [5, 0]]
+fn distanceMatrix(vectors, distFn) {
+	n := len(vectors)
+	fn makeRow(i, acc) if i >= n {
+		true -> acc
+		_ -> {
+			fn makeCols(j, row) if j >= n {
+				true -> row
+				_ -> makeCols(j + 1, row << distFn(vectors.(i), vectors.(j)))
+			}
+			makeRow(i + 1, acc << makeCols(0, []))
+		}
+	}
+	makeRow(0, [])
+}

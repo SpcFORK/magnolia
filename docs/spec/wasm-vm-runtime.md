@@ -23,7 +23,3 @@ _Auto-generated from Magnolia source._
 
 ### `generateDispatchTable()`
 
-### `generateSetLocalAtHelper()`
-
-> returns `:string`
-

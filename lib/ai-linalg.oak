@@ -1,0 +1,260 @@
+// libai-linalg implements matrix operations and linear algebra utilities
+// for the ai module.
+
+{
+	map: map
+	slice: slice
+} := import('std')
+{
+	pmap: pmap
+} := import('thread')
+
+// ============================================================================
+// Matrix Operations
+// ============================================================================
+
+// matZeros creates an m x n matrix filled with zeros.
+//
+// Example:
+//   matZeros(2, 3)  // => [[0, 0, 0], [0, 0, 0]]
+fn matZeros(rows, cols) {
+	fn makeRow(r, acc) if r >= rows {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= cols {
+				true -> row
+				_ -> makeCol(c + 1, row << 0)
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matIdentity creates an n x n identity matrix.
+//
+// Example:
+//   matIdentity(3)  // => [[1,0,0],[0,1,0],[0,0,1]]
+fn matIdentity(n) {
+	fn makeRow(r, acc) if r >= n {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= n {
+				true -> row
+				_ -> makeCol(c + 1, row << if c = r { true -> 1, _ -> 0 })
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matTranspose transposes a matrix (swaps rows and columns).
+//
+// Example:
+//   matTranspose([[1, 2], [3, 4], [5, 6]])  // => [[1, 3, 5], [2, 4, 6]]
+fn matTranspose(mat) {
+	rows := len(mat)
+	if rows = 0 {
+		true -> []
+		_ -> {
+			cols := len(mat.(0))
+			fn makeRow(c, acc) if c >= cols {
+				true -> acc
+				_ -> {
+					fn makeCol(r, row) if r >= rows {
+						true -> row
+						_ -> makeCol(r + 1, row << mat.(r).(c))
+					}
+					matRow := makeCol(0, [])
+					makeRow(c + 1, acc << matRow)
+				}
+			}
+			makeRow(0, [])
+		}
+	}
+}
+
+// matMul multiplies two matrices A (m x n) and B (n x p), returning an m x p matrix.
+//
+// Example:
+//   matMul([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[19, 22], [43, 50]]
+fn matMul(a, b) {
+	rowsA := len(a)
+	colsB := len(b.(0))
+	colsA := len(a.(0))
+	fn makeRow(r, acc) if r >= rowsA {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= colsB {
+				true -> row
+				_ -> {
+					fn dot(k, sum) if k >= colsA {
+						true -> sum
+						_ -> dot(k + 1, sum + a.(r).(k) * b.(k).(c))
+					}
+					makeCol(c + 1, row << dot(0, 0))
+				}
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matAdd adds two matrices element-wise.
+//
+// Example:
+//   matAdd([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[6, 8], [10, 12]]
+fn matAdd(a, b) {
+	fn makeRow(r, acc) if r >= len(a) {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= len(a.(r)) {
+				true -> row
+				_ -> makeCol(c + 1, row << (a.(r).(c) + b.(r).(c)))
+			}
+			matRow := makeCol(0, [])
+			makeRow(r + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// matScale multiplies every element in a matrix by a scalar.
+//
+// Example:
+//   matScale([[1, 2], [3, 4]], 3)  // => [[3, 6], [9, 12]]
+fn matScale(mat, scalar) mat |> map(fn(row) row |> map(fn(x) x * scalar))
+
+// matDiag extracts the diagonal of a square matrix as a vector.
+//
+// Example:
+//   matDiag([[1, 2], [3, 4]])  // => [1, 4]
+fn matDiag(mat) {
+	n := len(mat)
+	fn collect(i, acc) if i >= n {
+		true -> acc
+		_ -> collect(i + 1, acc << mat.(i).(i))
+	}
+	collect(0, [])
+}
+
+// matFromDiag creates a square matrix from a diagonal vector.
+//
+// Example:
+//   matFromDiag([3, 5])  // => [[3, 0], [0, 5]]
+fn matFromDiag(diag) {
+	n := len(diag)
+	fn makeRow(r, acc) if r >= n {
+		true -> acc
+		_ -> {
+			fn makeCols(c, row) if c >= n {
+				true -> row
+				_ -> makeCols(c + 1, row << if c = r { true -> diag.(r), _ -> 0 })
+			}
+			makeRow(r + 1, acc << makeCols(0, []))
+		}
+	}
+	makeRow(0, [])
+}
+
+// matTrace computes the trace (sum of diagonal elements) of a square matrix.
+//
+// Example:
+//   matTrace([[1, 2], [3, 4]])  // => 5
+fn matTrace(mat) {
+	fn sum(i, acc) if i >= len(mat) {
+		true -> acc
+		_ -> sum(i + 1, acc + mat.(i).(i))
+	}
+	sum(0, 0)
+}
+
+// outerProduct computes the outer product of two vectors, returning a matrix.
+//
+// Example:
+//   outerProduct([1, 2], [3, 4, 5])  // => [[3, 4, 5], [6, 8, 10]]
+fn outerProduct(v1, v2) {
+	v1 |> map(fn(a) v2 |> map(fn(b) a * b))
+}
+
+// matHadamard computes the element-wise (Hadamard) product of two matrices.
+//
+// Example:
+//   matHadamard([[1, 2], [3, 4]], [[5, 6], [7, 8]])  // => [[5, 12], [21, 32]]
+fn matHadamard(a, b) {
+	fn makeRow(r, acc) if r >= len(a) {
+		true -> acc
+		_ -> {
+			fn makeCols(c, row) if c >= len(a.(r)) {
+				true -> row
+				_ -> makeCols(c + 1, row << a.(r).(c) * b.(r).(c))
+			}
+			makeRow(r + 1, acc << makeCols(0, []))
+		}
+	}
+	makeRow(0, [])
+}
+
+// matFlatten flattens a matrix into a single vector (row-major).
+//
+// Example:
+//   matFlatten([[1, 2], [3, 4]])  // => [1, 2, 3, 4]
+fn matFlatten(mat) {
+	fn collect(r, acc) if r >= len(mat) {
+		true -> acc
+		_ -> {
+			fn cols(c, a) if c >= len(mat.(r)) {
+				true -> a
+				_ -> cols(c + 1, a << mat.(r).(c))
+			}
+			collect(r + 1, cols(0, acc))
+		}
+	}
+	collect(0, [])
+}
+
+// matReshape reshapes a flat vector into a rows x cols matrix.
+//
+// Example:
+//   matReshape([1, 2, 3, 4, 5, 6], 2, 3)  // => [[1, 2, 3], [4, 5, 6]]
+fn matReshape(flat, rows, cols) {
+	fn makeRow(r, acc) if r >= rows {
+		true -> acc
+		_ -> {
+			start := r * cols
+			makeRow(r + 1, acc << slice(flat, start, start + cols))
+		}
+	}
+	makeRow(0, [])
+}
+
+// ============================================================================
+// Parallel Matrix Operations
+// ============================================================================
+
+// pmatMul multiplies two matrices with parallelism across rows.
+//
+// Example:
+//   pmatMul([[1,2],[3,4]], [[5,6],[7,8]])  // => [[19,22],[43,50]]
+fn pmatMul(a, b) {
+	colsB := len(b.(0))
+	colsA := len(a.(0))
+	pmap(a, fn(rowA) {
+		fn makeCol(c, row) if c >= colsB {
+			true -> row
+			_ -> {
+				fn dot(k, sum) if k >= colsA {
+					true -> sum
+					_ -> dot(k + 1, sum + rowA.(k) * b.(k).(c))
+				}
+				makeCol(c + 1, row << dot(0, 0))
+			}
+		}
+		makeCol(0, [])
+	})
+}

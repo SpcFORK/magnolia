@@ -2590,10 +2590,18 @@ func (vm *VM) callBuiltin(idx int, args []Value) (Value, *runtimeError) {
 		lv := ListValue{}
 		return &lv, nil
 	case 10: // slice
-		if len(args) < 3 {
+		if len(args) < 1 {
 			return null, nil
 		}
-		return vmSlice(args[0], args[1], args[2])
+		var startArg Value = null
+		if len(args) >= 2 {
+			startArg = args[1]
+		}
+		var endArg Value = null
+		if len(args) >= 3 {
+			endArg = args[2]
+		}
+		return vmSlice(args[0], startArg, endArg)
 	case 11: // append
 		if len(args) < 2 {
 			return null, nil

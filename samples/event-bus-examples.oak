@@ -1,0 +1,93 @@
+#!/usr/bin/env oak
+
+// Async Event Bus Examples
+// Demonstrates publish/subscribe event-driven messaging
+
+{
+	println: println
+	string: string
+	each: each
+} := import('std')
+EventBus := import('async-event-bus')
+
+fn main() {
+	println('=== Async Event Bus Examples ===')
+	println('')
+
+	// 1. Create event bus and subscribe
+	println('1. Basic emit/on:')
+	bus := EventBus.create()
+
+	bus.on(:greet, fn(payload) {
+		println('  [greet] Hello, ' + string(payload.name) + '!')
+	})
+	bus.emit(:greet, { name: 'Alice' })
+	bus.emit(:greet, { name: 'Bob' })
+	println('')
+
+	// 2. Multiple listeners
+	println('2. Multiple listeners on same event:')
+	bus2 := EventBus.create()
+	bus2.on(:log, fn(msg) println('  [Logger A] ' + string(msg)))
+	bus2.on(:log, fn(msg) println('  [Logger B] ' + string(msg)))
+	bus2.emit(:log, 'Something happened')
+	println('')
+
+	// 3. Once (one-shot listener)
+	println('3. Once (fires only on first emit):')
+	bus3 := EventBus.create()
+	bus3.once(:init, fn(payload) {
+		println('  [init] Initialized with: ' + string(payload))
+	})
+	bus3.emit(:init, 'first call')
+	bus3.emit(:init, 'second call (should not print)')
+	println('')
+
+	// 4. Unsubscribe with off
+	println('4. Unsubscribe (off):')
+	bus4 := EventBus.create()
+	token := bus4.on(:tick, fn(n) println('  [tick] ' + string(n)))
+	bus4.emit(:tick, 1)
+	bus4.emit(:tick, 2)
+	bus4.off(:tick, token)
+	bus4.emit(:tick, 3) // should not print
+	println('  (tick 3 should not appear)')
+	println('')
+
+	// 5. Listener count
+	println('5. Listener count:')
+	bus5 := EventBus.create()
+	bus5.on(:data, fn {})
+	bus5.on(:data, fn {})
+	bus5.on(:other, fn {})
+	println('  Listeners for :data = ' + string(bus5.listenerCount(:data)))
+	println('  Listeners for :other = ' + string(bus5.listenerCount(:other)))
+	println('')
+
+	// 6. Clear listeners
+	println('6. Clear all listeners for event:')
+	bus6 := EventBus.create()
+	bus6.on(:temp, fn { println('  should not fire') })
+	bus6.on(:temp, fn { println('  should not fire') })
+	bus6.clear(:temp)
+	bus6.emit(:temp, ?)
+	println('  Listeners after clear: ' + string(bus6.listenerCount(:temp)))
+	println('')
+
+	// 7. Practical: simple state machine
+	println('7. Practical: order state machine:')
+	sm := EventBus.create()
+	state := { current: 'pending' }
+
+	sm.on(:transition, fn(evt) {
+		println('  ' + state.current + ' -> ' + evt.to)
+		state.current <- evt.to
+	})
+
+	sm.emit(:transition, { to: 'processing' })
+	sm.emit(:transition, { to: 'shipped' })
+	sm.emit(:transition, { to: 'delivered' })
+	println('  Final state: ' + state.current)
+}
+
+main()

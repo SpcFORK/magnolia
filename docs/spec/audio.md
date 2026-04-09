@@ -47,6 +47,10 @@ _Auto-generated from Magnolia source._
 
 ### `rawDecode(data, opts)`
 
+### `ogg(samples, sampleRate, channels, bitDepth)`
+
+### `parseOgg(data)`
+
 ### `sine(freq, sampleRate, length, phase)`
 
 ### `_oscPhaseTurn(freq, sampleRate, i, phase)`

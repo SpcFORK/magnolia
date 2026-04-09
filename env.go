@@ -110,6 +110,7 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("make_chan", c.oakMakeChan)
 	c.LoadFunc("chan_send", c.oakChanSend)
 	c.LoadFunc("chan_recv", c.oakChanRecv)
+	c.LoadFunc("chan_try_recv", c.oakChanTryRecv)
 
 	// i/o interfaces
 	c.LoadFunc("input", c.callbackify(c.oakInput))
@@ -1552,9 +1553,7 @@ func (c *Context) oakChanSend(args []Value) (Value, *runtimeError) {
 		}
 	}
 
-	c.eng.Add(1)
-	go func() {
-		defer c.eng.Done()
+	c.eng.Go(func() {
 		ch <- value
 
 		c.Lock()
@@ -1563,7 +1562,7 @@ func (c *Context) oakChanSend(args []Value) (Value, *runtimeError) {
 		if err != nil {
 			c.eng.reportErr(err)
 		}
-	}()
+	})
 
 	return null, nil
 }
@@ -1612,6 +1611,29 @@ func (c *Context) oakChanRecv(args []Value) (Value, *runtimeError) {
 	}()
 
 	return null, nil
+}
+
+func (c *Context) oakChanTryRecv(args []Value) (Value, *runtimeError) {
+	if err := c.requireArgLen("chan_try_recv", args, 1); err != nil {
+		return nil, err
+	}
+
+	ch, err := c.getGoChan(args[0], "chan_try_recv")
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case value := <-ch:
+		return ObjectValue{
+			"ok":   oakTrue,
+			"data": value,
+		}, nil
+	default:
+		return ObjectValue{
+			"ok": oakFalse,
+		}, nil
+	}
 }
 
 var inputReaderInit sync.Once

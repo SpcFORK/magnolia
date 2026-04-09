@@ -1,0 +1,433 @@
+// libaudio-ogg provides OGG container encoding and parsing helpers for
+// libaudio.
+//
+// This module implements the OGG bitstream framing format (RFC 3533) with
+// uncompressed signed 16-bit little-endian PCM payload. The codec is
+// identified by the header type string 'PCM     ' (8 bytes). While
+// real-world OGG files typically carry Vorbis or Opus compressed audio,
+// this pure-Oak implementation uses raw PCM so that no external codec
+// library is needed. Files produced by this module can be round-tripped
+// through ogg()/parseOgg() and converted to standard formats via the
+// other libaudio modules.
+//
+// Samples are normalised floats in [-1, 1].
+
+{
+	map: map
+	reduce: reduce
+	default: default
+	range: range
+} := import('std')
+{
+	join: join
+	slice: slice
+} := import('str')
+{
+	pmap: pmap
+} := import('thread')
+
+// ---- clamp -----------------------------------------------------------
+
+fn _clipF32(s) if {
+	s > 1 -> 1
+	s < -1 -> -1
+	_ -> s
+}
+
+// ---- sample conversions (signed 16-bit LE) --------------------------
+
+fn _f32ToI16(s) int(s * 32767)
+fn _i16ToF32(s) s / 32768
+
+// ---- little-endian byte utilities -----------------------------------
+
+fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
+
+fn _u16LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256]
+}
+
+fn _u32LE(n) {
+	n := int(n)
+	b0 := n % 256
+	b1 := int(n / 256) % 256
+	b2 := int(n / 65536) % 256
+	b3 := int(n / 16777216) % 256
+	[b0, b1, b2, b3]
+}
+
+fn _i16LE(n) {
+	n := int(n)
+	u := if n < 0 { true -> n + 65536, _ -> n }
+	_u16LE(u)
+}
+
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readU16LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b0 + b1 * 256
+}
+
+fn _readU32LE(s, off) {
+	b0 := codepoint(s.(off))
+	b1 := codepoint(s.(off + 1))
+	b2 := codepoint(s.(off + 2))
+	b3 := codepoint(s.(off + 3))
+	b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+fn _readI16LE(s, off) {
+	u := _readU16LE(s, off)
+	if u > 32767 { true -> u - 65536, _ -> u }
+}
+
+// ---- CRC-32 (OGG variant) -------------------------------------------
+// OGG pages use a CRC-32 with polynomial 0x04C11DB7 (normal form).
+// The checksum field in the page header is zeroed during computation.
+
+fn _pow2(n) {
+	fn sub(acc, i) if i >= n { true -> acc, _ -> sub(acc * 2, i + 1) }
+	sub(1, 0)
+}
+
+fn _xor32(a, b) {
+	fn sub(bit, acc) if bit >= 32 {
+		true -> acc
+		_ -> {
+			aBit := int(a / _pow2(bit)) % 2
+			bBit := int(b / _pow2(bit)) % 2
+			resBit := if aBit = bBit { true -> 0, _ -> 1 }
+			sub(bit + 1, acc + resBit * _pow2(bit))
+		}
+	}
+	sub(0, 0)
+}
+
+fn _crc32OggTable() {
+	range(256) |> map(fn(i) {
+		fn sub(crc, bit) if bit >= 8 {
+			true -> crc
+			_ -> {
+				next := if (int(crc / 2147483648) % 2) = 1 {
+					true -> {
+						shifted := (crc * 2) % 4294967296
+						xor := 79764919
+						int(_xor32(shifted, xor))
+					}
+					_ -> (crc * 2) % 4294967296
+				}
+				sub(next, bit + 1)
+			}
+		}
+		sub(i * 16777216, 0)
+	})
+}
+
+// Pre-compute the 256-entry CRC table once per module load.
+_crcTable := _crc32OggTable()
+
+fn _crc32Ogg(data) {
+	fn sub(crc, i) if i >= len(data) {
+		true -> crc
+		_ -> {
+			b := codepoint(data.(i))
+			// index = ((crc >> 24) ^ byte) & 0xFF
+			idx := _xor32(int(crc / 16777216) % 256, b)
+			// crc = (crc << 8) ^ table[index]
+			shifted := (crc * 256) % 4294967296
+			sub(_xor32(shifted, _crcTable.(idx)), i + 1)
+		}
+	}
+	sub(0, 0)
+}
+
+// ---- OGG page construction ------------------------------------------
+// An OGG page has:
+//   4 bytes  'OggS' capture pattern
+//   1 byte   version (0)
+//   1 byte   header type flag (0x02=BOS, 0x04=EOS, 0x00=mid)
+//   8 bytes  granule position (absolute sample position, LE i64)
+//   4 bytes  serial number (LE u32)
+//   4 bytes  page sequence number (LE u32)
+//   4 bytes  CRC-32 checksum (LE u32) — zeroed during computation
+//   1 byte   number of segments
+//   N bytes  segment table (each byte = segment length, max 255)
+//   M bytes  segment data
+
+// _granuleBytes encodes a 64-bit granule position as 8 LE bytes.
+fn _granuleBytes(n) {
+	n := int(n)
+	range(8) |> map(fn(i) {
+		int(n / _pow2(i * 8)) % 256
+	})
+}
+
+// _segmentTable splits a payload length into OGG segment table entries.
+// Each segment is at most 255 bytes; a trailing 0-length segment is added
+// when the payload is an exact multiple of 255 to signal packet end.
+fn _segmentTable(payloadLen) {
+	fn sub(remaining, acc) if remaining >= 255 {
+		true -> sub(remaining - 255, acc << 255)
+		_ -> acc << remaining
+	}
+	sub(payloadLen, [])
+}
+
+// _oggPage builds a single OGG page binary string.
+//   headerType: 0x02=BOS, 0x04=EOS, 0x00=continuation
+//   granule: absolute sample position
+//   serial: stream serial number
+//   pageSeq: page sequence number
+//   payload: binary string of segment data
+fn _oggPage(headerType, granule, serial, pageSeq, payload) {
+	segTable := _segmentTable(len(payload))
+	nSegments := len(segTable)
+
+	// Build header with zeroed CRC field
+	hdr := 'OggS' +
+		_byteStr([0]) +                        // version
+		_byteStr([headerType]) +                // header type
+		_byteStr(_granuleBytes(granule)) +      // granule position
+		_byteStr(_u32LE(serial)) +              // serial number
+		_byteStr(_u32LE(pageSeq)) +             // page sequence
+		_byteStr(_u32LE(0)) +                   // CRC placeholder
+		_byteStr([nSegments]) +                 // segment count
+		_byteStr(segTable)                      // segment table
+
+	page := hdr + payload
+
+	// Compute CRC over entire page (with CRC field zeroed)
+	crc := _crc32Ogg(page)
+
+	// Patch CRC bytes at offset 22..25
+	crcBytes := _byteStr(_u32LE(crc))
+	slice(page, 0, 22) + crcBytes + slice(page, 26)
+}
+
+// ---- OGG PCM codec header -------------------------------------------
+// The first OGG page (BOS) carries a codec identification header:
+//   8 bytes  codec id: 'PCM     '
+//   2 bytes  channels (LE u16)
+//   4 bytes  sample rate (LE u32)
+//   2 bytes  bit depth (LE u16)
+
+fn _oggPcmIdHeader(sampleRate, channels, bitDepth) {
+	'PCM     ' +
+		_byteStr(_u16LE(channels)) +
+		_byteStr(_u32LE(sampleRate)) +
+		_byteStr(_u16LE(bitDepth))
+}
+
+// ---- OGG encoding ---------------------------------------------------
+
+// _maxPageSamples limits how many samples go in one OGG data page.
+// OGG segments max out at 255 × 255 = 65025 bytes per page.
+// With 16-bit PCM (2 bytes/sample): 65025 / 2 = 32512 samples max.
+// We use a round number below that limit.
+_maxPageSamples := 32000
+
+// _encodeSamples converts normalised float samples to 16-bit LE PCM bytes.
+fn _encodeSamples(samples, bitDepth) {
+	samples |> map(fn(s) {
+		sc := _clipF32(s)
+		_byteStr(_i16LE(_f32ToI16(sc)))
+	}) |> join('')
+}
+
+// ogg encodes a list of normalised float samples into an OGG container
+// with PCM payload. `samples` must already be interleaved when channels > 1.
+//
+// Example:
+//   s := sine(440, 44100, 44100)
+//   data := ogg(s, 44100, 1, 16)
+fn ogg(samples, sampleRate, channels, bitDepth) {
+	sampleRate := default(sampleRate, 44100)
+	channels := default(channels, 1)
+	bitDepth := default(bitDepth, 16)
+	serial := 1
+
+	// BOS page: codec identification header
+	idHeader := _oggPcmIdHeader(sampleRate, channels, bitDepth)
+	bosPage := _oggPage(0x02, 0, serial, 0, idHeader)
+
+	// Data pages: split samples across multiple pages
+	totalSamples := len(samples)
+	bytesPerSample := int(bitDepth / 8)
+
+	fn buildPages(offset, pageSeq, acc) {
+		remaining := totalSamples - offset
+		if remaining <= 0 -> acc
+		count := if remaining < _maxPageSamples { true -> remaining, _ -> _maxPageSamples }
+		pageSamples := range(count) |> map(fn(i) samples.(offset + i))
+		payload := _encodeSamples(pageSamples, bitDepth)
+
+		granule := offset + count
+		isLast := granule >= totalSamples
+		headerType := if isLast { true -> 0x04, _ -> 0x00 }
+
+		page := _oggPage(headerType, granule, serial, pageSeq, payload)
+		buildPages(offset + count, pageSeq + 1, acc << page)
+	}
+
+	pages := buildPages(0, 1, [])
+
+	// If no data pages were built (empty sample list), emit an EOS page
+	pages := if len(pages) = 0 {
+		true -> [_oggPage(0x04, 0, serial, 1, '')]
+		_ -> pages
+	}
+
+	bosPage + (pages |> join(''))
+}
+
+// ---- OGG parsing ----------------------------------------------------
+
+// _readOggPageHeader reads an OGG page header starting at `off` in `data`.
+// Returns { headerType, granule, serial, pageSeq, nSegments, segTable,
+//           headerLen, dataLen } or ? on error.
+fn _readOggPageHeader(data, off) {
+	if off + 27 > len(data) -> ?
+
+	// Check capture pattern 'OggS'
+	magic := slice(data, off, off + 4)
+	if magic != 'OggS' -> ?
+
+	version := _readU8(data, off + 4)
+	if version != 0 -> ?
+
+	headerType := _readU8(data, off + 5)
+
+	// Granule position: 8 bytes LE (treat as unsigned for sample count)
+	granule := {
+		fn sub(i, acc) if i >= 8 {
+			true -> acc
+			_ -> sub(i + 1, acc + _readU8(data, off + 6 + i) * _pow2(i * 8))
+		}
+		sub(0, 0)
+	}
+
+	serial := _readU32LE(data, off + 14)
+	pageSeq := _readU32LE(data, off + 18)
+	// CRC at off+22..25 (skip verification for simplicity)
+	nSegments := _readU8(data, off + 26)
+
+	if off + 27 + nSegments > len(data) -> ?
+
+	segTable := range(nSegments) |> map(fn(i) _readU8(data, off + 27 + i))
+
+	dataLen := segTable |> reduce(0, fn(a, b) a + b)
+	headerLen := 27 + nSegments
+
+	{
+		headerType: headerType
+		granule: granule
+		serial: serial
+		pageSeq: pageSeq
+		nSegments: nSegments
+		segTable: segTable
+		headerLen: headerLen
+		dataLen: dataLen
+	}
+}
+
+// _readPcmSamples decodes 16-bit LE PCM bytes into normalised floats.
+fn _readPcmSamples(data, off, nBytes) {
+	totalSamples := int(nBytes / 2)
+	fn sub(acc, i) if i >= totalSamples {
+		true -> acc
+		_ -> {
+			s := _i16ToF32(_readI16LE(data, off + i * 2))
+			sub(acc << s, i + 1)
+		}
+	}
+	sub([], 0)
+}
+
+// parseOgg parses an OGG container with PCM payload and returns:
+//   { sampleRate, channels, bitDepth, samples }
+// where `samples` is a list of normalised floats. Returns ? on error.
+//
+// Example:
+//   r := parseOgg(fileBytes)
+//   r.sampleRate  // => 44100
+//   r.samples.(0) // => first normalised sample
+fn parseOgg(data) {
+	if len(data) < 27 -> ?
+
+	// Read BOS page
+	bos := _readOggPageHeader(data, 0)
+	if bos = ? -> ?
+	if (int(bos.headerType / 2) % 2) != 1 -> ?  // BOS flag (bit 1) must be set
+
+	idOff := bos.headerLen
+	if idOff + bos.dataLen > len(data) -> ?
+
+	// Parse codec identification header
+	idData := slice(data, idOff, idOff + bos.dataLen)
+	if len(idData) < 16 -> ?
+
+	codecId := slice(idData, 0, 8)
+	if codecId != 'PCM     ' -> ?
+
+	channels := _readU16LE(idData, 8)
+	sampleRate := _readU32LE(idData, 10)
+	bitDepth := _readU16LE(idData, 14)
+
+	// Helper to flatten a list of lists into a single list.
+	fn _flatten(lists) {
+		fn cat(result, i) if i >= len(lists) {
+			true -> result
+			_ -> {
+				lst := lists.(i)
+				fn inner(r, j) if j >= len(lst) {
+					true -> r
+					_ -> inner(r << lst.(j), j + 1)
+				}
+				cat(inner(result, 0), i + 1)
+			}
+		}
+		cat([], 0)
+	}
+
+	// Read subsequent data pages
+	fn readPages(off, acc) {
+		if off >= len(data) -> acc
+
+		pg := _readOggPageHeader(data, off)
+		if pg = ? -> acc
+
+		dataStart := off + pg.headerLen
+		if dataStart + pg.dataLen > len(data) -> acc
+
+		pageSamples := _readPcmSamples(data, dataStart, pg.dataLen)
+		nextOff := dataStart + pg.dataLen
+
+		isEos := (int(pg.headerType / 4) % 2) = 1  // EOS flag (bit 2)
+		if isEos {
+			true -> acc << pageSamples
+			_ -> readPages(nextOff, acc << pageSamples)
+		}
+	}
+
+	firstDataOff := bos.headerLen + bos.dataLen
+	sampleLists := readPages(firstDataOff, [])
+
+	allSamples := _flatten(sampleLists)
+
+	{
+		sampleRate: sampleRate
+		channels: channels
+		bitDepth: bitDepth
+		samples: allSamples
+	}
+}
+
+// pbatchOgg encodes multiple sample lists into OGG byte strings in parallel.
+// Each spec is { samples, sampleRate?, channels?, bitDepth? }.
+fn pbatchOgg(specs) pmap(specs, fn(s) ogg(s.samples, s.sampleRate, s.channels, s.bitDepth))
+
+// pbatchParseOgg decodes multiple OGG byte strings in parallel.
+fn pbatchParseOgg(dataList) pmap(dataList, parseOgg)

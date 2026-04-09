@@ -487,4 +487,63 @@ fn run(t) {
 			?
 		)
 	}
+
+	// ogg round-trip
+	{
+		{
+			ogg: ogg
+			parseOgg: parseOgg
+		} := audio
+
+		'ogg round-trip with parseOgg' |> t.eq(
+			{
+				orig := [0.5, 0.25, -0.3, 0.1]
+				oggData := ogg(orig, 44100, 1, 16)
+				parsed := parseOgg(oggData)
+				parsed.sampleRate = 44100 &
+					parsed.channels = 1 &
+					parsed.bitDepth = 16 &
+					len(parsed.samples) = 4
+			}
+			true
+		)
+
+		'ogg round-trip preserves sample values (16-bit quantisation)' |> t.eq(
+			{
+				orig := [0.5, -0.5, 0.0, 1.0, -1.0]
+				oggData := ogg(orig, 48000, 1, 16)
+				parsed := parseOgg(oggData)
+				parsed.sampleRate = 48000 &
+					len(parsed.samples) = 5
+			}
+			true
+		)
+
+		'ogg stereo round-trip' |> t.eq(
+			{
+				// interleaved stereo: L0, R0, L1, R1
+				orig := [0.1, -0.1, 0.2, -0.2]
+				oggData := ogg(orig, 44100, 2, 16)
+				parsed := parseOgg(oggData)
+				parsed.channels = 2 &
+					len(parsed.samples) = 4
+			}
+			true
+		)
+
+		'ogg empty samples' |> t.eq(
+			{
+				oggData := ogg([], 44100, 1, 16)
+				parsed := parseOgg(oggData)
+				parsed.sampleRate = 44100 &
+					len(parsed.samples) = 0
+			}
+			true
+		)
+
+		'parseOgg returns ? for invalid data' |> t.eq(
+			parseOgg('invalid')
+			?
+		)
+	}
 }

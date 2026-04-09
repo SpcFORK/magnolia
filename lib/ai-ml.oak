@@ -1,0 +1,423 @@
+// libai-ml implements machine learning algorithms including KNN, clustering,
+// dimensionality reduction, ensemble methods, time series, and decision stumps
+// for the ai module.
+
+{
+	default: default
+	map: map
+	slice: slice
+} := import('std')
+{
+	sort: sort
+} := import('sort')
+{
+	sqrt: sqrt
+} := import('math')
+{
+	dotProduct: dotProduct
+	euclideanDistance: euclideanDistance
+	mean: mean
+	stddev: stddev
+} := import('ai-vec')
+
+// ============================================================================
+// K-Nearest Neighbors
+// ============================================================================
+
+// knn classifies a query point using k-nearest neighbors from a labeled dataset.
+// data is a list of feature vectors, labels is a parallel list of class labels.
+// Returns the most common label among the k nearest neighbors (by Euclidean distance).
+//
+// Example:
+//   knn([[0,0],[1,1],[2,2],[3,3]], [:a,:a,:b,:b], [1.5,1.5], 3)  // => :a
+fn knn(data, labels, query, k) {
+	// Compute distances
+	distances := data |> map(fn(point, idx) [idx, euclideanDistance(point, query)])
+	// Get top-k closest
+	closest := distances |> sort(fn(pair) pair.(1)) |> slice(0, k)
+	// Majority vote
+	fn vote(i, counts) if i >= len(closest) {
+		true -> {
+			// Find label with highest count
+			fn best(j, bestLabel, bestCount) if j >= len(closest) {
+				true -> bestLabel
+				_ -> {
+					lbl := labels.(closest.(j).(0))
+					fn countLabel(m, c) if m >= len(closest) {
+						true -> c
+						_ -> if labels.(closest.(m).(0)) = lbl {
+							true -> countLabel(m + 1, c + 1)
+							_ -> countLabel(m + 1, c)
+						}
+					}
+					c := countLabel(0, 0)
+					if c > bestCount {
+						true -> best(j + 1, lbl, c)
+						_ -> best(j + 1, bestLabel, bestCount)
+					}
+				}
+			}
+			best(0, ?, 0)
+		}
+		_ -> vote(i + 1, counts)
+	}
+	vote(len(closest), {})
+}
+
+// ============================================================================
+// Clustering (K-Means)
+// ============================================================================
+
+// kMeansStep performs one iteration of K-Means clustering.
+// data is a list of feature vectors, centroids is current centroid list.
+// Returns {centroids: updatedCentroids, assignments: clusterIndexPerPoint}.
+//
+// Example:
+//   kMeansStep([[0,0],[1,1],[10,10],[11,11]], [[0,0],[10,10]])
+fn kMeansStep(data, centroids) {
+	k := len(centroids)
+	dim := len(centroids.(0))
+
+	// Assign each point to nearest centroid
+	fn assign(i, acc) if i >= len(data) {
+		true -> acc
+		_ -> {
+			point := data.(i)
+			fn nearest(c, bestC, bestD) if c >= k {
+				true -> bestC
+				_ -> {
+					d := euclideanDistance(point, centroids.(c))
+					if d < bestD {
+						true -> nearest(c + 1, c, d)
+						_ -> nearest(c + 1, bestC, bestD)
+					}
+				}
+			}
+			assign(i + 1, acc << nearest(0, 0, 999999999))
+		}
+	}
+	assignments := assign(0, [])
+
+	// Recompute centroids as mean of assigned points
+	fn newCentroids(c, acc) if c >= k {
+		true -> acc
+		_ -> {
+			// Gather points in cluster c
+			fn gather(i, pts) if i >= len(data) {
+				true -> pts
+				_ -> if assignments.(i) = c {
+					true -> gather(i + 1, pts << data.(i))
+					_ -> gather(i + 1, pts)
+				}
+			}
+			members := gather(0, [])
+			centroid := if len(members) = 0 {
+				true -> centroids.(c)
+				_ -> {
+					// Mean across each dimension
+					fn dimMean(d, row) if d >= dim {
+						true -> row
+						_ -> {
+							fn sumDim(j, s) if j >= len(members) {
+								true -> s
+								_ -> sumDim(j + 1, s + members.(j).(d))
+							}
+							dimMean(d + 1, row << sumDim(0, 0) / len(members))
+						}
+					}
+					dimMean(0, [])
+				}
+			}
+			newCentroids(c + 1, acc << centroid)
+		}
+	}
+
+	{
+		centroids: newCentroids(0, [])
+		assignments: assignments
+	}
+}
+
+// kMeans runs K-Means clustering for a fixed number of iterations.
+// Returns {centroids, assignments} after convergence.
+//
+// Example:
+//   kMeans([[0,0],[1,1],[10,10],[11,11]], [[0,0],[10,10]], 10)
+fn kMeans(data, initialCentroids, iterations) {
+	fn iterate(i, centroids) if i >= iterations {
+		true -> kMeansStep(data, centroids)
+		_ -> {
+			result := kMeansStep(data, centroids)
+			iterate(i + 1, result.centroids)
+		}
+	}
+	iterate(0, initialCentroids)
+}
+
+// ============================================================================
+// Dimensionality Reduction (PCA-like projection)
+// ============================================================================
+
+// centerData subtracts the column-wise mean from each row.
+// Returns {centered: centeredMatrix, means: meanVector}.
+//
+// Example:
+//   centerData([[1, 2], [3, 4], [5, 6]])
+//   // => {centered: [[-2,-2],[0,0],[2,2]], means: [3, 4]}
+fn centerData(data) {
+	n := len(data)
+	dim := len(data.(0))
+	fn colMean(d, acc) if d >= dim {
+		true -> acc
+		_ -> {
+			fn sumCol(i, s) if i >= n {
+				true -> s
+				_ -> sumCol(i + 1, s + data.(i).(d))
+			}
+			colMean(d + 1, acc << sumCol(0, 0) / n)
+		}
+	}
+	means := colMean(0, [])
+	centered := data |> map(fn(row) {
+		fn sub(d, r) if d >= dim {
+			true -> r
+			_ -> sub(d + 1, r << (row.(d) - means.(d)))
+		}
+		sub(0, [])
+	})
+	{ centered: centered, means: means }
+}
+
+// covarianceMatrix computes the covariance matrix of a centered data matrix.
+// Input should already be mean-centered (use centerData first).
+//
+// Example:
+//   covarianceMatrix([[-2,-2],[0,0],[2,2]])  // => [[4, 4], [4, 4]]
+fn covarianceMatrix(centered) {
+	n := len(centered)
+	dim := len(centered.(0))
+	fn makeRow(r, acc) if r >= dim {
+		true -> acc
+		_ -> {
+			fn makeCol(c, row) if c >= dim {
+				true -> row
+				_ -> {
+					fn sumProd(i, s) if i >= n {
+						true -> s
+						_ -> sumProd(i + 1, s + centered.(i).(r) * centered.(i).(c))
+					}
+					makeCol(c + 1, row << sumProd(0, 0) / n)
+				}
+			}
+			makeRow(r + 1, acc << makeCol(0, []))
+		}
+	}
+	makeRow(0, [])
+}
+
+// projectData projects data onto a set of basis vectors (e.g., principal components).
+// basis is a list of unit vectors. Returns projected coordinates.
+//
+// Example:
+//   projectData([[1, 2], [3, 4]], [[1, 0]])  // => [[1], [3]]
+fn projectData(data, basis) {
+	data |> map(fn(row) basis |> map(fn(bv) dotProduct(row, bv)))
+}
+
+// ============================================================================
+// Decision Stump (Weak Learner)
+// ============================================================================
+
+// decisionStump creates a simple threshold classifier on a single feature.
+// Returns a prediction function: fn(sample) => predictedLabel.
+// featureIdx is the feature to split on, threshold is the split value,
+// leftLabel / rightLabel are the predicted classes for each side.
+//
+// Example:
+//   stump := decisionStump(0, 5, :cat, :dog)
+//   stump([3, 7])  // => :cat  (feature 0 = 3 <= 5)
+//   stump([8, 2])  // => :dog  (feature 0 = 8 > 5)
+fn decisionStump(featureIdx, threshold, leftLabel, rightLabel) {
+	fn(sample) if sample.(featureIdx) <= threshold {
+		true -> leftLabel
+		_ -> rightLabel
+	}
+}
+
+// ============================================================================
+// Ensemble Utilities
+// ============================================================================
+
+// majorityVote returns the most common element in a list of predictions.
+//
+// Example:
+//   majorityVote([:cat, :dog, :cat, :cat, :dog])  // => :cat
+fn majorityVote(predictions) {
+	fn count(i, counts) if i >= len(predictions) {
+		true -> {
+			// Find key with max count
+			ks := keys(counts)
+			fn best(j, bestK, bestV) if j >= len(ks) {
+				true -> bestK
+				_ -> {
+					k := ks.(j)
+					v := counts.(k)
+					if v > bestV {
+						true -> best(j + 1, k, v)
+						_ -> best(j + 1, bestK, bestV)
+					}
+				}
+			}
+			if len(ks) = 0 { true -> ?, _ -> best(0, ks.(0), counts.(ks.(0))) }
+		}
+		_ -> {
+			p := string(predictions.(i))
+			prev := default(counts.(p), 0)
+			count(i + 1, counts.(p) <- prev + 1)
+		}
+	}
+	count(0, {})
+}
+
+// ensemblePredict runs multiple classifiers on a sample and returns the
+// majority vote of their predictions.
+//
+// Example:
+//   ensemblePredict([clf1, clf2, clf3], [1, 2, 3])
+fn ensemblePredict(classifiers, sample) {
+	preds := classifiers |> map(fn(clf) clf(sample))
+	majorityVote(preds)
+}
+
+// ============================================================================
+// Moving Window & Time Series
+// ============================================================================
+
+// rollingMean computes a rolling/moving average with the given window size.
+//
+// Example:
+//   rollingMean([1, 2, 3, 4, 5], 3)  // => [2, 3, 4]
+fn rollingMean(data, windowSize) {
+	fn roll(i, acc) if i + windowSize > len(data) {
+		true -> acc
+		_ -> {
+			fn sum(j, s) if j >= i + windowSize {
+				true -> s
+				_ -> sum(j + 1, s + data.(j))
+			}
+			roll(i + 1, acc << sum(i, 0) / windowSize)
+		}
+	}
+	roll(0, [])
+}
+
+// rollingStddev computes a rolling standard deviation with the given window.
+//
+// Example:
+//   rollingStddev([1, 2, 3, 4, 5, 6], 3)
+fn rollingStddev(data, windowSize) {
+	fn roll(i, acc) if i + windowSize > len(data) {
+		true -> acc
+		_ -> {
+			window := slice(data, i, i + windowSize)
+			roll(i + 1, acc << stddev(window))
+		}
+	}
+	roll(0, [])
+}
+
+// differencing computes first-order differences of a time series.
+// Returns a vector of length n-1 where each element is data[i+1] - data[i].
+//
+// Example:
+//   differencing([1, 3, 6, 10])  // => [2, 3, 4]
+fn differencing(data) {
+	fn diff(i, acc) if i + 1 >= len(data) {
+		true -> acc
+		_ -> diff(i + 1, acc << (data.(i + 1) - data.(i)))
+	}
+	diff(0, [])
+}
+
+// autoCorrelation computes the autocorrelation of a time series at a given lag.
+// Returns a value between -1 and 1.
+//
+// Example:
+//   autoCorrelation([1, 2, 3, 4, 5, 6], 1)  // => high positive
+fn autoCorrelation(data, lag) {
+	n := len(data)
+	m := mean(data)
+	fn sumProd(i, acc) if i + lag >= n {
+		true -> acc
+		_ -> sumProd(i + 1, acc + (data.(i) - m) * (data.(i + lag) - m))
+	}
+	fn sumSq(i, acc) if i >= n {
+		true -> acc
+		_ -> sumSq(i + 1, acc + (data.(i) - m) * (data.(i) - m))
+	}
+	denom := sumSq(0, 0)
+	if denom = 0 { true -> 0, _ -> sumProd(0, 0) / denom }
+}
+
+// ============================================================================
+// Convolution & Pooling
+// ============================================================================
+
+// convolve1d applies a 1D convolution with the given kernel (no padding).
+// Returns a vector of length len(signal) - len(kernel) + 1.
+//
+// Example:
+//   convolve1d([1, 2, 3, 4, 5], [1, 0, -1])  // => [-2, -2, -2]
+fn convolve1d(signal, kernel) {
+	outLen := len(signal) - len(kernel) + 1
+	fn conv(i, acc) if i >= outLen {
+		true -> acc
+		_ -> {
+			fn dot(j, sum) if j >= len(kernel) {
+				true -> sum
+				_ -> dot(j + 1, sum + signal.(i + j) * kernel.(j))
+			}
+			conv(i + 1, acc << dot(0, 0))
+		}
+	}
+	conv(0, [])
+}
+
+// maxPool1d applies 1D max pooling with the given window size and stride.
+//
+// Example:
+//   maxPool1d([1, 3, 2, 5, 4, 6], 2, 2)  // => [3, 5, 6]
+fn maxPool1d(data, windowSize, stride) {
+	fn pool(i, acc) if i + windowSize > len(data) {
+		true -> acc
+		_ -> {
+			fn findMax(j, m) if j >= i + windowSize {
+				true -> m
+				_ -> if data.(j) > m {
+					true -> findMax(j + 1, data.(j))
+					_ -> findMax(j + 1, m)
+				}
+			}
+			pool(i + stride, acc << findMax(i + 1, data.(i)))
+		}
+	}
+	pool(0, [])
+}
+
+// avgPool1d applies 1D average pooling with the given window size and stride.
+//
+// Example:
+//   avgPool1d([2, 4, 6, 8], 2, 2)  // => [3, 7]
+fn avgPool1d(data, windowSize, stride) {
+	fn pool(i, acc) if i + windowSize > len(data) {
+		true -> acc
+		_ -> {
+			fn sum(j, s) if j >= i + windowSize {
+				true -> s
+				_ -> sum(j + 1, s + data.(j))
+			}
+			pool(i + stride, acc << sum(i, 0) / windowSize)
+		}
+	}
+	pool(0, [])
+}

@@ -46,7 +46,7 @@ fn CommandQueue() {
 		drain: fn() {
 			result := []
 			fn _drainLoop() {
-				msg := chan_recv(ch)
+				msg := chan_try_recv(ch)
 				if msg.ok {
 					true -> {
 						result << msg.data
@@ -54,8 +54,7 @@ fn CommandQueue() {
 					}
 				}
 			}
-			// Non-blocking: try to receive all available messages
-			// Use a buffered approach - drain what's available
+			_drainLoop()
 			result
 		}
 
@@ -63,8 +62,8 @@ fn CommandQueue() {
 		// Intended to be called once per frame from the main thread.
 		flush: fn() {
 			fn _flushLoop() {
-				// Attempt non-blocking recv from the buffered channel
-				msg := chan_recv(ch)
+				// Non-blocking recv from the buffered channel
+				msg := chan_try_recv(ch)
 				if msg.ok {
 					true -> {
 						data := msg.data

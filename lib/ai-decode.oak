@@ -1,0 +1,254 @@
+// libai-decode implements sampling, decoding, retrieval, probability distributions,
+// and embedding lookup for the ai module.
+
+{
+	map: map
+	slice: slice
+} := import('std')
+{
+	sort: sort
+} := import('sort')
+{
+	pmap: pmap
+} := import('thread')
+{
+	cosineSimilarity: cosineSimilarity
+} := import('ai-vec')
+{
+	softmax: softmax
+} := import('ai-nn')
+{
+	oneHotDecode: oneHotDecode
+} := import('ai-data')
+
+// ============================================================================
+// Sampling & Decoding
+// ============================================================================
+
+// argmax returns the index of the largest element in a vector.
+//
+// Example:
+//   argmax([0.1, 0.7, 0.2])  // => 1
+fn argmax(v) oneHotDecode(v)
+
+// temperatureScale applies temperature scaling to logits before softmax.
+// Lower temperature sharpens the distribution, higher temperature flattens it.
+//
+// Example:
+//   temperatureScale([1, 2, 3], 0.5)  // => [2, 4, 6]
+fn temperatureScale(logits, temperature) {
+	t := if temperature <= 0 { true -> 0.0001, _ -> temperature }
+	logits |> map(fn(x) x / t)
+}
+
+// topPFilter filters logits to keep only tokens whose cumulative softmax
+// probability mass is <= p (nucleus sampling). Returns filtered logits with
+// rejected positions set to a large negative value.
+//
+// Example:
+//   topPFilter([1, 2, 3, 0.5], 0.9)
+fn topPFilter(logits, p) {
+	probs := softmax(logits)
+	n := len(probs)
+	// Build index-prob pairs and sort descending by prob
+	pairs := probs |> map(fn(prob, idx) [idx, prob])
+	sorted := pairs |> sort(fn(pair) pair.(1) * -1)
+	// Accumulate until cumulative prob exceeds p
+	fn accumulate(i, cumSum, kept) if i >= n {
+		true -> kept
+		_ -> {
+			newCum := cumSum + sorted.(i).(1)
+			if cumSum >= p {
+				true -> kept
+				_ -> accumulate(i + 1, newCum, kept << sorted.(i).(0))
+			}
+		}
+	}
+	keepSet := accumulate(0, 0, [])
+	// Rebuild logits, masking out non-kept indices
+	fn isKept(idx) {
+		fn check(j) if j >= len(keepSet) {
+			true -> false
+			_ -> if keepSet.(j) = idx {
+				true -> true
+				_ -> check(j + 1)
+			}
+		}
+		check(0)
+	}
+	logits |> map(fn(x, idx) if isKept(idx) { true -> x, _ -> -100000 })
+}
+
+// beamSearch performs beam search decoding over a score function.
+// scoreFn(sequence) returns a list of [nextToken, logProb] candidates.
+// Returns the top beamWidth sequences of the given maxLen.
+//
+// Example:
+//   beamSearch(fn(seq) [[1, -0.5], [2, -1.0]], [], 3, 5)
+fn beamSearch(scoreFn, startSeq, beamWidth, maxLen) {
+	// Each beam is {seq: [...tokens], score: cumLogProb}
+	initial := [{ seq: startSeq, score: 0 }]
+	fn step(beams, depth) if depth >= maxLen {
+		true -> beams
+		_ -> {
+			// Expand all beams
+			fn expand(i, candidates) if i >= len(beams) {
+				true -> candidates
+				_ -> {
+					beam := beams.(i)
+					nexts := scoreFn(beam.seq)
+					fn addCandidates(j, cands) if j >= len(nexts) {
+						true -> cands
+						_ -> {
+							tok := nexts.(j).(0)
+							prob := nexts.(j).(1)
+							addCandidates(j + 1, cands << {
+								seq: beam.seq << tok
+								score: beam.score + prob
+							})
+						}
+					}
+					expand(i + 1, addCandidates(0, candidates))
+				}
+			}
+			allCandidates := expand(0, [])
+			// Keep top beamWidth by score (descending)
+			sorted := allCandidates |> sort(fn(c) c.score * -1)
+			kept := if beamWidth >= len(sorted) {
+				true -> sorted
+				_ -> sorted |> slice(0, beamWidth)
+			}
+			step(kept, depth + 1)
+		}
+	}
+	step(initial, 0)
+}
+
+// greedyDecode performs greedy decoding using a score function.
+// scoreFn(sequence) returns a list of [token, score] candidates.
+// Picks the highest-scoring token at each step.
+//
+// Example:
+//   greedyDecode(fn(_) [[1, -0.2], [2, -0.8]], [], 4)
+//   // => [1, 1, 1, 1]
+fn greedyDecode(scoreFn, startSeq, maxLen) {
+	fn step(seq, depth) if depth >= maxLen {
+		true -> seq
+		_ -> {
+			candidates := scoreFn(seq)
+			fn best(i, bestTok, bestScore) if i >= len(candidates) {
+				true -> bestTok
+				_ -> {
+					tok := candidates.(i).(0)
+					sc := candidates.(i).(1)
+					if sc > bestScore {
+						true -> best(i + 1, tok, sc)
+						_ -> best(i + 1, bestTok, bestScore)
+					}
+				}
+			}
+			chosen := best(0, candidates.(0).(0), candidates.(0).(1))
+			step(seq << chosen, depth + 1)
+		}
+	}
+	step(startSeq, 0)
+}
+
+// ============================================================================
+// Embedding & Retrieval
+// ============================================================================
+
+// topK returns the top K items from a list of [item, score] pairs.
+// Useful for retrieval-augmented generation and recommendation.
+//
+// Example:
+//   topK([['a', 0.9], ['b', 0.5], ['c', 0.8]], 2)
+//   // => [['a', 0.9], ['c', 0.8]]
+fn topK(items, k) {
+	// Sort by score (second element) in descending order
+	sorted := items |> sort(fn(pair) {
+		// Return negative score for descending order
+		pair.(1) * -1
+	})
+	if k >= len(sorted) {
+		true -> sorted
+		_ -> sorted |> slice(0, k)
+	}
+}
+
+// kosineSimilaritySearch finds the most similar embeddings in a database
+// using cosine similarity. Returns top K matches.
+// Computes similarities in parallel for large embedding sets.
+//
+// Example:
+//   embeddings := [[1, 0], [0, 1], [1, 1]]
+//   query := [1, 0]
+//   kosineSimilaritySearch(embeddings, query, 2)
+fn kosineSimilaritySearch(embeddings, queryEmbedding, k) {
+	scores := pmap(embeddings, fn(emb) cosineSimilarity(emb, queryEmbedding))
+	similarities := scores |> map(fn(score, idx) [idx, score])
+	topK(similarities, k)
+}
+
+// embeddingLookup retrieves embedding vectors for a list of token indices
+// from an embedding matrix (list of vectors).
+//
+// Example:
+//   table := [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+//   embeddingLookup(table, [2, 0])  // => [[0.5, 0.6], [0.1, 0.2]]
+fn embeddingLookup(table, indices) indices |> map(fn(idx) table.(idx))
+
+// ============================================================================
+// Probability Distributions
+// ============================================================================
+
+// categoricalSample draws a sample index from a categorical distribution.
+// probs is a probability vector summing to ~1. Uses a deterministic seed.
+// Returns the chosen index.
+//
+// Example:
+//   categoricalSample([0.1, 0.7, 0.2], 42)  // => 1 (most likely)
+fn categoricalSample(probs, seed) {
+	rng := (1103515245 * seed + 12345) % 2147483648
+	u := rng / 2147483648
+	fn walk(i, cumSum) if i >= len(probs) {
+		true -> len(probs) - 1
+		_ -> {
+			next := cumSum + probs.(i)
+			if u < next { true -> i, _ -> walk(i + 1, next) }
+		}
+	}
+	walk(0, 0)
+}
+
+// multinomialSample draws n samples from a categorical distribution with replacement.
+// Returns a list of indices.
+//
+// Example:
+//   multinomialSample([0.1, 0.7, 0.2], 5, 42)  // => [1, 1, 2, 1, 1] (approx)
+fn multinomialSample(probs, n, seed) {
+	fn draw(i, rng, acc) if i >= n {
+		true -> acc
+		_ -> {
+			nextRng := (1103515245 * rng + 12345) % 2147483648
+			idx := categoricalSample(probs, nextRng)
+			draw(i + 1, nextRng, acc << idx)
+		}
+	}
+	draw(0, seed, [])
+}
+
+// uniformRandom generates n pseudo-random floats in [0, 1) using a deterministic LCG.
+//
+// Example:
+//   uniformRandom(5, 42)  // => [0.39, 0.82, ...] (deterministic)
+fn uniformRandom(n, seed) {
+	fn gen(i, rng, acc) if i >= n {
+		true -> acc
+		_ -> {
+			nextRng := (1103515245 * rng + 12345) % 2147483648
+			gen(i + 1, nextRng, acc << (nextRng / 2147483648))
+		}
+	}
+	gen(0, seed, [])
+}

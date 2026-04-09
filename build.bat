@@ -132,6 +132,7 @@ for %%F in (lib\*.oak) do (
     set "_BASE=%%~nF"
     .\build\magnolia.exe build --entry "%%F" --doc --output "docs\spec\!_BASE!.md" >nul 2>&1
     if errorlevel 1 (
+        echo   Failed to generate spec for %%F
         set /a _SPEC_FAIL+=1
     ) else (
         set /a _SPEC_OK+=1

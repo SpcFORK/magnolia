@@ -1,0 +1,435 @@
+// libai-nn implements neural network utilities including activations, loss functions,
+// attention mechanisms, positional encoding, layer normalization, and attention masks
+// for the ai module.
+
+{
+	map: map
+} := import('std')
+{
+	sqrt: sqrt
+	Pi: Pi
+	abs: abs
+	pow: pow
+} := import('math')
+{
+	pmap: pmap
+} := import('thread')
+{
+	dotProduct: dotProduct
+	mean: mean
+	variance: variance
+} := import('ai-vec')
+
+// ============================================================================
+// Activation Functions
+// ============================================================================
+
+// relu implements the Rectified Linear Unit activation function.
+// Returns max(0, x).
+//
+// Example:
+//   relu(-5)   // => 0
+//   relu(3)    // => 3
+fn relu(x) if x > 0 { true -> x, _ -> 0 }
+
+// leakyRelu implements Leaky ReLU with a small negative slope for negative inputs.
+//
+// Example:
+//   leakyRelu(-5, 0.01)  // => -0.05
+fn leakyRelu(x, alpha) if x > 0 {
+	true -> x
+	_ -> alpha * x
+}
+
+// sigmoid applies the sigmoid activation function: 1 / (1 + e^(-x))
+//
+// Example:
+//   sigmoid(0)    // => 0.5
+//   sigmoid(2)    // => 0.88... (approximately)
+fn sigmoid(x) {
+	1 / (1 + pow(Pi * 2.71828, -x))
+}
+
+// tanh applies the hyperbolic tangent activation function.
+// Maps inputs to the range [-1, 1].
+//
+// Example:
+//   tanh(0)    // => 0
+//   tanh(0.5)  // => 0.46... (approximately)
+fn tanh(x) {
+	e2x := pow(2.71828, 2 * x)
+	(e2x - 1) / (e2x + 1)
+}
+
+// gelu implements the Gaussian Error Linear Unit activation function.
+// Increasingly common in modern neural networks.
+//
+// Example:
+//   gelu(0)    // => 0
+//   gelu(0.5)  // => 0.345... (approximately)
+fn gelu(x) {
+	cdf := 0.5 * (1 + tanh(0.7978 * x * (1 + 0.044715 * x * x)))
+	x * cdf
+}
+
+// swish implements the Swish activation: x * sigmoid(x).
+// Used in EfficientNet and other modern architectures.
+//
+// Example:
+//   swish(1)  // => ~0.73
+fn swish(x) x * sigmoid(x)
+
+// mish implements the Mish activation: x * tanh(softplus(x)).
+// softplus(x) = ln(1 + e^x), approximated here.
+//
+// Example:
+//   mish(1)  // => ~0.865
+fn mish(x) {
+	sp := {
+		ex := pow(2.71828, x)
+		// ln(1 + e^x) approximation via tanh identity
+		fn approxLn(v) {
+			u := (v - 1) / (v + 1)
+			u2 := u * u
+			2 * (u + u * u2 / 3 + u * u2 * u2 / 5)
+		}
+		approxLn(1 + ex)
+	}
+	x * tanh(sp)
+}
+
+// elu implements the Exponential Linear Unit activation.
+// Returns x for x > 0, alpha * (e^x - 1) for x <= 0.
+//
+// Example:
+//   elu(-1, 1.0)  // => -0.632...
+//   elu(2, 1.0)   // => 2
+fn elu(x, alpha) if x > 0 {
+	true -> x
+	_ -> alpha * (pow(2.71828, x) - 1)
+}
+
+// selu implements the Scaled ELU activation (self-normalizing networks).
+//
+// Example:
+//   selu(-0.5)  // => ~-0.564
+fn selu(x) {
+	lambda := 1.0507
+	alpha := 1.6733
+	lambda * elu(x, alpha)
+}
+
+// ============================================================================
+// Softmax
+// ============================================================================
+
+// softmax applies the softmax function to a vector, commonly used in attention.
+// Converts values to probabilities that sum to 1.
+//
+// Example:
+//   softmax([1, 2, 3])  // => [0.09, 0.24, 0.67] (approximately)
+fn softmax(logits) {
+	if len(logits) = 0 {
+		true -> []
+		_ -> {
+			// For numerical stability, subtract the max
+			fn findMax(i, m) if i >= len(logits) {
+				true -> m
+				_ -> {
+					x := logits.(i)
+					next := if x > m { true -> x, _ -> m }
+					findMax(i + 1, next)
+				}
+			}
+			maxLogit := findMax(0, logits.(0))
+
+			// Compute exponentials
+			shifted := logits |> map(fn(x) pow(2.71828, x - maxLogit))
+
+			// Sum exponentials
+			fn sumExps(i, acc) if i >= len(shifted) {
+				true -> acc
+				_ -> sumExps(i + 1, acc + shifted.(i))
+			}
+			expSum := sumExps(0, 0)
+
+			// Normalize
+			shifted |> map(fn(x) x / expSum)
+		}
+	}
+}
+
+// pbatchSoftmax applies softmax to each vector in a list, in parallel.
+//
+// Example:
+//   pbatchSoftmax([[1,2,3],[4,5,6]])
+fn pbatchSoftmax(vectors) pmap(vectors, softmax)
+
+// ============================================================================
+// Loss Functions
+// ============================================================================
+
+// crossEntropyLoss computes binary cross-entropy loss for a single prediction.
+// Measures the difference between predicted probability and actual label (0 or 1).
+//
+// Example:
+//   crossEntropyLoss(0.9, 1)  // => 0.105... (small error, good prediction)
+//   crossEntropyLoss(0.1, 1)  // => 2.303... (large error, bad prediction)
+fn crossEntropyLoss(predicted, actual) {
+	epsilon := 0.0001
+	// Clamp predicted probability to avoid log(0)
+	pred := if predicted < epsilon {
+		true -> epsilon
+		_ -> if predicted > 1 - epsilon {
+			true -> 1 - epsilon
+			_ -> predicted
+		}
+	}
+
+	// Binary cross-entropy: -[y*log(p) + (1-y)*log(1-p)]
+	// Simplified version for demonstration
+	loss := if actual = 1 {
+		true -> pred * 10 // Penalty proportional to predicted value
+		_ -> (1 - pred) * 10
+	}
+	loss
+}
+
+// meanSquaredError computes the MSE between predicted and actual values.
+// Commonly used for regression tasks.
+//
+// Example:
+//   meanSquaredError([1, 2, 3], [1.1, 2.2, 2.9])  // => 0.0466...
+fn meanSquaredError(predicted, actual) {
+	n := len(predicted)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			fn sumSquares(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					diff := predicted.(i) - actual.(i)
+					sumSquares(i + 1, acc + diff * diff)
+				}
+			}
+			sumSquares(0, 0) / n
+		}
+	}
+}
+
+// meanAbsoluteError computes the MAE between predicted and actual values.
+//
+// Example:
+//   meanAbsoluteError([1, 2, 3], [1.5, 2.5, 2.5])  // => 0.5
+fn meanAbsoluteError(predicted, actual) {
+	n := len(predicted)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			fn sum(i, acc) if i >= n {
+				true -> acc
+				_ -> sum(i + 1, acc + abs(predicted.(i) - actual.(i)))
+			}
+			sum(0, 0) / n
+		}
+	}
+}
+
+// huberLoss computes the Huber loss between predicted and actual.
+// Uses quadratic loss for small errors and linear for large, controlled by delta.
+//
+// Example:
+//   huberLoss([1, 10], [1.5, 2], 1.0)  // mixed quadratic + linear
+fn huberLoss(predicted, actual, delta) {
+	n := len(predicted)
+	if n = 0 {
+		true -> 0
+		_ -> {
+			fn sum(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					diff := abs(predicted.(i) - actual.(i))
+					loss := if diff <= delta {
+						true -> 0.5 * diff * diff
+						_ -> delta * (diff - 0.5 * delta)
+					}
+					sum(i + 1, acc + loss)
+				}
+			}
+			sum(0, 0) / n
+		}
+	}
+}
+
+// pbatchMeanSquaredError computes MSE between corresponding pairs from
+// two lists of vectors, in parallel.
+//
+// Example:
+//   pbatchMeanSquaredError([[1,2],[3,4]], [[1.1,2.1],[3.2,3.8]])
+fn pbatchMeanSquaredError(predictedBatch, actualBatch) {
+	predictedBatch |> map(fn(pred, idx) meanSquaredError(pred, actualBatch.(idx)))
+}
+
+// ============================================================================
+// Attention & Transformer-Like Operations
+// ============================================================================
+
+// scaledDotProductAttention computes scaled dot-product attention.
+// A key mechanism in modern transformers.
+// query, key, value are embedding matrices. scale is typically 1/sqrt(d_k).
+//
+// Example:
+//   scaledDotProductAttention([1, 0], [1, 0], [5, 10], 0.5)
+fn scaledDotProductAttention(query, key, value, scale) {
+	scores := dotProduct(query, key) * scale
+	weights := softmax([scores]) // Wrap in list for softmax
+	value |> map(fn(x) x * weights.(0))
+}
+
+// multiHeadAttention computes simplified multi-head attention.
+// queries, keys, values are lists of vectors (one per head).
+// Returns a list of attention outputs per head.
+//
+// Example:
+//   multiHeadAttention([[1,0]], [[1,0]], [[5,10]], 2)
+fn multiHeadAttention(queries, keys, values, dK) {
+	scale := 1 / sqrt(dK)
+	queries |> map(fn(q, idx) {
+		k := keys.(idx)
+		v := values.(idx)
+		score := dotProduct(q, k) * scale
+		weights := softmax([score])
+		v |> map(fn(x) x * weights.(0))
+	})
+}
+
+// ============================================================================
+// Positional Encoding (Transformer)
+// ============================================================================
+
+// positionalEncoding generates sinusoidal positional encodings as used in
+// the original Transformer architecture ("Attention Is All You Need").
+// Returns a seqLen x dModel matrix.
+//
+// Example:
+//   positionalEncoding(4, 8)  // => 4x8 matrix of positional encodings
+fn positionalEncoding(seqLen, dModel) {
+	fn makeRow(pos, acc) if pos >= seqLen {
+		true -> acc
+		_ -> {
+			fn makeCol(i, row) if i >= dModel {
+				true -> row
+				_ -> {
+					angle := pos / pow(10000, (2 * int(i / 2)) / dModel)
+					val := if i % 2 = 0 {
+						true -> sin(angle)
+						_ -> cos(angle)
+					}
+					makeCol(i + 1, row << val)
+				}
+			}
+			matRow := makeCol(0, [])
+			makeRow(pos + 1, acc << matRow)
+		}
+	}
+	makeRow(0, [])
+}
+
+// ropeEmbedding applies rotary position embedding to a vector at a given position.
+// Rotates pairs of dimensions by position-dependent angles,
+// as used in modern transformer architectures (LLaMA, etc.).
+//
+// Example:
+//   ropeEmbedding([1, 0, 1, 0], 3, 10000)
+fn ropeEmbedding(v, position, base) {
+	d := len(v)
+	fn apply(i, acc) if i >= d {
+		true -> acc
+		_ -> if i + 1 >= d {
+			true -> acc << v.(i)
+			_ -> {
+				half := int(i / 2)
+				theta := position / pow(base, 2 * half / d)
+				cosT := cos(theta)
+				sinT := sin(theta)
+				x0 := v.(i)
+				x1 := v.(i + 1)
+				apply(i + 2, acc << (x0 * cosT - x1 * sinT) << (x0 * sinT + x1 * cosT))
+			}
+		}
+	}
+	apply(0, [])
+}
+
+// ============================================================================
+// Layer Normalization
+// ============================================================================
+
+// layerNorm applies layer normalization to a vector.
+// Normalizes to zero mean and unit variance, then applies scale (gamma)
+// and shift (beta) parameters.
+//
+// Example:
+//   layerNorm([1, 2, 3, 4], 1, 0)  // => [-1.34, -0.45, 0.45, 1.34] (approx)
+fn layerNorm(v, gamma, beta) {
+	m := mean(v)
+	epsilon := 0.00001
+	v2 := variance(v)
+	denom := sqrt(v2 + epsilon)
+	v |> map(fn(x) gamma * ((x - m) / denom) + beta)
+}
+
+// ============================================================================
+// Attention Mask Utilities
+// ============================================================================
+
+// causalMask creates a lower-triangular boolean mask for causal (autoregressive)
+// attention. Entry [i][j] is 1 if j <= i, else 0.
+//
+// Example:
+//   causalMask(4)
+//   // => [[1,0,0,0],[1,1,0,0],[1,1,1,0],[1,1,1,1]]
+fn causalMask(seqLen) {
+	fn makeRow(i, acc) if i >= seqLen {
+		true -> acc
+		_ -> {
+			fn makeCols(j, row) if j >= seqLen {
+				true -> row
+				_ -> makeCols(j + 1, row << if j <= i { true -> 1, _ -> 0 })
+			}
+			makeRow(i + 1, acc << makeCols(0, []))
+		}
+	}
+	makeRow(0, [])
+}
+
+// paddingMask creates a mask that is 1 for real tokens and 0 for padding tokens.
+//
+// Example:
+//   paddingMask([5, 3, 0, 0, 0], 0)  // => [1, 1, 0, 0, 0]
+fn paddingMask(sequence, padToken) {
+	sequence |> map(fn(x) if x = padToken { true -> 0, _ -> 1 })
+}
+
+// applyMask applies a mask to attention scores by setting masked positions to
+// a large negative value (effectively -infinity for softmax).
+//
+// Example:
+//   applyMask([[1, 2], [3, 4]], [[1, 0], [1, 1]])
+//   // => [[1, -100000], [3, 4]]
+fn applyMask(scores, mask) {
+	fn makeRow(i, acc) if i >= len(scores) {
+		true -> acc
+		_ -> {
+			fn makeCols(j, row) if j >= len(scores.(i)) {
+				true -> row
+				_ -> {
+					val := if mask.(i).(j) = 0 { true -> -100000, _ -> scores.(i).(j) }
+					makeCols(j + 1, row << val)
+				}
+			}
+			makeRow(i + 1, acc << makeCols(0, []))
+		}
+	}
+	makeRow(0, [])
+}

@@ -264,6 +264,70 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
     (local.get $ptr)
   )
 
+  ;; ---- String append byte ----
+  (func $str_append_byte (param $s i32) (param $byte i32) (result i32)
+    (local $slen i32) (local $ptr i32)
+    (local.set $slen (call $string_len (local.get $s)))
+    (local.set $ptr (call $alloc (i32.add (local.get $slen) (i32.const 5))))
+    (i32.store (local.get $ptr) (i32.add (local.get $slen) (i32.const 1)))
+    (call $memcpy
+      (i32.add (local.get $ptr) (i32.const 4))
+      (call $string_data (local.get $s))
+      (local.get $slen))
+    (i32.store8
+      (i32.add (i32.add (local.get $ptr) (i32.const 4)) (local.get $slen))
+      (i32.and (local.get $byte) (i32.const 255)))
+    (local.get $ptr)
+  )
+
+  ;; ---- String set byte in place ----
+  (func $str_set_byte (param $s i32) (param $idx i32) (param $byte i32)
+    (if (i32.lt_u (local.get $idx) (call $string_len (local.get $s)))
+      (then
+        (i32.store8
+          (i32.add (call $string_data (local.get $s)) (local.get $idx))
+          (i32.and (local.get $byte) (i32.const 255)))
+      )
+    )
+  )
+
+  ;; ---- List push (append value) ----
+  (func $list_push (param $lst i32) (param $vtype i32) (param $vval i32)
+    (local $len i32) (local $cap i32) (local $items i32)
+    (local $new_items i32) (local $new_cap i32)
+    (local.set $len (i32.load (local.get $lst)))
+    (local.set $cap (i32.load (i32.add (local.get $lst) (i32.const 4))))
+    (local.set $items (i32.load (i32.add (local.get $lst) (i32.const 8))))
+    (if (i32.ge_u (local.get $len) (local.get $cap))
+      (then
+        ;; Grow: double capacity
+        (local.set $new_cap (i32.mul (i32.add (local.get $cap) (i32.const 1)) (i32.const 2)))
+        (local.set $new_items (call $alloc (i32.mul (local.get $new_cap) (i32.const 8))))
+        (call $memcpy (local.get $new_items) (local.get $items)
+          (i32.mul (local.get $len) (i32.const 8)))
+        (i32.store (i32.add (local.get $lst) (i32.const 4)) (local.get $new_cap))
+        (i32.store (i32.add (local.get $lst) (i32.const 8)) (local.get $new_items))
+        (local.set $items (local.get $new_items))
+      )
+    )
+    ;; Append at position len
+    (call $list_set (local.get $lst) (local.get $len)
+      (local.get $vtype) (local.get $vval))
+    ;; Increment length
+    (i32.store (local.get $lst) (i32.add (local.get $len) (i32.const 1)))
+  )
+
+  ;; ---- Helper: set local in an explicit locals block ----
+  (func $set_local_at (param $locals_ptr i32) (param $idx i32)
+    (param $type i32) (param $val i32)
+    (local $base i32)
+    (local.set $base (i32.add
+      (local.get $locals_ptr)
+      (i32.mul (local.get $idx) (i32.const 8))))
+    (i32.store (local.get $base) (local.get $type))
+    (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $val))
+  )
+
   ;; ---- Constant pool access ----
   ;; Pool format: [count:u32] [entry...]
   ;; Each entry: [type:u8] [len:u32] [data:bytes]
@@ -301,25 +365,76 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
   )
 
   ;; ---- Function table access ----
-  ;; Table format: [count:u32] [entry...], each entry 9 bytes:
+  ;; Table format: [count:u32] [entry...], each entry variable-length:
   ;;   [offset:u32][arity:u16][localCount:u16][hasRestArg:u8]
+  ;;   [nameCount:u16] for each name: [len:u16][data]
+  ;; We walk the table to find the entry at a given index.
+
+  (global $fntable_cache_idx (mut i32) (i32.const -1))
+  (global $fntable_cache_off (mut i32) (i32.const 0))
+  (global $fntable_cache_ar  (mut i32) (i32.const 0))
+  (global $fntable_cache_lc  (mut i32) (i32.const 0))
+
+  (func $fntable_seek (param $idx i32)
+    ;; Walk the function table to entry $idx and cache its fields.
+    (local $pos i32) (local $count i32) (local $i i32)
+    (local $nc i32) (local $j i32) (local $nlen i32)
+    ;; Quick check: already cached?
+    (if (i32.eq (global.get $fntable_cache_idx) (local.get $idx))
+      (then (return)))
+    (local.set $pos (' << ic(fntableBase) << '))
+    (local.set $count (i32.load (local.get $pos)))
+    (local.set $pos (i32.add (local.get $pos) (i32.const 4)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $scan
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (if (i32.eq (local.get $i) (local.get $idx))
+          (then
+            (global.set $fntable_cache_idx (local.get $idx))
+            (global.set $fntable_cache_off (i32.load (local.get $pos)))
+            (global.set $fntable_cache_ar
+              (i32.load16_u (i32.add (local.get $pos) (i32.const 4))))
+            (global.set $fntable_cache_lc
+              (i32.load16_u (i32.add (local.get $pos) (i32.const 6))))
+            (return)
+          )
+        )
+        ;; Skip fixed header: offset(4) + arity(2) + localCount(2) + hasRestArg(1) = 9
+        (local.set $pos (i32.add (local.get $pos) (i32.const 9)))
+        ;; Skip local names: nameCount(2) then for each: len(2) + data
+        (local.set $nc (i32.load16_u (local.get $pos)))
+        (local.set $pos (i32.add (local.get $pos) (i32.const 2)))
+        (local.set $j (i32.const 0))
+        (block $names_done
+          (loop $names
+            (br_if $names_done (i32.ge_u (local.get $j) (local.get $nc)))
+            (local.set $nlen (i32.load16_u (local.get $pos)))
+            (local.set $pos (i32.add (local.get $pos)
+              (i32.add (i32.const 2) (local.get $nlen))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $names)
+          )
+        )
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan)
+      )
+    )
+  )
 
   (func $fntable_offset (param $idx i32) (result i32)
-    (i32.load (i32.add
-      (' << ic(fntableBase + 4) << ')
-      (i32.mul (local.get $idx) (i32.const 9))))
+    (call $fntable_seek (local.get $idx))
+    (global.get $fntable_cache_off)
   )
 
   (func $fntable_arity (param $idx i32) (result i32)
-    (i32.load16_u (i32.add
-      (' << ic(fntableBase + 8) << ')
-      (i32.mul (local.get $idx) (i32.const 9))))
+    (call $fntable_seek (local.get $idx))
+    (global.get $fntable_cache_ar)
   )
 
   (func $fntable_locals (param $idx i32) (result i32)
-    (i32.load16_u (i32.add
-      (' << ic(fntableBase + 10) << ')
-      (i32.mul (local.get $idx) (i32.const 9))))
+    (call $fntable_seek (local.get $idx))
+    (global.get $fntable_cache_lc)
   )
 
   ;; ---- Call frame management ----
@@ -628,6 +743,199 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
     (i32.eq (local.get $v1) (local.get $v2))
   )
 
+  ;; ---- Static string constructors (for builtins) ----
+  (func $make_static_str (param $c0 i32) (param $c1 i32) (param $c2 i32)
+    (param $c3 i32) (param $c4 i32) (param $slen i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.add (local.get $slen) (i32.const 4))))
+    (i32.store (local.get $ptr) (local.get $slen))
+    (if (i32.gt_u (local.get $slen) (i32.const 0))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 4)) (local.get $c0))))
+    (if (i32.gt_u (local.get $slen) (i32.const 1))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 5)) (local.get $c1))))
+    (if (i32.gt_u (local.get $slen) (i32.const 2))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 6)) (local.get $c2))))
+    (if (i32.gt_u (local.get $slen) (i32.const 3))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 7)) (local.get $c3))))
+    (if (i32.gt_u (local.get $slen) (i32.const 4))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 8)) (local.get $c4))))
+    (local.get $ptr)
+  )
+  ;; "true"
+  (func $make_static_str_true (result i32)
+    (call $make_static_str (i32.const 116)(i32.const 114)(i32.const 117)(i32.const 101)(i32.const 0)(i32.const 4)))
+  ;; "false"
+  (func $make_static_str_false (result i32)
+    (call $make_static_str (i32.const 102)(i32.const 97)(i32.const 108)(i32.const 115)(i32.const 101)(i32.const 5)))
+  ;; "?"
+  (func $make_static_str_qmark (result i32)
+    (call $make_static_str (i32.const 63)(i32.const 0)(i32.const 0)(i32.const 0)(i32.const 0)(i32.const 1)))
+
+  ;; Type name string constructors
+  (func $make_type_name_null (result i32)
+    (call $make_static_str (i32.const 110)(i32.const 117)(i32.const 108)(i32.const 108)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_empty (result i32)
+    (call $make_static_str (i32.const 101)(i32.const 109)(i32.const 112)(i32.const 116)(i32.const 121)(i32.const 5)))
+  (func $make_type_name_int (result i32)
+    (call $make_static_str (i32.const 105)(i32.const 110)(i32.const 116)(i32.const 0)(i32.const 0)(i32.const 3)))
+  (func $make_type_name_float (result i32)
+    (call $make_static_str (i32.const 102)(i32.const 108)(i32.const 111)(i32.const 97)(i32.const 116)(i32.const 5)))
+  (func $make_type_name_bool (result i32)
+    (call $make_static_str (i32.const 98)(i32.const 111)(i32.const 111)(i32.const 108)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_string (result i32)
+    ;; "string" = 6 chars, need extended version
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 10)))
+    (i32.store (local.get $ptr) (i32.const 6))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 4))(i32.const 115))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 5))(i32.const 116))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 6))(i32.const 114))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 7))(i32.const 105))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 8))(i32.const 110))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 9))(i32.const 103))
+    (local.get $ptr))
+  (func $make_type_name_atom (result i32)
+    (call $make_static_str (i32.const 97)(i32.const 116)(i32.const 111)(i32.const 109)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_list (result i32)
+    (call $make_static_str (i32.const 108)(i32.const 105)(i32.const 115)(i32.const 116)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_object (result i32)
+    ;; "object" = 6 chars
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 10)))
+    (i32.store (local.get $ptr) (i32.const 6))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 4))(i32.const 111))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 5))(i32.const 98))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 6))(i32.const 106))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 7))(i32.const 101))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 8))(i32.const 99))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 9))(i32.const 116))
+    (local.get $ptr))
+  (func $make_type_name_function (result i32)
+    ;; "function" = 8 chars
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 12)))
+    (i32.store (local.get $ptr) (i32.const 8))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 4))(i32.const 102))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 5))(i32.const 117))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 6))(i32.const 110))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 7))(i32.const 99))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 8))(i32.const 116))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 9))(i32.const 105))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 10))(i32.const 111))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 11))(i32.const 110))
+    (local.get $ptr))
+
+  ;; ---- Object keys/values helpers ----
+  (func $object_keys_list (param $obj i32) (result i32)
+    (local $count i32) (local $entries i32) (local $lst i32)
+    (local $i i32) (local $base i32)
+    (local.set $count (i32.load (local.get $obj)))
+    (local.set $entries (i32.load (i32.add (local.get $obj) (i32.const 8))))
+    (local.set $lst (call $alloc_list (local.get $count)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $iter
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $base (i32.add (local.get $entries)
+          (i32.mul (local.get $i) (i32.const 12))))
+        ;; Key is a string pointer at base+0
+        (call $list_set (local.get $lst) (local.get $i)
+          (i32.const 5) (i32.load (local.get $base)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $iter)
+      )
+    )
+    (local.get $lst)
+  )
+
+  (func $object_values_list (param $obj i32) (result i32)
+    (local $count i32) (local $entries i32) (local $lst i32)
+    (local $i i32) (local $base i32)
+    (local.set $count (i32.load (local.get $obj)))
+    (local.set $entries (i32.load (i32.add (local.get $obj) (i32.const 8))))
+    (local.set $lst (call $alloc_list (local.get $count)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $iter
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $base (i32.add (local.get $entries)
+          (i32.mul (local.get $i) (i32.const 12))))
+        ;; Value type at base+4, value payload at base+8
+        (call $list_set (local.get $lst) (local.get $i)
+          (i32.load (i32.add (local.get $base) (i32.const 4)))
+          (i32.load (i32.add (local.get $base) (i32.const 8))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $iter)
+      )
+    )
+    (local.get $lst)
+  )
+
+  ;; ---- String slice ----
+  (func $string_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
+    (local $slen i32) (local $slice_len i32)
+    (local.set $slen (call $string_len (local.get $s)))
+    ;; Clamp bounds
+    (if (i32.lt_s (local.get $start) (i32.const 0))
+      (then (local.set $start (i32.const 0))))
+    (if (i32.gt_s (local.get $end) (local.get $slen))
+      (then (local.set $end (local.get $slen))))
+    (if (i32.gt_s (local.get $start) (local.get $end))
+      (then (local.set $start (local.get $end))))
+    (local.set $slice_len (i32.sub (local.get $end) (local.get $start)))
+    (call $alloc_string
+      (i32.add (call $string_data (local.get $s)) (local.get $start))
+      (local.get $slice_len))
+  )
+
+  ;; ---- List slice ----
+  (func $list_slice (param $lst i32) (param $start i32) (param $end i32) (result i32)
+    (local $llen i32) (local $new_lst i32) (local $slice_len i32)
+    (local $i i32) (local $items i32) (local $base i32)
+    (local.set $llen (call $list_len (local.get $lst)))
+    ;; Clamp bounds
+    (if (i32.lt_s (local.get $start) (i32.const 0))
+      (then (local.set $start (i32.const 0))))
+    (if (i32.gt_s (local.get $end) (local.get $llen))
+      (then (local.set $end (local.get $llen))))
+    (if (i32.gt_s (local.get $start) (local.get $end))
+      (then (local.set $start (local.get $end))))
+    (local.set $slice_len (i32.sub (local.get $end) (local.get $start)))
+    (local.set $new_lst (call $alloc_list (local.get $slice_len)))
+    (local.set $items (i32.load (i32.add (local.get $lst) (i32.const 8))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $copy
+        (br_if $done (i32.ge_u (local.get $i) (local.get $slice_len)))
+        (local.set $base (i32.add (local.get $items)
+          (i32.mul (i32.add (local.get $start) (local.get $i)) (i32.const 8))))
+        (call $list_set (local.get $new_lst) (local.get $i)
+          (i32.load (local.get $base))
+          (i32.load (i32.add (local.get $base) (i32.const 4))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $copy)
+      )
+    )
+    (local.get $new_lst)
+  )
+
+  ;; ---- List append (non-mutating, returns new list) ----
+  (func $list_append (param $lst i32) (param $vtype i32) (param $vval i32) (result i32)
+    (local $llen i32) (local $new_lst i32) (local $items i32)
+    (local $new_items i32) (local $i i32) (local $base i32)
+    (local.set $llen (call $list_len (local.get $lst)))
+    (local.set $new_lst (call $alloc_list (i32.add (local.get $llen) (i32.const 1))))
+    (local.set $items (i32.load (i32.add (local.get $lst) (i32.const 8))))
+    (local.set $new_items (i32.load (i32.add (local.get $new_lst) (i32.const 8))))
+    ;; Copy existing elements
+    (call $memcpy (local.get $new_items) (local.get $items)
+      (i32.mul (local.get $llen) (i32.const 8)))
+    ;; Append new element
+    (call $list_set (local.get $new_lst) (local.get $llen)
+      (local.get $vtype) (local.get $vval))
+    (local.get $new_lst)
+  )
+
   ;; ===================================================================
   ;; ---- VM DISPATCH LOOP ----
   ;; ===================================================================
@@ -664,6 +972,9 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
   ;; ---- Built-in function dispatcher ----
   (func $call_builtin (param $bi i32) (param $arity i32)
     (local $t1 i32) (local $v1 i32)
+    (local $t2 i32) (local $v2 i32)
+    (local $t3 i32) (local $v3 i32)
+    (local $tmp i32) (local $i i32)
     ;; Dispatch by builtin index
     (if (i32.eqz (local.get $bi))
       (then
@@ -686,14 +997,20 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
                   (call $string_len (local.get $v1)))
               )
               (else
-                (if (i32.eq (local.get $t1) (i32.const 0))  ;; TAG_NULL
-                  (then (nop))
+                (if (i32.eq (local.get $t1) (i32.const 4))  ;; TAG_BOOL
+                  (then
+                    (if (local.get $v1)
+                      (then (call $host_print (call $string_data (call $make_static_str_true)) (i32.const 4)))
+                      (else (call $host_print (call $string_data (call $make_static_str_false)) (i32.const 5)))
+                    )
+                  )
                 )
               )
             )
           )
         )
         (call $push_val (i32.const 0) (i32.const 0))  ;; return null
+        (return)
       )
     )
     (if (i32.eq (local.get $bi) (i32.const 1))
@@ -711,6 +1028,7 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
             ))
           ))
         )
+        (return)
       )
     )
     (if (i32.eq (local.get $bi) (i32.const 2))
@@ -718,9 +1036,39 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
         ;; BUILTIN_TYPE (2): type(value) -> atom
         (local.set $t1 (call $pop_tagged))
         (drop (global.get $tmp_val))
-        ;; Return atom for the type name (reuse constant pool)
-        (call $push_val (i32.const 6)
-          (call $constpool_entry (local.get $t1)))
+        ;; Return atom with type name string
+        (if (i32.eq (local.get $t1) (i32.const 0))
+          (then (call $push_val (i32.const 6) (call $make_type_name_null)))
+          (else (if (i32.eq (local.get $t1) (i32.const 1))
+            (then (call $push_val (i32.const 6) (call $make_type_name_empty)))
+            (else (if (i32.eq (local.get $t1) (i32.const 2))
+              (then (call $push_val (i32.const 6) (call $make_type_name_int)))
+              (else (if (i32.eq (local.get $t1) (i32.const 3))
+                (then (call $push_val (i32.const 6) (call $make_type_name_float)))
+                (else (if (i32.eq (local.get $t1) (i32.const 4))
+                  (then (call $push_val (i32.const 6) (call $make_type_name_bool)))
+                  (else (if (i32.eq (local.get $t1) (i32.const 5))
+                    (then (call $push_val (i32.const 6) (call $make_type_name_string)))
+                    (else (if (i32.eq (local.get $t1) (i32.const 6))
+                      (then (call $push_val (i32.const 6) (call $make_type_name_atom)))
+                      (else (if (i32.eq (local.get $t1) (i32.const 7))
+                        (then (call $push_val (i32.const 6) (call $make_type_name_list)))
+                        (else (if (i32.eq (local.get $t1) (i32.const 8))
+                          (then (call $push_val (i32.const 6) (call $make_type_name_object)))
+                          (else (if (i32.eq (local.get $t1) (i32.const 9))
+                            (then (call $push_val (i32.const 6) (call $make_type_name_function)))
+                            (else (call $push_val (i32.const 6) (call $make_type_name_null)))
+                          ))
+                        ))
+                      ))
+                    ))
+                  ))
+                ))
+              ))
+            ))
+          ))
+        )
+        (return)
       )
     )
     (if (i32.eq (local.get $bi) (i32.const 3))
@@ -732,10 +1080,191 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
           (then (call $push_val (i32.const 5) (local.get $v1)))
           (else (if (i32.eq (local.get $t1) (i32.const 2)) ;; int
             (then (call $push_val (i32.const 5) (call $int_to_string (local.get $v1))))
-            (else (call $push_val (i32.const 5)
-              (call $int_to_string (local.get $v1)))) ;; fallback
+            (else (if (i32.eq (local.get $t1) (i32.const 6)) ;; atom
+              (then (call $push_val (i32.const 5) (local.get $v1)))
+              (else (if (i32.eq (local.get $t1) (i32.const 4)) ;; bool
+                (then
+                  (if (local.get $v1)
+                    (then (call $push_val (i32.const 5) (call $make_static_str_true)))
+                    (else (call $push_val (i32.const 5) (call $make_static_str_false)))
+                  )
+                )
+                (else (if (i32.eq (local.get $t1) (i32.const 0)) ;; null
+                  (then (call $push_val (i32.const 5) (call $make_static_str_qmark)))
+                  (else (call $push_val (i32.const 5)
+                    (call $int_to_string (local.get $v1)))) ;; fallback
+                ))
+              ))
+            ))
           ))
         )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 4))
+      (then
+        ;; BUILTIN_INT (4): int(value) -> int
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 2))  ;; already int
+          (then (call $push_val (i32.const 2) (local.get $v1)))
+          (else (if (i32.eq (local.get $t1) (i32.const 3)) ;; float → truncate
+            (then (call $push_val (i32.const 2) (local.get $v1)))
+            (else (call $push_val (i32.const 0) (i32.const 0)))  ;; null
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 5))
+      (then
+        ;; BUILTIN_FLOAT (5): float(value) -> float
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 3))  ;; already float
+          (then (call $push_val (i32.const 3) (local.get $v1)))
+          (else (if (i32.eq (local.get $t1) (i32.const 2)) ;; int → float
+            (then (call $push_val (i32.const 3) (local.get $v1)))
+            (else (call $push_val (i32.const 0) (i32.const 0)))  ;; null
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 6))
+      (then
+        ;; BUILTIN_CODEPOINT (6): codepoint(string) -> int
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                     (i32.gt_u (call $string_len (local.get $v1)) (i32.const 0)))
+          (then (call $push_val (i32.const 2)
+            (i32.load8_u (call $string_data (local.get $v1)))))
+          (else (call $push_val (i32.const 0) (i32.const 0)))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 7))
+      (then
+        ;; BUILTIN_CHAR (7): char(int) -> string
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 2))
+          (then
+            (local.set $tmp (call $alloc (i32.const 5)))
+            (i32.store (local.get $tmp) (i32.const 1))
+            (i32.store8 (i32.add (local.get $tmp) (i32.const 4))
+              (i32.and (local.get $v1) (i32.const 255)))
+            (call $push_val (i32.const 5) (local.get $tmp))
+          )
+          (else (call $push_val (i32.const 5) (call $alloc_string (i32.const 0) (i32.const 0))))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 8))
+      (then
+        ;; BUILTIN_KEYS (8): keys(object) -> list of strings
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 8))  ;; object
+          (then
+            (local.set $tmp (call $object_keys_list (local.get $v1)))
+            (call $push_val (i32.const 7) (local.get $tmp))
+          )
+          (else
+            (call $push_val (i32.const 7) (call $alloc_list (i32.const 0)))
+          )
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 9))
+      (then
+        ;; BUILTIN_VALUES (9): values(object) -> list
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 8))  ;; object
+          (then
+            (local.set $tmp (call $object_values_list (local.get $v1)))
+            (call $push_val (i32.const 7) (local.get $tmp))
+          )
+          (else
+            (call $push_val (i32.const 7) (call $alloc_list (i32.const 0)))
+          )
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 10))
+      (then
+        ;; BUILTIN_SLICE (10): slice(collection, start, end) -> sliced value
+        (local.set $t3 (call $pop_tagged))  ;; end
+        (local.set $v3 (global.get $tmp_val))
+        (local.set $t2 (call $pop_tagged))  ;; start
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))  ;; collection
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 5))  ;; string
+          (then
+            (call $push_val (i32.const 5)
+              (call $string_slice (local.get $v1) (local.get $v2) (local.get $v3)))
+          )
+          (else (if (i32.eq (local.get $t1) (i32.const 7))  ;; list
+            (then
+              (call $push_val (i32.const 7)
+                (call $list_slice (local.get $v1) (local.get $v2) (local.get $v3)))
+            )
+            (else (call $push_val (i32.const 0) (i32.const 0)))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 11))
+      (then
+        ;; BUILTIN_APPEND (11): append(list, value) -> new list
+        (local.set $t2 (call $pop_tagged))  ;; value to append
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))  ;; base list
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 7))  ;; list
+          (then
+            (local.set $tmp (call $list_append (local.get $v1)
+              (local.get $t2) (local.get $v2)))
+            (call $push_val (i32.const 7) (local.get $tmp))
+          )
+          (else (if (i32.eq (local.get $t1) (i32.const 5))  ;; string
+            (then
+              (if (i32.eq (local.get $t2) (i32.const 5))  ;; append string
+                (then (call $push_val (i32.const 5)
+                  (call $str_concat (local.get $v1) (local.get $v2))))
+                (else (call $push_val (i32.const 0) (i32.const 0)))
+              )
+            )
+            (else (call $push_val (i32.const 0) (i32.const 0)))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 12))
+      (then
+        ;; BUILTIN_WAIT (12): wait() -> null (no-op in WASM)
+        ;; Pop args based on arity
+        (local.set $i (i32.const 0))
+        (block $wait_pop_done
+          (loop $wait_pop
+            (br_if $wait_pop_done (i32.ge_u (local.get $i) (local.get $arity)))
+            (drop (call $pop_tagged))
+            (drop (global.get $tmp_val))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $wait_pop)
+          )
+        )
+        (call $push_val (i32.const 0) (i32.const 0))
+        (return)
       )
     )
     (if (i32.eq (local.get $bi) (i32.const 13))
@@ -744,8 +1273,21 @@ fn generateVMWat(bytecodeWAT, bytecodeLen, constpoolWAT, constpoolLen, fntableWA
         (local.set $t1 (call $pop_tagged))
         (local.set $v1 (global.get $tmp_val))
         (call $host_exit (local.get $v1))
+        (return)
       )
     )
+    ;; Unknown builtin — pop all args and push null
+    (local.set $i (i32.const 0))
+    (block $unk_done
+      (loop $unk_pop
+        (br_if $unk_done (i32.ge_u (local.get $i) (local.get $arity)))
+        (drop (call $pop_tagged))
+        (drop (global.get $tmp_val))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $unk_pop)
+      )
+    )
+    (call $push_val (i32.const 0) (i32.const 0))
   )
 
   ;; ---- Entry point ----
@@ -826,14 +1368,12 @@ fn generateDispatchTable() {
         (local.set $v1 (global.get $tmp_val))
         (call $set_local (local.get $idx) (local.get $t1) (local.get $v1))'
 
-		// 14: LOAD_UPVAL — simplified: not yet implemented; push null
+		// 14: LOAD_UPVAL — u16 name constant index; push null (scope chain NYI)
 		'(drop (call $fetch_u16))
-        (drop (call $fetch_u16))
         (call $push_val (i32.const 0) (i32.const 0))'
 
-		// 15: STORE_UPVAL — simplified: not yet implemented; pop and discard
+		// 15: STORE_UPVAL — u16 name constant index; pop and discard (scope chain NYI)
 		'(drop (call $fetch_u16))
-        (drop (call $fetch_u16))
         (drop (call $pop_tagged))
         (drop (global.get $tmp_val))'
 
@@ -1003,20 +1543,51 @@ fn generateDispatchTable() {
 		// 33: NOT
 		'(local.set $t1 (call $pop_tagged))
         (local.set $v1 (global.get $tmp_val))
-        (call $push_val (i32.const 4)
-          (i32.eqz (local.get $v1)))'
+        (if (i32.eq (local.get $t1) (i32.const 4))  ;; TAG_BOOL
+          (then (call $push_val (i32.const 4)
+            (i32.eqz (local.get $v1))))
+          (else (call $push_val (i32.const 4) (i32.const 1)))  ;; non-bool → true
+        )'
 
 		// 34: CONCAT (<<)
 		'(local.set $t2 (call $pop_tagged))
         (local.set $v2 (global.get $tmp_val))
         (local.set $t1 (call $pop_tagged))
         (local.set $v1 (global.get $tmp_val))
-        (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
-                     (i32.eq (local.get $t2) (i32.const 5)))
-          (then (call $push_val (i32.const 5)
-            (call $str_concat (local.get $v1) (local.get $v2))))
-          (else (call $push_val (i32.const 5)
-            (call $str_concat (local.get $v1) (local.get $v2))))
+        (if (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                     (i32.eq (local.get $t2) (i32.const 2)))
+          (then
+            ;; int << int → bitwise left shift (negative shift → null)
+            (if (i32.lt_s (local.get $v2) (i32.const 0))
+              (then (call $push_val (i32.const 0) (i32.const 0)))
+              (else (call $push_val (i32.const 2)
+                (i32.shl (local.get $v1) (local.get $v2))))
+            )
+          )
+          (else (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                             (i32.eq (local.get $t2) (i32.const 5)))
+            (then
+              ;; string << string → append bytes (mutable concat)
+              (call $push_val (i32.const 5)
+                (call $str_concat (local.get $v1) (local.get $v2)))
+            )
+            (else (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                               (i32.eq (local.get $t2) (i32.const 2)))
+              (then
+                ;; string << int → append single byte
+                (call $push_val (i32.const 5)
+                  (call $str_append_byte (local.get $v1) (local.get $v2)))
+              )
+              (else (if (i32.eq (local.get $t1) (i32.const 7))
+                (then
+                  ;; list << value → push value onto list
+                  (call $list_push (local.get $v1) (local.get $t2) (local.get $v2))
+                  (call $push_val (i32.const 7) (local.get $v1))
+                )
+                (else (call $push_val (i32.const 0) (i32.const 0)))  ;; null
+              ))
+            ))
+          ))
         )'
 
 		// 35: MAKE_LIST
@@ -1131,9 +1702,21 @@ fn generateDispatchTable() {
                 )
               )
             )
+            (else (if (i32.eq (local.get $tmp) (i32.const 5))
+              (then
+                ;; string[idx] = int → update byte in place
+                (if (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                             (i32.eq (local.get $t2) (i32.const 2)))
+                  (then
+                    (call $str_set_byte (local.get $tmp2) (local.get $v1)
+                      (local.get $v2))
+                  )
+                )
+              )
+            ))
           ))
         )
-        (call $push_val (local.get $tmp) (local.get $tmp2))'
+        (call $push_val (local.get $t2) (local.get $v2))'
 
 		// 39: JUMP
 		'(global.set $pc (i32.add
@@ -1145,9 +1728,14 @@ fn generateDispatchTable() {
         (local.set $t1 (call $pop_tagged))
         (local.set $v1 (global.get $tmp_val))
         (if (i32.or
-              (i32.and (i32.eq (local.get $t1) (i32.const 4))
-                       (i32.eqz (local.get $v1)))      ;; bool false
-              (i32.eq (local.get $t1) (i32.const 0)))   ;; null
+              (i32.or
+                (i32.and (i32.eq (local.get $t1) (i32.const 4))
+                         (i32.eqz (local.get $v1)))      ;; bool false
+                (i32.eq (local.get $t1) (i32.const 0)))   ;; null
+              (i32.or
+                (i32.eq (local.get $t1) (i32.const 1))    ;; empty
+                (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                         (i32.eqz (local.get $v1)))))      ;; int 0
           (then
             (global.set $pc (i32.add
               (global.get $bytecode_base)
@@ -1269,12 +1857,16 @@ fn generateDispatchTable() {
         (local.set $arity (call $fetch_u8))
         (call $call_builtin (local.get $idx) (local.get $arity))'
 
-		// 46: IMPORT — push null for now (modules are pre-bundled)
+		// 46: IMPORT — u16 constant pool index; push null (modules pre-bundled)
+		'(drop (call $fetch_u16))
+        (call $push_val (i32.const 0) (i32.const 0))'
+
+		// 47: IMPORT_DYN — pop string from stack; push null (modules pre-bundled)
 		'(drop (call $pop_tagged))
         (drop (global.get $tmp_val))
         (call $push_val (i32.const 0) (i32.const 0))'
 
-		// 47: DEEP_EQ — same as EQ for now
+		// 48: DEEP_EQ — structural equality (uses val_eq for now)
 		'(local.set $t2 (call $pop_tagged))
         (local.set $v2 (global.get $tmp_val))
         (local.set $t1 (call $pop_tagged))
@@ -1283,7 +1875,7 @@ fn generateDispatchTable() {
           (call $val_eq (local.get $t1) (local.get $v1)
                         (local.get $t2) (local.get $v2)))'
 
-		// 48: SWAP
+		// 49: SWAP
 		'(local.set $t2 (call $pop_tagged))
         (local.set $v2 (global.get $tmp_val))
         (local.set $t1 (call $pop_tagged))
@@ -1291,7 +1883,7 @@ fn generateDispatchTable() {
         (call $push_val (local.get $t2) (local.get $v2))
         (call $push_val (local.get $t1) (local.get $v1))'
 
-		// 49: MATCH_JUMP
+		// 50: MATCH_JUMP — pop pattern, peek condition, jump i32 if no match
 		'(local.set $t2 (call $pop_tagged))
         (local.set $v2 (global.get $tmp_val))
         (local.set $idx (call $fetch_i32))
@@ -1306,11 +1898,52 @@ fn generateDispatchTable() {
           )
         )'
 
-		// 50: SCOPE_PUSH
+		// 51: SCOPE_PUSH — no-op in frame-based approach
 		'(nop)'
 
-		// 51: SCOPE_POP
+		// 52: SCOPE_POP — no-op in frame-based approach
 		'(nop)'
+
+		// 53: CALL_SPREAD — u8 arity; last arg is list to spread
+		'(local.set $arity (call $fetch_u8))
+        ;; For now, treat as a regular call (spread not yet implemented in WASM)
+        (local.set $tmp (i32.sub (global.get $sp)
+          (i32.mul (i32.add (local.get $arity) (i32.const 1)) (i32.const 8))))
+        (local.set $t1 (i32.load (local.get $tmp)))
+        (local.set $v1 (i32.load (i32.add (local.get $tmp) (i32.const 4))))
+        (if (i32.eq (local.get $t1) (i32.const 9))
+          (then
+            (local.set $fn_idx (call $closure_fn_idx (local.get $v1)))
+            (local.set $locals_ptr
+              (call $alloc_locals (call $fntable_locals (local.get $fn_idx))))
+            (local.set $i (i32.const 0))
+            (block $cs_done
+              (loop $cs_args
+                (br_if $cs_done (i32.ge_u (local.get $i) (local.get $arity)))
+                (local.set $tmp2 (i32.add (local.get $tmp)
+                  (i32.mul (i32.add (local.get $i) (i32.const 1)) (i32.const 8))))
+                (call $set_local_at (local.get $locals_ptr) (local.get $i)
+                  (i32.load (local.get $tmp2))
+                  (i32.load (i32.add (local.get $tmp2) (i32.const 4))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $cs_args)
+              )
+            )
+            (global.set $sp (local.get $tmp))
+            (call $push_frame
+              (global.get $pc)
+              (global.get $sp)
+              (local.get $locals_ptr)
+              (call $fntable_locals (local.get $fn_idx)))
+            (global.set $pc (i32.add
+              (global.get $bytecode_base)
+              (call $fntable_offset (local.get $fn_idx))))
+          )
+          (else
+            (global.set $sp (local.get $tmp))
+            (call $push_val (i32.const 0) (i32.const 0))
+          )
+        )'
 	]
 
 	numOps := len(handlers)
@@ -1359,19 +1992,4 @@ fn generateDispatchTable() {
 	result
 }
 
-// Helper function referenced from the CALL handler
-// Needs to be emitted in the WAT module
-fn generateSetLocalAtHelper() {
-	'
-  ;; Helper: set local in an explicit locals block (not current frame)
-  (func $set_local_at (param $locals_ptr i32) (param $idx i32)
-    (param $type i32) (param $val i32)
-    (local $base i32)
-    (local.set $base (i32.add
-      (local.get $locals_ptr)
-      (i32.mul (local.get $idx) (i32.const 8))))
-    (i32.store (local.get $base) (local.get $type))
-    (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $val))
-  )
-'
-}
+// (generateSetLocalAtHelper removed: $set_local_at is now defined inline in the WAT module)
