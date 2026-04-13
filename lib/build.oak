@@ -934,14 +934,12 @@ fn renderJavaBundle(bundleNode) {
 }
 
 // renderGraphBundle generates a Mermaid dependency graph from the build's
-// ModuleNodes map and stdlib imports.  It walks each module's raw AST to
-// extract import() calls so that stdlib dependencies are included even though
-// they are not stored in ModuleNodes.
+// ModuleNodes map and recursively resolves stdlib imports so the full
+// transitive dependency tree is shown.  Project modules are grouped in one
+// subgraph, stdlib modules in another; every edge in the transitive closure
+// is rendered so the complete tree is visible.
 fn renderGraphBundle(bundleNode) {
 	mermaid := import('mermaid')
-
-	g := mermaid.graph(:lr)
-	g |> mermaid.setTitle('Module Dependency Graph')
 
 	// Sanitize a module name/path into a Mermaid-safe node id
 	fn sanitizeId(s) {
@@ -993,51 +991,139 @@ fn renderGraphBundle(bundleNode) {
 		imports
 	}
 
-	// Collect all module paths and their raw import lists
-	moduleKeys := ModuleNodes |> keys()
-	allEdges := {}
-	allImportedNames := {}
-
-	moduleKeys |> each(fn(modPath) {
-		ast := ModuleNodes.(modPath)
-		imports := extractImports(ast)
-		allEdges.(modPath) <- imports
-		imports |> each(fn(imp) allImportedNames.(imp) <- true)
-	})
-
-	// Add nodes for every module in ModuleNodes
-	moduleKeys |> each(fn(modPath) {
-		id := sanitizeId(modPath)
-		label := shortName(modPath)
-		shape := if modPath = AbsoluteEntry {
-			true -> mermaid.ShapeStadium
-			_ -> mermaid.ShapeRect
-		}
-		g |> mermaid.node(id, label, shape)
-	})
-
-	// Add nodes for stdlib imports not in ModuleNodes
-	allImportedNames |> keys() |> each(fn(imp) {
-		alreadyInModules := moduleKeys |> reduce(false, fn(found, k) {
-			if found {
-				true -> true
-				_ -> k = imp
+	// Resolve the import list for any module name.  For modules in ModuleNodes
+	// we already have the AST; for stdlib modules we fetch the source via
+	// ___runtime_lib and parse it on the fly.
+	resolvedCache := {}
+	fn resolveImports(name) if cached := resolvedCache.(name) {
+		? -> {
+			imports := if ast := ModuleNodes.(name) {
+				? -> if ___runtime_lib?(name) {
+					true -> {
+						src := ___runtime_lib(name)
+						if nodes := syntax.parse(src) {
+							{ type: :error } -> []
+							_ -> extractImports(nodes)
+						}
+					}
+					_ -> []
+				}
+				_ -> extractImports(ast)
 			}
+			resolvedCache.(name) <- imports
+			imports
+		}
+		_ -> cached
+	}
+
+	// Walk the full dependency tree starting from a set of root names.
+	// Returns { name: [importName, ...], ... } for every reachable module.
+	fn walkTree(roots) {
+		visited := {}
+		fn visit(name) if visited.(name) {
+			? -> {
+				visited.(name) <- true
+				imports := resolveImports(name)
+				imports |> each(visit)
+			}
+			_ -> ?
+		}
+		roots |> each(visit)
+		// Build result map for every visited module
+		result := {}
+		visited |> keys() |> each(fn(name) {
+			result.(name) <- resolveImports(name)
 		})
-		if !alreadyInModules {
-			true -> {
-				id := sanitizeId(imp)
-				g |> mermaid.node(id, imp, mermaid.ShapeRound)
-			}
-		}
+		result
+	}
+
+	// Collect module paths from the build and walk the full tree
+	moduleKeys := ModuleNodes |> keys()
+	fullTree := walkTree(moduleKeys)
+	allNames := fullTree |> keys()
+
+	// Classify each module
+	fn isProjectModule?(name) ModuleNodes.(name) != ?
+
+	// --- Build the graph ---
+	g := mermaid.graph(:lr)
+	g |> mermaid.setTitle('Module Dependency Graph')
+
+	// Partition names into project modules and stdlib modules
+	projectNames := []
+	stdlibNames := []
+	allNames |> each(fn(name) if isProjectModule?(name) {
+		true -> projectNames <- projectNames << name
+		_ -> stdlibNames <- stdlibNames << name
 	})
 
-	// Add edges
-	moduleKeys |> each(fn(modPath) {
-		fromId := sanitizeId(modPath)
-		imports := allEdges.(modPath)
-		imports |> each(fn(imp) {
-			toId := sanitizeId(imp)
+	// Helper to pick node shape
+	fn shapeFor(name) if name = AbsoluteEntry {
+		true -> mermaid.ShapeStadium
+		_ -> if isProjectModule?(name) {
+			true -> mermaid.ShapeRect
+			_ -> mermaid.ShapeRound
+		}
+	}
+
+	// Add project modules subgraph (if more than one project file)
+	if len(projectNames) > 1 {
+		true -> g |> mermaid.subgraph('project_modules', 'Project Modules', fn(sg) {
+			projectNames |> each(fn(name) {
+				id := sanitizeId(name)
+				label := shortName(name)
+				sg |> mermaid.node(id, label, shapeFor(name))
+			})
+		})
+		_ -> projectNames |> each(fn(name) {
+			id := sanitizeId(name)
+			label := shortName(name)
+			g |> mermaid.node(id, label, shapeFor(name))
+		})
+	}
+
+	// Group stdlib modules into families based on common prefix (before first
+	// hyphen), e.g. email-smtp, email-pop → "email" family.
+	stdlibFamilies := {}
+	stdlibNames |> each(fn(name) {
+		parts := name |> split('-')
+		family := if len(parts) > 1 {
+			true -> parts.(0)
+			_ -> name
+		}
+		if stdlibFamilies.(family) = ? -> stdlibFamilies.(family) <- []
+		stdlibFamilies.(family) <- stdlibFamilies.(family) << name
+	})
+
+	// Render each stdlib family: families with >1 member get a subgraph,
+	// singletons are placed in a catch-all "Stdlib" subgraph.
+	singletons := []
+	familyKeys := stdlibFamilies |> keys()
+	familyKeys |> each(fn(fam) {
+		members := stdlibFamilies.(fam)
+		if len(members) > 1 {
+			true -> g |> mermaid.subgraph('stdlib_' << sanitizeId(fam), fam, fn(sg) {
+				members |> each(fn(name) {
+					id := sanitizeId(name)
+					sg |> mermaid.node(id, name, shapeFor(name))
+				})
+			})
+			_ -> singletons <- singletons << members.(0)
+		}
+	})
+	if len(singletons) > 0 -> g |> mermaid.subgraph('stdlib_core', 'Standard Library', fn(sg) {
+		singletons |> each(fn(name) {
+			id := sanitizeId(name)
+			sg |> mermaid.node(id, name, shapeFor(name))
+		})
+	})
+
+	// Add all edges across the full tree
+	allNames |> each(fn(name) {
+		fromId := sanitizeId(name)
+		deps := fullTree.(name)
+		if deps != ? -> deps |> each(fn(dep) {
+			toId := sanitizeId(dep)
 			g |> mermaid.edge(fromId, toId)
 		})
 	})

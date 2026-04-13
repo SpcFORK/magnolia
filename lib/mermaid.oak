@@ -179,13 +179,13 @@ fn renderEdge(e) {
 
 fn renderSubgraph(sg, indent) {
 	lines := []
-	lines <- lines |> append([indent << 'subgraph ' << sg.id << ' ["' << escapeLabel(sg.label) << '"]'])
-	inner := indent << '    '
+	lines <- lines |> append([indent + 'subgraph ' + sg.id + ' ["' + escapeLabel(sg.label) + '"]'])
+	inner := indent + '    '
 	sg.graph.nodes |> each(fn(n) {
-		lines <- lines |> append([inner << renderShape(n.id, n.label, n.shape)])
+		lines <- lines |> append([inner + renderShape(n.id, n.label, n.shape)])
 	})
 	sg.graph.edges |> each(fn(e) {
-		lines <- lines |> append([inner << renderEdge(e) |> trim()])
+		lines <- lines |> append([inner + (renderEdge(e) |> trim())])
 	})
 	sg.graph.subgraphs |> each(fn(child) {
 		renderSubgraph(child, inner) |> each(fn(l) {
@@ -193,9 +193,9 @@ fn renderSubgraph(sg, indent) {
 		})
 	})
 	sg.graph.rawLines |> each(fn(l) {
-		lines <- lines |> append([inner << l])
+		lines <- lines |> append([inner + l])
 	})
-	lines <- lines |> append([indent << 'end'])
+	lines <- lines |> append([indent + 'end'])
 	lines
 }
 
@@ -232,16 +232,16 @@ fn renderFlowchart(g) {
 		:gantt -> 'gantt'
 		:erDiagram -> 'erDiagram'
 		:gitGraph -> 'gitgraph'
-		_ -> 'flowchart ' << dir
+		_ -> 'flowchart ' + dir
 	}
 
-	if g.title != '' -> lines <- lines |> append(['---', 'title: ' << g.title, '---'])
-	if g.theme != '' -> lines <- lines |> append(['%%{init: {\'theme\': \'' << g.theme << '\'}}%%'])
+	if g.title != '' -> lines <- lines |> append(['---', 'title: ' + g.title, '---'])
+	if g.theme != '' -> lines <- lines |> append(['%%{init: {\'theme\': \'' + g.theme + '\'}}%%'])
 	lines <- lines |> append([header])
 
 	// Nodes
 	g.nodes |> each(fn(n) {
-		lines <- lines |> append(['    ' << renderShape(n.id, n.label, n.shape)])
+		lines <- lines |> append(['    ' + renderShape(n.id, n.label, n.shape)])
 	})
 
 	// Edges
@@ -258,7 +258,7 @@ fn renderFlowchart(g) {
 
 	// Raw lines
 	g.rawLines |> each(fn(l) {
-		lines <- lines |> append(['    ' << l])
+		lines <- lines |> append(['    ' + l])
 	})
 
 	lines |> join(char(10))
@@ -317,19 +317,21 @@ fn pieSlice(g, label, value) {
 // renderHTML(g) returns a standalone HTML page that renders the diagram.
 fn renderHTML(g) {
 	mermaidText := render(g)
+	titleText := if g.title { '' -> 'Mermaid Diagram', _ -> g.title }
+	themeInit := if g.theme { '' -> '', _ -> ',theme:"' + g.theme + '"' }
 	'<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>' << (if g.title { '' -> 'Mermaid Diagram', _ -> g.title }) << '</title>
+<title>' + titleText + '</title>
 <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 <style>body{display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5;font-family:sans-serif}.mermaid{background:#fff;padding:2em;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}</style>
 </head>
 <body>
 <div class="mermaid">
-' << mermaidText << '
+' + mermaidText + '
 </div>
-<script>mermaid.initialize({startOnLoad:true' << (if g.theme { '' -> '', _ -> ',theme:"' << g.theme << '"' }) << '});</script>
+<script>mermaid.initialize({startOnLoad:true' + themeInit + '});</script>
 </body>
 </html>'
 }
@@ -368,7 +370,7 @@ fn saveImage(g, filepath, opts) {
 	theme := opts.theme |> default(g.theme) |> default('default')
 
 	// Write temporary .mmd file
-	tmpFile := filepath << '.tmp.mmd'
+	tmpFile := filepath + '.tmp.mmd'
 	text := render(g)
 	fs.writeFile(tmpFile, text)
 
