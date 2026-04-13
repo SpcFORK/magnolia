@@ -5,7 +5,7 @@
 
 **Magnolia** is an expressive, dynamically typed programming language based on [Oak](https://oaklang.org/). It extends Oak with a cross-platform GUI system, audio/DSP processing, full networking stack, concurrency primitives, multi-target compilation (JS, WASM, Lua, TypeScript), GPU interop, AST macros, a self-hosted bytecode VM, and 140+ standard library modules — while keeping the simplicity and elegance of the original language.
 
-> **Highlights:** 3.7x faster bytecode VM · Cross-platform GUI (Win32/X11/WebGL) with Vulkan · CPU shader engine · P2P mesh networking · Thread pools & async event bus · 8 compilation targets · Self-hosted bytecode VM · 67 sample programs
+> **Highlights:** 3.7x faster bytecode VM · Cross-platform GUI (Win32/X11/WebGL) with Vulkan · CPU shader engine · P2P mesh networking · Thread pools & async event bus · 9 compilation targets · Self-hosted bytecode VM · Mermaid dependency graphs · 67 sample programs
 
 ---
 
@@ -677,7 +677,7 @@ See [docs/runtime-codegen.md](docs/runtime-codegen.md).
 
 ### 🌍 Build System & Multi-Target Compilation
 
-Magnolia's build system bundles multi-file programs into single deployable artifacts, with **8 compilation targets**:
+Magnolia's build system bundles multi-file programs into single deployable artifacts, with **9 compilation targets**:
 
 | Target | Flag | Description |
 |--------|------|-------------|
@@ -689,16 +689,18 @@ Magnolia's build system bundles multi-file programs into single deployable artif
 | Documentation | `--doc` | Generated docs |
 | TypeScript | `--ts` | TypeScript output |
 | Lua | `--lua` | Lua transpilation |
+| Dependency graph | `--graph` | Mermaid diagram of module imports |
 
 ```sh
 magnolia build --entry src/main.oak --output dist/bundle.oak         # Native
 magnolia build --entry src/app.oak --output dist/bundle.js --web     # JavaScript
-magnolia build --entry src/main.oak --output dist/program.wat --wasm # WebAssembly
+magnolia build --entry src/main.oak --output dist/program.wat --wasm  # WebAssembly
+magnolia build --entry src/main.oak --output dist/deps.mmd --graph    # Dependency graph
 ```
 
 Features: module bundling, dependency resolution, tree-shaking, code minification, virtual filesystem embedding, and transpile middleware hooks.
 
-See [docs/build.md](docs/build.md) and [docs/wasm.md](docs/wasm.md).
+See [docs/build.md](docs/build.md), [docs/wasm.md](docs/wasm.md), and [docs/mermaid.md](docs/mermaid.md).
 
 ---
 
@@ -842,6 +844,7 @@ magnolia/
 │   ├── websocket.oak     #   WebSocket support
 │   ├── thread.oak        #   Concurrency primitives
 │   ├── build*.oak        #   Build system & bundler
+│   ├── mermaid.oak       #   Mermaid diagram generation & module graphs
 │   ├── syntax*.oak       #   Parsing, macros, AST transforms
 │   ├── windows*.oak      #   Windows platform bindings
 │   ├── Linux*.oak        #   Linux platform bindings
@@ -904,17 +907,18 @@ Both sets run entirely in "userland" without invoking the interpreter separately
 
 ## Documentation Index
 
-Comprehensive docs for every module live in [docs/](docs/). The [docs/spec/](docs/spec/) directory contains **171 detailed specification files** mirroring the stdlib — one per module — covering every function signature, data structure, and usage pattern.
+Comprehensive docs for every module live in [docs/](docs/). The [docs/spec/](docs/spec/) directory contains **184 detailed specification files** mirroring the stdlib — one per module — covering every function signature, data structure, and usage pattern.
 
 <details>
-<summary><strong>Language Specification</strong> (171 spec files)</summary>
+<summary><strong>Language Specification</strong> (184 spec files)</summary>
 
 The [docs/spec/](docs/spec/) directory provides per-module API specifications organized by category:
 
-- **Syntax & AST** — [syntax.md](docs/spec/syntax.md) · [syntax-tokenize.md](docs/spec/syntax-tokenize.md) · [syntax-parse.md](docs/spec/syntax-parse.md) · [syntax-print.md](docs/spec/syntax-print.md) · [syntax-macros.md](docs/spec/syntax-macros.md) · [ast-analyze.md](docs/spec/ast-analyze.md) · [ast-transform.md](docs/spec/ast-transform.md)
-- **Build & Bundling** — [build-analyze.md](docs/spec/build-analyze.md) · [build-ast.md](docs/spec/build-ast.md) · [build-config.md](docs/spec/build-config.md) · [build-ident.md](docs/spec/build-ident.md) · [build-imports.md](docs/spec/build-imports.md) · [build-includes.md](docs/spec/build-includes.md) · [build-render.md](docs/spec/build-render.md) · [build-render-node.md](docs/spec/build-render-node.md) · [bundle-utils.md](docs/spec/bundle-utils.md) · [pack.md](docs/spec/pack.md) · [pack-utils.md](docs/spec/pack-utils.md)
-- **Audio** — [audio.md](docs/spec/audio.md) · [audio-aiff.md](docs/spec/audio-aiff.md) · [audio-au.md](docs/spec/audio-au.md) · [audio-wav.md](docs/spec/audio-wav.md) · [audio-raw.md](docs/spec/audio-raw.md) · [audio-dsp.md](docs/spec/audio-dsp.md) · [audio-fft.md](docs/spec/audio-fft.md) · [audio-complex.md](docs/spec/audio-complex.md)
-- **GUI Core** — [GUI.md](docs/spec/GUI.md) · [gui-2d.md](docs/spec/gui-2d.md) · [gui-3dmath.md](docs/spec/gui-3dmath.md) · [gui-color.md](docs/spec/gui-color.md) · [gui-canvas.md](docs/spec/gui-canvas.md) · [gui-render.md](docs/spec/gui-render.md) · [gui-loop.md](docs/spec/gui-loop.md) · [gui-resolution.md](docs/spec/gui-resolution.md) · [gui-theme.md](docs/spec/gui-theme.md) · [gui-video.md](docs/spec/gui-video.md) · [gui-web.md](docs/spec/gui-web.md) · [gui-graph.md](docs/spec/gui-graph.md) · [gui-mesh.md](docs/spec/gui-mesh.md) · [gui-lighting.md](docs/spec/gui-lighting.md)
+- **Syntax & AST** — [syntax.md](docs/spec/syntax.md) · [syntax-tokenize.md](docs/spec/syntax-tokenize.md) · [syntax-parse.md](docs/spec/syntax-parse.md) · [syntax-print.md](docs/spec/syntax-print.md) · [syntax-macros.md](docs/spec/syntax-macros.md) · [syntaxfmt.md](docs/spec/syntaxfmt.md) · [ast-analyze.md](docs/spec/ast-analyze.md) · [ast-transform.md](docs/spec/ast-transform.md)
+- **Build & Bundling** — [build.md](docs/spec/build.md) · [build-analyze.md](docs/spec/build-analyze.md) · [build-ast.md](docs/spec/build-ast.md) · [build-config.md](docs/spec/build-config.md) · [build-ident.md](docs/spec/build-ident.md) · [build-imports.md](docs/spec/build-imports.md) · [build-includes.md](docs/spec/build-includes.md) · [build-render.md](docs/spec/build-render.md) · [build-render-node.md](docs/spec/build-render-node.md) · [bundle-ast.md](docs/spec/bundle-ast.md) · [bundle-utils.md](docs/spec/bundle-utils.md) · [pack.md](docs/spec/pack.md) · [pack-utils.md](docs/spec/pack-utils.md)
+- **Audio** — [audio.md](docs/spec/audio.md) · [audio-aiff.md](docs/spec/audio-aiff.md) · [audio-au.md](docs/spec/audio-au.md) · [audio-wav.md](docs/spec/audio-wav.md) · [audio-ogg.md](docs/spec/audio-ogg.md) · [audio-raw.md](docs/spec/audio-raw.md) · [audio-dsp.md](docs/spec/audio-dsp.md) · [audio-fft.md](docs/spec/audio-fft.md) · [audio-complex.md](docs/spec/audio-complex.md)
+- **AI & Machine Learning** — [ai.md](docs/spec/ai.md) · [ai-data.md](docs/spec/ai-data.md) · [ai-decode.md](docs/spec/ai-decode.md) · [ai-linalg.md](docs/spec/ai-linalg.md) · [ai-ml.md](docs/spec/ai-ml.md) · [ai-nn.md](docs/spec/ai-nn.md) · [ai-optim.md](docs/spec/ai-optim.md) · [ai-text.md](docs/spec/ai-text.md) · [ai-vec.md](docs/spec/ai-vec.md)
+- **GUI Core** — [GUI.md](docs/spec/GUI.md) · [gui-2d.md](docs/spec/gui-2d.md) · [gui-3dmath.md](docs/spec/gui-3dmath.md) · [gui-audio.md](docs/spec/gui-audio.md) · [gui-canvas.md](docs/spec/gui-canvas.md) · [gui-color.md](docs/spec/gui-color.md) · [gui-common.md](docs/spec/gui-common.md) · [gui-draw.md](docs/spec/gui-draw.md) · [gui-graph.md](docs/spec/gui-graph.md) · [gui-lighting.md](docs/spec/gui-lighting.md) · [gui-loop.md](docs/spec/gui-loop.md) · [gui-menus.md](docs/spec/gui-menus.md) · [gui-mesh.md](docs/spec/gui-mesh.md) · [gui-raster.md](docs/spec/gui-raster.md) · [gui-render.md](docs/spec/gui-render.md) · [gui-resolution.md](docs/spec/gui-resolution.md) · [gui-theme.md](docs/spec/gui-theme.md) · [gui-thread.md](docs/spec/gui-thread.md) · [gui-video.md](docs/spec/gui-video.md) · [gui-web.md](docs/spec/gui-web.md)
 - **GUI Shaders** — [gui-shader.md](docs/spec/gui-shader.md) · [gui-shader-codegen.md](docs/spec/gui-shader-codegen.md) · [gui-shader-color.md](docs/spec/gui-shader-color.md) · [gui-shader-math.md](docs/spec/gui-shader-math.md) · [gui-shader-noise.md](docs/spec/gui-shader-noise.md) · [gui-shader-sdf.md](docs/spec/gui-shader-sdf.md)
 - **GUI Input & Interaction** — [gui-input.md](docs/spec/gui-input.md) · [gui-form.md](docs/spec/gui-form.md) · [gui-events.md](docs/spec/gui-events.md) · [gui-gamepad.md](docs/spec/gui-gamepad.md) · [gui-filedrop.md](docs/spec/gui-filedrop.md) · [gui-clipboard.md](docs/spec/gui-clipboard.md) · [gui-dialogs.md](docs/spec/gui-dialogs.md) · [gui-accessibility.md](docs/spec/gui-accessibility.md) · [gui-systray.md](docs/spec/gui-systray.md) · [gui-fonts.md](docs/spec/gui-fonts.md)
 - **GUI Rendering Backends** — [gui-aa.md](docs/spec/gui-aa.md) · [gui-print.md](docs/spec/gui-print.md) · [gui-leak-detect.md](docs/spec/gui-leak-detect.md) · [gui-gpu-info.md](docs/spec/gui-gpu-info.md) · [gui-draw-ops.md](docs/spec/gui-draw-ops.md) · [gui-test.md](docs/spec/gui-test.md)
@@ -926,45 +930,45 @@ The [docs/spec/](docs/spec/) directory provides per-module API specifications or
 - **Networking** — [socket.md](docs/spec/socket.md) · [websocket.md](docs/spec/websocket.md) · [http.md](docs/spec/http.md) · [p2p.md](docs/spec/p2p.md) · [email.md](docs/spec/email.md) · [email-smtp.md](docs/spec/email-smtp.md) · [email-imap.md](docs/spec/email-imap.md) · [email-pop.md](docs/spec/email-pop.md) · [smtp.md](docs/spec/smtp.md) · [imap.md](docs/spec/imap.md) · [pop.md](docs/spec/pop.md) · [WLAN.md](docs/spec/WLAN.md)
 - **Crypto & Security** — [crypto.md](docs/spec/crypto.md) · [dataprot.md](docs/spec/dataprot.md)
 - **Math** — [math.md](docs/spec/math.md) · [math-base.md](docs/spec/math-base.md) · [math-geo.md](docs/spec/math-geo.md) · [math-stats.md](docs/spec/math-stats.md)
-- **Runtime & VMs** — [Virtual.md](docs/spec/Virtual.md) · [Virtual-Bytecode.md](docs/spec/Virtual-Bytecode.md) · [VirtualToken.md](docs/spec/VirtualToken.md) · [wasm-vm.md](docs/spec/wasm-vm.md) · [runtime-native.md](docs/spec/runtime-native.md) · [runtime-js.md](docs/spec/runtime-js.md) · [runtime-codegen.md](docs/spec/runtime-codegen.md)
+- **Runtime & VMs** — [Virtual.md](docs/spec/Virtual.md) · [Virtual-Bytecode.md](docs/spec/Virtual-Bytecode.md) · [VirtualToken.md](docs/spec/VirtualToken.md) · [wasm-vm.md](docs/spec/wasm-vm.md) · [wasm-vm-runtime.md](docs/spec/wasm-vm-runtime.md) · [runtime-native.md](docs/spec/runtime-native.md) · [runtime-js.md](docs/spec/runtime-js.md) · [runtime-codegen.md](docs/spec/runtime-codegen.md) · [codegen-common.md](docs/spec/codegen-common.md)
 - **Platform — Windows** — [windows.md](docs/spec/windows.md) · [windows-constants.md](docs/spec/windows-constants.md) · [windows-core.md](docs/spec/windows-core.md) · [windows-flags.md](docs/spec/windows-flags.md) · [windows-kernel.md](docs/spec/windows-kernel.md) · [windows-gdi.md](docs/spec/windows-gdi.md) · [windows-fonts.md](docs/spec/windows-fonts.md) · [windows-windowing.md](docs/spec/windows-windowing.md) · [windows-registry.md](docs/spec/windows-registry.md) · [windows-net.md](docs/spec/windows-net.md) · [windows-loader.md](docs/spec/windows-loader.md) · [win-common.md](docs/spec/win-common.md)
 - **Platform — Linux** — [Linux.md](docs/spec/Linux.md) · [linux-constants.md](docs/spec/linux-constants.md) · [linux-core.md](docs/spec/linux-core.md) · [linux-libc.md](docs/spec/linux-libc.md) · [linux-fonts.md](docs/spec/linux-fonts.md) · [linux-loader.md](docs/spec/linux-loader.md) · [linux-windowing.md](docs/spec/linux-windowing.md)
-- **Core & Utilities** — [std.md](docs/spec/std.md) · [str.md](docs/spec/str.md) · [fmt.md](docs/spec/fmt.md) · [fs.md](docs/spec/fs.md) · [path.md](docs/spec/path.md) · [cli.md](docs/spec/cli.md) · [shell.md](docs/spec/shell.md) · [sort.md](docs/spec/sort.md) · [random.md](docs/spec/random.md) · [datetime.md](docs/spec/datetime.md) · [bitwise.md](docs/spec/bitwise.md) · [test.md](docs/spec/test.md) · [debug.md](docs/spec/debug.md) · [sys.md](docs/spec/sys.md) · [thread.md](docs/spec/thread.md) · [video.md](docs/spec/video.md) · [writes.md](docs/spec/writes.md) · [codecols.md](docs/spec/codecols.md) · [ai.md](docs/spec/ai.md) · [gpu.md](docs/spec/gpu.md) · [gpus.md](docs/spec/gpus.md) · [transpile.md](docs/spec/transpile.md) · [syntaxfmt.md](docs/spec/syntaxfmt.md)
+- **Core & Utilities** — [std.md](docs/spec/std.md) · [str.md](docs/spec/str.md) · [fmt.md](docs/spec/fmt.md) · [fs.md](docs/spec/fs.md) · [path.md](docs/spec/path.md) · [cli.md](docs/spec/cli.md) · [shell.md](docs/spec/shell.md) · [sort.md](docs/spec/sort.md) · [random.md](docs/spec/random.md) · [datetime.md](docs/spec/datetime.md) · [bitwise.md](docs/spec/bitwise.md) · [test.md](docs/spec/test.md) · [debug.md](docs/spec/debug.md) · [sys.md](docs/spec/sys.md) · [thread.md](docs/spec/thread.md) · [async-event-bus.md](docs/spec/async-event-bus.md) · [video.md](docs/spec/video.md) · [writes.md](docs/spec/writes.md) · [codecols.md](docs/spec/codecols.md) · [gpu.md](docs/spec/gpu.md) · [gpus.md](docs/spec/gpus.md) · [transpile.md](docs/spec/transpile.md)
 
 </details>
 
 <details>
-<summary><strong>GUI & Graphics</strong> (29 docs)</summary>
+<summary><strong>GUI & Graphics</strong> (58 docs)</summary>
 
-[gui.md](docs/gui.md) · [gui-2d.md](docs/gui-2d.md) · [gui-3dmath.md](docs/gui-3dmath.md) · [gui-color.md](docs/gui-color.md) · [gui-common.md](docs/gui-common.md) · [gui-draw.md](docs/gui-draw.md) · [gui-events.md](docs/gui-events.md) · [gui-fonts.md](docs/gui-fonts.md) · [gui-form.md](docs/gui-form.md) · [gui-graph.md](docs/gui-graph.md) · [gui-lighting.md](docs/gui-lighting.md) · [gui-loop.md](docs/gui-loop.md) · [gui-mesh.md](docs/gui-mesh.md) · [gui-raster.md](docs/gui-raster.md) · [gui-render.md](docs/gui-render.md) · [gui-resolution.md](docs/gui-resolution.md) · [gui-shader.md](docs/gui-shader.md) · [gui-shader-codegen.md](docs/gui-shader-codegen.md) · [gui-shader-color.md](docs/gui-shader-color.md) · [gui-shader-math.md](docs/gui-shader-math.md) · [gui-shader-noise.md](docs/gui-shader-noise.md) · [gui-shader-sdf.md](docs/gui-shader-sdf.md) · [gui-video.md](docs/gui-video.md) · [gui-web.md](docs/gui-web.md) · [gui-native-win.md](docs/gui-native-win.md) · [gui-native-win-vulkan.md](docs/gui-native-win-vulkan.md) · [gui-native-win-opengl.md](docs/gui-native-win-opengl.md) · [gui-native-win-ddraw.md](docs/gui-native-win-ddraw.md) · [gui-native-linux.md](docs/gui-native-linux.md)
-
-</details>
-
-<details>
-<summary><strong>Audio</strong> (5 docs)</summary>
-
-[audio.md](docs/audio.md) · [audio-wav.md](docs/audio-wav.md) · [audio-dsp.md](docs/audio-dsp.md) · [audio-fft.md](docs/audio-fft.md) · [audio-complex.md](docs/audio-complex.md)
+[gui.md](docs/gui.md) · [gui-2d.md](docs/gui-2d.md) · [gui-3dmath.md](docs/gui-3dmath.md) · [gui-aa.md](docs/gui-aa.md) · [gui-accessibility.md](docs/gui-accessibility.md) · [gui-audio.md](docs/gui-audio.md) · [gui-canvas.md](docs/gui-canvas.md) · [gui-clipboard.md](docs/gui-clipboard.md) · [gui-color.md](docs/gui-color.md) · [gui-common.md](docs/gui-common.md) · [gui-dialogs.md](docs/gui-dialogs.md) · [gui-draw.md](docs/gui-draw.md) · [gui-draw-ops.md](docs/gui-draw-ops.md) · [gui-events.md](docs/gui-events.md) · [gui-filedrop.md](docs/gui-filedrop.md) · [gui-fonts.md](docs/gui-fonts.md) · [gui-form.md](docs/gui-form.md) · [gui-gamepad.md](docs/gui-gamepad.md) · [gui-gpu-info.md](docs/gui-gpu-info.md) · [gui-graph.md](docs/gui-graph.md) · [gui-input.md](docs/gui-input.md) · [gui-leak-detect.md](docs/gui-leak-detect.md) · [gui-lighting.md](docs/gui-lighting.md) · [gui-loop.md](docs/gui-loop.md) · [gui-menus.md](docs/gui-menus.md) · [gui-mesh.md](docs/gui-mesh.md) · [gui-native-linux.md](docs/gui-native-linux.md) · [gui-native-win.md](docs/gui-native-win.md) · [gui-native-win-close.md](docs/gui-native-win-close.md) · [gui-native-win-d3d11.md](docs/gui-native-win-d3d11.md) · [gui-native-win-ddraw.md](docs/gui-native-win-ddraw.md) · [gui-native-win-frame.md](docs/gui-native-win-frame.md) · [gui-native-win-icons.md](docs/gui-native-win-icons.md) · [gui-native-win-opengl.md](docs/gui-native-win-opengl.md) · [gui-native-win-poll.md](docs/gui-native-win-poll.md) · [gui-native-win-present.md](docs/gui-native-win-present.md) · [gui-native-win-probe.md](docs/gui-native-win-probe.md) · [gui-native-win-vulkan.md](docs/gui-native-win-vulkan.md) · [gui-native-win-vulkan-constants.md](docs/gui-native-win-vulkan-constants.md) · [gui-native-win-vulkan-init.md](docs/gui-native-win-vulkan-init.md) · [gui-native-win-vulkan-present.md](docs/gui-native-win-vulkan-present.md) · [gui-native-win-vulkan-swapchain.md](docs/gui-native-win-vulkan-swapchain.md) · [gui-print.md](docs/gui-print.md) · [gui-raster.md](docs/gui-raster.md) · [gui-render.md](docs/gui-render.md) · [gui-resolution.md](docs/gui-resolution.md) · [gui-shader.md](docs/gui-shader.md) · [gui-shader-codegen.md](docs/gui-shader-codegen.md) · [gui-shader-color.md](docs/gui-shader-color.md) · [gui-shader-math.md](docs/gui-shader-math.md) · [gui-shader-noise.md](docs/gui-shader-noise.md) · [gui-shader-sdf.md](docs/gui-shader-sdf.md) · [gui-systray.md](docs/gui-systray.md) · [gui-test.md](docs/gui-test.md) · [gui-theme.md](docs/gui-theme.md) · [gui-thread.md](docs/gui-thread.md) · [gui-video.md](docs/gui-video.md) · [gui-web.md](docs/gui-web.md)
 
 </details>
 
 <details>
-<summary><strong>Networking</strong> (7 docs)</summary>
+<summary><strong>Audio</strong> (9 docs)</summary>
 
-[http.md](docs/http.md) · [websocket.md](docs/websocket.md) · [socket.md](docs/socket.md) · [p2p.md](docs/p2p.md) · [smtp.md](docs/smtp.md) · [imap.md](docs/imap.md) · [wlan.md](docs/wlan.md)
-
-</details>
-
-<details>
-<summary><strong>Build System & Targets</strong> (15 docs)</summary>
-
-[build.md](docs/build.md) · [build-analyze.md](docs/build-analyze.md) · [build-ast.md](docs/build-ast.md) · [build-config.md](docs/build-config.md) · [build-ident.md](docs/build-ident.md) · [build-imports.md](docs/build-imports.md) · [build-includes.md](docs/build-includes.md) · [build-render.md](docs/build-render.md) · [build-render-node.md](docs/build-render-node.md) · [bundle-ast.md](docs/bundle-ast.md) · [bundle-utils.md](docs/bundle-utils.md) · [target-ast.md](docs/target-ast.md) · [target-bin.md](docs/target-bin.md) · [target-doc.md](docs/target-doc.md) · [target-lua.md](docs/target-lua.md)
+[audio.md](docs/audio.md) · [audio-aiff.md](docs/audio-aiff.md) · [audio-au.md](docs/audio-au.md) · [audio-complex.md](docs/audio-complex.md) · [audio-dsp.md](docs/audio-dsp.md) · [audio-fft.md](docs/audio-fft.md) · [audio-ogg.md](docs/audio-ogg.md) · [audio-raw.md](docs/audio-raw.md) · [audio-wav.md](docs/audio-wav.md)
 
 </details>
 
 <details>
-<summary><strong>Virtual Machines & Code Gen</strong> (7 docs)</summary>
+<summary><strong>Networking</strong> (12 docs)</summary>
 
-[Virtual-Bytecode.md](docs/Virtual-Bytecode.md) · [Virtual.md](docs/Virtual.md) · [VirtualToken.md](docs/VirtualToken.md) · [wasm-vm.md](docs/wasm-vm.md) · [wasm.md](docs/wasm.md) · [runtime-codegen.md](docs/runtime-codegen.md) · [engine-switching.md](docs/engine-switching.md)
+[http.md](docs/http.md) · [websocket.md](docs/websocket.md) · [socket.md](docs/socket.md) · [p2p.md](docs/p2p.md) · [smtp.md](docs/smtp.md) · [imap.md](docs/imap.md) · [pop.md](docs/pop.md) · [wlan.md](docs/wlan.md) · [email.md](docs/email.md) · [email-imap.md](docs/email-imap.md) · [email-pop.md](docs/email-pop.md) · [email-smtp.md](docs/email-smtp.md)
+
+</details>
+
+<details>
+<summary><strong>Build System & Targets</strong> (17 docs)</summary>
+
+[build.md](docs/build.md) · [build-analyze.md](docs/build-analyze.md) · [build-ast.md](docs/build-ast.md) · [build-config.md](docs/build-config.md) · [build-ident.md](docs/build-ident.md) · [build-imports.md](docs/build-imports.md) · [build-includes.md](docs/build-includes.md) · [build-render.md](docs/build-render.md) · [build-render-node.md](docs/build-render-node.md) · [bundle-ast.md](docs/bundle-ast.md) · [bundle-utils.md](docs/bundle-utils.md) · [mermaid.md](docs/mermaid.md) · [target-ast.md](docs/target-ast.md) · [target-bin.md](docs/target-bin.md) · [target-doc.md](docs/target-doc.md) · [target-java.md](docs/target-java.md) · [target-lua.md](docs/target-lua.md) · [target-ts.md](docs/target-ts.md)
+
+</details>
+
+<details>
+<summary><strong>Virtual Machines & Code Gen</strong> (11 docs)</summary>
+
+[Virtual-Bytecode.md](docs/Virtual-Bytecode.md) · [Virtual.md](docs/Virtual.md) · [VirtualToken.md](docs/VirtualToken.md) · [wasm-vm.md](docs/wasm-vm.md) · [wasm-vm-runtime.md](docs/wasm-vm-runtime.md) · [wasm.md](docs/wasm.md) · [runtime-codegen.md](docs/runtime-codegen.md) · [runtime-js.md](docs/runtime-js.md) · [runtime-native.md](docs/runtime-native.md) · [codegen-common.md](docs/codegen-common.md) · [engine-switching.md](docs/engine-switching.md)
 
 </details>
 
@@ -976,30 +980,30 @@ The [docs/spec/](docs/spec/) directory provides per-module API specifications or
 </details>
 
 <details>
-<summary><strong>Syntax & Macros</strong> (7 docs)</summary>
+<summary><strong>Syntax & Macros</strong> (8 docs)</summary>
 
-[syntax.md](docs/syntax.md) · [syntax-parse.md](docs/syntax-parse.md) · [syntax-print.md](docs/syntax-print.md) · [syntax-tokenize.md](docs/syntax-tokenize.md) · [syntax-macros.md](docs/syntax-macros.md) · [ast-analyze.md](docs/ast-analyze.md) · [ast-transform.md](docs/ast-transform.md)
-
-</details>
-
-<details>
-<summary><strong>Platform & System</strong> (20 docs)</summary>
-
-[windows.md](docs/windows.md) · [windows-constants.md](docs/windows-constants.md) · [windows-core.md](docs/windows-core.md) · [windows-flags.md](docs/windows-flags.md) · [windows-fonts.md](docs/windows-fonts.md) · [windows-gdi.md](docs/windows-gdi.md) · [windows-kernel.md](docs/windows-kernel.md) · [windows-loader.md](docs/windows-loader.md) · [windows-net.md](docs/windows-net.md) · [windows-registry.md](docs/windows-registry.md) · [windows-windowing.md](docs/windows-windowing.md) · [linux.md](docs/linux.md) · [linux-constants.md](docs/linux-constants.md) · [linux-core.md](docs/linux-core.md) · [linux-fonts.md](docs/linux-fonts.md) · [linux-libc.md](docs/linux-libc.md) · [linux-loader.md](docs/linux-loader.md) · [linux-windowing.md](docs/linux-windowing.md) · [gpu.md](docs/gpu.md) · [gpus.md](docs/gpus.md) · [go.md](docs/go.md) · [sys.md](docs/sys.md)
+[syntax.md](docs/syntax.md) · [syntax-parse.md](docs/syntax-parse.md) · [syntax-print.md](docs/syntax-print.md) · [syntax-tokenize.md](docs/syntax-tokenize.md) · [syntax-macros.md](docs/syntax-macros.md) · [syntaxfmt.md](docs/syntaxfmt.md) · [ast-analyze.md](docs/ast-analyze.md) · [ast-transform.md](docs/ast-transform.md)
 
 </details>
 
 <details>
-<summary><strong>Data, Crypto & Utilities</strong> (15 docs)</summary>
+<summary><strong>Platform & System</strong> (23 docs)</summary>
 
-[compression.md](docs/compression.md) · [compression-huffman.md](docs/compression-huffman.md) · [compression-lzw.md](docs/compression-lzw.md) · [compression-rle.md](docs/compression-rle.md) · [msgpack.md](docs/msgpack.md) · [json.md](docs/json.md) · [crypto.md](docs/crypto.md) · [dataprot.md](docs/dataprot.md) · [bmp.md](docs/bmp.md) · [ico.md](docs/ico.md) · [video.md](docs/video.md) · [datetime.md](docs/datetime.md) · [math.md](docs/math.md) · [math-geo.md](docs/math-geo.md) · [math-stats.md](docs/math-stats.md) · [math-base.md](docs/math-base.md)
+[windows.md](docs/windows.md) · [windows-constants.md](docs/windows-constants.md) · [windows-core.md](docs/windows-core.md) · [windows-flags.md](docs/windows-flags.md) · [windows-fonts.md](docs/windows-fonts.md) · [windows-gdi.md](docs/windows-gdi.md) · [windows-kernel.md](docs/windows-kernel.md) · [windows-loader.md](docs/windows-loader.md) · [windows-net.md](docs/windows-net.md) · [windows-registry.md](docs/windows-registry.md) · [windows-windowing.md](docs/windows-windowing.md) · [win-common.md](docs/win-common.md) · [linux.md](docs/linux.md) · [linux-constants.md](docs/linux-constants.md) · [linux-core.md](docs/linux-core.md) · [linux-fonts.md](docs/linux-fonts.md) · [linux-libc.md](docs/linux-libc.md) · [linux-loader.md](docs/linux-loader.md) · [linux-windowing.md](docs/linux-windowing.md) · [gpu.md](docs/gpu.md) · [gpus.md](docs/gpus.md) · [go.md](docs/go.md) · [sys.md](docs/sys.md)
 
 </details>
 
 <details>
-<summary><strong>Core Language & Misc</strong> (12 docs)</summary>
+<summary><strong>Data, Crypto & Utilities</strong> (32 docs)</summary>
 
-[spec.md](docs/spec.md) · [cs.md](docs/cs.md) · [str.md](docs/str.md) · [fmt.md](docs/fmt.md) · [fs.md](docs/fs.md) · [path.md](docs/path.md) · [cli.md](docs/cli.md) · [debug.md](docs/debug.md) · [error-display.md](docs/error-display.md) · [bitwise.md](docs/bitwise.md) · [transpile.md](docs/transpile.md) · [virtual-fs.md](docs/virtual-fs.md) · [pack.md](docs/pack.md)
+[data.md](docs/data.md) · [data-csv.md](docs/data-csv.md) · [data-ini.md](docs/data-ini.md) · [data-toml.md](docs/data-toml.md) · [data-xml.md](docs/data-xml.md) · [data-yaml.md](docs/data-yaml.md) · [compression.md](docs/compression.md) · [compression-huffman.md](docs/compression-huffman.md) · [compression-lzw.md](docs/compression-lzw.md) · [compression-rle.md](docs/compression-rle.md) · [msgpack.md](docs/msgpack.md) · [json.md](docs/json.md) · [md.md](docs/md.md) · [crypto.md](docs/crypto.md) · [dataprot.md](docs/dataprot.md) · [bmp.md](docs/bmp.md) · [ico.md](docs/ico.md) · [ppm.md](docs/ppm.md) · [qoi.md](docs/qoi.md) · [tga.md](docs/tga.md) · [image.md](docs/image.md) · [image-bmp.md](docs/image-bmp.md) · [image-ico.md](docs/image-ico.md) · [image-ppm.md](docs/image-ppm.md) · [image-qoi.md](docs/image-qoi.md) · [image-tga.md](docs/image-tga.md) · [video.md](docs/video.md) · [datetime.md](docs/datetime.md) · [math.md](docs/math.md) · [math-geo.md](docs/math-geo.md) · [math-stats.md](docs/math-stats.md) · [math-base.md](docs/math-base.md)
+
+</details>
+
+<details>
+<summary><strong>Core Language & Misc</strong> (23 docs)</summary>
+
+[spec.md](docs/spec.md) · [cs.md](docs/cs.md) · [std.md](docs/std.md) · [str.md](docs/str.md) · [fmt.md](docs/fmt.md) · [fs.md](docs/fs.md) · [path.md](docs/path.md) · [cli.md](docs/cli.md) · [shell.md](docs/shell.md) · [shell-simple.md](docs/shell-simple.md) · [debug.md](docs/debug.md) · [error-display.md](docs/error-display.md) · [bitwise.md](docs/bitwise.md) · [transpile.md](docs/transpile.md) · [virtual-fs.md](docs/virtual-fs.md) · [pack.md](docs/pack.md) · [pack-utils.md](docs/pack-utils.md) · [ai.md](docs/ai.md) · [codecols.md](docs/codecols.md) · [random.md](docs/random.md) · [sort.md](docs/sort.md) · [test.md](docs/test.md) · [writes.md](docs/writes.md)
 
 </details>
 

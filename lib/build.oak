@@ -16,6 +16,7 @@ keys := std.keys
 str := import('str')
 join := str.join
 replace := str.replace
+split := str.split
 startsWith? := str.startsWith?
 
 sort := import('sort')
@@ -72,6 +73,7 @@ Doc? := false
 Ts? := false
 Lua? := false
 Java? := false
+Graph? := false
 Target := 'oak'
 Output := ?
 Includes := []
@@ -98,6 +100,7 @@ fn applyConfig(config) {
 		Ts?: Ts?
 		Lua?: Lua?
 		Java?: Java?
+		Graph?: Graph?
 		Target: Target
 		Output: Output
 		Includes: Includes
@@ -128,6 +131,7 @@ fn applyConfig(config) {
 	Ts? <- state.Ts?
 	Lua? <- state.Lua?
 	Java? <- state.Java?
+	Graph? <- state.Graph?
 	Target <- state.Target
 	Output <- state.Output
 	Includes <- state.Includes
@@ -929,6 +933,134 @@ fn renderJavaBundle(bundleNode) {
 	output
 }
 
+// renderGraphBundle generates a Mermaid dependency graph from the build's
+// ModuleNodes map and stdlib imports.  It walks each module's raw AST to
+// extract import() calls so that stdlib dependencies are included even though
+// they are not stored in ModuleNodes.
+fn renderGraphBundle(bundleNode) {
+	mermaid := import('mermaid')
+
+	g := mermaid.graph(:lr)
+	g |> mermaid.setTitle('Module Dependency Graph')
+
+	// Sanitize a module name/path into a Mermaid-safe node id
+	fn sanitizeId(s) {
+		s |> replace('/', '_') |> replace('\\', '_') |> replace('.', '_') |> replace('-', '_') |> replace(' ', '_') |> replace(':', '_')
+	}
+
+	// Short display name from a path (last segment)
+	fn shortName(p) {
+		parts := p |> split('/')
+		bparts := p |> split('\\')
+		use := if len(bparts) > len(parts) {
+			true -> bparts
+			_ -> parts
+		}
+		if len(use) > 0 {
+			true -> use.(len(use) - 1)
+			_ -> p
+		}
+	}
+
+	// Extract all static import('name') calls from an AST node list
+	fn extractImports(nodes) {
+		imports := []
+		fn walk(node) if type(node) = :object {
+			true -> if node.type {
+				:block -> if type(node.exprs) = :list {
+					true -> node.exprs |> each(walk)
+				}
+				:assignment -> if {
+					node.local? = true &
+					type(node.right) = :object &
+					node.right.type = :fnCall &
+					type(node.right.function) = :object &
+					node.right.function.type = :identifier &
+					node.right.function.val = 'import' &
+					len(node.right.args) = 1 &
+					type(node.right.args.(0)) = :object &
+					node.right.args.(0).type = :string -> {
+						imports <- imports << node.right.args.(0).val
+					}
+				}
+				_ -> ?
+			}
+		}
+		if type(nodes) = :list {
+			true -> nodes |> each(walk)
+			_ -> walk(nodes)
+		}
+		imports
+	}
+
+	// Collect all module paths and their raw import lists
+	moduleKeys := ModuleNodes |> keys()
+	allEdges := {}
+	allImportedNames := {}
+
+	moduleKeys |> each(fn(modPath) {
+		ast := ModuleNodes.(modPath)
+		imports := extractImports(ast)
+		allEdges.(modPath) <- imports
+		imports |> each(fn(imp) allImportedNames.(imp) <- true)
+	})
+
+	// Add nodes for every module in ModuleNodes
+	moduleKeys |> each(fn(modPath) {
+		id := sanitizeId(modPath)
+		label := shortName(modPath)
+		shape := if modPath = AbsoluteEntry {
+			true -> mermaid.ShapeStadium
+			_ -> mermaid.ShapeRect
+		}
+		g |> mermaid.node(id, label, shape)
+	})
+
+	// Add nodes for stdlib imports not in ModuleNodes
+	allImportedNames |> keys() |> each(fn(imp) {
+		alreadyInModules := moduleKeys |> reduce(false, fn(found, k) {
+			if found {
+				true -> true
+				_ -> k = imp
+			}
+		})
+		if !alreadyInModules {
+			true -> {
+				id := sanitizeId(imp)
+				g |> mermaid.node(id, imp, mermaid.ShapeRound)
+			}
+		}
+	})
+
+	// Add edges
+	moduleKeys |> each(fn(modPath) {
+		fromId := sanitizeId(modPath)
+		imports := allEdges.(modPath)
+		imports |> each(fn(imp) {
+			toId := sanitizeId(imp)
+			g |> mermaid.edge(fromId, toId)
+		})
+	})
+
+	// Output as HTML or Mermaid text depending on file extension
+	graphText := mermaid.render(g)
+
+	if Output != ? {
+		true -> {
+			outParts := Output |> split('.')
+			ext := if len(outParts) > 1 {
+				true -> outParts.(len(outParts) - 1)
+				_ -> ''
+			}
+			if ext {
+				'html', 'htm' -> mermaid.renderHTML(g)
+				_ -> graphText
+			}
+		}
+		_ -> graphText
+	}
+}
+
 // renderBundle transforms a bundle's AST nodes to compiled program text
 fn renderBundle(bundleNode) {
 	buildRender.renderBundle(
@@ -943,6 +1075,7 @@ fn renderBundle(bundleNode) {
 		renderTsBundle
 		renderLuaBundle
 		renderJavaBundle
+		renderGraphBundle
 	)
 }
 

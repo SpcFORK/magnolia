@@ -1,0 +1,568 @@
+// ast-js -- JavaScript AST node constructors and JS-to-Oak transpilation
+//
+// Provides helpers for building JavaScript-style AST nodes and converting
+// them into equivalent Oak AST nodes for cross-language transpilation.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+} := import('std')
+{
+	split: split
+	replace: replace
+	contains?: strContains?
+	trim: trim
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+} := import('str')
+{
+	format: format
+} := import('fmt')
+
+// -- JS reserved words --
+JSReserved := [
+	'await', 'break', 'case', 'catch', 'class', 'const', 'continue'
+	'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export'
+	'extends', 'false', 'finally', 'for', 'function', 'if', 'in'
+	'instanceof', 'let', 'new', 'null', 'return', 'super', 'switch'
+	'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while'
+	'with', 'yield', 'import'
+]
+
+fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
+
+// -- JS AST node constructors --
+// These build JS-flavored AST nodes that can be inspected or transpiled to Oak.
+
+fn jsNull() {
+	type: :jsNull
+	tok: _tok()
+}
+
+fn jsUndefined() {
+	type: :jsUndefined
+	tok: _tok()
+}
+
+fn jsNumber(val) {
+	type: :jsNumber
+	tok: _tok()
+	val: val
+}
+
+fn jsString(val) {
+	type: :jsString
+	tok: _tok()
+	val: val
+}
+
+fn jsBool(val) {
+	type: :jsBool
+	tok: _tok()
+	val: val
+}
+
+fn jsIdentifier(name) {
+	type: :jsIdentifier
+	tok: _tok()
+	val: name
+}
+
+fn jsArray(elems) {
+	type: :jsArray
+	tok: _tok()
+	elems: elems
+}
+
+fn jsObject(entries) {
+	type: :jsObject
+	tok: _tok()
+	entries: entries
+}
+
+fn jsObjectEntry(key, val) {
+	key: key
+	val: val
+}
+
+fn jsBinary(op, left, right) {
+	type: :jsBinary
+	tok: _tok()
+	op: op
+	left: left
+	right: right
+}
+
+fn jsUnary(op, operand) {
+	type: :jsUnary
+	tok: _tok()
+	op: op
+	right: operand
+}
+
+fn jsAssignment(left, right) {
+	type: :jsAssignment
+	tok: _tok()
+	left: left
+	right: right
+}
+
+fn jsProperty(object, property) {
+	type: :jsProperty
+	tok: _tok()
+	object: object
+	property: property
+}
+
+fn jsIndex(object, index) {
+	type: :jsIndex
+	tok: _tok()
+	object: object
+	index: index
+}
+
+fn jsCall(callee, args) {
+	type: :jsCall
+	tok: _tok()
+	callee: callee
+	args: args
+}
+
+fn jsFunction(name, params, body) {
+	type: :jsFunction
+	tok: _tok()
+	name: default(name, '')
+	params: params
+	body: body
+}
+
+fn jsArrowFunction(params, body) {
+	type: :jsArrowFunction
+	tok: _tok()
+	params: params
+	body: body
+}
+
+fn jsReturn(value) {
+	type: :jsReturn
+	tok: _tok()
+	value: value
+}
+
+fn jsBlock(stmts) {
+	type: :jsBlock
+	tok: _tok()
+	stmts: stmts
+}
+
+fn jsIf(test, consequent, alternate) {
+	type: :jsIf
+	tok: _tok()
+	test: test
+	consequent: consequent
+	alternate: alternate
+}
+
+fn jsVar(kind, name, init) {
+	type: :jsVar
+	tok: _tok()
+	kind: default(kind, 'let')
+	name: name
+	init: init
+}
+
+fn jsTernary(test, consequent, alternate) {
+	type: :jsTernary
+	tok: _tok()
+	test: test
+	consequent: consequent
+	alternate: alternate
+}
+
+fn jsTemplateLiteral(parts) {
+	type: :jsTemplateLiteral
+	tok: _tok()
+	parts: parts
+}
+
+fn jsSpread(argument) {
+	type: :jsSpread
+	tok: _tok()
+	argument: argument
+}
+
+// -- JS operator to Oak operator mapping --
+fn _mapJSOp(op) if op {
+	'+' -> :plus
+	'-' -> :minus
+	'*' -> :times
+	'/' -> :divide
+	'%' -> :modulus
+	'>>' -> :rshift
+	'<<' -> :pushArrow
+	'==', '===' -> :eq
+	'!=', '!==' -> :neq
+	'>' -> :greater
+	'<' -> :less
+	'>=' -> :geq
+	'<=' -> :leq
+	'&&' -> :and
+	'||' -> :or
+	'^' -> :xor
+	_ -> :plus
+}
+
+fn _mapJSUnaryOp(op) if op {
+	'-' -> :minus
+	'!' -> :exclam
+	'~' -> :exclam
+	_ -> :minus
+}
+
+// -- JS identifier to Oak identifier mapping --
+fn _jsIdentToOak(name) if name {
+	'undefined' -> '?'
+	'null' -> '?'
+	'true' -> 'true'
+	'false' -> 'false'
+	'console' -> '__console'
+	'Math' -> '__Math'
+	'Array' -> '__Array'
+	'Object' -> '__Object'
+	'String' -> '__String'
+	'Number' -> '__Number'
+	'JSON' -> '__JSON'
+	'Date' -> '__Date'
+	'RegExp' -> '__RegExp'
+	'Promise' -> '__Promise'
+	_ -> name |> replace('$', '_dlr_')
+}
+
+// -- transpileToOak: JS AST -> Oak AST --
+// Converts a JS-style AST node into an equivalent Oak AST node.
+fn transpileToOak(node) if node {
+	? -> { type: :null, tok: _tok(), val: ? }
+	_ -> if node.type {
+		:jsNull, :jsUndefined -> { type: :null, tok: _tok(), val: ? }
+
+		:jsNumber -> {
+			type: if int(node.val) = node.val { true -> :int, _ -> :float }
+			tok: _tok()
+			val: node.val
+		}
+
+		:jsString -> {
+			type: :string
+			tok: _tok()
+			val: node.val
+		}
+
+		:jsBool -> {
+			type: :bool
+			tok: _tok()
+			val: node.val
+		}
+
+		:jsIdentifier -> {
+			type: :identifier
+			tok: _tok()
+			val: _jsIdentToOak(node.val)
+		}
+
+		:jsArray -> {
+			type: :list
+			tok: _tok()
+			elems: node.elems |> map(transpileToOak)
+		}
+
+		:jsObject -> {
+			type: :object
+			tok: _tok()
+			entries: node.entries |> map(fn(entry) {
+				key: transpileToOak(entry.key)
+				val: transpileToOak(entry.val)
+			})
+		}
+
+		:jsBinary -> {
+			type: :binary
+			tok: _tok()
+			op: _mapJSOp(node.op)
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:jsUnary -> {
+			type: :unary
+			tok: _tok()
+			op: _mapJSUnaryOp(node.op)
+			right: transpileToOak(node.right)
+		}
+
+		:jsAssignment -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:jsProperty -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.object)
+			right: if node.property.type {
+				:jsString -> {
+					type: :identifier
+					tok: _tok()
+					val: node.property.val
+				}
+				:jsIdentifier -> {
+					type: :identifier
+					tok: _tok()
+					val: node.property.val
+				}
+				_ -> transpileToOak(node.property)
+			}
+		}
+
+		:jsIndex -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.object)
+			right: {
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				exprs: [transpileToOak(node.index)]
+			}
+		}
+
+		:jsCall -> {
+			type: :fnCall
+			tok: _tok()
+			function: transpileToOak(node.callee)
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:jsFunction, :jsArrowFunction -> {
+			type: :function
+			tok: _tok()
+			name: default(node.name, '')
+			args: node.params |> map(fn(p) if type(p) {
+				:string -> p
+				_ -> if p.type {
+					:jsIdentifier -> _jsIdentToOak(p.val)
+					_ -> '_'
+				}
+			})
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:jsReturn -> transpileToOak(node.value)
+
+		:jsBlock -> {
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.stmts |> map(transpileToOak)
+		}
+
+		:jsIf -> {
+			type: :ifExpr
+			tok: _tok()
+			cond: transpileToOak(node.test)
+			branches: [
+				{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :bool, tok: _tok(), val: true }
+					body: transpileToOak(node.consequent)
+				}
+			] |> append(if node.alternate {
+				? -> [{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: { type: :null, tok: _tok(), val: ? }
+				}]
+				_ -> [{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: transpileToOak(node.alternate)
+				}]
+			})
+		}
+
+		:jsVar -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: transpileToOak(jsIdentifier(node.name))
+			right: if node.init {
+				? -> { type: :null, tok: _tok(), val: ? }
+				_ -> transpileToOak(node.init)
+			}
+		}
+
+		:jsTernary -> {
+			type: :ifExpr
+			tok: _tok()
+			cond: transpileToOak(node.test)
+			branches: [
+				{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :bool, tok: _tok(), val: true }
+					body: transpileToOak(node.consequent)
+				}
+				{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: transpileToOak(node.alternate)
+				}
+			]
+		}
+
+		:jsTemplateLiteral -> {
+			// Reduce template parts into a series of + concatenations
+			node.parts |> reduce(
+				{ type: :string, tok: _tok(), val: '' }
+				fn(acc, part) {
+					type: :binary
+					tok: _tok()
+					op: :plus
+					left: acc
+					right: transpileToOak(part)
+				}
+			)
+		}
+
+		:jsSpread -> transpileToOak(node.argument)
+
+		_ -> { type: :null, tok: _tok(), val: ? }
+	}
+}
+
+// -- walkJS: traverse JS AST calling visitor on each node --
+fn walkJS(node, visitor) if node {
+	? -> ?
+	_ -> {
+		visitor(node)
+		if node.type {
+			:jsArray -> node.elems |> each(fn(el) walkJS(el, visitor))
+			:jsObject -> node.entries |> each(fn(e) {
+				walkJS(e.key, visitor)
+				walkJS(e.val, visitor)
+			})
+			:jsBinary -> {
+				walkJS(node.left, visitor)
+				walkJS(node.right, visitor)
+			}
+			:jsUnary -> walkJS(node.right, visitor)
+			:jsAssignment -> {
+				walkJS(node.left, visitor)
+				walkJS(node.right, visitor)
+			}
+			:jsProperty -> {
+				walkJS(node.object, visitor)
+				walkJS(node.property, visitor)
+			}
+			:jsIndex -> {
+				walkJS(node.object, visitor)
+				walkJS(node.index, visitor)
+			}
+			:jsCall -> {
+				walkJS(node.callee, visitor)
+				node.args |> each(fn(a) walkJS(a, visitor))
+			}
+			:jsFunction, :jsArrowFunction -> walkJS(node.body, visitor)
+			:jsReturn -> walkJS(node.value, visitor)
+			:jsBlock -> node.stmts |> each(fn(s) walkJS(s, visitor))
+			:jsIf -> {
+				walkJS(node.test, visitor)
+				walkJS(node.consequent, visitor)
+				walkJS(node.alternate, visitor)
+			}
+			:jsVar -> walkJS(node.init, visitor)
+			:jsTernary -> {
+				walkJS(node.test, visitor)
+				walkJS(node.consequent, visitor)
+				walkJS(node.alternate, visitor)
+			}
+			:jsTemplateLiteral -> node.parts |> each(fn(p) walkJS(p, visitor))
+			:jsSpread -> walkJS(node.argument, visitor)
+		}
+	}
+}
+
+// -- renderJS: render a JS AST node back to JavaScript source --
+fn renderJS(node) if node {
+	? -> 'null'
+	_ -> if node.type {
+		:jsNull -> 'null'
+		:jsUndefined -> 'undefined'
+		:jsNumber -> string(node.val)
+		:jsString -> '\'' << node.val |> replace('\'', '\\\'') << '\''
+		:jsBool -> string(node.val)
+		:jsIdentifier -> node.val
+		:jsArray -> '[' << node.elems |> map(renderJS) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ']'
+		:jsObject -> '{' << node.entries |> map(fn(e) renderJS(e.key) << ': ' << renderJS(e.val)) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << '}'
+		:jsBinary -> '(' << renderJS(node.left) << ' ' << node.op << ' ' << renderJS(node.right) << ')'
+		:jsUnary -> '(' << node.op << renderJS(node.right) << ')'
+		:jsAssignment -> renderJS(node.left) << ' = ' << renderJS(node.right)
+		:jsProperty -> renderJS(node.object) << '.' << renderJS(node.property)
+		:jsIndex -> renderJS(node.object) << '[' << renderJS(node.index) << ']'
+		:jsCall -> renderJS(node.callee) << '(' << node.args |> map(renderJS) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:jsFunction -> 'function ' << default(node.name, '') << '(' << node.params |> map(fn(p) if type(p) {
+			:string -> p
+			_ -> renderJS(p)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ') ' << renderJS(node.body)
+		:jsArrowFunction -> '(' << node.params |> map(fn(p) if type(p) {
+			:string -> p
+			_ -> renderJS(p)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ') => ' << renderJS(node.body)
+		:jsReturn -> 'return ' << renderJS(node.value)
+		:jsBlock -> '{\n' << node.stmts |> map(fn(s) renderJS(s) << ';\n') |> reduce('', fn(acc, el) acc << el) << '}'
+		:jsIf -> 'if (' << renderJS(node.test) << ') ' << renderJS(node.consequent) << if node.alternate {
+			? -> ''
+			_ -> ' else ' << renderJS(node.alternate)
+		}
+		:jsVar -> node.kind << ' ' << node.name << if node.init {
+			? -> ''
+			_ -> ' = ' << renderJS(node.init)
+		}
+		:jsTernary -> '(' << renderJS(node.test) << ' ? ' << renderJS(node.consequent) << ' : ' << renderJS(node.alternate) << ')'
+		:jsTemplateLiteral -> '`' << node.parts |> map(fn(p) if p.type {
+			:jsString -> p.val
+			_ -> '${' << renderJS(p) << '}'
+		}) |> reduce('', fn(acc, el) acc << el) << '`'
+		:jsSpread -> '...' << renderJS(node.argument)
+		_ -> '/* unknown */'
+	}
+}

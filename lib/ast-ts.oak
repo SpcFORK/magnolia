@@ -1,0 +1,442 @@
+// ast-ts -- TypeScript AST node constructors and TS-to-Oak transpilation
+//
+// Extends the JS AST with TypeScript-specific nodes (type annotations,
+// interfaces, generics, enums) and provides transpilation to Oak AST.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+} := import('std')
+{
+	replace: replace
+	contains?: strContains?
+} := import('str')
+{
+	format: format
+} := import('fmt')
+
+// Import the JS AST module for shared node types
+astJs := import('ast-js')
+
+// Re-export all JS AST constructors for convenience
+jsNull := astJs.jsNull
+jsUndefined := astJs.jsUndefined
+jsNumber := astJs.jsNumber
+jsString := astJs.jsString
+jsBool := astJs.jsBool
+jsIdentifier := astJs.jsIdentifier
+jsArray := astJs.jsArray
+jsObject := astJs.jsObject
+jsObjectEntry := astJs.jsObjectEntry
+jsBinary := astJs.jsBinary
+jsUnary := astJs.jsUnary
+jsAssignment := astJs.jsAssignment
+jsProperty := astJs.jsProperty
+jsIndex := astJs.jsIndex
+jsCall := astJs.jsCall
+jsFunction := astJs.jsFunction
+jsArrowFunction := astJs.jsArrowFunction
+jsReturn := astJs.jsReturn
+jsBlock := astJs.jsBlock
+jsIf := astJs.jsIf
+jsVar := astJs.jsVar
+jsTernary := astJs.jsTernary
+jsSpread := astJs.jsSpread
+
+fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
+
+// -- TS-specific AST node constructors --
+
+// Type annotation node (e.g., `: string`, `: number[]`)
+fn tsTypeAnnotation(typeExpr) {
+	type: :tsTypeAnnotation
+	tok: _tok()
+	typeExpr: typeExpr
+}
+
+// Basic type reference (e.g., `string`, `number`, `boolean`, `any`)
+fn tsTypeRef(name) {
+	type: :tsTypeRef
+	tok: _tok()
+	name: name
+}
+
+// Array type (e.g., `number[]`)
+fn tsArrayType(elementType) {
+	type: :tsArrayType
+	tok: _tok()
+	elementType: elementType
+}
+
+// Union type (e.g., `string | number`)
+fn tsUnionType(types) {
+	type: :tsUnionType
+	tok: _tok()
+	types: types
+}
+
+// Intersection type (e.g., `A & B`)
+fn tsIntersectionType(types) {
+	type: :tsIntersectionType
+	tok: _tok()
+	types: types
+}
+
+// Generic type (e.g., `Array<number>`, `Map<string, any>`)
+fn tsGenericType(name, typeArgs) {
+	type: :tsGenericType
+	tok: _tok()
+	name: name
+	typeArgs: typeArgs
+}
+
+// Function type (e.g., `(x: number) => string`)
+fn tsFunctionType(params, returnType) {
+	type: :tsFunctionType
+	tok: _tok()
+	params: params
+	returnType: returnType
+}
+
+// Typed parameter for function types
+fn tsParam(name, typeAnnotation) {
+	type: :tsParam
+	tok: _tok()
+	name: name
+	typeAnnotation: typeAnnotation
+}
+
+// Interface declaration
+fn tsInterface(name, members, extends) {
+	type: :tsInterface
+	tok: _tok()
+	name: name
+	members: members
+	extends: default(extends, [])
+}
+
+// Interface member / property signature
+fn tsPropertySig(name, typeAnnotation, optional?) {
+	type: :tsPropertySig
+	tok: _tok()
+	name: name
+	typeAnnotation: typeAnnotation
+	optional?: default(optional?, false)
+}
+
+// Method signature in an interface
+fn tsMethodSig(name, params, returnType) {
+	type: :tsMethodSig
+	tok: _tok()
+	name: name
+	params: params
+	returnType: returnType
+}
+
+// Type alias (e.g., `type Foo = string | number`)
+fn tsTypeAlias(name, typeExpr) {
+	type: :tsTypeAlias
+	tok: _tok()
+	name: name
+	typeExpr: typeExpr
+}
+
+// Enum declaration
+fn tsEnum(name, members) {
+	type: :tsEnum
+	tok: _tok()
+	name: name
+	members: members
+}
+
+// Enum member
+fn tsEnumMember(name, value) {
+	type: :tsEnumMember
+	tok: _tok()
+	name: name
+	value: value
+}
+
+// Type assertion (e.g., `x as string`)
+fn tsAsExpr(expr, typeExpr) {
+	type: :tsAsExpr
+	tok: _tok()
+	expr: expr
+	typeExpr: typeExpr
+}
+
+// Non-null assertion (e.g., `x!`)
+fn tsNonNullExpr(expr) {
+	type: :tsNonNullExpr
+	tok: _tok()
+	expr: expr
+}
+
+// Typed variable declaration (e.g., `let x: number = 5`)
+fn tsTypedVar(kind, name, typeAnnotation, init) {
+	type: :tsTypedVar
+	tok: _tok()
+	kind: default(kind, 'let')
+	name: name
+	typeAnnotation: typeAnnotation
+	init: init
+}
+
+// Typed function (function with param types + return type)
+fn tsTypedFunction(name, params, returnType, body) {
+	type: :tsTypedFunction
+	tok: _tok()
+	name: default(name, '')
+	params: params
+	returnType: returnType
+	body: body
+}
+
+// -- TS type rendering to string --
+fn renderType(typeNode) if typeNode {
+	? -> 'any'
+	_ -> if typeNode.type {
+		:tsTypeRef -> typeNode.name
+		:tsArrayType -> renderType(typeNode.elementType) << '[]'
+		:tsUnionType -> typeNode.types |> map(renderType) |> reduce('', fn(acc, t) if acc {
+			'' -> t
+			_ -> acc << ' | ' << t
+		})
+		:tsIntersectionType -> typeNode.types |> map(renderType) |> reduce('', fn(acc, t) if acc {
+			'' -> t
+			_ -> acc << ' & ' << t
+		})
+		:tsGenericType -> typeNode.name << '<' << typeNode.typeArgs |> map(renderType) |> reduce('', fn(acc, t) if acc {
+			'' -> t
+			_ -> acc << ', ' << t
+		}) << '>'
+		:tsFunctionType -> '(' << typeNode.params |> map(fn(p) {
+			p.name << ': ' << renderType(p.typeAnnotation)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ') => ' << renderType(typeNode.returnType)
+		_ -> 'any'
+	}
+}
+
+// -- transpileToOak: TS AST -> Oak AST --
+// TypeScript-specific nodes are stripped of type info and converted to Oak.
+// Type annotations are erased (Oak is dynamically typed).
+fn transpileToOak(node) if node {
+	? -> { type: :null, tok: _tok(), val: ? }
+	_ -> if node.type {
+		// TS-specific nodes: erase types, transpile underlying expressions
+		:tsTypeAnnotation, :tsTypeRef, :tsArrayType, :tsUnionType
+		:tsIntersectionType, :tsGenericType, :tsFunctionType -> {
+			// Type nodes have no runtime representation in Oak
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:tsInterface -> {
+			// Interfaces become comments / no-ops in Oak (no runtime effect)
+			// We produce an empty object as a placeholder shape
+			type: :object
+			tok: _tok()
+			entries: node.members |> filter(fn(m) m.type = :tsPropertySig) |> map(fn(m) {
+				key: { type: :identifier, tok: _tok(), val: m.name }
+				val: { type: :null, tok: _tok(), val: ? }
+			})
+		}
+
+		:tsTypeAlias -> {
+			// Type aliases are erased; produce null
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:tsEnum -> {
+			// Enums become Oak objects: EnumName := { Member1: 0, Member2: 1, ... }
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: { type: :identifier, tok: _tok(), val: node.name }
+			right: {
+				type: :object
+				tok: _tok()
+				entries: node.members |> map(fn(member, i) {
+					key: { type: :identifier, tok: _tok(), val: member.name }
+					val: if member.value {
+						? -> { type: :int, tok: _tok(), val: i }
+						_ -> transpileToOak(member.value)
+					}
+				})
+			}
+		}
+
+		:tsEnumMember -> {
+			// Should not be visited directly; handled by tsEnum
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:tsAsExpr -> transpileToOak(node.expr)
+
+		:tsNonNullExpr -> transpileToOak(node.expr)
+
+		:tsTypedVar -> {
+			// Strip type annotation, keep the variable binding
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: { type: :identifier, tok: _tok(), val: node.name }
+			right: if node.init {
+				? -> { type: :null, tok: _tok(), val: ? }
+				_ -> transpileToOak(node.init)
+			}
+		}
+
+		:tsTypedFunction -> {
+			// Strip param types and return type, keep function body
+			type: :function
+			tok: _tok()
+			name: default(node.name, '')
+			args: node.params |> map(fn(p) if p.type {
+				:tsParam -> p.name
+				_ -> if type(p) {
+					:string -> p
+					_ -> '_'
+				}
+			})
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:tsParam -> {
+			// A bare param reference transpiles to an identifier
+			type: :identifier
+			tok: _tok()
+			val: node.name
+		}
+
+		:tsPropertySig, :tsMethodSig -> {
+			// Interface members have no runtime representation
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		// For all JS node types, delegate to the JS transpiler
+		_ -> astJs.transpileToOak(node)
+	}
+}
+
+// -- walkTS: traverse TS AST calling visitor on each node --
+fn walkTS(node, visitor) if node {
+	? -> ?
+	_ -> {
+		visitor(node)
+		if node.type {
+			// TS-specific nodes
+			:tsTypeAnnotation -> walkTS(node.typeExpr, visitor)
+			:tsArrayType -> walkTS(node.elementType, visitor)
+			:tsUnionType -> node.types |> each(fn(t) walkTS(t, visitor))
+			:tsIntersectionType -> node.types |> each(fn(t) walkTS(t, visitor))
+			:tsGenericType -> node.typeArgs |> each(fn(t) walkTS(t, visitor))
+			:tsFunctionType -> {
+				node.params |> each(fn(p) walkTS(p, visitor))
+				walkTS(node.returnType, visitor)
+			}
+			:tsParam -> walkTS(node.typeAnnotation, visitor)
+			:tsInterface -> {
+				node.members |> each(fn(m) walkTS(m, visitor))
+				node.extends |> each(fn(e) walkTS(e, visitor))
+			}
+			:tsPropertySig -> walkTS(node.typeAnnotation, visitor)
+			:tsMethodSig -> {
+				node.params |> each(fn(p) walkTS(p, visitor))
+				walkTS(node.returnType, visitor)
+			}
+			:tsTypeAlias -> walkTS(node.typeExpr, visitor)
+			:tsEnum -> node.members |> each(fn(m) walkTS(m, visitor))
+			:tsEnumMember -> walkTS(node.value, visitor)
+			:tsAsExpr -> {
+				walkTS(node.expr, visitor)
+				walkTS(node.typeExpr, visitor)
+			}
+			:tsNonNullExpr -> walkTS(node.expr, visitor)
+			:tsTypedVar -> {
+				walkTS(node.typeAnnotation, visitor)
+				walkTS(node.init, visitor)
+			}
+			:tsTypedFunction -> {
+				node.params |> each(fn(p) walkTS(p, visitor))
+				walkTS(node.returnType, visitor)
+				walkTS(node.body, visitor)
+			}
+			// JS nodes delegate to JS walker
+			_ -> astJs.walkJS(node, visitor)
+		}
+	}
+}
+
+// -- renderTS: render TS AST back to TypeScript source --
+fn renderTS(node) if node {
+	? -> 'null'
+	_ -> if node.type {
+		// TS-specific nodes
+		:tsTypeAnnotation -> ': ' << renderType(node.typeExpr)
+		:tsTypeRef -> node.name
+		:tsArrayType -> renderType(node.elementType) << '[]'
+		:tsUnionType -> node.types |> map(renderType) |> reduce('', fn(acc, t) if acc {
+			'' -> t
+			_ -> acc << ' | ' << t
+		})
+		:tsIntersectionType -> node.types |> map(renderType) |> reduce('', fn(acc, t) if acc {
+			'' -> t
+			_ -> acc << ' & ' << t
+		})
+		:tsGenericType -> node.name << '<' << node.typeArgs |> map(renderType) |> reduce('', fn(acc, t) if acc {
+			'' -> t
+			_ -> acc << ', ' << t
+		}) << '>'
+		:tsInterface -> 'interface ' << node.name << if len(node.extends) {
+			0 -> ''
+			_ -> ' extends ' << node.extends |> map(renderTS) |> reduce('', fn(acc, e) if acc {
+				'' -> e
+				_ -> acc << ', ' << e
+			})
+		} << ' {\n' << node.members |> map(fn(m) '  ' << renderTS(m) << ';\n') |> reduce('', fn(acc, el) acc << el) << '}'
+		:tsPropertySig -> node.name << if node.optional? { true -> '?', _ -> '' } << ': ' << renderType(node.typeAnnotation)
+		:tsMethodSig -> node.name << '(' << node.params |> map(fn(p) p.name << ': ' << renderType(p.typeAnnotation)) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << '): ' << renderType(node.returnType)
+		:tsTypeAlias -> 'type ' << node.name << ' = ' << renderType(node.typeExpr)
+		:tsEnum -> 'enum ' << node.name << ' {\n' << node.members |> map(fn(m) '  ' << renderTS(m) << ',\n') |> reduce('', fn(acc, el) acc << el) << '}'
+		:tsEnumMember -> node.name << if node.value {
+			? -> ''
+			_ -> ' = ' << renderTS(node.value)
+		}
+		:tsAsExpr -> renderTS(node.expr) << ' as ' << renderType(node.typeExpr)
+		:tsNonNullExpr -> renderTS(node.expr) << '!'
+		:tsTypedVar -> node.kind << ' ' << node.name << ': ' << renderType(node.typeAnnotation) << if node.init {
+			? -> ''
+			_ -> ' = ' << renderTS(node.init)
+		}
+		:tsTypedFunction -> 'function ' << default(node.name, '') << '(' << node.params |> map(fn(p) {
+			p.name << ': ' << renderType(p.typeAnnotation)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << '): ' << renderType(node.returnType) << ' ' << renderTS(node.body)
+		// JS nodes delegate to JS renderer
+		_ -> astJs.renderJS(node)
+	}
+}

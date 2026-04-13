@@ -21,6 +21,7 @@ _Auto-generated from Magnolia source._
 - `str` · `import(...)`
 - `join` — constant
 - `replace` — constant
+- `split` — constant
 - `startsWith?` — constant
 - `sort` · `import(...)`
 - `sort!` — constant
@@ -65,6 +66,7 @@ _Auto-generated from Magnolia source._
 - `Ts?` · `false`
 - `Lua?` · `false`
 - `Java?` · `false`
+- `Graph?` · `false`
 - `Target` · `'oak'`
 - `Output` · `?`
 - `Includes` · `[]`
@@ -118,6 +120,8 @@ _Auto-generated from Magnolia source._
 ### `renderLuaBundle(bundleNode)`
 
 ### `renderJavaBundle(bundleNode)`
+
+### `renderGraphBundle(bundleNode)`
 
 ### `renderBundle(bundleNode)`
 

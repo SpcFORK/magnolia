@@ -1,0 +1,780 @@
+// ast-lua -- Lua AST node constructors and Lua-to-Oak transpilation
+//
+// Provides helpers for building Lua 5.4-style AST nodes and converting
+// them into equivalent Oak AST nodes for cross-language transpilation.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+} := import('std')
+{
+	replace: replace
+	contains?: strContains?
+} := import('str')
+{
+	format: format
+} := import('fmt')
+
+// -- Lua reserved words --
+LuaReserved := [
+	'and', 'break', 'do', 'else', 'elseif', 'end', 'false'
+	'for', 'function', 'goto', 'if', 'in', 'local', 'nil', 'not', 'or'
+	'repeat', 'return', 'then', 'true', 'until', 'while'
+]
+
+fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
+
+// -- Lua AST node constructors --
+
+fn luaNil() {
+	type: :luaNil
+	tok: _tok()
+}
+
+fn luaNumber(val) {
+	type: :luaNumber
+	tok: _tok()
+	val: val
+}
+
+fn luaString(val) {
+	type: :luaString
+	tok: _tok()
+	val: val
+}
+
+fn luaBool(val) {
+	type: :luaBool
+	tok: _tok()
+	val: val
+}
+
+fn luaIdentifier(name) {
+	type: :luaIdentifier
+	tok: _tok()
+	val: name
+}
+
+fn luaTable(entries) {
+	type: :luaTable
+	tok: _tok()
+	entries: entries
+}
+
+// Table entry can be array element (key = ?) or key/value pair
+fn luaTableEntry(key, val) {
+	key: key
+	val: val
+}
+
+fn luaBinary(op, left, right) {
+	type: :luaBinary
+	tok: _tok()
+	op: op
+	left: left
+	right: right
+}
+
+fn luaUnary(op, operand) {
+	type: :luaUnary
+	tok: _tok()
+	op: op
+	right: operand
+}
+
+fn luaAssignment(left, right, local?) {
+	type: :luaAssignment
+	tok: _tok()
+	left: left
+	right: right
+	local?: default(local?, false)
+}
+
+fn luaIndex(table, key) {
+	type: :luaIndex
+	tok: _tok()
+	table: table
+	key: key
+}
+
+fn luaDot(table, field) {
+	type: :luaDot
+	tok: _tok()
+	table: table
+	field: field
+}
+
+fn luaCall(callee, args) {
+	type: :luaCall
+	tok: _tok()
+	callee: callee
+	args: args
+}
+
+fn luaMethodCall(object, method, args) {
+	type: :luaMethodCall
+	tok: _tok()
+	object: object
+	method: method
+	args: args
+}
+
+fn luaFunction(name, params, body) {
+	type: :luaFunction
+	tok: _tok()
+	name: default(name, '')
+	params: params
+	body: body
+}
+
+fn luaReturn(values) {
+	type: :luaReturn
+	tok: _tok()
+	values: values
+}
+
+fn luaBlock(stmts) {
+	type: :luaBlock
+	tok: _tok()
+	stmts: stmts
+}
+
+fn luaIf(test, consequent, elseifs, alternate) {
+	type: :luaIf
+	tok: _tok()
+	test: test
+	consequent: consequent
+	elseifs: default(elseifs, [])
+	alternate: alternate
+}
+
+fn luaElseIf(test, body) {
+	type: :luaElseIf
+	tok: _tok()
+	test: test
+	body: body
+}
+
+fn luaForNumeric(var, start, stop, step, body) {
+	type: :luaForNumeric
+	tok: _tok()
+	var: var
+	start: start
+	stop: stop
+	step: step
+	body: body
+}
+
+fn luaForGeneric(vars, iterators, body) {
+	type: :luaForGeneric
+	tok: _tok()
+	vars: vars
+	iterators: iterators
+	body: body
+}
+
+fn luaWhile(test, body) {
+	type: :luaWhile
+	tok: _tok()
+	test: test
+	body: body
+}
+
+fn luaRepeatUntil(body, test) {
+	type: :luaRepeatUntil
+	tok: _tok()
+	body: body
+	test: test
+}
+
+fn luaConcat(left, right) {
+	type: :luaConcat
+	tok: _tok()
+	left: left
+	right: right
+}
+
+fn luaVararg() {
+	type: :luaVararg
+	tok: _tok()
+}
+
+fn luaLength(operand) {
+	type: :luaLength
+	tok: _tok()
+	operand: operand
+}
+
+// -- Lua operator to Oak operator mapping --
+fn _mapLuaOp(op) if op {
+	'+' -> :plus
+	'-' -> :minus
+	'*' -> :times
+	'/' -> :divide
+	'//' -> :divide
+	'%' -> :modulus
+	'>>' -> :rshift
+	'<<' -> :pushArrow
+	'==' -> :eq
+	'~=' -> :neq
+	'>' -> :greater
+	'<' -> :less
+	'>=' -> :geq
+	'<=' -> :leq
+	'and' -> :and
+	'or' -> :or
+	'~' -> :xor
+	'^' -> :times
+	_ -> :plus
+}
+
+fn _mapLuaUnaryOp(op) if op {
+	'-' -> :minus
+	'not' -> :exclam
+	'~' -> :exclam
+	_ -> :minus
+}
+
+// -- transpileToOak: Lua AST -> Oak AST --
+fn transpileToOak(node) if node {
+	? -> { type: :null, tok: _tok(), val: ? }
+	_ -> if node.type {
+		:luaNil -> { type: :null, tok: _tok(), val: ? }
+
+		:luaNumber -> {
+			type: if int(node.val) = node.val { true -> :int, _ -> :float }
+			tok: _tok()
+			val: node.val
+		}
+
+		:luaString -> {
+			type: :string
+			tok: _tok()
+			val: node.val
+		}
+
+		:luaBool -> {
+			type: :bool
+			tok: _tok()
+			val: node.val
+		}
+
+		:luaIdentifier -> {
+			oakName := if node.val {
+				'nil' -> '?'
+				'true' -> 'true'
+				'false' -> 'false'
+				'self' -> 'self'
+				_ -> node.val |> replace('_qm', '?') |> replace('_exclam', '!')
+			}
+			{
+				type: :identifier
+				tok: _tok()
+				val: oakName
+			}
+		}
+
+		:luaTable -> {
+			// Check if this is an array-like table (sequential integer keys)
+			arrayLike? := node.entries |> reduce(true, fn(acc, e) acc & e.key = ?)
+			if arrayLike? {
+				true -> {
+					type: :list
+					tok: _tok()
+					elems: node.entries |> map(fn(e) transpileToOak(e.val))
+				}
+				_ -> {
+					type: :object
+					tok: _tok()
+					entries: node.entries |> map(fn(e) {
+						key: if e.key {
+							? -> { type: :int, tok: _tok(), val: 0 }
+							_ -> transpileToOak(e.key)
+						}
+						val: transpileToOak(e.val)
+					})
+				}
+			}
+		}
+
+		:luaBinary -> {
+			type: :binary
+			tok: _tok()
+			op: _mapLuaOp(node.op)
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:luaUnary -> {
+			type: :unary
+			tok: _tok()
+			op: _mapLuaUnaryOp(node.op)
+			right: transpileToOak(node.right)
+		}
+
+		:luaConcat -> {
+			// .. in Lua becomes + in Oak (string concatenation)
+			type: :binary
+			tok: _tok()
+			op: :plus
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:luaLength -> {
+			// #x in Lua becomes len(x) in Oak
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'len' }
+			args: [transpileToOak(node.operand)]
+			restArg: ?
+		}
+
+		:luaAssignment -> {
+			type: :assignment
+			tok: _tok()
+			local?: node.local?
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:luaDot -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.table)
+			right: {
+				type: :identifier
+				tok: _tok()
+				val: node.field
+			}
+		}
+
+		:luaIndex -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.table)
+			right: {
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				exprs: [transpileToOak(node.key)]
+			}
+		}
+
+		:luaCall -> {
+			type: :fnCall
+			tok: _tok()
+			function: transpileToOak(node.callee)
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:luaMethodCall -> {
+			// obj:method(args) becomes obj.method(obj, args) in Oak
+			type: :fnCall
+			tok: _tok()
+			function: {
+				type: :propertyAccess
+				tok: _tok()
+				left: transpileToOak(node.object)
+				right: { type: :identifier, tok: _tok(), val: node.method }
+			}
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:luaFunction -> {
+			type: :function
+			tok: _tok()
+			name: default(node.name, '')
+			args: node.params |> map(fn(p) if type(p) {
+				:string -> p
+				_ -> if p.type {
+					:luaIdentifier -> p.val
+					_ -> '_'
+				}
+			})
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:luaReturn -> if len(node.values) {
+			0 -> { type: :null, tok: _tok(), val: ? }
+			1 -> transpileToOak(node.values.(0))
+			_ -> {
+				// Multiple return values become a list in Oak
+				type: :list
+				tok: _tok()
+				elems: node.values |> map(transpileToOak)
+			}
+		}
+
+		:luaBlock -> {
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.stmts |> map(transpileToOak)
+		}
+
+		:luaIf -> {
+			// Lua if/elseif/else maps to Oak if-expression branches
+			branches := [{
+				type: :ifBranch
+				tok: _tok()
+				target: { type: :bool, tok: _tok(), val: true }
+				body: transpileToOak(node.consequent)
+			}]
+			node.elseifs |> each(fn(elif) {
+				// Each elseif becomes a nested if in the else branch
+				branches << {
+					type: :ifBranch
+					tok: _tok()
+					target: transpileToOak(elif.test)
+					body: transpileToOak(elif.body)
+				}
+			})
+			branches << {
+				type: :ifBranch
+				tok: _tok()
+				target: { type: :empty, tok: _tok() }
+				body: if node.alternate {
+					? -> { type: :null, tok: _tok(), val: ? }
+					_ -> transpileToOak(node.alternate)
+				}
+			}
+			{
+				type: :ifExpr
+				tok: _tok()
+				cond: transpileToOak(node.test)
+				branches: branches
+			}
+		}
+
+		:luaForNumeric -> {
+			// for i = start, stop, step do body end
+			// becomes: range(start, stop) |> each(fn(i) body)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'each' }
+			args: [
+				{
+					type: :fnCall
+					tok: _tok()
+					function: { type: :identifier, tok: _tok(), val: 'range' }
+					args: [
+						transpileToOak(node.start)
+						transpileToOak(node.stop)
+					] |> append(if node.step {
+						? -> []
+						_ -> [transpileToOak(node.step)]
+					})
+					restArg: ?
+				}
+				{
+					type: :function
+					tok: _tok()
+					name: ''
+					args: [node.var]
+					restArg: ?
+					body: transpileToOak(node.body)
+				}
+			]
+			restArg: ?
+		}
+
+		:luaForGeneric -> {
+			// for k, v in pairs(t) do body end
+			// becomes: each(t, fn(v, k) body)  or similar
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'each' }
+			args: [
+				if len(node.iterators) {
+					0 -> { type: :null, tok: _tok(), val: ? }
+					_ -> transpileToOak(node.iterators.(0))
+				}
+				{
+					type: :function
+					tok: _tok()
+					name: ''
+					args: node.vars
+					restArg: ?
+					body: transpileToOak(node.body)
+				}
+			]
+			restArg: ?
+		}
+
+		:luaWhile -> {
+			// while loops become recursive functions in Oak
+			// fn __loop() if test { true -> { body; __loop() } }
+			// __loop()
+			loopName := '__oak_loop'
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					{
+						type: :function
+						tok: _tok()
+						name: loopName
+						args: []
+						restArg: ?
+						body: {
+							type: :ifExpr
+							tok: _tok()
+							cond: transpileToOak(node.test)
+							branches: [
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :bool, tok: _tok(), val: true }
+									body: {
+										type: :block
+										tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+										decls: []
+										exprs: [
+											transpileToOak(node.body)
+											{
+												type: :fnCall
+												tok: _tok()
+												function: { type: :identifier, tok: _tok(), val: loopName }
+												args: []
+												restArg: ?
+											}
+										]
+									}
+								}
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :empty, tok: _tok() }
+									body: { type: :null, tok: _tok(), val: ? }
+								}
+							]
+						}
+					}
+					{
+						type: :fnCall
+						tok: _tok()
+						function: { type: :identifier, tok: _tok(), val: loopName }
+						args: []
+						restArg: ?
+					}
+				]
+			}
+		}
+
+		:luaRepeatUntil -> {
+			// repeat body until test -> same as while !test
+			loopName := '__oak_loop'
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					{
+						type: :function
+						tok: _tok()
+						name: loopName
+						args: []
+						restArg: ?
+						body: {
+							type: :block
+							tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+							decls: []
+							exprs: [
+								transpileToOak(node.body)
+								{
+									type: :ifExpr
+									tok: _tok()
+									cond: transpileToOak(node.test)
+									branches: [
+										{
+											type: :ifBranch
+											tok: _tok()
+											target: { type: :bool, tok: _tok(), val: true }
+											body: { type: :null, tok: _tok(), val: ? }
+										}
+										{
+											type: :ifBranch
+											tok: _tok()
+											target: { type: :empty, tok: _tok() }
+											body: {
+												type: :fnCall
+												tok: _tok()
+												function: { type: :identifier, tok: _tok(), val: loopName }
+												args: []
+												restArg: ?
+											}
+										}
+									]
+								}
+							]
+						}
+					}
+					{
+						type: :fnCall
+						tok: _tok()
+						function: { type: :identifier, tok: _tok(), val: loopName }
+						args: []
+						restArg: ?
+					}
+				]
+			}
+		}
+
+		:luaVararg -> {
+			type: :identifier
+			tok: _tok()
+			val: 'args'
+		}
+
+		_ -> { type: :null, tok: _tok(), val: ? }
+	}
+}
+
+// -- walkLua: traverse Lua AST calling visitor on each node --
+fn walkLua(node, visitor) if node {
+	? -> ?
+	_ -> {
+		visitor(node)
+		if node.type {
+			:luaTable -> node.entries |> each(fn(e) {
+				walkLua(e.key, visitor)
+				walkLua(e.val, visitor)
+			})
+			:luaBinary, :luaConcat -> {
+				walkLua(node.left, visitor)
+				walkLua(node.right, visitor)
+			}
+			:luaUnary -> walkLua(node.right, visitor)
+			:luaLength -> walkLua(node.operand, visitor)
+			:luaAssignment -> {
+				walkLua(node.left, visitor)
+				walkLua(node.right, visitor)
+			}
+			:luaDot -> walkLua(node.table, visitor)
+			:luaIndex -> {
+				walkLua(node.table, visitor)
+				walkLua(node.key, visitor)
+			}
+			:luaCall -> {
+				walkLua(node.callee, visitor)
+				node.args |> each(fn(a) walkLua(a, visitor))
+			}
+			:luaMethodCall -> {
+				walkLua(node.object, visitor)
+				node.args |> each(fn(a) walkLua(a, visitor))
+			}
+			:luaFunction -> walkLua(node.body, visitor)
+			:luaReturn -> node.values |> each(fn(v) walkLua(v, visitor))
+			:luaBlock -> node.stmts |> each(fn(s) walkLua(s, visitor))
+			:luaIf -> {
+				walkLua(node.test, visitor)
+				walkLua(node.consequent, visitor)
+				node.elseifs |> each(fn(e) {
+					walkLua(e.test, visitor)
+					walkLua(e.body, visitor)
+				})
+				walkLua(node.alternate, visitor)
+			}
+			:luaForNumeric -> {
+				walkLua(node.start, visitor)
+				walkLua(node.stop, visitor)
+				walkLua(node.step, visitor)
+				walkLua(node.body, visitor)
+			}
+			:luaForGeneric -> {
+				node.iterators |> each(fn(i) walkLua(i, visitor))
+				walkLua(node.body, visitor)
+			}
+			:luaWhile -> {
+				walkLua(node.test, visitor)
+				walkLua(node.body, visitor)
+			}
+			:luaRepeatUntil -> {
+				walkLua(node.body, visitor)
+				walkLua(node.test, visitor)
+			}
+		}
+	}
+}
+
+// -- renderLua: render Lua AST back to Lua source --
+fn renderLua(node) if node {
+	? -> 'nil'
+	_ -> if node.type {
+		:luaNil -> 'nil'
+		:luaNumber -> string(node.val)
+		:luaString -> '\'' << node.val |> replace('\'', '\\\'') << '\''
+		:luaBool -> string(node.val)
+		:luaIdentifier -> node.val
+		:luaVararg -> '...'
+		:luaTable -> '{' << node.entries |> map(fn(e) if e.key {
+			? -> renderLua(e.val)
+			_ -> '[' << renderLua(e.key) << '] = ' << renderLua(e.val)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << '}'
+		:luaBinary -> '(' << renderLua(node.left) << ' ' << node.op << ' ' << renderLua(node.right) << ')'
+		:luaUnary -> '(' << node.op << ' ' << renderLua(node.right) << ')'
+		:luaConcat -> '(' << renderLua(node.left) << ' .. ' << renderLua(node.right) << ')'
+		:luaLength -> '#' << renderLua(node.operand)
+		:luaAssignment -> if node.local? {
+			true -> 'local ' << renderLua(node.left) << ' = ' << renderLua(node.right)
+			_ -> renderLua(node.left) << ' = ' << renderLua(node.right)
+		}
+		:luaDot -> renderLua(node.table) << '.' << node.field
+		:luaIndex -> renderLua(node.table) << '[' << renderLua(node.key) << ']'
+		:luaCall -> renderLua(node.callee) << '(' << node.args |> map(renderLua) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:luaMethodCall -> renderLua(node.object) << ':' << node.method << '(' << node.args |> map(renderLua) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:luaFunction -> 'function' << if node.name {
+			'' -> ''
+			_ -> ' ' << node.name
+		} << '(' << node.params |> map(fn(p) if type(p) {
+			:string -> p
+			_ -> renderLua(p)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')\n' << renderLua(node.body) << '\nend'
+		:luaReturn -> 'return ' << node.values |> map(renderLua) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		})
+		:luaBlock -> node.stmts |> map(fn(s) renderLua(s) << '\n') |> reduce('', fn(acc, el) acc << el)
+		:luaIf -> 'if ' << renderLua(node.test) << ' then\n' << renderLua(node.consequent) << node.elseifs |> map(fn(e) '\nelseif ' << renderLua(e.test) << ' then\n' << renderLua(e.body)) |> reduce('', fn(acc, el) acc << el) << if node.alternate {
+			? -> '\nend'
+			_ -> '\nelse\n' << renderLua(node.alternate) << '\nend'
+		}
+		:luaForNumeric -> 'for ' << node.var << ' = ' << renderLua(node.start) << ', ' << renderLua(node.stop) << if node.step {
+			? -> ''
+			_ -> ', ' << renderLua(node.step)
+		} << ' do\n' << renderLua(node.body) << '\nend'
+		:luaForGeneric -> 'for ' << node.vars |> reduce('', fn(acc, v) if acc {
+			'' -> v
+			_ -> acc << ', ' << v
+		}) << ' in ' << node.iterators |> map(renderLua) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ' do\n' << renderLua(node.body) << '\nend'
+		:luaWhile -> 'while ' << renderLua(node.test) << ' do\n' << renderLua(node.body) << '\nend'
+		:luaRepeatUntil -> 'repeat\n' << renderLua(node.body) << '\nuntil ' << renderLua(node.test)
+		_ -> '-- unknown node'
+	}
+}

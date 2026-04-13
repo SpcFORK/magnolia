@@ -1,0 +1,761 @@
+// test for ast-js, ast-ts, ast-lua, ast-java libraries
+
+std := import('std')
+str := import('str')
+astJs := import('ast-js')
+astTs := import('ast-ts')
+astLua := import('ast-lua')
+astJava := import('ast-java')
+codegenCommon := import('codegen-common')
+
+fn run(t) {
+	// ========================================================
+	// ast-js tests
+	// ========================================================
+
+	// -- JS node constructors --
+	'jsNull creates null node' |> t.eq(
+		astJs.jsNull().type
+		:jsNull
+	)
+	'jsNumber creates number node' |> t.eq(
+		astJs.jsNumber(42).val
+		42
+	)
+	'jsString creates string node' |> t.eq(
+		astJs.jsString('hello').val
+		'hello'
+	)
+	'jsBool creates bool node' |> t.eq(
+		astJs.jsBool(true).val
+		true
+	)
+	'jsIdentifier creates identifier node' |> t.eq(
+		astJs.jsIdentifier('foo').val
+		'foo'
+	)
+	'jsArray creates array node' |> t.eq(
+		astJs.jsArray([astJs.jsNumber(1), astJs.jsNumber(2)]).elems |> std.map(fn(e) e.val)
+		[1, 2]
+	)
+	'jsObject creates object node' |> t.eq(
+		len(astJs.jsObject([astJs.jsObjectEntry(astJs.jsString('a'), astJs.jsNumber(1))]).entries)
+		1
+	)
+	'jsBinary creates binary node' |> t.eq(
+		astJs.jsBinary('+', astJs.jsNumber(1), astJs.jsNumber(2)).op
+		'+'
+	)
+	'jsFunction creates function node' |> t.eq(
+		astJs.jsFunction('add', ['a', 'b'], astJs.jsNumber(0)).name
+		'add'
+	)
+	'jsArrowFunction creates arrow function' |> t.eq(
+		astJs.jsArrowFunction(['x'], astJs.jsNumber(0)).type
+		:jsArrowFunction
+	)
+	'jsCall creates call node' |> t.eq(
+		astJs.jsCall(astJs.jsIdentifier('fn'), [astJs.jsNumber(1)]).args |> std.map(fn(a) a.val)
+		[1]
+	)
+	'jsVar creates var node' |> t.eq(
+		astJs.jsVar('let', 'x', astJs.jsNumber(5)).kind
+		'let'
+	)
+	'jsIf creates if node' |> t.eq(
+		astJs.jsIf(astJs.jsBool(true), astJs.jsNumber(1), astJs.jsNumber(2)).type
+		:jsIf
+	)
+	'jsTernary creates ternary node' |> t.eq(
+		astJs.jsTernary(astJs.jsBool(true), astJs.jsNumber(1), astJs.jsNumber(2)).type
+		:jsTernary
+	)
+	'jsBlock creates block node' |> t.eq(
+		len(astJs.jsBlock([astJs.jsNumber(1), astJs.jsNumber(2)]).stmts)
+		2
+	)
+	'jsReturn creates return node' |> t.eq(
+		astJs.jsReturn(astJs.jsNumber(42)).value.val
+		42
+	)
+	'jsProperty creates property node' |> t.eq(
+		astJs.jsProperty(astJs.jsIdentifier('obj'), astJs.jsIdentifier('key')).type
+		:jsProperty
+	)
+	'jsIndex creates index node' |> t.eq(
+		astJs.jsIndex(astJs.jsIdentifier('arr'), astJs.jsNumber(0)).type
+		:jsIndex
+	)
+	'jsSpread creates spread node' |> t.eq(
+		astJs.jsSpread(astJs.jsIdentifier('args')).type
+		:jsSpread
+	)
+
+	// -- JS to Oak transpilation --
+	'jsNull transpiles to Oak null' |> t.eq(
+		astJs.transpileToOak(astJs.jsNull()).type
+		:null
+	)
+	'jsUndefined transpiles to Oak null' |> t.eq(
+		astJs.transpileToOak(astJs.jsUndefined()).type
+		:null
+	)
+	'jsNumber int transpiles to Oak int' |> t.eq(
+		astJs.transpileToOak(astJs.jsNumber(42)).type
+		:int
+	)
+	'jsNumber float transpiles to Oak float' |> t.eq(
+		astJs.transpileToOak(astJs.jsNumber(3.14)).type
+		:float
+	)
+	'jsNumber preserves value' |> t.eq(
+		astJs.transpileToOak(astJs.jsNumber(42)).val
+		42
+	)
+	'jsString transpiles to Oak string' |> t.eq(
+		astJs.transpileToOak(astJs.jsString('hello')).val
+		'hello'
+	)
+	'jsBool transpiles to Oak bool' |> t.eq(
+		astJs.transpileToOak(astJs.jsBool(true)).val
+		true
+	)
+	'jsIdentifier transpiles to Oak identifier' |> t.eq(
+		astJs.transpileToOak(astJs.jsIdentifier('foo')).val
+		'foo'
+	)
+	'jsIdentifier undefined -> null' |> t.eq(
+		astJs.transpileToOak(astJs.jsIdentifier('undefined')).val
+		'?'
+	)
+	'jsArray transpiles to Oak list' |> t.eq(
+		astJs.transpileToOak(astJs.jsArray([astJs.jsNumber(1), astJs.jsNumber(2)])).type
+		:list
+	)
+	'jsObject transpiles to Oak object' |> t.eq(
+		astJs.transpileToOak(astJs.jsObject([
+			astJs.jsObjectEntry(astJs.jsString('a'), astJs.jsNumber(1))
+		])).type
+		:object
+	)
+	'jsBinary + transpiles to Oak binary plus' |> t.eq(
+		astJs.transpileToOak(astJs.jsBinary('+', astJs.jsNumber(1), astJs.jsNumber(2))).op
+		:plus
+	)
+	'jsBinary === transpiles to Oak eq' |> t.eq(
+		astJs.transpileToOak(astJs.jsBinary('===', astJs.jsNumber(1), astJs.jsNumber(1))).op
+		:eq
+	)
+	'jsBinary && transpiles to Oak and' |> t.eq(
+		astJs.transpileToOak(astJs.jsBinary('&&', astJs.jsBool(true), astJs.jsBool(false))).op
+		:and
+	)
+	'jsUnary - transpiles to Oak minus' |> t.eq(
+		astJs.transpileToOak(astJs.jsUnary('-', astJs.jsNumber(5))).op
+		:minus
+	)
+	'jsUnary ! transpiles to Oak exclam' |> t.eq(
+		astJs.transpileToOak(astJs.jsUnary('!', astJs.jsBool(true))).op
+		:exclam
+	)
+	'jsAssignment transpiles to Oak assignment' |> t.eq(
+		astJs.transpileToOak(astJs.jsAssignment(astJs.jsIdentifier('x'), astJs.jsNumber(5))).type
+		:assignment
+	)
+	'jsProperty transpiles to Oak propertyAccess' |> t.eq(
+		astJs.transpileToOak(astJs.jsProperty(astJs.jsIdentifier('obj'), astJs.jsIdentifier('key'))).type
+		:propertyAccess
+	)
+	'jsIndex transpiles to Oak computed propertyAccess' |> t.eq(
+		astJs.transpileToOak(astJs.jsIndex(astJs.jsIdentifier('arr'), astJs.jsNumber(0))).type
+		:propertyAccess
+	)
+	'jsCall transpiles to Oak fnCall' |> t.eq(
+		astJs.transpileToOak(astJs.jsCall(astJs.jsIdentifier('fn'), [astJs.jsNumber(1)])).type
+		:fnCall
+	)
+	'jsFunction transpiles to Oak function' |> t.eq(
+		astJs.transpileToOak(astJs.jsFunction('add', ['a', 'b'], astJs.jsNumber(0))).type
+		:function
+	)
+	'jsFunction preserves name' |> t.eq(
+		astJs.transpileToOak(astJs.jsFunction('add', ['a', 'b'], astJs.jsNumber(0))).name
+		'add'
+	)
+	'jsFunction preserves args' |> t.eq(
+		astJs.transpileToOak(astJs.jsFunction('add', ['a', 'b'], astJs.jsNumber(0))).args
+		['a', 'b']
+	)
+	'jsArrowFunction transpiles to Oak function' |> t.eq(
+		astJs.transpileToOak(astJs.jsArrowFunction(['x'], astJs.jsNumber(0))).type
+		:function
+	)
+	'jsReturn transpiles to inner value' |> t.eq(
+		astJs.transpileToOak(astJs.jsReturn(astJs.jsNumber(42))).val
+		42
+	)
+	'jsBlock transpiles to Oak block' |> t.eq(
+		astJs.transpileToOak(astJs.jsBlock([astJs.jsNumber(1)])).type
+		:block
+	)
+	'jsIf transpiles to Oak ifExpr' |> t.eq(
+		astJs.transpileToOak(astJs.jsIf(astJs.jsBool(true), astJs.jsNumber(1), astJs.jsNumber(2))).type
+		:ifExpr
+	)
+	'jsVar transpiles to Oak assignment' |> t.eq(
+		astJs.transpileToOak(astJs.jsVar('let', 'x', astJs.jsNumber(5))).type
+		:assignment
+	)
+	'jsTernary transpiles to Oak ifExpr' |> t.eq(
+		astJs.transpileToOak(astJs.jsTernary(astJs.jsBool(true), astJs.jsNumber(1), astJs.jsNumber(2))).type
+		:ifExpr
+	)
+	'jsTernary has two branches' |> t.eq(
+		len(astJs.transpileToOak(astJs.jsTernary(astJs.jsBool(true), astJs.jsNumber(1), astJs.jsNumber(2))).branches)
+		2
+	)
+	'jsSpread transpiles to inner value' |> t.eq(
+		astJs.transpileToOak(astJs.jsSpread(astJs.jsIdentifier('args'))).type
+		:identifier
+	)
+	'null node transpiles safely' |> t.eq(
+		astJs.transpileToOak(?).type
+		:null
+	)
+
+	// -- JS rendering --
+	'renderJS null' |> t.eq(astJs.renderJS(astJs.jsNull()), 'null')
+	'renderJS undefined' |> t.eq(astJs.renderJS(astJs.jsUndefined()), 'undefined')
+	'renderJS number' |> t.eq(astJs.renderJS(astJs.jsNumber(42)), '42')
+	'renderJS string' |> t.eq(astJs.renderJS(astJs.jsString('hi')), '\'hi\'')
+	'renderJS bool' |> t.eq(astJs.renderJS(astJs.jsBool(true)), 'true')
+	'renderJS identifier' |> t.eq(astJs.renderJS(astJs.jsIdentifier('x')), 'x')
+	'renderJS array' |> t.eq(astJs.renderJS(astJs.jsArray([astJs.jsNumber(1), astJs.jsNumber(2)])), '[1, 2]')
+	'renderJS binary' |> t.eq(astJs.renderJS(astJs.jsBinary('+', astJs.jsNumber(1), astJs.jsNumber(2))), '(1 + 2)')
+	'renderJS unary' |> t.eq(astJs.renderJS(astJs.jsUnary('-', astJs.jsNumber(5))), '(-5)')
+	'renderJS spread' |> t.eq(astJs.renderJS(astJs.jsSpread(astJs.jsIdentifier('args'))), '...args')
+
+	// -- JS walk visitor --
+	'walkJS visits all nodes' |> t.eq(
+		{
+			count := 0
+			astJs.walkJS(
+				astJs.jsBinary('+', astJs.jsNumber(1), astJs.jsNumber(2))
+				fn(n) count <- count + 1
+			)
+			count
+		}
+		3
+	)
+
+	// -- Oak AST rendered from JS transpilation --
+	'JS number -> Oak source value' |> t.eq(
+		string(astJs.transpileToOak(astJs.jsNumber(42)).val)
+		'42'
+	)
+	'JS string -> Oak renders correctly' |> t.eq(
+		codegenCommon.renderNode(astJs.transpileToOak(astJs.jsString('hello')))
+		'\'hello\''
+	)
+
+	// ========================================================
+	// ast-ts tests
+	// ========================================================
+
+	// -- TS node constructors --
+	'tsTypeRef creates type ref' |> t.eq(
+		astTs.tsTypeRef('string').name
+		'string'
+	)
+	'tsArrayType creates array type' |> t.eq(
+		astTs.tsArrayType(astTs.tsTypeRef('number')).elementType.name
+		'number'
+	)
+	'tsUnionType creates union type' |> t.eq(
+		len(astTs.tsUnionType([astTs.tsTypeRef('string'), astTs.tsTypeRef('number')]).types)
+		2
+	)
+	'tsGenericType creates generic type' |> t.eq(
+		astTs.tsGenericType('Array', [astTs.tsTypeRef('number')]).name
+		'Array'
+	)
+	'tsInterface creates interface node' |> t.eq(
+		astTs.tsInterface('User', [
+			astTs.tsPropertySig('name', astTs.tsTypeRef('string'))
+		]).name
+		'User'
+	)
+	'tsTypeAlias creates type alias' |> t.eq(
+		astTs.tsTypeAlias('ID', astTs.tsTypeRef('string')).name
+		'ID'
+	)
+	'tsEnum creates enum node' |> t.eq(
+		astTs.tsEnum('Color', [
+			astTs.tsEnumMember('Red', ?)
+			astTs.tsEnumMember('Green', ?)
+		]).name
+		'Color'
+	)
+	'tsAsExpr creates as expression' |> t.eq(
+		astTs.tsAsExpr(astTs.jsNumber(5), astTs.tsTypeRef('any')).type
+		:tsAsExpr
+	)
+	'tsNonNullExpr creates non-null assertion' |> t.eq(
+		astTs.tsNonNullExpr(astTs.jsIdentifier('x')).type
+		:tsNonNullExpr
+	)
+	'tsTypedVar creates typed variable' |> t.eq(
+		astTs.tsTypedVar('const', 'x', astTs.tsTypeRef('number'), astTs.jsNumber(5)).name
+		'x'
+	)
+	'tsTypedFunction creates typed function' |> t.eq(
+		astTs.tsTypedFunction('add', [
+			astTs.tsParam('a', astTs.tsTypeRef('number'))
+			astTs.tsParam('b', astTs.tsTypeRef('number'))
+		], astTs.tsTypeRef('number'), astTs.jsNumber(0)).name
+		'add'
+	)
+
+	// -- TS type rendering --
+	'renderType basic' |> t.eq(astTs.renderType(astTs.tsTypeRef('string')), 'string')
+	'renderType array' |> t.eq(astTs.renderType(astTs.tsArrayType(astTs.tsTypeRef('number'))), 'number[]')
+	'renderType union' |> t.eq(
+		astTs.renderType(astTs.tsUnionType([astTs.tsTypeRef('string'), astTs.tsTypeRef('number')]))
+		'string | number'
+	)
+	'renderType generic' |> t.eq(
+		astTs.renderType(astTs.tsGenericType('Array', [astTs.tsTypeRef('number')]))
+		'Array<number>'
+	)
+
+	// -- TS to Oak transpilation --
+	'tsAsExpr erases type, keeps value' |> t.eq(
+		astTs.transpileToOak(astTs.tsAsExpr(astTs.jsNumber(5), astTs.tsTypeRef('any'))).val
+		5
+	)
+	'tsNonNullExpr erases assertion, keeps value' |> t.eq(
+		astTs.transpileToOak(astTs.tsNonNullExpr(astTs.jsIdentifier('x'))).val
+		'x'
+	)
+	'tsTypedVar erases type, creates assignment' |> t.eq(
+		astTs.transpileToOak(astTs.tsTypedVar('const', 'x', astTs.tsTypeRef('number'), astTs.jsNumber(5))).type
+		:assignment
+	)
+	'tsTypedFunction erases types, creates function' |> t.eq(
+		astTs.transpileToOak(astTs.tsTypedFunction('add', [
+			astTs.tsParam('a', astTs.tsTypeRef('number'))
+			astTs.tsParam('b', astTs.tsTypeRef('number'))
+		], astTs.tsTypeRef('number'), astTs.jsNumber(0))).type
+		:function
+	)
+	'tsTypedFunction preserves param names' |> t.eq(
+		astTs.transpileToOak(astTs.tsTypedFunction('add', [
+			astTs.tsParam('a', astTs.tsTypeRef('number'))
+			astTs.tsParam('b', astTs.tsTypeRef('number'))
+		], astTs.tsTypeRef('number'), astTs.jsNumber(0))).args
+		['a', 'b']
+	)
+	'tsEnum transpiles to Oak object assignment' |> t.eq(
+		astTs.transpileToOak(astTs.tsEnum('Color', [
+			astTs.tsEnumMember('Red', ?)
+			astTs.tsEnumMember('Green', ?)
+		])).type
+		:assignment
+	)
+	'tsEnum values are sequential integers' |> t.eq(
+		astTs.transpileToOak(astTs.tsEnum('Color', [
+			astTs.tsEnumMember('Red', ?)
+			astTs.tsEnumMember('Green', ?)
+		])).right.entries |> std.map(fn(e) e.val.val)
+		[0, 1]
+	)
+	'tsInterface transpiles to Oak object shape' |> t.eq(
+		astTs.transpileToOak(astTs.tsInterface('User', [
+			astTs.tsPropertySig('name', astTs.tsTypeRef('string'))
+		])).type
+		:object
+	)
+	'tsTypeAlias transpiles to null (erased)' |> t.eq(
+		astTs.transpileToOak(astTs.tsTypeAlias('ID', astTs.tsTypeRef('string'))).type
+		:null
+	)
+	'TS delegates JS nodes to JS transpiler' |> t.eq(
+		astTs.transpileToOak(astTs.jsNumber(42)).type
+		:int
+	)
+
+	// -- TS rendering --
+	'renderTS interface' |> t.assert(
+		str.contains?(
+			astTs.renderTS(astTs.tsInterface('User', [
+				astTs.tsPropertySig('name', astTs.tsTypeRef('string'))
+			]))
+			'interface User'
+		)
+	)
+	'renderTS enum' |> t.assert(
+		str.contains?(
+			astTs.renderTS(astTs.tsEnum('Color', [
+				astTs.tsEnumMember('Red', ?)
+			]))
+			'enum Color'
+		)
+	)
+	'renderTS typeAlias' |> t.assert(
+		str.contains?(
+			astTs.renderTS(astTs.tsTypeAlias('ID', astTs.tsTypeRef('string')))
+			'type ID = string'
+		)
+	)
+
+	// ========================================================
+	// ast-lua tests
+	// ========================================================
+
+	// -- Lua node constructors --
+	'luaNil creates nil node' |> t.eq(astLua.luaNil().type, :luaNil)
+	'luaNumber creates number node' |> t.eq(astLua.luaNumber(42).val, 42)
+	'luaString creates string node' |> t.eq(astLua.luaString('hello').val, 'hello')
+	'luaBool creates bool node' |> t.eq(astLua.luaBool(true).val, true)
+	'luaIdentifier creates identifier node' |> t.eq(astLua.luaIdentifier('foo').val, 'foo')
+	'luaTable creates table node' |> t.eq(
+		len(astLua.luaTable([astLua.luaTableEntry(?, astLua.luaNumber(1))]).entries)
+		1
+	)
+	'luaBinary creates binary node' |> t.eq(astLua.luaBinary('+', astLua.luaNumber(1), astLua.luaNumber(2)).op, '+')
+	'luaFunction creates function node' |> t.eq(astLua.luaFunction('add', ['a', 'b'], astLua.luaNumber(0)).name, 'add')
+	'luaCall creates call node' |> t.eq(astLua.luaCall(astLua.luaIdentifier('fn'), []).type, :luaCall)
+	'luaConcat creates concat node' |> t.eq(astLua.luaConcat(astLua.luaString('a'), astLua.luaString('b')).type, :luaConcat)
+	'luaLength creates length node' |> t.eq(astLua.luaLength(astLua.luaIdentifier('t')).type, :luaLength)
+	'luaReturn creates return node' |> t.eq(len(astLua.luaReturn([astLua.luaNumber(1)]).values), 1)
+	'luaBlock creates block node' |> t.eq(len(astLua.luaBlock([astLua.luaNumber(1)]).stmts), 1)
+	'luaIf creates if node' |> t.eq(astLua.luaIf(astLua.luaBool(true), astLua.luaNumber(1), [], ?).type, :luaIf)
+	'luaForNumeric creates for node' |> t.eq(
+		astLua.luaForNumeric('i', astLua.luaNumber(1), astLua.luaNumber(10), ?, astLua.luaNumber(0)).type
+		:luaForNumeric
+	)
+	'luaWhile creates while node' |> t.eq(astLua.luaWhile(astLua.luaBool(true), astLua.luaNumber(0)).type, :luaWhile)
+	'luaDot creates dot node' |> t.eq(astLua.luaDot(astLua.luaIdentifier('t'), 'x').field, 'x')
+	'luaIndex creates index node' |> t.eq(astLua.luaIndex(astLua.luaIdentifier('t'), astLua.luaNumber(1)).type, :luaIndex)
+
+	// -- Lua to Oak transpilation --
+	'luaNil transpiles to Oak null' |> t.eq(astLua.transpileToOak(astLua.luaNil()).type, :null)
+	'luaNumber int transpiles to Oak int' |> t.eq(astLua.transpileToOak(astLua.luaNumber(5)).type, :int)
+	'luaNumber float transpiles to Oak float' |> t.eq(astLua.transpileToOak(astLua.luaNumber(3.14)).type, :float)
+	'luaString transpiles to Oak string' |> t.eq(astLua.transpileToOak(astLua.luaString('hi')).val, 'hi')
+	'luaBool transpiles to Oak bool' |> t.eq(astLua.transpileToOak(astLua.luaBool(true)).val, true)
+	'luaIdentifier nil -> null' |> t.eq(astLua.transpileToOak(astLua.luaIdentifier('nil')).val, '?')
+
+	'luaTable array-like transpiles to Oak list' |> t.eq(
+		astLua.transpileToOak(astLua.luaTable([
+			astLua.luaTableEntry(?, astLua.luaNumber(1))
+			astLua.luaTableEntry(?, astLua.luaNumber(2))
+		])).type
+		:list
+	)
+	'luaTable dict-like transpiles to Oak object' |> t.eq(
+		astLua.transpileToOak(astLua.luaTable([
+			astLua.luaTableEntry(astLua.luaString('a'), astLua.luaNumber(1))
+		])).type
+		:object
+	)
+
+	'luaBinary + transpiles to Oak plus' |> t.eq(
+		astLua.transpileToOak(astLua.luaBinary('+', astLua.luaNumber(1), astLua.luaNumber(2))).op
+		:plus
+	)
+	'luaBinary == transpiles to Oak eq' |> t.eq(
+		astLua.transpileToOak(astLua.luaBinary('==', astLua.luaNumber(1), astLua.luaNumber(1))).op
+		:eq
+	)
+	'luaConcat transpiles to Oak binary plus' |> t.eq(
+		astLua.transpileToOak(astLua.luaConcat(astLua.luaString('a'), astLua.luaString('b'))).op
+		:plus
+	)
+	'luaLength transpiles to Oak len() call' |> t.eq(
+		astLua.transpileToOak(astLua.luaLength(astLua.luaIdentifier('t'))).type
+		:fnCall
+	)
+
+	'luaFunction transpiles to Oak function' |> t.eq(
+		astLua.transpileToOak(astLua.luaFunction('add', ['a', 'b'], astLua.luaNumber(0))).type
+		:function
+	)
+	'luaReturn single value transpiles directly' |> t.eq(
+		astLua.transpileToOak(astLua.luaReturn([astLua.luaNumber(42)])).val
+		42
+	)
+	'luaReturn multiple values transpiles to list' |> t.eq(
+		astLua.transpileToOak(astLua.luaReturn([astLua.luaNumber(1), astLua.luaNumber(2)])).type
+		:list
+	)
+	'luaReturn empty transpiles to null' |> t.eq(
+		astLua.transpileToOak(astLua.luaReturn([])).type
+		:null
+	)
+	'luaBlock transpiles to Oak block' |> t.eq(
+		astLua.transpileToOak(astLua.luaBlock([astLua.luaNumber(1)])).type
+		:block
+	)
+	'luaIf transpiles to Oak ifExpr' |> t.eq(
+		astLua.transpileToOak(astLua.luaIf(astLua.luaBool(true), astLua.luaNumber(1), [], astLua.luaNumber(0))).type
+		:ifExpr
+	)
+	'luaDot transpiles to Oak propertyAccess' |> t.eq(
+		astLua.transpileToOak(astLua.luaDot(astLua.luaIdentifier('t'), 'x')).type
+		:propertyAccess
+	)
+	'luaCall transpiles to Oak fnCall' |> t.eq(
+		astLua.transpileToOak(astLua.luaCall(astLua.luaIdentifier('print'), [astLua.luaString('hi')])).type
+		:fnCall
+	)
+	'luaForNumeric transpiles to each(range(...))' |> t.eq(
+		astLua.transpileToOak(astLua.luaForNumeric('i', astLua.luaNumber(1), astLua.luaNumber(10), ?, astLua.luaNumber(0))).type
+		:fnCall
+	)
+	'luaWhile transpiles to recursive function + call' |> t.eq(
+		astLua.transpileToOak(astLua.luaWhile(astLua.luaBool(true), astLua.luaNumber(0))).type
+		:block
+	)
+	'null Lua node transpiles safely' |> t.eq(astLua.transpileToOak(?).type, :null)
+
+	// -- Lua rendering --
+	'renderLua nil' |> t.eq(astLua.renderLua(astLua.luaNil()), 'nil')
+	'renderLua number' |> t.eq(astLua.renderLua(astLua.luaNumber(42)), '42')
+	'renderLua string' |> t.eq(astLua.renderLua(astLua.luaString('hi')), '\'hi\'')
+	'renderLua bool' |> t.eq(astLua.renderLua(astLua.luaBool(true)), 'true')
+	'renderLua identifier' |> t.eq(astLua.renderLua(astLua.luaIdentifier('x')), 'x')
+	'renderLua concat' |> t.assert(
+		str.contains?(
+			astLua.renderLua(astLua.luaConcat(astLua.luaString('a'), astLua.luaString('b')))
+			'..'
+		)
+	)
+	'renderLua length' |> t.eq(astLua.renderLua(astLua.luaLength(astLua.luaIdentifier('t'))), '#t')
+
+	// -- Lua walk visitor --
+	'walkLua visits all nodes' |> t.eq(
+		{
+			count := 0
+			astLua.walkLua(
+				astLua.luaBinary('+', astLua.luaNumber(1), astLua.luaNumber(2))
+				fn(n) count <- count + 1
+			)
+			count
+		}
+		3
+	)
+
+	// -- Lua AST rendered from Oak --
+	'Lua number -> Oak source value' |> t.eq(
+		string(astLua.transpileToOak(astLua.luaNumber(42)).val)
+		'42'
+	)
+
+	// ========================================================
+	// ast-java tests
+	// ========================================================
+
+	// -- Java node constructors --
+	'javaNull creates null node' |> t.eq(astJava.javaNull().type, :javaNull)
+	'javaInt creates int node' |> t.eq(astJava.javaInt(42).val, 42)
+	'javaDouble creates double node' |> t.eq(astJava.javaDouble(3.14).val, 3.14)
+	'javaString creates string node' |> t.eq(astJava.javaString('hello').val, 'hello')
+	'javaBool creates bool node' |> t.eq(astJava.javaBool(true).val, true)
+	'javaChar creates char node' |> t.eq(astJava.javaChar('a').val, 'a')
+	'javaIdentifier creates identifier node' |> t.eq(astJava.javaIdentifier('foo').val, 'foo')
+	'javaArray creates array node' |> t.eq(len(astJava.javaArray([astJava.javaInt(1)]).elems), 1)
+	'javaMap creates map node' |> t.eq(
+		len(astJava.javaMap([astJava.javaMapEntry(astJava.javaString('a'), astJava.javaInt(1))]).entries)
+		1
+	)
+	'javaBinary creates binary node' |> t.eq(astJava.javaBinary('+', astJava.javaInt(1), astJava.javaInt(2)).op, '+')
+	'javaLambda creates lambda node' |> t.eq(astJava.javaLambda(['x'], astJava.javaInt(0)).type, :javaLambda)
+	'javaMethod creates method node' |> t.eq(astJava.javaMethod(['public'], 'int', 'add', [], astJava.javaInt(0)).name, 'add')
+	'javaVarDecl creates var decl' |> t.eq(astJava.javaVarDecl('int', 'x', astJava.javaInt(5)).name, 'x')
+	'javaReturn creates return node' |> t.eq(astJava.javaReturn(astJava.javaInt(42)).value.val, 42)
+	'javaBlock creates block node' |> t.eq(len(astJava.javaBlock([astJava.javaInt(1)]).stmts), 1)
+	'javaIf creates if node' |> t.eq(astJava.javaIf(astJava.javaBool(true), astJava.javaInt(1), ?).type, :javaIf)
+	'javaNew creates new node' |> t.eq(astJava.javaNew('ArrayList', []).className, 'ArrayList')
+	'javaCast creates cast node' |> t.eq(astJava.javaCast('int', astJava.javaDouble(3.14)).javaType, 'int')
+	'javaTernary creates ternary node' |> t.eq(astJava.javaTernary(astJava.javaBool(true), astJava.javaInt(1), astJava.javaInt(2)).type, :javaTernary)
+	'javaDot creates dot node' |> t.eq(astJava.javaDot(astJava.javaIdentifier('obj'), 'field').field, 'field')
+	'javaMethodCall creates method call' |> t.eq(astJava.javaMethodCall(astJava.javaIdentifier('list'), 'add', [astJava.javaInt(1)]).method, 'add')
+	'javaForEach creates for-each node' |> t.eq(astJava.javaForEach('var', 'item', astJava.javaIdentifier('list'), astJava.javaInt(0)).type, :javaForEach)
+	'javaInstanceOf creates instanceof node' |> t.eq(astJava.javaInstanceOf(astJava.javaIdentifier('x'), 'String').javaType, 'String')
+
+	// -- Java to Oak transpilation --
+	'javaNull transpiles to Oak null' |> t.eq(astJava.transpileToOak(astJava.javaNull()).type, :null)
+	'javaInt transpiles to Oak int' |> t.eq(astJava.transpileToOak(astJava.javaInt(42)).val, 42)
+	'javaDouble transpiles to Oak float' |> t.eq(astJava.transpileToOak(astJava.javaDouble(3.14)).val, 3.14)
+	'javaString transpiles to Oak string' |> t.eq(astJava.transpileToOak(astJava.javaString('hi')).val, 'hi')
+	'javaBool transpiles to Oak bool' |> t.eq(astJava.transpileToOak(astJava.javaBool(true)).val, true)
+	'javaChar transpiles to Oak string' |> t.eq(astJava.transpileToOak(astJava.javaChar('a')).val, 'a')
+	'javaIdentifier null -> null' |> t.eq(astJava.transpileToOak(astJava.javaIdentifier('null')).val, '?')
+	'javaIdentifier this -> self' |> t.eq(astJava.transpileToOak(astJava.javaIdentifier('this')).val, 'self')
+	'javaArray transpiles to Oak list' |> t.eq(
+		astJava.transpileToOak(astJava.javaArray([astJava.javaInt(1), astJava.javaInt(2)])).type
+		:list
+	)
+	'javaMap transpiles to Oak object' |> t.eq(
+		astJava.transpileToOak(astJava.javaMap([
+			astJava.javaMapEntry(astJava.javaString('a'), astJava.javaInt(1))
+		])).type
+		:object
+	)
+	'javaBinary + transpiles to Oak plus' |> t.eq(
+		astJava.transpileToOak(astJava.javaBinary('+', astJava.javaInt(1), astJava.javaInt(2))).op
+		:plus
+	)
+	'javaBinary == transpiles to Oak eq' |> t.eq(
+		astJava.transpileToOak(astJava.javaBinary('==', astJava.javaInt(1), astJava.javaInt(1))).op
+		:eq
+	)
+	'javaLambda transpiles to Oak function' |> t.eq(
+		astJava.transpileToOak(astJava.javaLambda(['x'], astJava.javaInt(0))).type
+		:function
+	)
+	'javaMethod transpiles to Oak function' |> t.eq(
+		astJava.transpileToOak(astJava.javaMethod([], 'int', 'add', ['a', 'b'], astJava.javaInt(0))).type
+		:function
+	)
+	'javaMethod preserves name' |> t.eq(
+		astJava.transpileToOak(astJava.javaMethod([], 'int', 'add', ['a', 'b'], astJava.javaInt(0))).name
+		'add'
+	)
+	'javaVarDecl transpiles to Oak assignment' |> t.eq(
+		astJava.transpileToOak(astJava.javaVarDecl('int', 'x', astJava.javaInt(5))).type
+		:assignment
+	)
+	'javaReturn transpiles to inner value' |> t.eq(
+		astJava.transpileToOak(astJava.javaReturn(astJava.javaInt(42))).val
+		42
+	)
+	'javaBlock transpiles to Oak block' |> t.eq(
+		astJava.transpileToOak(astJava.javaBlock([astJava.javaInt(1)])).type
+		:block
+	)
+	'javaIf transpiles to Oak ifExpr' |> t.eq(
+		astJava.transpileToOak(astJava.javaIf(astJava.javaBool(true), astJava.javaInt(1), astJava.javaInt(0))).type
+		:ifExpr
+	)
+	'javaNew transpiles to Oak fnCall' |> t.eq(
+		astJava.transpileToOak(astJava.javaNew('ArrayList', [])).type
+		:fnCall
+	)
+	'javaCast erases type, keeps expr' |> t.eq(
+		astJava.transpileToOak(astJava.javaCast('int', astJava.javaDouble(3.14))).val
+		3.14
+	)
+	'javaTernary transpiles to Oak ifExpr' |> t.eq(
+		astJava.transpileToOak(astJava.javaTernary(astJava.javaBool(true), astJava.javaInt(1), astJava.javaInt(2))).type
+		:ifExpr
+	)
+	'javaDot transpiles to Oak propertyAccess' |> t.eq(
+		astJava.transpileToOak(astJava.javaDot(astJava.javaIdentifier('obj'), 'x')).type
+		:propertyAccess
+	)
+	'javaMethodCall transpiles to Oak fnCall' |> t.eq(
+		astJava.transpileToOak(astJava.javaMethodCall(astJava.javaIdentifier('list'), 'add', [astJava.javaInt(1)])).type
+		:fnCall
+	)
+	'javaForEach transpiles to each()' |> t.eq(
+		astJava.transpileToOak(astJava.javaForEach('var', 'item', astJava.javaIdentifier('list'), astJava.javaInt(0))).type
+		:fnCall
+	)
+	'javaInstanceOf transpiles to type check' |> t.eq(
+		astJava.transpileToOak(astJava.javaInstanceOf(astJava.javaIdentifier('x'), 'String')).op
+		:eq
+	)
+	'null Java node transpiles safely' |> t.eq(astJava.transpileToOak(?).type, :null)
+
+	// -- Java rendering --
+	'renderJava null' |> t.eq(astJava.renderJava(astJava.javaNull()), 'null')
+	'renderJava int' |> t.eq(astJava.renderJava(astJava.javaInt(42)), '42')
+	'renderJava double' |> t.eq(astJava.renderJava(astJava.javaDouble(3.14)), '3.14')
+	'renderJava string' |> t.eq(astJava.renderJava(astJava.javaString('hi')), '"hi"')
+	'renderJava bool' |> t.eq(astJava.renderJava(astJava.javaBool(true)), 'true')
+	'renderJava identifier' |> t.eq(astJava.renderJava(astJava.javaIdentifier('x')), 'x')
+	'renderJava binary' |> t.eq(astJava.renderJava(astJava.javaBinary('+', astJava.javaInt(1), astJava.javaInt(2))), '(1 + 2)')
+
+	// -- Java walk visitor --
+	'walkJava visits all nodes' |> t.eq(
+		{
+			count := 0
+			astJava.walkJava(
+				astJava.javaBinary('+', astJava.javaInt(1), astJava.javaInt(2))
+				fn(n) count <- count + 1
+			)
+			count
+		}
+		3
+	)
+
+	// -- Java AST rendered from Oak --
+	'Java int -> Oak source value' |> t.eq(
+		string(astJava.transpileToOak(astJava.javaInt(42)).val)
+		'42'
+	)
+
+	// ========================================================
+	// Cross-language transpilation roundtrip tests
+	// ========================================================
+
+	// -- JS -> Oak -> renderNode --
+	'JS add function -> Oak -> source' |> t.assert(
+		str.contains?(
+			codegenCommon.renderNode(
+				astJs.transpileToOak(
+					astJs.jsFunction('add', ['a', 'b'],
+						astJs.jsBinary('+', astJs.jsIdentifier('a'), astJs.jsIdentifier('b'))
+					)
+				)
+			)
+			'fn add'
+		)
+	)
+
+	// -- TS typed function -> Oak --
+	'TS typed add -> Oak function source' |> t.assert(
+		str.contains?(
+			codegenCommon.renderNode(
+				astTs.transpileToOak(
+					astTs.tsTypedFunction('add', [
+						astTs.tsParam('a', astTs.tsTypeRef('number'))
+						astTs.tsParam('b', astTs.tsTypeRef('number'))
+					], astTs.tsTypeRef('number'),
+					astTs.jsBinary('+', astTs.jsIdentifier('a'), astTs.jsIdentifier('b')))
+				)
+			)
+			'fn add'
+		)
+	)
+
+	// -- Lua function -> Oak --
+	'Lua function -> Oak function source' |> t.assert(
+		str.contains?(
+			codegenCommon.renderNode(
+				astLua.transpileToOak(
+					astLua.luaFunction('add', ['a', 'b'],
+						astLua.luaBinary('+', astLua.luaIdentifier('a'), astLua.luaIdentifier('b'))
+					)
+				)
+			)
+			'fn add'
+		)
+	)
+
+	// -- Java method -> Oak --
+	'Java method -> Oak function source' |> t.assert(
+		str.contains?(
+			codegenCommon.renderNode(
+				astJava.transpileToOak(
+					astJava.javaMethod([], 'int', 'add', ['a', 'b'],
+						astJava.javaBinary('+', astJava.javaIdentifier('a'), astJava.javaIdentifier('b'))
+					)
+				)
+			)
+			'fn add'
+		)
+	)
+}

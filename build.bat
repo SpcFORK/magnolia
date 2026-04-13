@@ -138,6 +138,16 @@ for %%F in (lib\*.oak) do (
         set /a _SPEC_OK+=1
     )
 )
+for %%F in (lib\*.oak) do (
+    set "_BASE=%%~nF"
+    .\build\magnolia.exe build --entry "%%F" --graph --output "docs\spec\!_BASE!.mmd" >nul 2>&1
+    if errorlevel 1 (
+        echo   Failed to generate spec for %%F
+        set /a _SPEC_FAIL+=1
+    ) else (
+        set /a _SPEC_OK+=1
+    )
+)
 echo   Spec docs: !_SPEC_OK! generated, !_SPEC_FAIL! skipped
 
 goto :eof

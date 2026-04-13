@@ -1,0 +1,474 @@
+// libmermaid -- Mermaid diagram generation library
+//
+// Provides functions for creating Mermaid-syntax diagrams (flowcharts,
+// sequence diagrams, class diagrams, state diagrams, etc.) and exporting
+// them to Mermaid text, HTML preview, or image files via mermaid-cli.
+//
+// Usage:
+//   mermaid := import('mermaid')
+//   g := mermaid.graph(:td)
+//   g |> mermaid.node('A', 'Start')
+//   g |> mermaid.node('B', 'End')
+//   g |> mermaid.edge('A', 'B', 'goes to')
+//   text := mermaid.render(g)
+//   mermaid.saveImage(g, 'diagram.png')
+
+{
+	default: default
+	map: map
+	each: each
+	filter: filter
+	reduce: reduce
+	append: append
+	clone: clone
+} := import('std')
+{
+	join: join
+	contains?: strContains?
+	trim: trim
+	replace: replace
+	split: split
+} := import('str')
+{
+	format: format
+} := import('fmt')
+fs := import('fs')
+path := import('path')
+
+// --- Graph types ---
+
+FlowchartLR := :lr
+FlowchartTD := :td
+FlowchartRL := :rl
+FlowchartBT := :bt
+SequenceDiagram := :sequence
+ClassDiagram := :classDiagram
+StateDiagram := :stateDiagram
+PieChart := :pie
+Gantt := :gantt
+ERDiagram := :erDiagram
+GitGraph := :gitGraph
+
+// --- Node shapes ---
+
+ShapeRect := :rect
+ShapeRound := :round
+ShapeStadium := :stadium
+ShapeCircle := :circle
+ShapeRhombus := :rhombus
+ShapeHexagon := :hexagon
+ShapeTrapezoid := :trapezoid
+ShapeDefault := :default
+
+// --- Edge styles ---
+
+EdgeArrow := :arrow
+EdgeDotted := :dotted
+EdgeThick := :thick
+EdgeOpen := :open
+
+// graph(direction) creates a new mermaid graph object.
+// direction is one of FlowchartLR, FlowchartTD, etc.
+fn graph(direction) {
+	type: :mermaidGraph
+	direction: direction |> default(:td)
+	nodes: []
+	edges: []
+	subgraphs: []
+	rawLines: []
+	title: ''
+	theme: ''
+}
+
+// node(g, id, label, shape) adds a node to the graph.
+fn node(g, id, label, shape) {
+	label := label |> default(id)
+	shape := shape |> default(ShapeDefault)
+	g.nodes <- g.nodes |> append([{
+		id: id
+		label: label
+		shape: shape
+	}])
+	g
+}
+
+// edge(g, from, to, label, style) adds an edge between two nodes.
+fn edge(g, from, to, label, style) {
+	style := style |> default(EdgeArrow)
+	g.edges <- g.edges |> append([{
+		from: from
+		to: to
+		label: label |> default('')
+		style: style
+	}])
+	g
+}
+
+// subgraph(g, id, label, builderFn) adds a subgraph.
+// builderFn receives a fresh graph object; its nodes/edges are nested.
+fn subgraph(g, id, label, builderFn) {
+	sub := graph(g.direction)
+	builderFn(sub)
+	g.subgraphs <- g.subgraphs |> append([{
+		id: id
+		label: label |> default(id)
+		graph: sub
+	}])
+	g
+}
+
+// raw(g, line) adds a raw Mermaid syntax line.
+fn raw(g, line) {
+	g.rawLines <- g.rawLines |> append([line])
+	g
+}
+
+// title(g, t) sets the diagram title.
+fn setTitle(g, t) {
+	g.title <- t
+	g
+}
+
+// theme(g, t) sets the Mermaid theme (default, forest, dark, neutral).
+fn setTheme(g, t) {
+	g.theme <- t
+	g
+}
+
+// --- Rendering helpers ---
+
+fn escapeLabel(s) {
+	s |> replace('"', '#quot;')
+}
+
+fn renderShape(id, label, shape) if shape {
+	:rect -> format('{{0}}["{{1}}"]', id, escapeLabel(label))
+	:round -> format('{{0}}("{{1}}")', id, escapeLabel(label))
+	:stadium -> format('{{0}}(["{{1}}"])', id, escapeLabel(label))
+	:circle -> format('{{0}}(("{{1}}"))', id, escapeLabel(label))
+	:rhombus -> format('{{0}}{{"{{1}}"}}', id, escapeLabel(label))
+	:hexagon -> format('{{0}}{{{"{{1}}"}}}}', id, escapeLabel(label))
+	:trapezoid -> format('{{0}}[/"{{1}}"\\]', id, escapeLabel(label))
+	_ -> if label = id {
+		true -> id
+		_ -> format('{{0}}["{{1}}"]', id, escapeLabel(label))
+	}
+}
+
+fn renderEdge(e) {
+	connector := if e.style {
+		:dotted -> if e.label {
+			'' -> '-.->'
+			_ -> format('-. {{0}} .->', e.label)
+		}
+		:thick -> if e.label {
+			'' -> '==>'
+			_ -> format('== {{0}} ==>', e.label)
+		}
+		:open -> if e.label {
+			'' -> '---'
+			_ -> format('-- {{0}} ---', e.label)
+		}
+		_ -> if e.label {
+			'' -> '-->'
+			_ -> format('-- {{0}} -->', e.label)
+		}
+	}
+	format('    {{0}} {{1}} {{2}}', e.from, connector, e.to)
+}
+
+fn renderSubgraph(sg, indent) {
+	lines := []
+	lines <- lines |> append([indent << 'subgraph ' << sg.id << ' ["' << escapeLabel(sg.label) << '"]'])
+	inner := indent << '    '
+	sg.graph.nodes |> each(fn(n) {
+		lines <- lines |> append([inner << renderShape(n.id, n.label, n.shape)])
+	})
+	sg.graph.edges |> each(fn(e) {
+		lines <- lines |> append([inner << renderEdge(e) |> trim()])
+	})
+	sg.graph.subgraphs |> each(fn(child) {
+		renderSubgraph(child, inner) |> each(fn(l) {
+			lines <- lines |> append([l])
+		})
+	})
+	sg.graph.rawLines |> each(fn(l) {
+		lines <- lines |> append([inner << l])
+	})
+	lines <- lines |> append([indent << 'end'])
+	lines
+}
+
+// render(g) returns the complete Mermaid diagram text.
+fn render(g) if g.type {
+	:mermaidGraph -> renderFlowchart(g)
+	_ -> renderFlowchart(g)
+}
+
+fn renderFlowchart(g) {
+	lines := []
+
+	// Direction header
+	dir := if g.direction {
+		:lr -> 'LR'
+		:rl -> 'RL'
+		:bt -> 'BT'
+		:sequence -> ''
+		:classDiagram -> ''
+		:stateDiagram -> ''
+		:pie -> ''
+		:gantt -> ''
+		:erDiagram -> ''
+		:gitGraph -> ''
+		_ -> 'TD'
+	}
+
+	// Diagram type header
+	header := if g.direction {
+		:sequence -> 'sequenceDiagram'
+		:classDiagram -> 'classDiagram'
+		:stateDiagram -> 'stateDiagram-v2'
+		:pie -> 'pie'
+		:gantt -> 'gantt'
+		:erDiagram -> 'erDiagram'
+		:gitGraph -> 'gitgraph'
+		_ -> 'flowchart ' << dir
+	}
+
+	if g.title != '' -> lines <- lines |> append(['---', 'title: ' << g.title, '---'])
+	if g.theme != '' -> lines <- lines |> append(['%%{init: {\'theme\': \'' << g.theme << '\'}}%%'])
+	lines <- lines |> append([header])
+
+	// Nodes
+	g.nodes |> each(fn(n) {
+		lines <- lines |> append(['    ' << renderShape(n.id, n.label, n.shape)])
+	})
+
+	// Edges
+	g.edges |> each(fn(e) {
+		lines <- lines |> append([renderEdge(e)])
+	})
+
+	// Subgraphs
+	g.subgraphs |> each(fn(sg) {
+		renderSubgraph(sg, '    ') |> each(fn(l) {
+			lines <- lines |> append([l])
+		})
+	})
+
+	// Raw lines
+	g.rawLines |> each(fn(l) {
+		lines <- lines |> append(['    ' << l])
+	})
+
+	lines |> join(char(10))
+}
+
+// --- Sequence diagram helpers ---
+
+fn seqMessage(g, from, to, label, lineType) {
+	arrow := if lineType {
+		:dotted -> '-->>'
+		:reply -> '-->'
+		:dottedReply -> '-->'
+		_ -> '->>'
+	}
+	g |> raw(format('    {{0}} {{1}} {{2}}: {{3}}', from, arrow, to, label |> default('')))
+}
+
+fn seqNote(g, position, actor, text) {
+	pos := if position {
+		:left -> 'left of'
+		:right -> 'right of'
+		_ -> 'over'
+	}
+	g |> raw(format('    Note {{0}} {{1}}: {{2}}', pos, actor, text))
+}
+
+fn seqActivate(g, actor) g |> raw(format('    activate {{0}}', actor))
+fn seqDeactivate(g, actor) g |> raw(format('    deactivate {{0}}', actor))
+
+fn seqLoop(g, label, builderFn) {
+	g |> raw(format('    loop {{0}}', label))
+	builderFn(g)
+	g |> raw('    end')
+}
+
+fn seqAlt(g, label, builderFn, elseLabel, elseBuilderFn) {
+	g |> raw(format('    alt {{0}}', label))
+	builderFn(g)
+	if elseBuilderFn != ? {
+		true -> {
+			g |> raw(format('    else {{0}}', elseLabel |> default('')))
+			elseBuilderFn(g)
+		}
+	}
+	g |> raw('    end')
+}
+
+// --- Pie chart helpers ---
+
+fn pieSlice(g, label, value) {
+	g |> raw(format('    "{{0}}" : {{1}}', label, string(value)))
+}
+
+// --- HTML wrapper ---
+
+// renderHTML(g) returns a standalone HTML page that renders the diagram.
+fn renderHTML(g) {
+	mermaidText := render(g)
+	'<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>' << (if g.title { '' -> 'Mermaid Diagram', _ -> g.title }) << '</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>body{display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5;font-family:sans-serif}.mermaid{background:#fff;padding:2em;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}</style>
+</head>
+<body>
+<div class="mermaid">
+' << mermaidText << '
+</div>
+<script>mermaid.initialize({startOnLoad:true' << (if g.theme { '' -> '', _ -> ',theme:"' << g.theme << '"' }) << '});</script>
+</body>
+</html>'
+}
+
+// --- File export ---
+
+// save(g, filepath) writes the Mermaid text to a .mmd file.
+fn save(g, filepath) {
+	text := render(g)
+	fs.writeFile(filepath, text)
+}
+
+// saveHTML(g, filepath) writes a standalone HTML preview to a file.
+fn saveHTML(g, filepath) {
+	html := renderHTML(g)
+	fs.writeFile(filepath, html)
+}
+
+// saveImage(g, filepath, opts) exports the diagram to PNG/SVG/PDF via
+// mermaid-cli (mmdc). Requires @mermaid-js/mermaid-cli to be installed.
+//
+// opts:
+//   format  - 'png', 'svg', or 'pdf' (default: inferred from filepath, or 'png')
+//   width   - image width in pixels (default: 800)
+//   height  - image height in pixels (default: 600)
+//   theme   - mermaid theme override
+//   bg      - background color (default: 'white')
+//   mmdc    - path to mmdc binary (default: 'mmdc')
+fn saveImage(g, filepath, opts) {
+	opts := opts |> default({})
+	mmdcBin := opts.mmdc |> default('mmdc')
+	imgFormat := opts.format |> default(inferFormat(filepath))
+	width := opts.width |> default(800)
+	height := opts.height |> default(600)
+	bg := opts.bg |> default('white')
+	theme := opts.theme |> default(g.theme) |> default('default')
+
+	// Write temporary .mmd file
+	tmpFile := filepath << '.tmp.mmd'
+	text := render(g)
+	fs.writeFile(tmpFile, text)
+
+	// Build mmdc command
+	cmd := format('{{0}} -i "{{1}}" -o "{{2}}" -t {{3}} -w {{4}} -H {{5}} -b {{6}} -e {{7}}',
+		mmdcBin, tmpFile, filepath, theme, string(width), string(height), bg, imgFormat)
+
+	// Execute mmdc
+	result := exec(cmd, '')
+
+	// Clean up temp file
+	rm(tmpFile)
+
+	result
+}
+
+fn inferFormat(filepath) {
+	parts := filepath |> split('.')
+	if len(parts) > 1 {
+		true -> {
+			ext := parts.(len(parts) - 1)
+			if ext {
+				'png' -> 'png'
+				'svg' -> 'svg'
+				'pdf' -> 'pdf'
+				_ -> 'png'
+			}
+		}
+		_ -> 'png'
+	}
+}
+
+// --- Module dependency graph ---
+
+// depGraph(moduleNodes, entryPath) creates a Mermaid dependency graph
+// from a map of module paths to their AST (as produced by the build system).
+fn depGraph(moduleNodes, entryPath) {
+	g := graph(:lr)
+	g |> setTitle('Module Dependency Graph')
+
+	moduleKeys := keys(moduleNodes)
+
+	// Create short display names from paths
+	fn shortName(p) {
+		parts := p |> split('/')
+		if len(parts) > 0 {
+			true -> parts.(len(parts) - 1)
+			_ -> p
+		}
+	}
+
+	// Sanitize ID for Mermaid (alphanumeric + underscore)
+	fn sanitizeId(s) {
+		s |> replace('/', '_') |> replace('\\', '_') |> replace('.', '_') |> replace('-', '_') |> replace(' ', '_') |> replace(':', '_')
+	}
+
+	// Add nodes
+	moduleKeys |> each(fn(modPath) {
+		id := sanitizeId(modPath)
+		label := shortName(modPath)
+		shape := if modPath = entryPath {
+			true -> ShapeStadium
+			_ -> ShapeRect
+		}
+		g |> node(id, label, shape)
+	})
+
+	// Walk ASTs to extract import edges
+	moduleKeys |> each(fn(modPath) {
+		ast := moduleNodes.(modPath)
+		fromId := sanitizeId(modPath)
+		if type(ast) = :list {
+			true -> ast |> each(fn(astNode) extractImportEdges(g, fromId, astNode, fn(name) sanitizeId(name)))
+		}
+	})
+
+	g
+}
+
+// extractImportEdges walks an AST looking for import() calls and adds edges.
+fn extractImportEdges(g, fromId, node, sanitize) if type(node) = :object {
+	true -> if node.type {
+		:assignment -> if {
+			node.local? = true &
+			type(node.right) = :object &
+			node.right.type = :fnCall &
+			type(node.right.function) = :object &
+			node.right.function.type = :identifier &
+			node.right.function.val = 'import' &
+			len(node.right.args) = 1 &
+			type(node.right.args.(0)) = :object &
+			node.right.args.(0).type = :string -> {
+				importName := node.right.args.(0).val
+				toId := sanitize(importName)
+				g |> edge(fromId, toId)
+			}
+		}
+		:block -> if type(node.exprs) = :list {
+			true -> node.exprs |> each(fn(child) extractImportEdges(g, fromId, child, sanitize))
+		}
+		_ -> ?
+	}
+}

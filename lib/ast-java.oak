@@ -1,0 +1,846 @@
+// ast-java -- Java AST node constructors and Java-to-Oak transpilation
+//
+// Provides helpers for building Java 17+-style AST nodes and converting
+// them into equivalent Oak AST nodes for cross-language transpilation.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+} := import('std')
+{
+	replace: replace
+	contains?: strContains?
+} := import('str')
+{
+	format: format
+} := import('fmt')
+
+// -- Java reserved words --
+JavaReserved := [
+	'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch'
+	'char', 'class', 'const', 'continue', 'default', 'do', 'double', 'else'
+	'enum', 'extends', 'final', 'finally', 'float', 'for', 'goto', 'if'
+	'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native'
+	'new', 'package', 'private', 'protected', 'public', 'return', 'short'
+	'static', 'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw'
+	'throws', 'transient', 'try', 'void', 'volatile', 'while', 'var', 'yield'
+	'record', 'sealed', 'permits'
+]
+
+fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
+
+// -- Java AST node constructors --
+
+fn javaNull() {
+	type: :javaNull
+	tok: _tok()
+}
+
+fn javaInt(val) {
+	type: :javaInt
+	tok: _tok()
+	val: val
+}
+
+fn javaDouble(val) {
+	type: :javaDouble
+	tok: _tok()
+	val: val
+}
+
+fn javaString(val) {
+	type: :javaString
+	tok: _tok()
+	val: val
+}
+
+fn javaBool(val) {
+	type: :javaBool
+	tok: _tok()
+	val: val
+}
+
+fn javaChar(val) {
+	type: :javaChar
+	tok: _tok()
+	val: val
+}
+
+fn javaIdentifier(name) {
+	type: :javaIdentifier
+	tok: _tok()
+	val: name
+}
+
+fn javaArray(elems) {
+	type: :javaArray
+	tok: _tok()
+	elems: elems
+}
+
+fn javaNewArray(elementType, elems) {
+	type: :javaNewArray
+	tok: _tok()
+	elementType: elementType
+	elems: elems
+}
+
+fn javaMap(entries) {
+	type: :javaMap
+	tok: _tok()
+	entries: entries
+}
+
+fn javaMapEntry(key, val) {
+	key: key
+	val: val
+}
+
+fn javaBinary(op, left, right) {
+	type: :javaBinary
+	tok: _tok()
+	op: op
+	left: left
+	right: right
+}
+
+fn javaUnary(op, operand) {
+	type: :javaUnary
+	tok: _tok()
+	op: op
+	right: operand
+}
+
+fn javaAssignment(left, right) {
+	type: :javaAssignment
+	tok: _tok()
+	left: left
+	right: right
+}
+
+fn javaDot(object, field) {
+	type: :javaDot
+	tok: _tok()
+	object: object
+	field: field
+}
+
+fn javaIndex(object, index) {
+	type: :javaIndex
+	tok: _tok()
+	object: object
+	index: index
+}
+
+fn javaCall(callee, args) {
+	type: :javaCall
+	tok: _tok()
+	callee: callee
+	args: args
+}
+
+fn javaMethodCall(object, method, args) {
+	type: :javaMethodCall
+	tok: _tok()
+	object: object
+	method: method
+	args: args
+}
+
+fn javaNew(className, args) {
+	type: :javaNew
+	tok: _tok()
+	className: className
+	args: args
+}
+
+fn javaLambda(params, body) {
+	type: :javaLambda
+	tok: _tok()
+	params: params
+	body: body
+}
+
+fn javaMethod(modifiers, returnType, name, params, body) {
+	type: :javaMethod
+	tok: _tok()
+	modifiers: default(modifiers, [])
+	returnType: default(returnType, 'void')
+	name: name
+	params: params
+	body: body
+}
+
+fn javaVarDecl(javaType, name, init) {
+	type: :javaVarDecl
+	tok: _tok()
+	javaType: default(javaType, 'var')
+	name: name
+	init: init
+}
+
+fn javaReturn(value) {
+	type: :javaReturn
+	tok: _tok()
+	value: value
+}
+
+fn javaBlock(stmts) {
+	type: :javaBlock
+	tok: _tok()
+	stmts: stmts
+}
+
+fn javaIf(test, consequent, alternate) {
+	type: :javaIf
+	tok: _tok()
+	test: test
+	consequent: consequent
+	alternate: alternate
+}
+
+fn javaFor(init, test, update, body) {
+	type: :javaFor
+	tok: _tok()
+	init: init
+	test: test
+	update: update
+	body: body
+}
+
+fn javaForEach(javaType, name, iterable, body) {
+	type: :javaForEach
+	tok: _tok()
+	javaType: default(javaType, 'var')
+	name: name
+	iterable: iterable
+	body: body
+}
+
+fn javaWhile(test, body) {
+	type: :javaWhile
+	tok: _tok()
+	test: test
+	body: body
+}
+
+fn javaCast(javaType, expr) {
+	type: :javaCast
+	tok: _tok()
+	javaType: javaType
+	expr: expr
+}
+
+fn javaTernary(test, consequent, alternate) {
+	type: :javaTernary
+	tok: _tok()
+	test: test
+	consequent: consequent
+	alternate: alternate
+}
+
+fn javaInstanceOf(expr, javaType) {
+	type: :javaInstanceOf
+	tok: _tok()
+	expr: expr
+	javaType: javaType
+}
+
+fn javaClass(name, members) {
+	type: :javaClass
+	tok: _tok()
+	name: name
+	members: members
+}
+
+// -- Java operator to Oak operator mapping --
+fn _mapJavaOp(op) if op {
+	'+' -> :plus
+	'-' -> :minus
+	'*' -> :times
+	'/' -> :divide
+	'%' -> :modulus
+	'>>' -> :rshift
+	'<<' -> :pushArrow
+	'==' -> :eq
+	'!=' -> :neq
+	'>' -> :greater
+	'<' -> :less
+	'>=' -> :geq
+	'<=' -> :leq
+	'&&' -> :and
+	'||' -> :or
+	'^' -> :xor
+	'&' -> :and
+	'|' -> :or
+	_ -> :plus
+}
+
+fn _mapJavaUnaryOp(op) if op {
+	'-' -> :minus
+	'!' -> :exclam
+	'~' -> :exclam
+	_ -> :minus
+}
+
+// -- Java identifier to Oak mapping --
+fn _javaIdentToOak(name) if name {
+	'null' -> '?'
+	'true' -> 'true'
+	'false' -> 'false'
+	'this' -> 'self'
+	'System' -> '__System'
+	_ -> name
+}
+
+// -- transpileToOak: Java AST -> Oak AST --
+fn transpileToOak(node) if node {
+	? -> { type: :null, tok: _tok(), val: ? }
+	_ -> if node.type {
+		:javaNull -> { type: :null, tok: _tok(), val: ? }
+
+		:javaInt -> {
+			type: :int
+			tok: _tok()
+			val: node.val
+		}
+
+		:javaDouble -> {
+			type: :float
+			tok: _tok()
+			val: node.val
+		}
+
+		:javaString -> {
+			type: :string
+			tok: _tok()
+			val: node.val
+		}
+
+		:javaBool -> {
+			type: :bool
+			tok: _tok()
+			val: node.val
+		}
+
+		:javaChar -> {
+			// Characters become single-character strings in Oak
+			type: :string
+			tok: _tok()
+			val: node.val
+		}
+
+		:javaIdentifier -> {
+			type: :identifier
+			tok: _tok()
+			val: _javaIdentToOak(node.val)
+		}
+
+		:javaArray, :javaNewArray -> {
+			type: :list
+			tok: _tok()
+			elems: node.elems |> map(transpileToOak)
+		}
+
+		:javaMap -> {
+			type: :object
+			tok: _tok()
+			entries: node.entries |> map(fn(e) {
+				key: transpileToOak(e.key)
+				val: transpileToOak(e.val)
+			})
+		}
+
+		:javaBinary -> {
+			type: :binary
+			tok: _tok()
+			op: _mapJavaOp(node.op)
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:javaUnary -> {
+			type: :unary
+			tok: _tok()
+			op: _mapJavaUnaryOp(node.op)
+			right: transpileToOak(node.right)
+		}
+
+		:javaAssignment -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:javaDot -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.object)
+			right: {
+				type: :identifier
+				tok: _tok()
+				val: node.field
+			}
+		}
+
+		:javaIndex -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.object)
+			right: {
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				exprs: [transpileToOak(node.index)]
+			}
+		}
+
+		:javaCall -> {
+			type: :fnCall
+			tok: _tok()
+			function: transpileToOak(node.callee)
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:javaMethodCall -> {
+			type: :fnCall
+			tok: _tok()
+			function: {
+				type: :propertyAccess
+				tok: _tok()
+				left: transpileToOak(node.object)
+				right: { type: :identifier, tok: _tok(), val: node.method }
+			}
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:javaNew -> {
+			// new ClassName(args) -> ClassName(args) in Oak (class constructor call)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: node.className }
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:javaLambda -> {
+			type: :function
+			tok: _tok()
+			name: ''
+			args: node.params |> map(fn(p) if type(p) {
+				:string -> p
+				_ -> if p.type {
+					:javaIdentifier -> p.val
+					_ -> '_'
+				}
+			})
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:javaMethod -> {
+			type: :function
+			tok: _tok()
+			name: node.name
+			args: node.params |> map(fn(p) if type(p) {
+				:string -> p
+				_ -> if p.name {
+					? -> '_'
+					_ -> p.name
+				}
+			})
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:javaVarDecl -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: { type: :identifier, tok: _tok(), val: node.name }
+			right: if node.init {
+				? -> { type: :null, tok: _tok(), val: ? }
+				_ -> transpileToOak(node.init)
+			}
+		}
+
+		:javaReturn -> transpileToOak(node.value)
+
+		:javaBlock -> {
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.stmts |> map(transpileToOak)
+		}
+
+		:javaIf -> {
+			type: :ifExpr
+			tok: _tok()
+			cond: transpileToOak(node.test)
+			branches: [
+				{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :bool, tok: _tok(), val: true }
+					body: transpileToOak(node.consequent)
+				}
+			] |> append(if node.alternate {
+				? -> [{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: { type: :null, tok: _tok(), val: ? }
+				}]
+				_ -> [{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: transpileToOak(node.alternate)
+				}]
+			})
+		}
+
+		:javaFor -> {
+			// Traditional for loop -> recursive function
+			loopName := '__oak_loop'
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					transpileToOak(node.init)
+					{
+						type: :function
+						tok: _tok()
+						name: loopName
+						args: []
+						restArg: ?
+						body: {
+							type: :ifExpr
+							tok: _tok()
+							cond: transpileToOak(node.test)
+							branches: [
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :bool, tok: _tok(), val: true }
+									body: {
+										type: :block
+										tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+										decls: []
+										exprs: [
+											transpileToOak(node.body)
+											transpileToOak(node.update)
+											{
+												type: :fnCall
+												tok: _tok()
+												function: { type: :identifier, tok: _tok(), val: loopName }
+												args: []
+												restArg: ?
+											}
+										]
+									}
+								}
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :empty, tok: _tok() }
+									body: { type: :null, tok: _tok(), val: ? }
+								}
+							]
+						}
+					}
+					{
+						type: :fnCall
+						tok: _tok()
+						function: { type: :identifier, tok: _tok(), val: loopName }
+						args: []
+						restArg: ?
+					}
+				]
+			}
+		}
+
+		:javaForEach -> {
+			// for (var x : iterable) -> each(iterable, fn(x) body)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'each' }
+			args: [
+				transpileToOak(node.iterable)
+				{
+					type: :function
+					tok: _tok()
+					name: ''
+					args: [node.name]
+					restArg: ?
+					body: transpileToOak(node.body)
+				}
+			]
+			restArg: ?
+		}
+
+		:javaWhile -> {
+			loopName := '__oak_loop'
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					{
+						type: :function
+						tok: _tok()
+						name: loopName
+						args: []
+						restArg: ?
+						body: {
+							type: :ifExpr
+							tok: _tok()
+							cond: transpileToOak(node.test)
+							branches: [
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :bool, tok: _tok(), val: true }
+									body: {
+										type: :block
+										tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+										decls: []
+										exprs: [
+											transpileToOak(node.body)
+											{
+												type: :fnCall
+												tok: _tok()
+												function: { type: :identifier, tok: _tok(), val: loopName }
+												args: []
+												restArg: ?
+											}
+										]
+									}
+								}
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :empty, tok: _tok() }
+									body: { type: :null, tok: _tok(), val: ? }
+								}
+							]
+						}
+					}
+					{
+						type: :fnCall
+						tok: _tok()
+						function: { type: :identifier, tok: _tok(), val: loopName }
+						args: []
+						restArg: ?
+					}
+				]
+			}
+		}
+
+		:javaCast -> transpileToOak(node.expr)
+
+		:javaTernary -> {
+			type: :ifExpr
+			tok: _tok()
+			cond: transpileToOak(node.test)
+			branches: [
+				{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :bool, tok: _tok(), val: true }
+					body: transpileToOak(node.consequent)
+				}
+				{
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: transpileToOak(node.alternate)
+				}
+			]
+		}
+
+		:javaInstanceOf -> {
+			// instanceof -> type check via type() in Oak
+			type: :binary
+			tok: _tok()
+			op: :eq
+			left: {
+				type: :fnCall
+				tok: _tok()
+				function: { type: :identifier, tok: _tok(), val: 'type' }
+				args: [transpileToOak(node.expr)]
+				restArg: ?
+			}
+			right: { type: :atom, tok: _tok(), val: node.javaType }
+		}
+
+		:javaClass -> {
+			// Java class -> Oak class sugar
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.members |> map(transpileToOak)
+		}
+
+		_ -> { type: :null, tok: _tok(), val: ? }
+	}
+}
+
+// -- walkJava: traverse Java AST calling visitor on each node --
+fn walkJava(node, visitor) if node {
+	? -> ?
+	_ -> {
+		visitor(node)
+		if node.type {
+			:javaArray, :javaNewArray -> node.elems |> each(fn(el) walkJava(el, visitor))
+			:javaMap -> node.entries |> each(fn(e) {
+				walkJava(e.key, visitor)
+				walkJava(e.val, visitor)
+			})
+			:javaBinary -> {
+				walkJava(node.left, visitor)
+				walkJava(node.right, visitor)
+			}
+			:javaUnary -> walkJava(node.right, visitor)
+			:javaAssignment -> {
+				walkJava(node.left, visitor)
+				walkJava(node.right, visitor)
+			}
+			:javaDot -> walkJava(node.object, visitor)
+			:javaIndex -> {
+				walkJava(node.object, visitor)
+				walkJava(node.index, visitor)
+			}
+			:javaCall -> {
+				walkJava(node.callee, visitor)
+				node.args |> each(fn(a) walkJava(a, visitor))
+			}
+			:javaMethodCall -> {
+				walkJava(node.object, visitor)
+				node.args |> each(fn(a) walkJava(a, visitor))
+			}
+			:javaNew -> node.args |> each(fn(a) walkJava(a, visitor))
+			:javaLambda -> walkJava(node.body, visitor)
+			:javaMethod -> walkJava(node.body, visitor)
+			:javaVarDecl -> walkJava(node.init, visitor)
+			:javaReturn -> walkJava(node.value, visitor)
+			:javaBlock -> node.stmts |> each(fn(s) walkJava(s, visitor))
+			:javaIf -> {
+				walkJava(node.test, visitor)
+				walkJava(node.consequent, visitor)
+				walkJava(node.alternate, visitor)
+			}
+			:javaFor -> {
+				walkJava(node.init, visitor)
+				walkJava(node.test, visitor)
+				walkJava(node.update, visitor)
+				walkJava(node.body, visitor)
+			}
+			:javaForEach -> {
+				walkJava(node.iterable, visitor)
+				walkJava(node.body, visitor)
+			}
+			:javaWhile -> {
+				walkJava(node.test, visitor)
+				walkJava(node.body, visitor)
+			}
+			:javaCast -> walkJava(node.expr, visitor)
+			:javaTernary -> {
+				walkJava(node.test, visitor)
+				walkJava(node.consequent, visitor)
+				walkJava(node.alternate, visitor)
+			}
+			:javaInstanceOf -> walkJava(node.expr, visitor)
+			:javaClass -> node.members |> each(fn(m) walkJava(m, visitor))
+		}
+	}
+}
+
+// -- renderJava: render Java AST back to Java source --
+fn renderJava(node) if node {
+	? -> 'null'
+	_ -> if node.type {
+		:javaNull -> 'null'
+		:javaInt -> string(node.val)
+		:javaDouble -> string(node.val)
+		:javaString -> '"' << node.val |> replace('"', '\\"') << '"'
+		:javaBool -> string(node.val)
+		:javaChar -> '\'' << node.val << '\''
+		:javaIdentifier -> node.val
+		:javaArray -> '{' << node.elems |> map(renderJava) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << '}'
+		:javaNewArray -> 'new ' << node.elementType << '[]{' << node.elems |> map(renderJava) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << '}'
+		:javaMap -> 'Map.of(' << node.entries |> map(fn(e) renderJava(e.key) << ', ' << renderJava(e.val)) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:javaBinary -> '(' << renderJava(node.left) << ' ' << node.op << ' ' << renderJava(node.right) << ')'
+		:javaUnary -> '(' << node.op << renderJava(node.right) << ')'
+		:javaAssignment -> renderJava(node.left) << ' = ' << renderJava(node.right)
+		:javaDot -> renderJava(node.object) << '.' << node.field
+		:javaIndex -> renderJava(node.object) << '[' << renderJava(node.index) << ']'
+		:javaCall -> renderJava(node.callee) << '(' << node.args |> map(renderJava) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:javaMethodCall -> renderJava(node.object) << '.' << node.method << '(' << node.args |> map(renderJava) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:javaNew -> 'new ' << node.className << '(' << node.args |> map(renderJava) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ')'
+		:javaLambda -> '(' << node.params |> map(fn(p) if type(p) {
+			:string -> p
+			_ -> renderJava(p)
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ') -> ' << renderJava(node.body)
+		:javaMethod -> node.modifiers |> reduce('', fn(acc, m) acc << m << ' ') << node.returnType << ' ' << node.name << '(' << node.params |> map(fn(p) if type(p) {
+			:string -> p
+			_ -> if p.javaType {
+				? -> 'Object ' << default(p.name, '_')
+				_ -> p.javaType << ' ' << default(p.name, '_')
+			}
+		}) |> reduce('', fn(acc, el) if acc {
+			'' -> el
+			_ -> acc << ', ' << el
+		}) << ') ' << renderJava(node.body)
+		:javaVarDecl -> node.javaType << ' ' << node.name << if node.init {
+			? -> ''
+			_ -> ' = ' << renderJava(node.init)
+		}
+		:javaReturn -> 'return ' << renderJava(node.value)
+		:javaBlock -> '{\n' << node.stmts |> map(fn(s) '  ' << renderJava(s) << ';\n') |> reduce('', fn(acc, el) acc << el) << '}'
+		:javaIf -> 'if (' << renderJava(node.test) << ') ' << renderJava(node.consequent) << if node.alternate {
+			? -> ''
+			_ -> ' else ' << renderJava(node.alternate)
+		}
+		:javaFor -> 'for (' << renderJava(node.init) << '; ' << renderJava(node.test) << '; ' << renderJava(node.update) << ') ' << renderJava(node.body)
+		:javaForEach -> 'for (' << node.javaType << ' ' << node.name << ' : ' << renderJava(node.iterable) << ') ' << renderJava(node.body)
+		:javaWhile -> 'while (' << renderJava(node.test) << ') ' << renderJava(node.body)
+		:javaCast -> '((' << node.javaType << ') ' << renderJava(node.expr) << ')'
+		:javaTernary -> '(' << renderJava(node.test) << ' ? ' << renderJava(node.consequent) << ' : ' << renderJava(node.alternate) << ')'
+		:javaInstanceOf -> renderJava(node.expr) << ' instanceof ' << node.javaType
+		:javaClass -> 'class ' << node.name << ' {\n' << node.members |> map(fn(m) '  ' << renderJava(m) << ';\n') |> reduce('', fn(acc, el) acc << el) << '}'
+		_ -> '/* unknown */'
+	}
+}

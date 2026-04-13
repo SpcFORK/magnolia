@@ -106,6 +106,9 @@ var libcli string
 //go:embed lib/md.oak
 var libmd string
 
+//go:embed lib/mermaid.oak
+var libmermaid string
+
 //go:embed lib/crypto.oak
 var libcrypto string
 
@@ -174,6 +177,18 @@ var libasttransform string
 
 //go:embed lib/ast-analyze.oak
 var libastanalyze string
+
+//go:embed lib/ast-js.oak
+var libastjs string
+
+//go:embed lib/ast-ts.oak
+var libastts string
+
+//go:embed lib/ast-lua.oak
+var libastlua string
+
+//go:embed lib/ast-java.oak
+var libastjava string
 
 //go:embed lib/bundle-ast.oak
 var libbundleast string
@@ -597,6 +612,7 @@ var stdlibs = map[string]string{
 	"debug":                           libdebug,
 	"cli":                             libcli,
 	"md":                              libmd,
+	"mermaid":                         libmermaid,
 	"crypto":                          libcrypto,
 	"bitwise":                         libbitwise,
 	"bmp":                             libimagebmp,
@@ -626,6 +642,10 @@ var stdlibs = map[string]string{
 	"bundle-utils":                    libbundleutils,
 	"ast-analyze":                     libastanalyze,
 	"ast-transform":                   libasttransform,
+	"ast-js":                          libastjs,
+	"ast-ts":                          libastts,
+	"ast-lua":                         libastlua,
+	"ast-java":                        libastjava,
 	"shell":                           libshell,
 	"thread":                          libthread,
 	"transpile":                       libtranspile,
@@ -807,6 +827,10 @@ var stdlibAutoLoadOrder = []string{
 	"bundle-utils",
 	"ast-transform",
 	"ast-analyze",
+	"ast-js",
+	"ast-ts",
+	"ast-lua",
+	"ast-java",
 	"bundle-ast",
 	"shell",
 	"transpile",
