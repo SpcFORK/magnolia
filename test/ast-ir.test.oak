@@ -1,0 +1,521 @@
+// test for ast-ir.oak — IR to Oak AST transpiler
+
+std := import('std')
+str := import('str')
+fmt := import('fmt')
+codegen := import('codegen-native')
+ir := import('ast-ir')
+codegenCommon := import('codegen-common')
+
+{
+	println: println
+	map: map
+	each: each
+} := std
+
+fn run(t) {
+	// ---------------------------------------------------------------
+	// Helper: compile Oak AST with IR compiler, transpile back to Oak
+	// ---------------------------------------------------------------
+	fn irRoundTrip(ast) {
+		compiler := codegen.createIRCompiler()
+		result := compiler.compile(ast)
+		ir.transpileToOak(result)
+	}
+
+	// Helper: get IR from Oak AST
+	fn getIR(ast) {
+		compiler := codegen.createIRCompiler()
+		compiler.compile(ast)
+	}
+
+	// ---------------------------------------------------------------
+	// transpileInst: ir_const with various value types
+	// ---------------------------------------------------------------
+
+	t.eq('ir_const null'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: ?, b: ?, extra: ?
+		}).right.type
+		:null)
+
+	t.eq('ir_const int'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: 42, b: ?, extra: ?
+		}).right.val
+		42)
+
+	t.eq('ir_const int type'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: 42, b: ?, extra: ?
+		}).right.type
+		:int)
+
+	t.eq('ir_const float'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: 3.14, b: ?, extra: ?
+		}).right.val
+		3.14)
+
+	t.eq('ir_const bool true'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: true, b: ?, extra: ?
+		}).right.val
+		true)
+
+	t.eq('ir_const bool false'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: false, b: ?, extra: ?
+		}).right.val
+		false)
+
+	t.eq('ir_const string pool ref'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: { stringIdx: 3 }, b: ?, extra: ?
+		}).right.type
+		:string)
+
+	t.eq('ir_const atom pool ref'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: { atomIdx: 5 }, b: ?, extra: ?
+		}).right.type
+		:atom)
+
+	t.eq('ir_const assigns to register'
+		ir.transpileInst({
+			op: :ir_const, dst: 2, a: 7, b: ?, extra: ?
+		}).left.val
+		'__r2')
+
+	t.eq('ir_const is local assignment'
+		ir.transpileInst({
+			op: :ir_const, dst: 0, a: 1, b: ?, extra: ?
+		}).('local?')
+		true)
+
+	// ---------------------------------------------------------------
+	// transpileInst: ir_load / ir_store
+	// ---------------------------------------------------------------
+
+	t.eq('ir_load from named var'
+		ir.transpileInst({
+			op: :ir_load, dst: 1, a: 'myVar', b: ?, extra: ?
+		}).right.val
+		'myVar')
+
+	t.eq('ir_load dst register'
+		ir.transpileInst({
+			op: :ir_load, dst: 3, a: 'x', b: ?, extra: ?
+		}).left.val
+		'__r3')
+
+	t.eq('ir_store to named var'
+		ir.transpileInst({
+			op: :ir_store, dst: 'result', a: 5, b: ?, extra: ?
+		}).left.val
+		'result')
+
+	t.eq('ir_store from register'
+		ir.transpileInst({
+			op: :ir_store, dst: 'result', a: 5, b: ?, extra: ?
+		}).right.val
+		'__r5')
+
+	t.eq('ir_store not local'
+		ir.transpileInst({
+			op: :ir_store, dst: 'x', a: 0, b: ?, extra: ?
+		}).('local?')
+		false)
+
+	// ---------------------------------------------------------------
+	// transpileInst: arithmetic binary ops
+	// ---------------------------------------------------------------
+
+	t.eq('ir_add becomes :plus'
+		ir.transpileInst({
+			op: :ir_add, dst: 2, a: 0, b: 1, extra: ?
+		}).right.op
+		:plus)
+
+	t.eq('ir_sub becomes :minus'
+		ir.transpileInst({
+			op: :ir_sub, dst: 2, a: 0, b: 1, extra: ?
+		}).right.op
+		:minus)
+
+	t.eq('ir_mul becomes :times'
+		ir.transpileInst({
+			op: :ir_mul, dst: 2, a: 0, b: 1, extra: ?
+		}).right.op
+		:times)
+
+	t.eq('ir_div becomes :divide'
+		ir.transpileInst({
+			op: :ir_div, dst: 2, a: 0, b: 1, extra: ?
+		}).right.op
+		:divide)
+
+	t.eq('ir_mod becomes :modulus'
+		ir.transpileInst({
+			op: :ir_mod, dst: 2, a: 0, b: 1, extra: ?
+		}).right.op
+		:modulus)
+
+	t.eq('ir_add left operand'
+		ir.transpileInst({
+			op: :ir_add, dst: 2, a: 0, b: 1, extra: ?
+		}).right.left.val
+		'__r0')
+
+	t.eq('ir_add right operand'
+		ir.transpileInst({
+			op: :ir_add, dst: 2, a: 0, b: 1, extra: ?
+		}).right.right.val
+		'__r1')
+
+	t.eq('ir_add assigns to dst'
+		ir.transpileInst({
+			op: :ir_add, dst: 5, a: 3, b: 4, extra: ?
+		}).left.val
+		'__r5')
+
+	// ---------------------------------------------------------------
+	// transpileInst: comparison ops
+	// ---------------------------------------------------------------
+
+	t.eq('ir_eq becomes :eq'
+		ir.transpileInst({
+			op: :ir_eq, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:eq)
+
+	t.eq('ir_neq becomes :neq'
+		ir.transpileInst({
+			op: :ir_neq, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:neq)
+
+	t.eq('ir_lt becomes :less'
+		ir.transpileInst({
+			op: :ir_lt, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:less)
+
+	t.eq('ir_gt becomes :greater'
+		ir.transpileInst({
+			op: :ir_gt, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:greater)
+
+	t.eq('ir_leq becomes :leq'
+		ir.transpileInst({
+			op: :ir_leq, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:leq)
+
+	t.eq('ir_geq becomes :geq'
+		ir.transpileInst({
+			op: :ir_geq, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:geq)
+
+	// ---------------------------------------------------------------
+	// transpileInst: bitwise ops
+	// ---------------------------------------------------------------
+
+	t.eq('ir_and becomes :and'
+		ir.transpileInst({
+			op: :ir_and, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:and)
+
+	t.eq('ir_or becomes :or'
+		ir.transpileInst({
+			op: :ir_or, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:or)
+
+	t.eq('ir_xor becomes :xor'
+		ir.transpileInst({
+			op: :ir_xor, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:xor)
+
+	t.eq('ir_shl becomes :pushArrow'
+		ir.transpileInst({
+			op: :ir_shl, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:pushArrow)
+
+	t.eq('ir_shr becomes :rshift'
+		ir.transpileInst({
+			op: :ir_shr, dst: 3, a: 1, b: 2, extra: ?
+		}).right.op
+		:rshift)
+
+	// ---------------------------------------------------------------
+	// transpileInst: unary ops
+	// ---------------------------------------------------------------
+
+	t.eq('ir_neg becomes :minus unary'
+		ir.transpileInst({
+			op: :ir_neg, dst: 1, a: 0, b: ?, extra: ?
+		}).right.op
+		:minus)
+
+	t.eq('ir_neg is unary node'
+		ir.transpileInst({
+			op: :ir_neg, dst: 1, a: 0, b: ?, extra: ?
+		}).right.type
+		:unary)
+
+	t.eq('ir_not becomes :exclam unary'
+		ir.transpileInst({
+			op: :ir_not, dst: 1, a: 0, b: ?, extra: ?
+		}).right.op
+		:exclam)
+
+	// ---------------------------------------------------------------
+	// transpileInst: call
+	// ---------------------------------------------------------------
+
+	t.eq('ir_call is fnCall node'
+		ir.transpileInst({
+			op: :ir_call, dst: 3, a: 0, b: ?, extra: { args: [1, 2] }
+		}).right.type
+		:fnCall)
+
+	t.eq('ir_call function register'
+		ir.transpileInst({
+			op: :ir_call, dst: 3, a: 0, b: ?, extra: { args: [1, 2] }
+		}).right.function.val
+		'__r0')
+
+	t.eq('ir_call arg count'
+		len(ir.transpileInst({
+			op: :ir_call, dst: 3, a: 0, b: ?, extra: { args: [1, 2] }
+		}).right.args)
+		2)
+
+	t.eq('ir_call first arg'
+		ir.transpileInst({
+			op: :ir_call, dst: 3, a: 0, b: ?, extra: { args: [1, 2] }
+		}).right.args.0.val
+		'__r1')
+
+	t.eq('ir_call no args'
+		len(ir.transpileInst({
+			op: :ir_call, dst: 3, a: 0, b: ?, extra: { args: [] }
+		}).right.args)
+		0)
+
+	// ---------------------------------------------------------------
+	// transpileInst: ret
+	// ---------------------------------------------------------------
+
+	t.eq('ir_ret with value'
+		ir.transpileInst({
+			op: :ir_ret, dst: ?, a: 0, b: ?, extra: ?
+		}).val
+		'__r0')
+
+	t.eq('ir_ret with value type'
+		ir.transpileInst({
+			op: :ir_ret, dst: ?, a: 0, b: ?, extra: ?
+		}).type
+		:identifier)
+
+	t.eq('ir_ret without value'
+		ir.transpileInst({
+			op: :ir_ret, dst: ?, a: ?, b: ?, extra: ?
+		}).type
+		:null)
+
+	// ---------------------------------------------------------------
+	// transpileInst: jumps and labels
+	// ---------------------------------------------------------------
+
+	t.eq('ir_jmp is fnCall to __jmp'
+		ir.transpileInst({
+			op: :ir_jmp, dst: ?, a: ?, b: ?, extra: { label: 'loop_0' }
+		}).function.val
+		'__jmp')
+
+	t.eq('ir_jmp label arg'
+		ir.transpileInst({
+			op: :ir_jmp, dst: ?, a: ?, b: ?, extra: { label: 'loop_0' }
+		}).args.0.val
+		'loop_0')
+
+	t.eq('ir_jz is ifExpr'
+		ir.transpileInst({
+			op: :ir_jz, dst: ?, a: 1, b: ?, extra: { label: 'skip' }
+		}).type
+		:ifExpr)
+
+	t.eq('ir_jz condition'
+		ir.transpileInst({
+			op: :ir_jz, dst: ?, a: 1, b: ?, extra: { label: 'skip' }
+		}).cond.val
+		'__r1')
+
+	t.eq('ir_jnz is ifExpr'
+		ir.transpileInst({
+			op: :ir_jnz, dst: ?, a: 2, b: ?, extra: { label: 'cont' }
+		}).type
+		:ifExpr)
+
+	t.eq('ir_jnz condition'
+		ir.transpileInst({
+			op: :ir_jnz, dst: ?, a: 2, b: ?, extra: { label: 'cont' }
+		}).cond.val
+		'__r2')
+
+	t.eq('ir_label is fnCall to __label'
+		ir.transpileInst({
+			op: :ir_label, dst: ?, a: ?, b: ?, extra: { label: 'start' }
+		}).function.val
+		'__label')
+
+	t.eq('ir_label name'
+		ir.transpileInst({
+			op: :ir_label, dst: ?, a: ?, b: ?, extra: { label: 'start' }
+		}).args.0.val
+		'start')
+
+	// ---------------------------------------------------------------
+	// transpileInst: alloc / push / index / setindex
+	// ---------------------------------------------------------------
+
+	t.eq('ir_alloc list (size > 0)'
+		ir.transpileInst({
+			op: :ir_alloc, dst: 0, a: 3, b: ?, extra: ?
+		}).right.type
+		:list)
+
+	t.eq('ir_alloc object (size 0)'
+		ir.transpileInst({
+			op: :ir_alloc, dst: 0, a: 0, b: ?, extra: ?
+		}).right.type
+		:object)
+
+	t.eq('ir_push is pushArrow binary'
+		ir.transpileInst({
+			op: :ir_push, dst: ?, a: 0, b: 1, extra: ?
+		}).op
+		:pushArrow)
+
+	t.eq('ir_index is property access'
+		ir.transpileInst({
+			op: :ir_index, dst: 2, a: 0, b: 1, extra: ?
+		}).right.type
+		:propertyAccess)
+
+	t.eq('ir_setindex left is property access'
+		ir.transpileInst({
+			op: :ir_setindex, dst: ?, a: 0, b: 1, extra: { val: 2 }
+		}).left.type
+		:propertyAccess)
+
+	// ---------------------------------------------------------------
+	// transpileInst: closure / phi / nop
+	// ---------------------------------------------------------------
+
+	t.eq('ir_closure is fnCall to __closure'
+		ir.transpileInst({
+			op: :ir_closure, dst: 0, a: 1, b: ?, extra: { captures: [2, 3] }
+		}).right.function.val
+		'__closure')
+
+	t.eq('ir_phi is fnCall to __phi'
+		ir.transpileInst({
+			op: :ir_phi, dst: 0, a: 1, b: 2, extra: ?
+		}).right.function.val
+		'__phi')
+
+	t.eq('ir_nop is null'
+		ir.transpileInst({
+			op: :ir_nop, dst: ?, a: ?, b: ?, extra: ?
+		}).type
+		:null)
+
+	// ---------------------------------------------------------------
+	// transpileToOak: full IR program transpilation
+	// ---------------------------------------------------------------
+
+	// Compile 1 + 2 via IR compiler, then transpile back
+	addResult := getIR({ type: :binary, op: :plus, left: { type: :int, val: 1, tok: ? }, right: { type: :int, val: 2, tok: ? }, tok: ? })
+	oakBlock := ir.transpileToOak(addResult)
+
+	t.eq('transpileToOak returns block'
+		oakBlock.type
+		:block)
+
+	t.eq('transpileToOak block has 3 instructions for 1+2'
+		len(oakBlock.exprs)
+		3)
+
+	// First: __r0 := 1
+	t.eq('1+2 first inst is const 1'
+		oakBlock.exprs.0.right.val
+		1)
+
+	// Second: __r1 := 2
+	t.eq('1+2 second inst is const 2'
+		oakBlock.exprs.1.right.val
+		2)
+
+	// Third: __r2 := __r0 + __r1
+	t.eq('1+2 third inst is addition'
+		oakBlock.exprs.2.right.op
+		:plus)
+
+	// Compile integer literal via IR
+	intResult := getIR({ type: :int, val: 99, tok: ? })
+	intBlock := ir.transpileToOak(intResult)
+
+	t.eq('int literal transpiles to 1 instruction'
+		len(intBlock.exprs)
+		1)
+
+	t.eq('int literal value preserved'
+		intBlock.exprs.0.right.val
+		99)
+
+	// Compile null via IR
+	nullResult := getIR({ type: :null, val: ?, tok: ? })
+	nullBlock := ir.transpileToOak(nullResult)
+
+	t.eq('null transpiles to null const'
+		nullBlock.exprs.0.right.type
+		:null)
+
+	// ---------------------------------------------------------------
+	// renderIR: human-readable listing
+	// ---------------------------------------------------------------
+
+	addIR := getIR({ type: :binary, op: :plus, left: { type: :int, val: 1, tok: ? }, right: { type: :int, val: 2, tok: ? }, tok: ? })
+	rendered := ir.renderIR(addIR)
+
+	t.assert('renderIR includes __r0'
+		str.contains?(rendered, '__r0'))
+
+	t.assert('renderIR includes __r1'
+		str.contains?(rendered, '__r1'))
+
+	t.assert('renderIR includes + operator'
+		str.contains?(rendered, '+'))
+
+	// renderIR for a subtraction
+	subIR := getIR({ type: :binary, op: :minus, left: { type: :int, val: 10, tok: ? }, right: { type: :int, val: 3, tok: ? }, tok: ? })
+	subRendered := ir.renderIR(subIR)
+
+	t.assert('renderIR sub includes - operator'
+		str.contains?(subRendered, '-'))
+
+	// ---------------------------------------------------------------
+	// Register naming: verified indirectly through transpileInst
+	// (ir_const assigns to __rN, ir_load loads named vars, etc.)
+	// Operator mapping: verified by all binary/unary/comparison tests
+	// ---------------------------------------------------------------
+}

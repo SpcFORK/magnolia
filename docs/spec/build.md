@@ -121,6 +121,10 @@ _Auto-generated from Magnolia source._
 
 ### `renderJavaBundle(bundleNode)`
 
+### `renderGoBundle(bundleNode)`
+
+### `renderNativeBundle(bundleNode)`
+
 ### `renderGraphBundle(bundleNode)`
 
 ### `renderBundle(bundleNode)`

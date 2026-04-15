@@ -36,5 +36,5 @@ _Auto-generated from Magnolia source._
 
 > returns `:string`
 
-### `renderBundle(bundleNode, target, renderOak, renderJS, renderWasm, renderAst, renderBin, renderDoc, renderTs, renderLua, renderJava, renderGraph)`
+### `renderBundle(bundleNode, target, renderOak, renderJS, renderWasm, renderAst, renderBin, renderDoc, renderTs, renderLua, renderJava, renderGo, renderNative, renderGraph)`
 

@@ -1,0 +1,154 @@
+// ir-to-oak.oak
+// Demo: Compile Oak AST to IR, then transpile IR back to readable Oak AST
+//
+// Shows how ast-ir bridges the codegen-native IR representation
+// back to Oak AST nodes for debugging and inspection.
+
+std := import('std')
+str := import('str')
+fmt := import('fmt')
+codegen := import('codegen-native')
+ir := import('ast-ir')
+codegenCommon := import('codegen-common')
+
+{
+	println: println
+	each: each
+} := std
+
+nl := char(10)
+
+// --------------------------------------------------------
+// 1. Integer literal: 42
+// --------------------------------------------------------
+
+println('=== IR for integer literal 42 ===')
+println('')
+
+intAst := { type: :int, val: 42, tok: ? }
+intIR := codegen.createIRCompiler().compile(intAst)
+
+println('IR listing:')
+println(ir.renderIR(intIR))
+println('')
+
+oakBlock := ir.transpileToOak(intIR)
+println('Transpiled Oak AST block:')
+println('  type: ' + string(oakBlock.type))
+println('  exprs: ' + string(len(oakBlock.exprs)) + ' nodes')
+println('  first expr assigns: ' + string(oakBlock.exprs.0.right.val))
+println('')
+
+// --------------------------------------------------------
+// 2. Binary expression: 10 + 20
+// --------------------------------------------------------
+
+println('=== IR for 10 + 20 ===')
+println('')
+
+addAst := {
+	type: :binary, op: :plus, tok: ?
+	left: { type: :int, val: 10, tok: ? }
+	right: { type: :int, val: 20, tok: ? }
+}
+
+addIR := codegen.createIRCompiler().compile(addAst)
+
+println('IR listing:')
+println(ir.renderIR(addIR))
+println('')
+
+addOak := ir.transpileToOak(addIR)
+println('Oak AST:')
+each(addOak.exprs, fn(expr, i) {
+	println('  [' + string(i) + '] ' + string(expr.type) + ': ' + string(expr.left.val) + ' := ' + if expr.right.type {
+		:int -> string(expr.right.val)
+		:binary -> string(expr.right.left.val) + ' + ' + string(expr.right.right.val)
+		_ -> string(expr.right.type)
+	})
+})
+println('')
+
+// --------------------------------------------------------
+// 3. Nested expression: (3 * 4) - 2
+// --------------------------------------------------------
+
+println('=== IR for (3 * 4) - 2 ===')
+println('')
+
+nestedAst := {
+	type: :binary, op: :minus, tok: ?
+	left: {
+		type: :binary, op: :times, tok: ?
+		left: { type: :int, val: 3, tok: ? }
+		right: { type: :int, val: 4, tok: ? }
+	}
+	right: { type: :int, val: 2, tok: ? }
+}
+
+nestedIR := codegen.createIRCompiler().compile(nestedAst)
+
+println('IR listing:')
+println(ir.renderIR(nestedIR))
+println('')
+
+nestedOak := ir.transpileToOak(nestedIR)
+println('Oak AST: ' + string(len(nestedOak.exprs)) + ' instructions')
+println('  (3 registers for values, 1 for multiply, 1 for subtract)')
+println('')
+
+// --------------------------------------------------------
+// 4. Function call
+// --------------------------------------------------------
+
+println('=== IR for f(1, 2) ===')
+println('')
+
+callAst := {
+	type: :fnCall, tok: ?
+	function: { type: :identifier, val: 'f', tok: ? }
+	args: [
+		{ type: :int, val: 1, tok: ? }
+		{ type: :int, val: 2, tok: ? }
+	]
+}
+
+callIR := codegen.createIRCompiler().compile(callAst)
+
+println('IR listing:')
+println(ir.renderIR(callIR))
+println('')
+
+// --------------------------------------------------------
+// 5. All IR opcodes rendered
+// --------------------------------------------------------
+
+println('=== renderIR opcode showcase ===')
+println('')
+
+// Manually construct a showcase IR program
+showcase := {
+	instructions: [
+		{ op: :ir_const, dst: 0, a: 42, b: ?, extra: ? }
+		{ op: :ir_const, dst: 1, a: 10, b: ?, extra: ? }
+		{ op: :ir_add, dst: 2, a: 0, b: 1, extra: ? }
+		{ op: :ir_sub, dst: 3, a: 0, b: 1, extra: ? }
+		{ op: :ir_mul, dst: 4, a: 0, b: 1, extra: ? }
+		{ op: :ir_eq, dst: 5, a: 2, b: 3, extra: ? }
+		{ op: :ir_neg, dst: 6, a: 0, b: ?, extra: ? }
+		{ op: :ir_not, dst: 7, a: 5, b: ?, extra: ? }
+		{ op: :ir_label, dst: ?, a: ?, b: ?, extra: { label: 'loop' } }
+		{ op: :ir_jz, dst: ?, a: 5, b: ?, extra: { label: 'done' } }
+		{ op: :ir_call, dst: 8, a: 0, b: ?, extra: { args: [1, 2] } }
+		{ op: :ir_jmp, dst: ?, a: ?, b: ?, extra: { label: 'loop' } }
+		{ op: :ir_label, dst: ?, a: ?, b: ?, extra: { label: 'done' } }
+		{ op: :ir_ret, dst: ?, a: 8, b: ?, extra: ? }
+	]
+	stringPool: []
+	functionPool: []
+	regCount: 9
+}
+
+println(ir.renderIR(showcase))
+println('')
+println('Done.')

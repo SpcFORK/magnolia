@@ -1,0 +1,458 @@
+// ast-ir -- IR (intermediate representation) to Oak AST transpiler
+//
+// Converts 3-address IR instructions (as produced by codegen-native's
+// createIRCompiler) back into readable Oak AST nodes. This is useful
+// for debugging the native code generation pipeline and inspecting
+// what the IR compiler produces in a human-readable form.
+//
+// Usage:
+//   ir := import('ast-ir')
+//   codegen := import('codegen-native')
+//
+//   compiler := codegen.createIRCompiler()
+//   result := compiler.compile(someAst)
+//   oakAst := ir.transpileToOak(result)
+//   // oakAst is an Oak block AST node
+
+{
+	map: map
+	each: each
+	filter: filter
+	len: len
+} := import('std')
+{
+	join: join
+} := import('str')
+
+// ---------------------------------------------------------------------------
+// Synthetic token factory (mirrors ast-go.oak pattern)
+// ---------------------------------------------------------------------------
+
+fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
+
+// ---------------------------------------------------------------------------
+// Register name helper — virtual register index to identifier string
+// ---------------------------------------------------------------------------
+
+fn _regName(r) if r {
+	? -> '_'
+	_ -> if type(r) {
+		:int -> '__r' + string(r)
+		:string -> r
+		_ -> '__r' + string(r)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Map IR opcode to Oak binary operator atom
+// ---------------------------------------------------------------------------
+
+fn _mapIROp(op) if op {
+	:ir_add -> :plus
+	:ir_sub -> :minus
+	:ir_mul -> :times
+	:ir_div -> :divide
+	:ir_mod -> :modulus
+	:ir_and -> :and
+	:ir_or -> :or
+	:ir_xor -> :xor
+	:ir_shl -> :pushArrow
+	:ir_shr -> :rshift
+	:ir_eq -> :eq
+	:ir_neq -> :neq
+	:ir_lt -> :less
+	:ir_gt -> :greater
+	:ir_leq -> :leq
+	:ir_geq -> :geq
+	_ -> :plus
+}
+
+// ---------------------------------------------------------------------------
+// Map IR opcode to Oak unary operator atom
+// ---------------------------------------------------------------------------
+
+fn _mapIRUnaryOp(op) if op {
+	:ir_neg -> :minus
+	:ir_not -> :exclam
+	_ -> :minus
+}
+
+// ---------------------------------------------------------------------------
+// Transpile a single IR instruction to an Oak AST node
+// ---------------------------------------------------------------------------
+
+fn transpileInst(inst) if inst.op {
+	// %dst = const value
+	:ir_const -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: if inst.a {
+			? -> { type: :null, tok: _tok(), val: ? }
+			_ -> if type(inst.a) {
+				:int -> { type: :int, tok: _tok(), val: inst.a }
+				:float -> { type: :float, tok: _tok(), val: inst.a }
+				:string -> { type: :string, tok: _tok(), val: inst.a }
+				:bool -> { type: :bool, tok: _tok(), val: inst.a }
+				_ -> if inst.a.stringIdx != ? {
+					true -> {
+						type: :string
+						tok: _tok()
+						val: '(str#' + string(inst.a.stringIdx) + ')'
+					}
+					_ -> if inst.a.atomIdx != ? {
+						true -> {
+							type: :atom
+							tok: _tok()
+							val: '(atom#' + string(inst.a.atomIdx) + ')'
+						}
+						_ -> { type: :null, tok: _tok(), val: ? }
+					}
+				}
+			}
+		}
+	}
+
+	// %dst = load(%src)
+	:ir_load -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: { type: :identifier, tok: _tok(), val: if type(inst.a) {
+			:string -> inst.a
+			_ -> _regName(inst.a)
+		}}
+	}
+
+	// store(%dst, %src)
+	:ir_store -> {
+		type: :assignment
+		tok: _tok()
+		local?: false
+		left: { type: :identifier, tok: _tok(), val: if type(inst.dst) {
+			:string -> inst.dst
+			_ -> _regName(inst.dst)
+		}}
+		right: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+	}
+
+	// Arithmetic/logic binary ops: %dst = %a op %b
+	:ir_add, :ir_sub, :ir_mul, :ir_div, :ir_mod
+	:ir_and, :ir_or, :ir_xor, :ir_shl, :ir_shr
+	:ir_eq, :ir_neq, :ir_lt, :ir_gt, :ir_leq, :ir_geq -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :binary
+			tok: _tok()
+			op: _mapIROp(inst.op)
+			left: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+			right: { type: :identifier, tok: _tok(), val: _regName(inst.b) }
+		}
+	}
+
+	// Unary ops: %dst = op(%src)
+	:ir_neg, :ir_not -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :unary
+			tok: _tok()
+			op: _mapIRUnaryOp(inst.op)
+			right: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+		}
+	}
+
+	// %dst = call(%fn, args...)
+	:ir_call -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+			args: if inst.extra != ? & inst.extra.args != ? {
+				true -> inst.extra.args |> map(fn(r) {
+					type: :identifier
+					tok: _tok()
+					val: _regName(r)
+				})
+				_ -> []
+			}
+			restArg: ?
+		}
+	}
+
+	// return %src
+	:ir_ret -> if inst.a {
+		? -> { type: :null, tok: _tok(), val: ? }
+		_ -> { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+	}
+
+	// goto label
+	:ir_jmp -> {
+		type: :fnCall
+		tok: _tok()
+		function: { type: :identifier, tok: _tok(), val: '__jmp' }
+		args: [{
+			type: :atom
+			tok: _tok()
+			val: if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+		}]
+		restArg: ?
+	}
+
+	// if %cond == 0 goto label
+	:ir_jz -> {
+		type: :ifExpr
+		tok: _tok()
+		cond: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+		branches: [{
+			type: :ifBranch
+			tok: _tok()
+			target: { type: :null, tok: _tok(), val: ? }
+			body: {
+				type: :fnCall
+				tok: _tok()
+				function: { type: :identifier, tok: _tok(), val: '__jmp' }
+				args: [{
+					type: :atom
+					tok: _tok()
+					val: if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+				}]
+				restArg: ?
+			}
+		}]
+	}
+
+	// if %cond != 0 goto label
+	:ir_jnz -> {
+		type: :ifExpr
+		tok: _tok()
+		cond: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+		branches: [
+			{
+				type: :ifBranch
+				tok: _tok()
+				target: { type: :bool, tok: _tok(), val: true }
+				body: {
+					type: :fnCall
+					tok: _tok()
+					function: { type: :identifier, tok: _tok(), val: '__jmp' }
+					args: [{
+						type: :atom
+						tok: _tok()
+						val: if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+					}]
+					restArg: ?
+				}
+			}
+		]
+	}
+
+	// label:
+	:ir_label -> {
+		type: :fnCall
+		tok: _tok()
+		function: { type: :identifier, tok: _tok(), val: '__label' }
+		args: [{
+			type: :atom
+			tok: _tok()
+			val: if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+		}]
+		restArg: ?
+	}
+
+	// %dst = alloc(size)
+	:ir_alloc -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: if inst.a > 0 {
+			true -> {
+				type: :list
+				tok: _tok()
+				elems: []
+			}
+			_ -> {
+				type: :object
+				tok: _tok()
+				entries: []
+			}
+		}
+	}
+
+	// push(%list, %val)
+	:ir_push -> {
+		type: :binary
+		tok: _tok()
+		op: :pushArrow
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+		right: { type: :identifier, tok: _tok(), val: _regName(inst.b) }
+	}
+
+	// %dst = %obj[%key]
+	:ir_index -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :propertyAccess
+			tok: _tok()
+			left: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+			right: { type: :identifier, tok: _tok(), val: _regName(inst.b) }
+		}
+	}
+
+	// %obj[%key] = %val
+	:ir_setindex -> {
+		type: :assignment
+		tok: _tok()
+		local?: false
+		left: {
+			type: :propertyAccess
+			tok: _tok()
+			left: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+			right: { type: :identifier, tok: _tok(), val: _regName(inst.b) }
+		}
+		right: { type: :identifier, tok: _tok(), val: if inst.extra != ? & inst.extra.val != ? {
+			true -> _regName(inst.extra.val)
+			_ -> '_'
+		}}
+	}
+
+	// %dst = closure(%fn, captures...)
+	:ir_closure -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: '__closure' }
+			args: [
+				{ type: :int, tok: _tok(), val: inst.a }
+				if inst.extra != ? & inst.extra.captures != ? {
+					true -> {
+						type: :list
+						tok: _tok()
+						elems: inst.extra.captures |> map(fn(c) {
+							type: :identifier
+							tok: _tok()
+							val: _regName(c)
+						})
+					}
+					_ -> { type: :list, tok: _tok(), elems: [] }
+				}
+			]
+			restArg: ?
+		}
+	}
+
+	// phi(%a, %b)
+	:ir_phi -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: '__phi' }
+			args: [
+				{ type: :identifier, tok: _tok(), val: _regName(inst.a) }
+				{ type: :identifier, tok: _tok(), val: _regName(inst.b) }
+			]
+			restArg: ?
+		}
+	}
+
+	// nop
+	:ir_nop -> { type: :null, tok: _tok(), val: ? }
+
+	// unknown
+	_ -> { type: :null, tok: _tok(), val: ? }
+}
+
+// ---------------------------------------------------------------------------
+// Transpile a complete IR program (as returned by compiler.compile()) to
+// an Oak block AST node.
+//
+// irProgram shape: { instructions: [...], stringPool: [...],
+//                    functionPool: [...], regCount: N }
+// ---------------------------------------------------------------------------
+
+fn transpileToOak(irProgram) {
+	exprs := irProgram.instructions |> map(transpileInst)
+
+	{
+		type: :block
+		tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+		decls: []
+		exprs: exprs
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Render IR instructions to a human-readable text form (not Oak source,
+// but a pseudo-assembly listing for quick debugging).
+// ---------------------------------------------------------------------------
+
+fn renderIR(irProgram) {
+	nl := char(10)
+	lines := irProgram.instructions |> map(fn(inst) if inst.op {
+		:ir_const -> '  ' + _regName(inst.dst) + ' = ' + string(inst.a)
+		:ir_load -> '  ' + _regName(inst.dst) + ' = load ' + string(inst.a)
+		:ir_store -> '  store ' + string(inst.dst) + ', ' + _regName(inst.a)
+		:ir_add -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' + ' + _regName(inst.b)
+		:ir_sub -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' - ' + _regName(inst.b)
+		:ir_mul -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' * ' + _regName(inst.b)
+		:ir_div -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' / ' + _regName(inst.b)
+		:ir_mod -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' % ' + _regName(inst.b)
+		:ir_neg -> '  ' + _regName(inst.dst) + ' = -' + _regName(inst.a)
+		:ir_not -> '  ' + _regName(inst.dst) + ' = !' + _regName(inst.a)
+		:ir_and -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' & ' + _regName(inst.b)
+		:ir_or -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' | ' + _regName(inst.b)
+		:ir_xor -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' ^ ' + _regName(inst.b)
+		:ir_shl -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' << ' + _regName(inst.b)
+		:ir_shr -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' >> ' + _regName(inst.b)
+		:ir_eq -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' == ' + _regName(inst.b)
+		:ir_neq -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' != ' + _regName(inst.b)
+		:ir_lt -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' < ' + _regName(inst.b)
+		:ir_gt -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' > ' + _regName(inst.b)
+		:ir_leq -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' <= ' + _regName(inst.b)
+		:ir_geq -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + ' >= ' + _regName(inst.b)
+		:ir_call -> {
+			argNames := if inst.extra != ? & inst.extra.args != ? {
+				true -> inst.extra.args |> map(_regName) |> join(', ')
+				_ -> ''
+			}
+			'  ' + _regName(inst.dst) + ' = call ' + _regName(inst.a) + '(' + argNames + ')'
+		}
+		:ir_ret -> '  ret ' + _regName(inst.a)
+		:ir_jmp -> '  jmp ' + if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+		:ir_jz -> '  jz ' + _regName(inst.a) + ', ' + if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+		:ir_jnz -> '  jnz ' + _regName(inst.a) + ', ' + if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
+		:ir_label -> if inst.extra != ? { true -> inst.extra.label, _ -> '?' } + ':'
+		:ir_alloc -> '  ' + _regName(inst.dst) + ' = alloc(' + string(inst.a) + ')'
+		:ir_push -> '  push ' + _regName(inst.a) + ', ' + _regName(inst.b)
+		:ir_index -> '  ' + _regName(inst.dst) + ' = ' + _regName(inst.a) + '[' + _regName(inst.b) + ']'
+		:ir_setindex -> '  ' + _regName(inst.a) + '[' + _regName(inst.b) + '] = ' + if inst.extra != ? & inst.extra.val != ? { true -> _regName(inst.extra.val), _ -> '?' }
+		:ir_closure -> '  ' + _regName(inst.dst) + ' = closure(fn#' + string(inst.a) + ')'
+		:ir_phi -> '  ' + _regName(inst.dst) + ' = phi(' + _regName(inst.a) + ', ' + _regName(inst.b) + ')'
+		:ir_nop -> '  nop'
+		_ -> '  ; unknown op ' + string(inst.op)
+	})
+	join(lines, nl)
+}

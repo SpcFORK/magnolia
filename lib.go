@@ -193,6 +193,9 @@ var libastjava string
 //go:embed lib/ast-go.oak
 var libastgo string
 
+//go:embed lib/ast-ir.oak
+var libastir string
+
 //go:embed lib/codegen-go.oak
 var libcodegengo string
 
@@ -662,6 +665,7 @@ var stdlibs = map[string]string{
 	"ast-lua":                         libastlua,
 	"ast-java":                        libastjava,
 	"ast-go":                          libastgo,
+	"ast-ir":                          libastir,
 	"codegen-go":                      libcodegengo,
 	"codegen-native":                  libcodegennative,
 	"assembler":                       libassembler,
@@ -852,6 +856,7 @@ var stdlibAutoLoadOrder = []string{
 	"ast-lua",
 	"ast-java",
 	"ast-go",
+	"ast-ir",
 	"codegen-go",
 	"codegen-native",
 	"assembler",

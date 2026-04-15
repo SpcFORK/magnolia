@@ -32,7 +32,7 @@ _Auto-generated from Magnolia source._
 
 ### `_serNode(node)`
 
-### `parse(text)`
+### `parse(src)`
 
 ### `querySelector(nodes, sel)`
 
