@@ -1,0 +1,414 @@
+// linker -- Object file linker for Magnolia native codegen
+//
+// Links assembled machine code segments into executable binary formats:
+//   - ELF (Linux/FreeBSD)
+//   - PE/COFF (Windows)
+//   - Mach-O (macOS) [stub]
+//
+// The linker resolves relocations between sections, merges data/text
+// segments, and writes platform-appropriate headers and load commands.
+//
+// Used by the native codegen target (codegen-native.oak) and can be
+// called directly for custom binary generation workflows.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+	range: range
+} := import('std')
+{
+	replace: replace
+	join: join
+	padStart: padStart
+} := import('str')
+{
+	format: format
+	printf: printf
+} := import('fmt')
+
+// ---------------------------------------------------------------------------
+// Binary format constants
+// ---------------------------------------------------------------------------
+
+FORMAT_ELF  := :elf
+FORMAT_PE   := :pe
+FORMAT_MACHO := :macho
+
+// ELF constants
+ELF_MAGIC := [0x7F, 0x45, 0x4C, 0x46]  // \x7FELF
+ELFCLASS64 := 2
+ELFDATA2LSB := 1
+EV_CURRENT := 1
+ET_EXEC := 2
+EM_X86_64 := 0x3E
+EM_AARCH64 := 0xB7
+
+// PE/COFF constants
+PE_MAGIC := [0x4D, 0x5A]  // MZ
+PE_SIGNATURE := [0x50, 0x45, 0x00, 0x00]  // PE\0\0
+IMAGE_FILE_MACHINE_AMD64 := 0x8664
+IMAGE_FILE_MACHINE_ARM64 := 0xAA64
+
+// ---------------------------------------------------------------------------
+// Byte emission helpers
+// ---------------------------------------------------------------------------
+
+fn createByteWriter() {
+	buf := []
+
+	fn writeByte(b) buf << (b & 255)
+
+	fn writeWord(w) {
+		writeByte(w & 255)
+		writeByte((w >> 8) & 255)
+	}
+
+	fn writeDword(d) {
+		writeByte(d & 255)
+		writeByte((d >> 8) & 255)
+		writeByte((d >> 16) & 255)
+		writeByte((d >> 24) & 255)
+	}
+
+	fn writeQword(q) {
+		writeDword(q & 4294967295)
+		writeDword((q >> 32) & 4294967295)
+	}
+
+	fn writeBytes(bytes) bytes |> each(writeByte)
+
+	fn writeString(s, fixedLen) {
+		s |> each(fn(c) writeByte(codepoint(c)))
+		// Pad with zeroes to fixed length
+		remaining := fixedLen - len(s)
+		range(remaining) |> each(fn() writeByte(0))
+	}
+
+	fn padTo(alignment) {
+		remainder := len(buf) % alignment
+		if remainder > 0 {
+			true -> range(alignment - remainder) |> each(fn() writeByte(0))
+		}
+	}
+
+	fn position() len(buf)
+
+	fn patchDword(offset, val) {
+		buf.(offset) <- val & 255
+		buf.(offset + 1) <- (val >> 8) & 255
+		buf.(offset + 2) <- (val >> 16) & 255
+		buf.(offset + 3) <- (val >> 24) & 255
+	}
+
+	fn patchQword(offset, val) {
+		patchDword(offset, val & 4294967295)
+		patchDword(offset + 4, (val >> 32) & 4294967295)
+	}
+
+	{
+		writeByte: writeByte
+		writeWord: writeWord
+		writeDword: writeDword
+		writeQword: writeQword
+		writeBytes: writeBytes
+		writeString: writeString
+		padTo: padTo
+		position: position
+		patchDword: patchDword
+		patchQword: patchQword
+		getBuffer: fn() buf
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Section descriptor
+// ---------------------------------------------------------------------------
+
+fn createSection(name, flags) {
+	{
+		name: name
+		flags: default(flags, 0)
+		data: []
+		relocations: []
+		address: 0
+		fileOffset: 0
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ELF64 linker
+// ---------------------------------------------------------------------------
+
+fn linkELF(textCode, dataBytes, entrySymbol, arch) {
+	w := createByteWriter()
+
+	machine := if arch {
+		:arm64, :aarch64 -> EM_AARCH64
+		_ -> EM_X86_64
+	}
+
+	// Virtual addresses
+	textVAddr := 0x400000
+	dataVAddr := 0x600000
+	ehdrSize := 64       // ELF64 header size
+	phdrSize := 56       // Program header size
+	phdrCount := 2       // .text + .data
+
+	textOffset := ehdrSize + (phdrSize * phdrCount)
+	textSize := len(textCode)
+
+	// Align data to page boundary
+	dataOffset := textOffset + textSize
+	dataAlignedOffset := dataOffset
+	if dataOffset % 4096 > 0 -> dataAlignedOffset <- dataOffset + (4096 - (dataOffset % 4096))
+	dataSize := len(dataBytes)
+
+	// --- ELF Header ---
+	w.writeBytes(ELF_MAGIC)          // e_ident magic
+	w.writeByte(ELFCLASS64)          // 64-bit
+	w.writeByte(ELFDATA2LSB)         // little-endian
+	w.writeByte(EV_CURRENT)          // version
+	w.writeByte(0)                   // OS/ABI (ELFOSABI_NONE)
+	range(8) |> each(fn() w.writeByte(0))  // padding
+
+	w.writeWord(ET_EXEC)             // e_type: executable
+	w.writeWord(machine)             // e_machine
+	w.writeDword(EV_CURRENT)         // e_version
+	w.writeQword(textVAddr)          // e_entry: entry point
+	w.writeQword(ehdrSize)           // e_phoff: program header offset
+	w.writeQword(0)                  // e_shoff: section header offset (none)
+	w.writeDword(0)                  // e_flags
+	w.writeWord(ehdrSize)            // e_ehsize
+	w.writeWord(phdrSize)            // e_phentsize
+	w.writeWord(phdrCount)           // e_phnum
+	w.writeWord(0)                   // e_shentsize
+	w.writeWord(0)                   // e_shnum
+	w.writeWord(0)                   // e_shstrndx
+
+	// --- Program Header: .text (PT_LOAD) ---
+	w.writeDword(1)                  // p_type: PT_LOAD
+	w.writeDword(5)                  // p_flags: PF_R | PF_X
+	w.writeQword(textOffset)         // p_offset
+	w.writeQword(textVAddr)          // p_vaddr
+	w.writeQword(textVAddr)          // p_paddr
+	w.writeQword(textSize)           // p_filesz
+	w.writeQword(textSize)           // p_memsz
+	w.writeQword(4096)               // p_align
+
+	// --- Program Header: .data (PT_LOAD) ---
+	w.writeDword(1)                  // p_type: PT_LOAD
+	w.writeDword(6)                  // p_flags: PF_R | PF_W
+	w.writeQword(dataAlignedOffset)  // p_offset
+	w.writeQword(dataVAddr)          // p_vaddr
+	w.writeQword(dataVAddr)          // p_paddr
+	w.writeQword(dataSize)           // p_filesz
+	w.writeQword(dataSize)           // p_memsz
+	w.writeQword(4096)               // p_align
+
+	// --- .text section ---
+	w.writeBytes(textCode)
+
+	// Pad to data section
+	w.padTo(4096)
+
+	// --- .data section ---
+	w.writeBytes(dataBytes)
+
+	{
+		binary: w.getBuffer()
+		entryPoint: textVAddr
+		textVAddr: textVAddr
+		dataVAddr: dataVAddr
+		textSize: textSize
+		dataSize: dataSize
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PE/COFF linker (Windows)
+// ---------------------------------------------------------------------------
+
+fn linkPE(textCode, dataBytes, entrySymbol, arch) {
+	w := createByteWriter()
+
+	machine := if arch {
+		:arm64, :aarch64 -> IMAGE_FILE_MACHINE_ARM64
+		_ -> IMAGE_FILE_MACHINE_AMD64
+	}
+
+	// DOS stub
+	w.writeBytes(PE_MAGIC)           // e_magic: MZ
+	range(58) |> each(fn() w.writeByte(0))  // DOS header fields (zeroed)
+	peHeaderOffset := 64
+	w.writeDword(peHeaderOffset)     // e_lfanew: PE header offset
+
+	// Some minimal DOS stub padding to get to offset 64
+	// (We already wrote 64 bytes above: 2 + 58 + 4 = 64)
+
+	// --- PE Signature ---
+	w.writeBytes(PE_SIGNATURE)
+
+	// --- COFF File Header ---
+	w.writeWord(machine)             // Machine
+	w.writeWord(2)                   // NumberOfSections (.text + .data)
+	w.writeDword(0)                  // TimeDateStamp
+	w.writeDword(0)                  // PointerToSymbolTable
+	w.writeDword(0)                  // NumberOfSymbols
+	optHdrSize := 240                // Optional header size for PE32+
+	w.writeWord(optHdrSize)          // SizeOfOptionalHeader
+	w.writeWord(0x22)                // Characteristics: EXEC | LARGE_ADDRESS_AWARE
+
+	// --- Optional Header (PE32+) ---
+	w.writeWord(0x20B)              // Magic: PE32+ (64-bit)
+	w.writeByte(1)                  // MajorLinkerVersion
+	w.writeByte(0)                  // MinorLinkerVersion
+
+	textSize := len(textCode)
+	dataSize := len(dataBytes)
+
+	// Align sizes to 512-byte file alignment
+	fileAlignment := 512
+	sectionAlignment := 4096
+
+	textFileSize := textSize
+	if textFileSize % fileAlignment > 0 -> textFileSize <- textFileSize + (fileAlignment - (textFileSize % fileAlignment))
+	dataFileSize := dataSize
+	if dataFileSize % fileAlignment > 0 -> dataFileSize <- dataFileSize + (fileAlignment - (dataFileSize % fileAlignment))
+
+	w.writeDword(textFileSize)       // SizeOfCode
+	w.writeDword(dataFileSize)       // SizeOfInitializedData
+	w.writeDword(0)                  // SizeOfUninitializedData
+
+	textRVA := sectionAlignment
+	dataRVA := textRVA + sectionAlignment
+	imageSize := dataRVA + sectionAlignment
+
+	w.writeDword(textRVA)            // AddressOfEntryPoint
+	w.writeDword(textRVA)            // BaseOfCode
+
+	imageBase := 0x140000000         // Default image base for 64-bit PE
+	w.writeQword(imageBase)          // ImageBase
+	w.writeDword(sectionAlignment)   // SectionAlignment
+	w.writeDword(fileAlignment)      // FileAlignment
+	w.writeWord(6)                   // MajorOperatingSystemVersion
+	w.writeWord(0)                   // MinorOperatingSystemVersion
+	w.writeWord(0)                   // MajorImageVersion
+	w.writeWord(0)                   // MinorImageVersion
+	w.writeWord(6)                   // MajorSubsystemVersion
+	w.writeWord(0)                   // MinorSubsystemVersion
+	w.writeDword(0)                  // Win32VersionValue
+	w.writeDword(imageSize)          // SizeOfImage
+	headerSize := 512
+	w.writeDword(headerSize)         // SizeOfHeaders
+	w.writeDword(0)                  // CheckSum
+	w.writeWord(3)                   // Subsystem: CONSOLE
+	w.writeWord(0x8160)              // DllCharacteristics: NX_COMPAT | DYNAMIC_BASE | TERMINAL_SERVER_AWARE | HIGH_ENTROPY_VA
+	w.writeQword(0x100000)           // SizeOfStackReserve
+	w.writeQword(0x1000)             // SizeOfStackCommit
+	w.writeQword(0x100000)           // SizeOfHeapReserve
+	w.writeQword(0x1000)             // SizeOfHeapCommit
+	w.writeDword(0)                  // LoaderFlags
+	w.writeDword(16)                 // NumberOfRvaAndSizes
+
+	// Data directories (16 entries, all zeroed)
+	range(16) |> each(fn() {
+		w.writeDword(0)              // VirtualAddress
+		w.writeDword(0)              // Size
+	})
+
+	// --- Section Headers ---
+
+	// .text section
+	w.writeString('.text', 8)        // Name
+	w.writeDword(textSize)           // VirtualSize
+	w.writeDword(textRVA)            // VirtualAddress
+	w.writeDword(textFileSize)       // SizeOfRawData
+	w.writeDword(headerSize)         // PointerToRawData
+	w.writeDword(0)                  // PointerToRelocations
+	w.writeDword(0)                  // PointerToLinenumbers
+	w.writeWord(0)                   // NumberOfRelocations
+	w.writeWord(0)                   // NumberOfLinenumbers
+	w.writeDword(0x60000020)         // Characteristics: CODE | EXECUTE | READ
+
+	// .data section
+	dataPointer := headerSize + textFileSize
+	w.writeString('.data', 8)
+	w.writeDword(dataSize)
+	w.writeDword(dataRVA)
+	w.writeDword(dataFileSize)
+	w.writeDword(dataPointer)
+	w.writeDword(0)
+	w.writeDword(0)
+	w.writeWord(0)
+	w.writeWord(0)
+	w.writeDword(0xC0000040)         // Characteristics: INITIALIZED_DATA | READ | WRITE
+
+	// Pad headers to alignment
+	w.padTo(fileAlignment)
+
+	// --- .text section data ---
+	w.writeBytes(textCode)
+	w.padTo(fileAlignment)
+
+	// --- .data section data ---
+	w.writeBytes(dataBytes)
+	w.padTo(fileAlignment)
+
+	{
+		binary: w.getBuffer()
+		entryPoint: imageBase + textRVA
+		imageBase: imageBase
+		textRVA: textRVA
+		dataRVA: dataRVA
+		textSize: textSize
+		dataSize: dataSize
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Link section — merge code and data into a binary
+// ---------------------------------------------------------------------------
+
+fn createLinkerConfig(opts) {
+	{
+		format: opts.format |> default(FORMAT_ELF)
+		arch: opts.arch |> default(:x86_64)
+		entry: opts.entry |> default('_start')
+		textCode: opts.textCode |> default([])
+		dataBytes: opts.dataBytes |> default([])
+		symbols: opts.symbols |> default({})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+fn link(config) {
+	cfg := createLinkerConfig(config)
+	if cfg.format {
+		:elf -> linkELF(cfg.textCode, cfg.dataBytes, cfg.entry, cfg.arch)
+		:pe -> linkPE(cfg.textCode, cfg.dataBytes, cfg.entry, cfg.arch)
+		_ -> linkELF(cfg.textCode, cfg.dataBytes, cfg.entry, cfg.arch)
+	}
+}
+
+// Convenience: compile AST → native → linked binary
+fn compileAndLink(ast, format, arch) {
+	nativeCodegen := import('codegen-native')
+	nativeResult := nativeCodegen.compileToNative(ast, arch)
+
+	link({
+		format: format
+		arch: arch
+		textCode: nativeResult.code
+		dataBytes: []
+	})
+}

@@ -1,0 +1,150 @@
+// native-codegen.oak
+// Demo: Oak AST → IR → x86-64/ARM64 machine code → ELF/PE binary
+//
+// This sample walks through Magnolia's native code generation pipeline,
+// showing each stage from IR compilation to final binary output.
+
+std := import('std')
+str := import('str')
+fmt := import('fmt')
+codegen := import('codegen-native')
+assembler := import('assembler')
+linker := import('linker')
+{
+	println: println
+	map: map
+	each: each
+	range: range
+} := std
+
+nl := char(10)
+
+// Helper: format bytes as hex string
+fn bytesToHex(bytes) {
+	map(bytes, fn(b) {
+		hi := std.toHex((b >> 4) & 15)
+		lo := std.toHex(b & 15)
+		hi + lo
+	}) |> str.join(' ')
+}
+
+// --------------------------------------------------------
+// 1. Create an IR compiler and inspect intermediate output
+// --------------------------------------------------------
+
+println('=== IR Compiler ===')
+println('')
+
+compiler := codegen.createIRCompiler()
+
+// Compile a simple addition: 1 + 2
+addAst := {
+	type: :binary
+	op: :plus
+	left: { type: :int, val: 1, tok: ? }
+	right: { type: :int, val: 2, tok: ? }
+	tok: ?
+}
+
+irResult := compiler.compile(addAst)
+
+println('IR for "1 + 2":')
+println('  Instructions: ' + string(len(irResult.instructions)))
+println('  Registers used: ' + string(irResult.regCount))
+each(irResult.instructions, fn(inst, i) {
+	println('  [' + string(i) + '] op=' + string(inst.op) + ' dst=' + string(inst.dst) + ' a=' + string(inst.a) + ' b=' + string(inst.b))
+})
+println('')
+
+// --------------------------------------------------------
+// 2. Compile AST directly to native x86-64 code
+// --------------------------------------------------------
+
+println('=== Native Code Generation (x86-64) ===')
+println('')
+
+simpleAst := {
+	type: :int
+	val: 42
+	tok: ?
+}
+
+nativeResult := codegen.compileToNative(simpleAst, :x86_64)
+
+println('Compiled integer literal 42 to x86-64:')
+println('  Code bytes: ' + bytesToHex(nativeResult.code))
+println('  Code size:  ' + string(len(nativeResult.code)) + ' bytes')
+println('')
+
+// --------------------------------------------------------
+// 3. Assemble raw instructions and link into ELF
+// --------------------------------------------------------
+
+println('=== Assembler + Linker Pipeline ===')
+println('')
+
+// Assemble a minimal x86-64 program: nop + ret
+asmResult := assembler.assemble(str.join([
+	'_start:'
+	'nop'
+	'ret'
+], nl), :x86_64)
+
+println('Assembled nop + ret:')
+println('  Machine code: ' + bytesToHex(asmResult.code))
+println('  Labels: _start -> ' + string(asmResult.labels._start))
+println('')
+
+// Link into ELF format
+elfResult := linker.link({
+	format: :elf
+	arch: :x86_64
+	textCode: asmResult.code
+	dataBytes: []
+})
+
+println('Linked ELF binary:')
+println('  Binary size:  ' + string(len(elfResult.binary)) + ' bytes')
+println('  Entry point:  0x' + std.toHex(elfResult.entryPoint))
+
+// Verify ELF magic: 0x7F 'E' 'L' 'F'
+magic := bytesToHex(std.slice(elfResult.binary, 0, 4))
+println('  ELF magic:    ' + magic)
+println('')
+
+// Link into PE format
+peResult := linker.link({
+	format: :pe
+	arch: :x86_64
+	textCode: asmResult.code
+	dataBytes: []
+})
+
+println('Linked PE binary:')
+println('  Binary size:  ' + string(len(peResult.binary)) + ' bytes')
+println('  Entry point:  0x' + std.toHex(peResult.entryPoint))
+
+// Verify PE magic: 'M' 'Z'
+peMagic := bytesToHex(std.slice(peResult.binary, 0, 2))
+println('  PE magic:     ' + peMagic)
+println('')
+
+// --------------------------------------------------------
+// 4. Full pipeline: AST → compile → link
+// --------------------------------------------------------
+
+println('=== Full Pipeline (compileAndLink) ===')
+println('')
+
+fullAst := {
+	type: :int
+	val: 7
+	tok: ?
+}
+
+fullResult := linker.compileAndLink(fullAst, :elf, :x86_64)
+
+println('AST → ELF binary in one step:')
+println('  Binary size: ' + string(len(fullResult.binary)) + ' bytes')
+println('')
+println('Done.')

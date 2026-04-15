@@ -1,0 +1,514 @@
+std := import('std')
+str := import('str')
+mermaid := import('mermaid')
+
+{
+	contains?: contains?
+} := str
+
+fn run(t) {
+	// --- Graph creation with different directions ---
+
+	'graph() creates a mermaid graph object' |> t.eq(
+		mermaid.graph(:td).type
+		:mermaidGraph
+	)
+
+	'graph(:td) sets direction to :td' |> t.eq(
+		mermaid.graph(:td).direction
+		:td
+	)
+
+	'graph(:lr) sets direction to :lr' |> t.eq(
+		mermaid.graph(:lr).direction
+		:lr
+	)
+
+	'graph(:rl) sets direction to :rl' |> t.eq(
+		mermaid.graph(:rl).direction
+		:rl
+	)
+
+	'graph(:bt) sets direction to :bt' |> t.eq(
+		mermaid.graph(:bt).direction
+		:bt
+	)
+
+	'graph(:sequence) sets direction to :sequence' |> t.eq(
+		mermaid.graph(:sequence).direction
+		:sequence
+	)
+
+	'graph(:pie) sets direction to :pie' |> t.eq(
+		mermaid.graph(:pie).direction
+		:pie
+	)
+
+	'graph() defaults to :td direction' |> t.eq(
+		mermaid.graph().direction
+		:td
+	)
+
+	'graph() initializes empty nodes list' |> t.eq(
+		len(mermaid.graph(:td).nodes)
+		0
+	)
+
+	// --- Node creation with different shapes ---
+
+	'node() adds a node to the graph' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Start', mermaid.ShapeRect)
+			len(g.nodes)
+		}
+		1
+	)
+
+	'node() stores correct id and label' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Hello', mermaid.ShapeRect)
+			g.nodes.0.id + ':' + g.nodes.0.label
+		}
+		'A:Hello'
+	)
+
+	'node() defaults label to id when not provided' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('X', ?, ?)
+			g.nodes.0.label
+		}
+		'X'
+	)
+
+	'node() stores the shape' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Circle', mermaid.ShapeCircle)
+			g.nodes.0.shape
+		}
+		:circle
+	)
+
+	'node() defaults shape to ShapeDefault' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Plain')
+			g.nodes.0.shape
+		}
+		:default
+	)
+
+	'multiple nodes accumulate in graph' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'First', mermaid.ShapeRect)
+			g |> mermaid.node('B', 'Second', mermaid.ShapeRound)
+			g |> mermaid.node('C', 'Third', mermaid.ShapeStadium)
+			len(g.nodes)
+		}
+		3
+	)
+
+	// --- Edge creation with different styles ---
+
+	'edge() adds an edge to the graph' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('A', 'B', 'link', mermaid.EdgeArrow)
+			len(g.edges)
+		}
+		1
+	)
+
+	'edge() stores from, to, label, style' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('X', 'Y', 'goes to', mermaid.EdgeDotted)
+			e := g.edges.0
+			e.from + ':' + e.to + ':' + e.label
+		}
+		'X:Y:goes to'
+	)
+
+	'edge() defaults style to EdgeArrow' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('A', 'B', 'test')
+			g.edges.0.style
+		}
+		:arrow
+	)
+
+	'edge() allows empty label' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('A', 'B')
+			g.edges.0.label
+		}
+		''
+	)
+
+	// --- Subgraph creation ---
+
+	'subgraph() adds a subgraph to the graph' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.subgraph('sg1', 'My Subgraph', fn(sub) {
+				sub |> mermaid.node('S1', 'Inner')
+			})
+			len(g.subgraphs)
+		}
+		1
+	)
+
+	'subgraph() builder populates inner nodes' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.subgraph('sg1', 'Sub', fn(sub) {
+				sub |> mermaid.node('S1', 'Inner1')
+				sub |> mermaid.node('S2', 'Inner2')
+			})
+			len(g.subgraphs.0.graph.nodes)
+		}
+		2
+	)
+
+	// --- Title and theme setting ---
+
+	'setTitle() sets the graph title' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.setTitle('My Diagram')
+			g.title
+		}
+		'My Diagram'
+	)
+
+	'setTheme() sets the graph theme' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.setTheme('forest')
+			g.theme
+		}
+		'forest'
+	)
+
+	// --- Raw lines ---
+
+	'raw() adds a raw line to the graph' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.raw('style A fill:#f9f')
+			g.rawLines.0
+		}
+		'style A fill:#f9f'
+	)
+
+	'raw() accumulates multiple raw lines' |> t.eq(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.raw('line1')
+			g |> mermaid.raw('line2')
+			len(g.rawLines)
+		}
+		2
+	)
+
+	// --- render() output verification ---
+
+	'render() includes flowchart header for :td' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			out := mermaid.render(g)
+			out |> contains?('flowchart TD')
+		}
+	)
+
+	'render() includes flowchart LR for :lr' |> t.assert(
+		{
+			g := mermaid.graph(:lr)
+			out := mermaid.render(g)
+			out |> contains?('flowchart LR')
+		}
+	)
+
+	'render() includes sequenceDiagram header for :sequence' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			out := mermaid.render(g)
+			out |> contains?('sequenceDiagram')
+		}
+	)
+
+	'render() includes pie header for :pie' |> t.assert(
+		{
+			g := mermaid.graph(:pie)
+			out := mermaid.render(g)
+			out |> contains?('pie')
+		}
+	)
+
+	'render() includes title when set' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.setTitle('Test Title')
+			out := mermaid.render(g)
+			out |> contains?('title: Test Title')
+		}
+	)
+
+	'render() includes theme init when set' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.setTheme('dark')
+			out := mermaid.render(g)
+			out |> contains?('dark')
+		}
+	)
+
+	'render() includes node shapes in output' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Start', mermaid.ShapeRound)
+			out := mermaid.render(g)
+			out |> contains?('A("Start")')
+		}
+	)
+
+	'render() includes rect node with brackets' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('B', 'Box', mermaid.ShapeRect)
+			out := mermaid.render(g)
+			out |> contains?('B["Box"]')
+		}
+	)
+
+	'render() includes edge arrow syntax' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Start')
+			g |> mermaid.node('B', 'End')
+			g |> mermaid.edge('A', 'B', 'goes to', mermaid.EdgeArrow)
+			out := mermaid.render(g)
+			out |> contains?('-- goes to -->') & out |> contains?('A') & out |> contains?('B')
+		}
+	)
+
+	'render() includes dotted edge syntax' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('A', 'B', 'maybe', mermaid.EdgeDotted)
+			out := mermaid.render(g)
+			out |> contains?('-. maybe .->')
+		}
+	)
+
+	'render() includes thick edge syntax' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('A', 'B', 'important', mermaid.EdgeThick)
+			out := mermaid.render(g)
+			out |> contains?('== important ==>')
+		}
+	)
+
+	'render() includes open edge syntax (no arrow)' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.edge('A', 'B', 'link', mermaid.EdgeOpen)
+			out := mermaid.render(g)
+			out |> contains?('-- link ---')
+		}
+	)
+
+	'render() includes raw lines' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.raw('style A fill:#f9f')
+			out := mermaid.render(g)
+			out |> contains?('style A fill:#f9f')
+		}
+	)
+
+	'render() includes subgraph block' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.subgraph('sg1', 'Group', fn(sub) {
+				sub |> mermaid.node('S1', 'Inside')
+			})
+			out := mermaid.render(g)
+			out |> contains?('subgraph sg1') & out |> contains?('end')
+		}
+	)
+
+	// --- renderHTML() output verification ---
+
+	'renderHTML() includes DOCTYPE' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			html := mermaid.renderHTML(g)
+			html |> contains?('<!DOCTYPE html>')
+		}
+	)
+
+	'renderHTML() includes mermaid script tag' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			html := mermaid.renderHTML(g)
+			html |> contains?('mermaid.min.js')
+		}
+	)
+
+	'renderHTML() includes mermaid div' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			html := mermaid.renderHTML(g)
+			html |> contains?('<div class="mermaid">')
+		}
+	)
+
+	'renderHTML() embeds rendered diagram' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.node('A', 'Hello', mermaid.ShapeRect)
+			html := mermaid.renderHTML(g)
+			html |> contains?('flowchart TD') & html |> contains?('A["Hello"]')
+		}
+	)
+
+	'renderHTML() includes title in HTML head' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.setTitle('My Chart')
+			html := mermaid.renderHTML(g)
+			html |> contains?('<title>My Chart</title>')
+		}
+	)
+
+	'renderHTML() includes theme init when set' |> t.assert(
+		{
+			g := mermaid.graph(:td)
+			g |> mermaid.setTheme('dark')
+			html := mermaid.renderHTML(g)
+			html |> contains?('theme:"dark"')
+		}
+	)
+
+	// --- Sequence diagram helpers ---
+
+	'seqMessage() adds message raw line' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqMessage('Alice', 'Bob', 'Hello', :solid)
+			len(g.rawLines) > 0
+		}
+	)
+
+	'seqMessage() renders arrow syntax' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqMessage('Alice', 'Bob', 'Hello', :solid)
+			out := mermaid.render(g)
+			out |> contains?('Alice') & out |> contains?('Bob') & out |> contains?('Hello')
+		}
+	)
+
+	'seqMessage() dotted uses -->>' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqMessage('A', 'B', 'msg', :dotted)
+			out := mermaid.render(g)
+			out |> contains?('-->>')
+		}
+	)
+
+	'seqNote() adds note to the diagram' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqNote('over', 'Alice', 'Important note')
+			out := mermaid.render(g)
+			out |> contains?('Note over Alice: Important note')
+		}
+	)
+
+	'seqNote() with :right position' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqNote(:right, 'Bob', 'Side note')
+			out := mermaid.render(g)
+			out |> contains?('Note right of Bob: Side note')
+		}
+	)
+
+	'seqActivate/Deactivate adds activate and deactivate lines' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqActivate('Alice')
+			g |> mermaid.seqDeactivate('Alice')
+			out := mermaid.render(g)
+			out |> contains?('activate Alice') & out |> contains?('deactivate Alice')
+		}
+	)
+
+	'seqLoop() renders loop block' |> t.assert(
+		{
+			g := mermaid.graph(:sequence)
+			g |> mermaid.seqLoop('Every minute', fn(inner) {
+				inner |> mermaid.seqMessage('Client', 'Server', 'ping', :solid)
+			})
+			out := mermaid.render(g)
+			out |> contains?('loop Every minute') & out |> contains?('end')
+		}
+	)
+
+	// --- Pie chart slices ---
+
+	'pieSlice() adds a pie slice raw line' |> t.assert(
+		{
+			g := mermaid.graph(:pie)
+			g |> mermaid.pieSlice('Dogs', 40)
+			len(g.rawLines) > 0
+		}
+	)
+
+	'pieSlice() renders in pie output' |> t.assert(
+		{
+			g := mermaid.graph(:pie)
+			g |> mermaid.setTitle('Pets')
+			g |> mermaid.pieSlice('Dogs', 40)
+			g |> mermaid.pieSlice('Cats', 35)
+			g |> mermaid.pieSlice('Birds', 25)
+			out := mermaid.render(g)
+			out |> contains?('"Dogs" : 40') & out |> contains?('"Cats" : 35') & out |> contains?('"Birds" : 25')
+		}
+	)
+
+	// --- Direction constants match expected atoms ---
+
+	'FlowchartLR constant is :lr' |> t.eq(mermaid.FlowchartLR, :lr)
+	'FlowchartTD constant is :td' |> t.eq(mermaid.FlowchartTD, :td)
+	'FlowchartRL constant is :rl' |> t.eq(mermaid.FlowchartRL, :rl)
+	'FlowchartBT constant is :bt' |> t.eq(mermaid.FlowchartBT, :bt)
+	'SequenceDiagram constant is :sequence' |> t.eq(mermaid.SequenceDiagram, :sequence)
+	'PieChart constant is :pie' |> t.eq(mermaid.PieChart, :pie)
+
+	// --- Shape constants ---
+
+	'ShapeRect constant is :rect' |> t.eq(mermaid.ShapeRect, :rect)
+	'ShapeRound constant is :round' |> t.eq(mermaid.ShapeRound, :round)
+	'ShapeCircle constant is :circle' |> t.eq(mermaid.ShapeCircle, :circle)
+	'ShapeRhombus constant is :rhombus' |> t.eq(mermaid.ShapeRhombus, :rhombus)
+	'ShapeStadium constant is :stadium' |> t.eq(mermaid.ShapeStadium, :stadium)
+	'ShapeHexagon constant is :hexagon' |> t.eq(mermaid.ShapeHexagon, :hexagon)
+
+	// --- Edge constants ---
+
+	'EdgeArrow constant is :arrow' |> t.eq(mermaid.EdgeArrow, :arrow)
+	'EdgeDotted constant is :dotted' |> t.eq(mermaid.EdgeDotted, :dotted)
+	'EdgeThick constant is :thick' |> t.eq(mermaid.EdgeThick, :thick)
+	'EdgeOpen constant is :open' |> t.eq(mermaid.EdgeOpen, :open)
+}

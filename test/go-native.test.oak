@@ -1,0 +1,684 @@
+// tests for ast-go, codegen-go, codegen-native, assembler, linker libraries
+
+std := import('std')
+str := import('str')
+astGo := import('ast-go')
+codegenGo := import('codegen-go')
+codegenNative := import('codegen-native')
+assembler := import('assembler')
+linker := import('linker')
+
+fn run(t) {
+	// ========================================================
+	// ast-go: Node constructors
+	// ========================================================
+
+	'goNil creates nil node' |> t.eq(
+		astGo.goNil().type
+		:goNil
+	)
+	'goInt creates int node' |> t.eq(
+		astGo.goInt(42).val
+		42
+	)
+	'goFloat creates float node' |> t.eq(
+		astGo.goFloat(3.14).val
+		3.14
+	)
+	'goString creates string node' |> t.eq(
+		astGo.goString('hello').val
+		'hello'
+	)
+	'goRawString creates raw string node' |> t.eq(
+		astGo.goRawString('raw `text`').type
+		:goRawString
+	)
+	'goBool creates bool node' |> t.eq(
+		astGo.goBool(true).val
+		true
+	)
+	'goRune creates rune node' |> t.eq(
+		astGo.goRune('A').val
+		'A'
+	)
+	'goIdentifier creates identifier node' |> t.eq(
+		astGo.goIdentifier('foo').val
+		'foo'
+	)
+	'goSliceLit creates slice literal' |> t.eq(
+		astGo.goSliceLit([astGo.goInt(1), astGo.goInt(2)]).elems |> std.map(fn(e) e.val)
+		[1, 2]
+	)
+	'goMapLit creates map literal' |> t.eq(
+		len(astGo.goMapLit([astGo.goMapEntry(astGo.goString('a'), astGo.goInt(1))]).entries)
+		1
+	)
+	'goStructLit creates struct literal' |> t.eq(
+		astGo.goStructLit('Point', [astGo.goStructField('X', astGo.goInt(10))]).typeName
+		'Point'
+	)
+	'goBinary creates binary node' |> t.eq(
+		astGo.goBinary('+', astGo.goInt(1), astGo.goInt(2)).op
+		'+'
+	)
+	'goUnary creates unary node' |> t.eq(
+		astGo.goUnary('-', astGo.goInt(5)).op
+		'-'
+	)
+	'goAssignment creates assignment' |> t.eq(
+		astGo.goAssignment(astGo.goIdentifier('x'), astGo.goInt(10)).type
+		:goAssignment
+	)
+	'goShortDecl creates short declaration' |> t.eq(
+		astGo.goShortDecl(astGo.goIdentifier('x'), astGo.goInt(10)).type
+		:goShortDecl
+	)
+	'goVarDecl creates var declaration' |> t.eq(
+		astGo.goVarDecl('x', 'int', astGo.goInt(0)).name
+		'x'
+	)
+	'goConstDecl creates const declaration' |> t.eq(
+		astGo.goConstDecl('PI', 'float64', astGo.goFloat(3.14)).name
+		'PI'
+	)
+	'goDot creates dot access' |> t.eq(
+		astGo.goDot(astGo.goIdentifier('obj'), 'field').field
+		'field'
+	)
+	'goIndex creates index access' |> t.eq(
+		astGo.goIndex(astGo.goIdentifier('arr'), astGo.goInt(0)).type
+		:goIndex
+	)
+	'goSliceExpr creates slice expression' |> t.eq(
+		astGo.goSliceExpr(astGo.goIdentifier('s'), astGo.goInt(1), astGo.goInt(3), ?).type
+		:goSliceExpr
+	)
+	'goCall creates function call' |> t.eq(
+		astGo.goCall(astGo.goIdentifier('fmt'), [astGo.goString('hi')]).args |> std.map(fn(a) a.val)
+		['hi']
+	)
+	'goMethodCall creates method call' |> t.eq(
+		astGo.goMethodCall(astGo.goIdentifier('obj'), 'Method', []).method
+		'Method'
+	)
+	'goFunc creates function declaration' |> t.eq(
+		astGo.goFunc('add', [astGo.goFuncParam('a', 'int'), astGo.goFuncParam('b', 'int')], ['int'], astGo.goBlock([])).name
+		'add'
+	)
+	'goFuncLit creates function literal' |> t.eq(
+		astGo.goFuncLit([], [], astGo.goBlock([])).type
+		:goFuncLit
+	)
+	'goReturn creates return statement' |> t.eq(
+		astGo.goReturn([astGo.goInt(42)]).values |> std.map(fn(v) v.val)
+		[42]
+	)
+	'goBlock creates block' |> t.eq(
+		len(astGo.goBlock([astGo.goInt(1), astGo.goInt(2)]).stmts)
+		2
+	)
+	'goIf creates if statement' |> t.eq(
+		astGo.goIf(?, astGo.goBool(true), astGo.goBlock([]), ?).type
+		:goIf
+	)
+	'goFor creates for loop' |> t.eq(
+		astGo.goFor(?, astGo.goBool(true), ?, astGo.goBlock([])).type
+		:goFor
+	)
+	'goForRange creates for-range loop' |> t.eq(
+		astGo.goForRange('i', 'v', astGo.goIdentifier('items'), astGo.goBlock([])).type
+		:goForRange
+	)
+	'goSwitch creates switch statement' |> t.eq(
+		astGo.goSwitch(astGo.goIdentifier('x'), []).type
+		:goSwitch
+	)
+	'goGo creates goroutine' |> t.eq(
+		astGo.goGo(astGo.goCall(astGo.goIdentifier('f'), [])).type
+		:goGo
+	)
+	'goDefer creates defer' |> t.eq(
+		astGo.goDefer(astGo.goCall(astGo.goIdentifier('cleanup'), [])).type
+		:goDefer
+	)
+	'goChanSend creates channel send' |> t.eq(
+		astGo.goChanSend(astGo.goIdentifier('ch'), astGo.goInt(42)).type
+		:goChanSend
+	)
+	'goChanRecv creates channel receive' |> t.eq(
+		astGo.goChanRecv(astGo.goIdentifier('ch')).type
+		:goChanRecv
+	)
+	'goStruct creates struct type' |> t.eq(
+		astGo.goStruct('Point', []).name
+		'Point'
+	)
+	'goInterface creates interface type' |> t.eq(
+		astGo.goInterface('Reader', []).name
+		'Reader'
+	)
+	'goImport creates import' |> t.eq(
+		astGo.goImport('fmt', ?).path
+		'fmt'
+	)
+	'goPackage creates package decl' |> t.eq(
+		astGo.goPackage('main').name
+		'main'
+	)
+	'goMultiAssign creates multi-assign' |> t.eq(
+		len(astGo.goMultiAssign(
+			[astGo.goIdentifier('a'), astGo.goIdentifier('b')]
+			[astGo.goInt(1), astGo.goInt(2)]
+		).lefts)
+		2
+	)
+	'goBlank creates blank identifier' |> t.eq(
+		astGo.goBlank().type
+		:goBlank
+	)
+	'goAddrOf creates address-of' |> t.eq(
+		astGo.goAddrOf(astGo.goIdentifier('x')).type
+		:goAddrOf
+	)
+	'goDeref creates dereference' |> t.eq(
+		astGo.goDeref(astGo.goIdentifier('p')).type
+		:goDeref
+	)
+
+	// ========================================================
+	// ast-go: Go → Oak transpilation
+	// ========================================================
+
+	'goNil transpiles to Oak null' |> t.eq(
+		astGo.transpileToOak(astGo.goNil()).type
+		:null
+	)
+	'goInt transpiles to Oak int' |> t.eq(
+		astGo.transpileToOak(astGo.goInt(42)).val
+		42
+	)
+	'goFloat transpiles to Oak float' |> t.eq(
+		astGo.transpileToOak(astGo.goFloat(3.14)).val
+		3.14
+	)
+	'goString transpiles to Oak string' |> t.eq(
+		astGo.transpileToOak(astGo.goString('hello')).val
+		'hello'
+	)
+	'goBool transpiles to Oak bool' |> t.eq(
+		astGo.transpileToOak(astGo.goBool(true)).val
+		true
+	)
+	'goRune transpiles to Oak string (single char)' |> t.eq(
+		astGo.transpileToOak(astGo.goRune('A')).val
+		'A'
+	)
+	'goIdentifier nil transpiles to Oak ?' |> t.eq(
+		astGo.transpileToOak(astGo.goIdentifier('nil')).val
+		'?'
+	)
+	'goBlank transpiles to Oak empty' |> t.eq(
+		astGo.transpileToOak(astGo.goBlank()).type
+		:empty
+	)
+	'goSliceLit transpiles to Oak list' |> t.eq(
+		astGo.transpileToOak(astGo.goSliceLit([astGo.goInt(1), astGo.goInt(2)])).type
+		:list
+	)
+	'goSliceLit preserves elements' |> t.eq(
+		astGo.transpileToOak(astGo.goSliceLit([astGo.goInt(1), astGo.goInt(2)])).elems |> std.map(fn(e) e.val)
+		[1, 2]
+	)
+	'goMapLit transpiles to Oak object' |> t.eq(
+		astGo.transpileToOak(astGo.goMapLit([
+			astGo.goMapEntry(astGo.goString('key'), astGo.goInt(42))
+		])).type
+		:object
+	)
+	'goStructLit transpiles to Oak object' |> t.eq(
+		astGo.transpileToOak(astGo.goStructLit('Point', [
+			astGo.goStructField('X', astGo.goInt(10))
+			astGo.goStructField('Y', astGo.goInt(20))
+		])).type
+		:object
+	)
+	'goBinary transpiles to Oak binary' |> t.eq(
+		astGo.transpileToOak(astGo.goBinary('+', astGo.goInt(1), astGo.goInt(2))).op
+		:plus
+	)
+	'goUnary transpiles to Oak unary' |> t.eq(
+		astGo.transpileToOak(astGo.goUnary('-', astGo.goInt(5))).op
+		:minus
+	)
+	'goAssignment transpiles to non-local Oak assignment' |> t.eq(
+		astGo.transpileToOak(astGo.goAssignment(astGo.goIdentifier('x'), astGo.goInt(10))).local?
+		false
+	)
+	'goShortDecl transpiles to local Oak assignment' |> t.eq(
+		astGo.transpileToOak(astGo.goShortDecl(astGo.goIdentifier('x'), astGo.goInt(10))).local?
+		true
+	)
+	'goVarDecl transpiles to Oak assignment' |> t.eq(
+		astGo.transpileToOak(astGo.goVarDecl('x', 'int', astGo.goInt(0))).type
+		:assignment
+	)
+	'goVarDecl with no init transpiles to null' |> t.eq(
+		astGo.transpileToOak(astGo.goVarDecl('y', 'string', ?)).right.type
+		:null
+	)
+	'goDot transpiles to Oak propertyAccess' |> t.eq(
+		astGo.transpileToOak(astGo.goDot(astGo.goIdentifier('obj'), 'field')).type
+		:propertyAccess
+	)
+	'goIndex transpiles to Oak computed propertyAccess' |> t.eq(
+		astGo.transpileToOak(astGo.goIndex(astGo.goIdentifier('arr'), astGo.goInt(0))).type
+		:propertyAccess
+	)
+	'goSliceExpr transpiles to Oak slice call' |> t.eq(
+		astGo.transpileToOak(astGo.goSliceExpr(astGo.goIdentifier('s'), astGo.goInt(1), astGo.goInt(3), ?)).function.val
+		'slice'
+	)
+	'goCall transpiles to Oak fnCall' |> t.eq(
+		astGo.transpileToOak(astGo.goCall(astGo.goIdentifier('f'), [astGo.goInt(1)])).type
+		:fnCall
+	)
+	'goMethodCall transpiles to Oak fnCall with propertyAccess' |> t.eq(
+		astGo.transpileToOak(astGo.goMethodCall(astGo.goIdentifier('obj'), 'Do', [])).function.type
+		:propertyAccess
+	)
+	'goFunc transpiles to Oak function' |> t.eq(
+		astGo.transpileToOak(astGo.goFunc('add', [astGo.goFuncParam('a', 'int')], ['int'], astGo.goBlock([]))).type
+		:function
+	)
+	'goFunc preserves name' |> t.eq(
+		astGo.transpileToOak(astGo.goFunc('add', [], [], astGo.goBlock([]))).name
+		'add'
+	)
+	'goFuncLit transpiles to Oak anonymous function' |> t.eq(
+		astGo.transpileToOak(astGo.goFuncLit([astGo.goFuncParam('x', 'int')], [], astGo.goBlock([]))).name
+		''
+	)
+	'goReturn single value unwraps' |> t.eq(
+		astGo.transpileToOak(astGo.goReturn([astGo.goInt(42)])).val
+		42
+	)
+	'goReturn multiple values becomes list' |> t.eq(
+		astGo.transpileToOak(astGo.goReturn([astGo.goInt(1), astGo.goInt(2)])).type
+		:list
+	)
+	'goReturn no values becomes null' |> t.eq(
+		astGo.transpileToOak(astGo.goReturn([])).type
+		:null
+	)
+	'goBlock transpiles to Oak block' |> t.eq(
+		astGo.transpileToOak(astGo.goBlock([astGo.goInt(1)])).type
+		:block
+	)
+	'goIf transpiles to Oak ifExpr' |> t.eq(
+		astGo.transpileToOak(astGo.goIf(?, astGo.goBool(true), astGo.goBlock([astGo.goInt(1)]), ?)).type
+		:ifExpr
+	)
+	'goIf with init wraps in block' |> t.eq(
+		astGo.transpileToOak(astGo.goIf(
+			astGo.goShortDecl(astGo.goIdentifier('err'), astGo.goNil())
+			astGo.goBool(true)
+			astGo.goBlock([])
+			?
+		)).type
+		:block
+	)
+	'goFor transpiles to recursive Oak function' |> t.eq(
+		astGo.transpileToOak(astGo.goFor(?, astGo.goBool(true), ?, astGo.goBlock([]))).type
+		:block
+	)
+	'goForRange transpiles to Oak each() call' |> t.eq(
+		astGo.transpileToOak(astGo.goForRange('i', 'v', astGo.goIdentifier('items'), astGo.goBlock([]))).function.val
+		'each'
+	)
+	'goSwitch transpiles to Oak ifExpr' |> t.eq(
+		astGo.transpileToOak(astGo.goSwitch(
+			astGo.goIdentifier('x')
+			[astGo.goSwitchCase([astGo.goInt(1)], astGo.goBlock([astGo.goInt(10)]))]
+		)).type
+		:ifExpr
+	)
+	'goGo transpiles to Oak go() call' |> t.eq(
+		astGo.transpileToOak(astGo.goGo(astGo.goCall(astGo.goIdentifier('f'), []))).function.val
+		'go'
+	)
+	'goChanSend transpiles to Oak chan_send call' |> t.eq(
+		astGo.transpileToOak(astGo.goChanSend(astGo.goIdentifier('ch'), astGo.goInt(1))).function.val
+		'chan_send'
+	)
+	'goChanRecv transpiles to Oak chan_recv().data' |> t.eq(
+		astGo.transpileToOak(astGo.goChanRecv(astGo.goIdentifier('ch'))).right.val
+		'data'
+	)
+	'goMake chan transpiles to Oak make_chan call' |> t.eq(
+		astGo.transpileToOak(astGo.goMake('chan', [astGo.goInt(1)])).function.val
+		'make_chan'
+	)
+	'goImport transpiles to Oak import call' |> t.eq(
+		astGo.transpileToOak(astGo.goImport('fmt', ?)).right.function.val
+		'import'
+	)
+	'goImport derives name from path last segment' |> t.eq(
+		astGo.transpileToOak(astGo.goImport('net/http', ?)).left.val
+		'http'
+	)
+	'goImport uses alias when provided' |> t.eq(
+		astGo.transpileToOak(astGo.goImport('net/http', 'myhttp')).left.val
+		'myhttp'
+	)
+	'goInterface transpiles to null (duck typed)' |> t.eq(
+		astGo.transpileToOak(astGo.goInterface('Reader', [])).type
+		:null
+	)
+	'goPackage transpiles to null' |> t.eq(
+		astGo.transpileToOak(astGo.goPackage('main')).type
+		:null
+	)
+	'goAddrOf transpiles to pointer() call' |> t.eq(
+		astGo.transpileToOak(astGo.goAddrOf(astGo.goIdentifier('x'))).function.val
+		'pointer'
+	)
+	'goDeref transpiles to deref() call' |> t.eq(
+		astGo.transpileToOak(astGo.goDeref(astGo.goIdentifier('p'))).function.val
+		'deref'
+	)
+	'goMultiAssign transpiles to list destructuring' |> t.eq(
+		astGo.transpileToOak(astGo.goMultiAssign(
+			[astGo.goIdentifier('a'), astGo.goIdentifier('b')]
+			[astGo.goInt(1), astGo.goInt(2)]
+		)).left.type
+		:list
+	)
+	'goCast transpiles through to inner expression' |> t.eq(
+		astGo.transpileToOak(astGo.goCast('int', astGo.goFloat(3.14))).val
+		3.14
+	)
+
+	// ========================================================
+	// codegen-go: Oak → Go rendering
+	// ========================================================
+
+	'renderGoBundle produces Go output' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :null
+			tok: { pos: [0, 1, 1], type: :nullLiteral, val: ? }
+			val: ?
+		}), 'package main')
+	)
+	'renderGoBundle renders int literal' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :int
+			tok: { pos: [0, 1, 1], type: :numberLiteral, val: '42' }
+			val: 42
+		}), 'int(42)')
+	)
+	'renderGoBundle renders string literal' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :string
+			tok: { pos: [0, 1, 1], type: :stringLiteral, val: 'hello' }
+			val: 'hello'
+		}), '"hello"')
+	)
+	'renderGoBundle renders bool literal' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :bool
+			tok: { pos: [0, 1, 1], type: :trueLiteral, val: 'true' }
+			val: true
+		}), 'true')
+	)
+	'renderGoBundle renders list literal' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :list
+			tok: { pos: [0, 1, 1], type: :leftBracket, val: ? }
+			elems: [
+				{ type: :int, tok: { pos: [0, 1, 1], type: :numberLiteral, val: '1' }, val: 1 }
+				{ type: :int, tok: { pos: [0, 1, 1], type: :numberLiteral, val: '2' }, val: 2 }
+			]
+		}), 'OakList{')
+	)
+	'renderGoBundle renders object literal' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :object
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			entries: [
+				{
+					key: { type: :identifier, tok: { pos: [0, 1, 1], type: :identifier, val: 'name' }, val: 'name' }
+					val: { type: :string, tok: { pos: [0, 1, 1], type: :stringLiteral, val: 'Alice' }, val: 'Alice' }
+				}
+			]
+		}), 'OakObject{')
+	)
+	'renderGoBundle renders function' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :function
+			tok: { pos: [0, 1, 1], type: :fnKeyword, val: 'fn' }
+			name: 'double'
+			args: ['n']
+			restArg: ?
+			body: {
+				type: :binary
+				tok: { pos: [0, 1, 1], type: :star, val: '*' }
+				op: :times
+				left: { type: :int, tok: { pos: [0, 1, 1], type: :numberLiteral, val: '2' }, val: 2 }
+				right: { type: :identifier, tok: { pos: [0, 1, 1], type: :identifier, val: 'n' }, val: 'n' }
+			}
+		}), 'OakFn(func(__oak_args ...OakValue) OakValue {')
+	)
+	'renderGoBundle includes runtime preamble' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :null
+			tok: { pos: [0, 1, 1], type: :nullLiteral, val: ? }
+			val: ?
+		}), 'func __oak_eq(a, b OakValue) bool')
+	)
+	'renderGoBundle includes module system' |> t.assert(
+		str.contains?(codegenGo.renderGoBundle({
+			type: :null
+			tok: { pos: [0, 1, 1], type: :nullLiteral, val: ? }
+			val: ?
+		}), 'func __oak_module_import')
+	)
+
+	// ========================================================
+	// codegen-go: identifier mangling
+	// ========================================================
+
+	'goIdent mangles Go reserved words' |> t.eq(
+		codegenGo.goIdent('func')
+		'__oak_go_func'
+	)
+	'goIdent mangles map keyword' |> t.eq(
+		codegenGo.goIdent('map')
+		'__oak_go_map'
+	)
+	'goIdent mangles type keyword' |> t.eq(
+		codegenGo.goIdent('type')
+		'__oak_go_type'
+	)
+	'goIdent passes non-reserved words through' |> t.eq(
+		codegenGo.goIdent('myVar')
+		'myVar'
+	)
+	'goIdent replaces ? in names' |> t.eq(
+		codegenGo.goIdent('empty?')
+		'empty_qm'
+	)
+	'goIdent replaces ! in names' |> t.eq(
+		codegenGo.goIdent('save!')
+		'save_bang'
+	)
+
+	// ========================================================
+	// codegen-native: IR compiler
+	// ========================================================
+
+	'IR compiler creates instructions for int literal' |> t.assert({
+		compiler := codegenNative.createIRCompiler()
+		result := compiler.compile({
+			type: :int
+			tok: { pos: [0, 1, 1], type: :numberLiteral, val: '42' }
+			val: 42
+		})
+		len(result.instructions) > 0
+	})
+	'IR compiler creates instructions for binary add' |> t.assert({
+		compiler := codegenNative.createIRCompiler()
+		result := compiler.compile({
+			type: :binary
+			tok: { pos: [0, 1, 1], type: :plus, val: '+' }
+			op: :plus
+			left: { type: :int, tok: { pos: [0, 1, 1], type: :numberLiteral, val: '1' }, val: 1 }
+			right: { type: :int, tok: { pos: [0, 1, 1], type: :numberLiteral, val: '2' }, val: 2 }
+		})
+		// Should have 3 instructions: const 1, const 2, add
+		len(result.instructions) >= 3
+	})
+	'IR compiler tracks string pool' |> t.assert({
+		compiler := codegenNative.createIRCompiler()
+		result := compiler.compile({
+			type: :string
+			tok: { pos: [0, 1, 1], type: :stringLiteral, val: 'hello' }
+			val: 'hello'
+		})
+		len(result.stringPool) > 0
+	})
+	'IR compiler handles null' |> t.assert({
+		compiler := codegenNative.createIRCompiler()
+		result := compiler.compile({
+			type: :null
+			tok: { pos: [0, 1, 1], type: :nullLiteral, val: ? }
+			val: ?
+		})
+		len(result.instructions) > 0
+	})
+	'IR compiler handles list' |> t.assert({
+		compiler := codegenNative.createIRCompiler()
+		result := compiler.compile({
+			type: :list
+			tok: { pos: [0, 1, 1], type: :leftBracket, val: ? }
+			elems: [
+				{ type: :int, tok: { pos: [0, 1, 1], type: :numberLiteral, val: '1' }, val: 1 }
+			]
+		})
+		len(result.instructions) >= 2
+	})
+	'compileToNative returns code bytes' |> t.assert({
+		result := codegenNative.compileToNative({
+			type: :int
+			tok: { pos: [0, 1, 1], type: :numberLiteral, val: '42' }
+			val: 42
+		}, :x86_64)
+		len(result.code) > 0
+	})
+
+	// ========================================================
+	// assembler: x86-64
+	// ========================================================
+
+	'x86_64 nop assembles to 0x90' |> t.eq(
+		assembler.assemble('nop', :x86_64).code
+		[144]
+	)
+	'x86_64 ret assembles to 0xC3' |> t.eq(
+		assembler.assemble('ret', :x86_64).code
+		[195]
+	)
+	'x86_64 syscall assembles to 0F 05' |> t.eq(
+		assembler.assemble('syscall', :x86_64).code
+		[15, 5]
+	)
+	'x86_64 push rax assembles correctly' |> t.eq(
+		assembler.assemble('push rax', :x86_64).code
+		[80]
+	)
+	'x86_64 pop rax assembles correctly' |> t.eq(
+		assembler.assemble('pop rax', :x86_64).code
+		[88]
+	)
+	'assembler collects labels' |> t.assert({
+		result := assembler.assemble('start:\nnop\nloop:\nnop', :x86_64)
+		result.labels.start = 0 & result.labels.loop = 1
+	})
+	'assembler produces non-empty code for mov' |> t.assert({
+		result := assembler.assemble('mov rax rcx', :x86_64)
+		len(result.code) > 0
+	})
+
+	// ========================================================
+	// assembler: ARM64
+	// ========================================================
+
+	'arm64 nop assembles to 4 bytes' |> t.eq(
+		len(assembler.assemble('nop', :arm64).code)
+		4
+	)
+	'arm64 ret assembles to 4 bytes' |> t.eq(
+		len(assembler.assemble('ret', :arm64).code)
+		4
+	)
+
+	// ========================================================
+	// linker: ELF
+	// ========================================================
+
+	'ELF linker produces valid ELF magic' |> t.assert({
+		result := linker.link({
+			format: :elf
+			arch: :x86_64
+			textCode: [144, 195]
+			dataBytes: []
+		})
+		b := result.binary
+		// \x7FELF magic
+		b.0 = 127 & b.1 = 69 & b.2 = 76 & b.3 = 70
+	})
+	'ELF linker sets correct machine type for x86_64' |> t.assert({
+		result := linker.link({
+			format: :elf
+			arch: :x86_64
+			textCode: [144]
+			dataBytes: []
+		})
+		// e_machine at offset 18 (little-endian) = 0x3E = 62
+		result.binary.18 = 62
+	})
+	'ELF linker sets x86_64 entry point' |> t.eq(
+		linker.link({
+			format: :elf
+			arch: :x86_64
+			textCode: [144]
+			dataBytes: []
+		}).entryPoint
+		4194304
+	)
+
+	// ========================================================
+	// linker: PE
+	// ========================================================
+
+	'PE linker produces MZ header' |> t.assert({
+		result := linker.link({
+			format: :pe
+			arch: :x86_64
+			textCode: [144, 195]
+			dataBytes: []
+		})
+		b := result.binary
+		b.0 = 77 & b.1 = 90
+	})
+	'PE linker has PE signature' |> t.assert({
+		result := linker.link({
+			format: :pe
+			arch: :x86_64
+			textCode: [144]
+			dataBytes: []
+		})
+		b := result.binary
+		// PE signature at offset 64
+		b.64 = 80 & b.65 = 69 & b.66 = 0 & b.67 = 0
+	})
+}

@@ -1,0 +1,292 @@
+std := import('std')
+str := import('str')
+cg := import('codegen-common')
+
+fn run(t) {
+	// helper: minimal tok for AST nodes
+	tok := { pos: [0, 1, 1], type: :identifier, val: ? }
+
+	// --- renderNode tests ---
+
+	'renderNode null' |> t.eq(
+		cg.renderNode({ type: :null, tok: tok, val: ? })
+		'?'
+	)
+
+	'renderNode empty' |> t.eq(
+		cg.renderNode({ type: :empty, tok: tok })
+		'_'
+	)
+
+	'renderNode integer' |> t.eq(
+		cg.renderNode({ type: :number, tok: tok, val: 42 })
+		'42'
+	)
+
+	'renderNode float' |> t.eq(
+		cg.renderNode({ type: :number, tok: tok, val: 3.14 })
+		'3.14'
+	)
+
+	'renderNode zero' |> t.eq(
+		cg.renderNode({ type: :number, tok: tok, val: 0 })
+		'0'
+	)
+
+	'renderNode string simple' |> t.eq(
+		cg.renderNode({ type: :string, tok: tok, val: 'hello' })
+		'\'hello\''
+	)
+
+	'renderNode string with embedded quote' |> t.eq(
+		cg.renderNode({ type: :string, tok: tok, val: 'it\'s' })
+		'\'it\\\'s\''
+	)
+
+	'renderNode empty string' |> t.eq(
+		cg.renderNode({ type: :string, tok: tok, val: '' })
+		'\'\''
+	)
+
+	'renderNode atom' |> t.eq(
+		cg.renderNode({ type: :atom, tok: tok, val: 'keyword' })
+		':keyword'
+	)
+
+	'renderNode bool true' |> t.eq(
+		cg.renderNode({ type: :bool, tok: tok, val: true })
+		'true'
+	)
+
+	'renderNode bool false' |> t.eq(
+		cg.renderNode({ type: :bool, tok: tok, val: false })
+		'false'
+	)
+
+	'renderNode identifier' |> t.eq(
+		cg.renderNode({ type: :identifier, tok: tok, val: 'myVar' })
+		'myVar'
+	)
+
+	'renderNode empty list' |> t.eq(
+		cg.renderNode({ type: :list, tok: tok, elems: [] })
+		'[]'
+	)
+
+	'renderNode list with elements' |> t.eq(
+		cg.renderNode({ type: :list, tok: tok, elems: [
+			{ type: :number, tok: tok, val: 1 }
+			{ type: :number, tok: tok, val: 2 }
+			{ type: :number, tok: tok, val: 3 }
+		] })
+		'[1, 2, 3]'
+	)
+
+	'renderNode object' |> t.eq(
+		cg.renderNode({ type: :object, tok: tok, entries: [
+			{
+				key: { type: :identifier, tok: tok, val: 'name' }
+				val: { type: :string, tok: tok, val: 'oak' }
+			}
+		] })
+		'{name: \'oak\'}'
+	)
+
+	'renderNode empty object' |> t.eq(
+		cg.renderNode({ type: :object, tok: tok, entries: [] })
+		'{}'
+	)
+
+	'renderNode function with name' |> t.eq(
+		cg.renderNode({
+			type: :function, tok: tok
+			name: 'add'
+			args: ['a', 'b']
+			restArg: ?
+			body: { type: :identifier, tok: tok, val: 'a' }
+		})
+		'fn add(a, b) a'
+	)
+
+	'renderNode anonymous function' |> t.eq(
+		cg.renderNode({
+			type: :function, tok: tok
+			name: ''
+			args: ['x']
+			restArg: ?
+			body: { type: :identifier, tok: tok, val: 'x' }
+		})
+		'fn(x) x'
+	)
+
+	'renderNode function with rest arg' |> t.eq(
+		cg.renderNode({
+			type: :function, tok: tok
+			name: 'f'
+			args: ['a']
+			restArg: 'rest'
+			body: { type: :identifier, tok: tok, val: 'a' }
+		})
+		'fn f(a, rest...) a'
+	)
+
+	'renderNode fnCall simple' |> t.eq(
+		cg.renderNode({
+			type: :fnCall, tok: tok
+			function: { type: :identifier, tok: tok, val: 'print' }
+			args: [{ type: :string, tok: tok, val: 'hi' }]
+			restArg: ?
+		})
+		'print(\'hi\')'
+	)
+
+	'renderNode fnCall no args' |> t.eq(
+		cg.renderNode({
+			type: :fnCall, tok: tok
+			function: { type: :identifier, tok: tok, val: 'now' }
+			args: []
+			restArg: ?
+		})
+		'now()'
+	)
+
+	'renderNode fnCall with rest arg' |> t.eq(
+		cg.renderNode({
+			type: :fnCall, tok: tok
+			function: { type: :identifier, tok: tok, val: 'call' }
+			args: [{ type: :number, tok: tok, val: 1 }]
+			restArg: { type: :identifier, tok: tok, val: 'xs' }
+		})
+		'call(1, xs...)'
+	)
+
+	'renderNode unknown type' |> t.eq(
+		cg.renderNode({ type: :somethingElse, tok: tok })
+		'(unknown node)'
+	)
+
+	// --- traceDependencies tests ---
+
+	'traceDependencies single import' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :fnCall, tok: tok
+				function: { type: :identifier, tok: tok, val: 'import' }
+				args: [{ type: :string, tok: tok, val: 'std' }]
+				restArg: ?
+			}
+		])
+		['std']
+	)
+
+	'traceDependencies multiple imports' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :fnCall, tok: tok
+				function: { type: :identifier, tok: tok, val: 'import' }
+				args: [{ type: :string, tok: tok, val: 'std' }]
+				restArg: ?
+			}
+			{
+				type: :fnCall, tok: tok
+				function: { type: :identifier, tok: tok, val: 'import' }
+				args: [{ type: :string, tok: tok, val: 'str' }]
+				restArg: ?
+			}
+		])
+		['std', 'str']
+	)
+
+	'traceDependencies no imports' |> t.eq(
+		cg.traceDependencies([
+			{ type: :identifier, tok: tok, val: 'x' }
+		])
+		[]
+	)
+
+	'traceDependencies empty nodes list' |> t.eq(
+		cg.traceDependencies([])
+		[]
+	)
+
+	'traceDependencies import inside block' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :block, tok: tok
+				exprs: [
+					{
+						type: :fnCall, tok: tok
+						function: { type: :identifier, tok: tok, val: 'import' }
+						args: [{ type: :string, tok: tok, val: 'fmt' }]
+						restArg: ?
+					}
+				]
+			}
+		])
+		['fmt']
+	)
+
+	'traceDependencies import inside function body' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :function, tok: tok
+				name: 'init'
+				args: []
+				restArg: ?
+				body: {
+					type: :fnCall, tok: tok
+					function: { type: :identifier, tok: tok, val: 'import' }
+					args: [{ type: :string, tok: tok, val: 'math' }]
+					restArg: ?
+				}
+			}
+		])
+		['math']
+	)
+
+	'traceDependencies import in assignment right' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :assignment, tok: tok
+				local?: true
+				left: { type: :identifier, tok: tok, val: 'std' }
+				right: {
+					type: :fnCall, tok: tok
+					function: { type: :identifier, tok: tok, val: 'import' }
+					args: [{ type: :string, tok: tok, val: 'std' }]
+					restArg: ?
+				}
+			}
+		])
+		['std']
+	)
+
+	'traceDependencies non-import fnCall ignored' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :fnCall, tok: tok
+				function: { type: :identifier, tok: tok, val: 'print' }
+				args: [{ type: :string, tok: tok, val: 'hello' }]
+				restArg: ?
+			}
+		])
+		[]
+	)
+
+	'traceDependencies import in list element' |> t.eq(
+		cg.traceDependencies([
+			{
+				type: :list, tok: tok
+				elems: [
+					{
+						type: :fnCall, tok: tok
+						function: { type: :identifier, tok: tok, val: 'import' }
+						args: [{ type: :string, tok: tok, val: 'json' }]
+						restArg: ?
+					}
+				]
+			}
+		])
+		['json']
+	)
+}

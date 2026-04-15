@@ -933,6 +933,51 @@ fn renderJavaBundle(bundleNode) {
 	output
 }
 
+// renderGoBundle transpiles the Oak AST bundle to Go source code.
+fn renderGoBundle(bundleNode) {
+	codegenGo := import('codegen-go')
+	codegenGo.renderGoBundle(bundleNode)
+}
+
+// renderNativeBundle compiles the Oak AST bundle to native machine code
+// and links it into an executable binary.
+fn renderNativeBundle(bundleNode) {
+	nativeCodegen := import('codegen-native')
+	linker := import('linker')
+
+	irCompiler := nativeCodegen.createIRCompiler()
+	irProgram := irCompiler.compile(bundleNode)
+
+	// Detect host OS/arch
+	sysInfo := ___runtime_sys_info()
+	arch := if sysInfo.arch {
+		'arm64', 'aarch64' -> :arm64
+		_ -> :x86_64
+	}
+	format := if sysInfo.os {
+		'windows' -> :pe
+		'darwin' -> :macho
+		_ -> :elf
+	}
+
+	generator := if arch {
+		:arm64 -> nativeCodegen.createARM64Generator()
+		_ -> nativeCodegen.createX86_64Generator()
+	}
+
+	compiled := generator.compile(irProgram)
+
+	result := linker.link({
+		format: format
+		arch: arch
+		textCode: compiled.code
+		dataBytes: []
+	})
+
+	// Return raw binary bytes as string
+	result.binary |> map(fn(b) char(b)) |> join('')
+}
+
 // renderGraphBundle generates a Mermaid dependency graph from the build's
 // ModuleNodes map and recursively resolves stdlib imports so the full
 // transitive dependency tree is shown.  Project modules are grouped in one
@@ -1169,6 +1214,8 @@ fn renderBundle(bundleNode) {
 		renderTsBundle
 		renderLuaBundle
 		renderJavaBundle
+		renderGoBundle
+		renderNativeBundle
 		renderGraphBundle
 	)
 }

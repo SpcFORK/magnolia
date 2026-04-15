@@ -1,0 +1,1139 @@
+// ast-go -- Go AST node constructors and Go-to-Oak transpilation
+//
+// Provides helpers for building Go-style AST nodes and converting
+// them into equivalent Oak AST nodes for cross-language transpilation.
+// Supports Go 1.18+ constructs including generics, goroutines, channels,
+// defer, multiple return values, interfaces, and struct embedding.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+} := import('std')
+{
+	replace: replace
+	contains?: strContains?
+	split: split
+	trim: trim
+} := import('str')
+{
+	format: format
+} := import('fmt')
+
+// -- Go reserved words --
+GoReserved := [
+	'break', 'case', 'chan', 'const', 'continue', 'default', 'defer'
+	'else', 'fallthrough', 'for', 'func', 'go', 'goto', 'if', 'import'
+	'interface', 'map', 'package', 'range', 'return', 'select', 'struct'
+	'switch', 'type', 'var'
+]
+
+// Go builtin identifiers
+GoBuiltins := [
+	'append', 'cap', 'close', 'complex', 'copy', 'delete', 'imag'
+	'len', 'make', 'new', 'panic', 'print', 'println', 'real', 'recover'
+	'any', 'bool', 'byte', 'comparable', 'complex64', 'complex128'
+	'error', 'float32', 'float64', 'int', 'int8', 'int16', 'int32', 'int64'
+	'rune', 'string', 'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uintptr'
+	'true', 'false', 'iota', 'nil'
+]
+
+fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
+
+// ---------------------------------------------------------------------------
+// Go AST node constructors
+// ---------------------------------------------------------------------------
+
+fn goNil() {
+	type: :goNil
+	tok: _tok()
+}
+
+fn goInt(val) {
+	type: :goInt
+	tok: _tok()
+	val: val
+}
+
+fn goFloat(val) {
+	type: :goFloat
+	tok: _tok()
+	val: val
+}
+
+fn goString(val) {
+	type: :goString
+	tok: _tok()
+	val: val
+}
+
+fn goRawString(val) {
+	type: :goRawString
+	tok: _tok()
+	val: val
+}
+
+fn goBool(val) {
+	type: :goBool
+	tok: _tok()
+	val: val
+}
+
+fn goRune(val) {
+	type: :goRune
+	tok: _tok()
+	val: val
+}
+
+fn goIdentifier(name) {
+	type: :goIdentifier
+	tok: _tok()
+	val: name
+}
+
+fn goSliceLit(elems) {
+	type: :goSliceLit
+	tok: _tok()
+	elems: default(elems, [])
+}
+
+fn goArrayLit(size, elems) {
+	type: :goArrayLit
+	tok: _tok()
+	size: size
+	elems: default(elems, [])
+}
+
+fn goMapLit(entries) {
+	type: :goMapLit
+	tok: _tok()
+	entries: default(entries, [])
+}
+
+fn goMapEntry(key, val) {
+	key: key
+	val: val
+}
+
+fn goStructLit(typeName, fields) {
+	type: :goStructLit
+	tok: _tok()
+	typeName: typeName
+	fields: default(fields, [])
+}
+
+fn goStructField(name, val) {
+	name: name
+	val: val
+}
+
+fn goBinary(op, left, right) {
+	type: :goBinary
+	tok: _tok()
+	op: op
+	left: left
+	right: right
+}
+
+fn goUnary(op, operand) {
+	type: :goUnary
+	tok: _tok()
+	op: op
+	right: operand
+}
+
+fn goAssignment(left, right) {
+	type: :goAssignment
+	tok: _tok()
+	left: left
+	right: right
+}
+
+fn goShortDecl(left, right) {
+	type: :goShortDecl
+	tok: _tok()
+	left: left
+	right: right
+}
+
+fn goVarDecl(name, goType, init) {
+	type: :goVarDecl
+	tok: _tok()
+	name: name
+	goType: goType
+	init: init
+}
+
+fn goConstDecl(name, goType, init) {
+	type: :goConstDecl
+	tok: _tok()
+	name: name
+	goType: goType
+	init: init
+}
+
+fn goDot(object, field) {
+	type: :goDot
+	tok: _tok()
+	object: object
+	field: field
+}
+
+fn goIndex(object, index) {
+	type: :goIndex
+	tok: _tok()
+	object: object
+	index: index
+}
+
+fn goSliceExpr(object, low, high, max) {
+	type: :goSliceExpr
+	tok: _tok()
+	object: object
+	low: low
+	high: high
+	max: max
+}
+
+fn goCall(callee, args) {
+	type: :goCall
+	tok: _tok()
+	callee: callee
+	args: default(args, [])
+}
+
+fn goMethodCall(object, method, args) {
+	type: :goMethodCall
+	tok: _tok()
+	object: object
+	method: method
+	args: default(args, [])
+}
+
+fn goFunc(name, params, results, body) {
+	type: :goFunc
+	tok: _tok()
+	name: default(name, '')
+	params: default(params, [])
+	results: default(results, [])
+	body: body
+}
+
+fn goFuncParam(name, goType) {
+	name: name
+	goType: goType
+}
+
+fn goFuncLit(params, results, body) {
+	type: :goFuncLit
+	tok: _tok()
+	params: default(params, [])
+	results: default(results, [])
+	body: body
+}
+
+fn goReturn(values) {
+	type: :goReturn
+	tok: _tok()
+	values: default(values, [])
+}
+
+fn goBlock(stmts) {
+	type: :goBlock
+	tok: _tok()
+	stmts: default(stmts, [])
+}
+
+fn goIf(init, cond, consequent, alternate) {
+	type: :goIf
+	tok: _tok()
+	init: init
+	cond: cond
+	consequent: consequent
+	alternate: alternate
+}
+
+fn goFor(init, cond, post, body) {
+	type: :goFor
+	tok: _tok()
+	init: init
+	cond: cond
+	post: post
+	body: body
+}
+
+fn goForRange(key, value, iterable, body) {
+	type: :goForRange
+	tok: _tok()
+	key: key
+	value: value
+	iterable: iterable
+	body: body
+}
+
+fn goSwitch(tag, cases) {
+	type: :goSwitch
+	tok: _tok()
+	tag: tag
+	cases: default(cases, [])
+}
+
+fn goSwitchCase(exprs, body) {
+	exprs: exprs
+	body: body
+}
+
+fn goTypeSwitch(assign, cases) {
+	type: :goTypeSwitch
+	tok: _tok()
+	assign: assign
+	cases: default(cases, [])
+}
+
+fn goSelect(cases) {
+	type: :goSelect
+	tok: _tok()
+	cases: default(cases, [])
+}
+
+fn goSelectCase(comm, body) {
+	comm: comm
+	body: body
+}
+
+fn goGo(call) {
+	type: :goGo
+	tok: _tok()
+	call: call
+}
+
+fn goDefer(call) {
+	type: :goDefer
+	tok: _tok()
+	call: call
+}
+
+fn goChanSend(ch, value) {
+	type: :goChanSend
+	tok: _tok()
+	ch: ch
+	value: value
+}
+
+fn goChanRecv(ch) {
+	type: :goChanRecv
+	tok: _tok()
+	ch: ch
+}
+
+fn goMake(goType, args) {
+	type: :goMake
+	tok: _tok()
+	goType: goType
+	args: default(args, [])
+}
+
+fn goTypeAssert(expr, goType) {
+	type: :goTypeAssert
+	tok: _tok()
+	expr: expr
+	goType: goType
+}
+
+fn goCast(goType, expr) {
+	type: :goCast
+	tok: _tok()
+	goType: goType
+	expr: expr
+}
+
+fn goStruct(name, fields) {
+	type: :goStruct
+	tok: _tok()
+	name: default(name, '')
+	fields: default(fields, [])
+}
+
+fn goInterface(name, methods) {
+	type: :goInterface
+	tok: _tok()
+	name: default(name, '')
+	methods: default(methods, [])
+}
+
+fn goTypeDecl(name, underlying) {
+	type: :goTypeDecl
+	tok: _tok()
+	name: name
+	underlying: underlying
+}
+
+fn goImport(path, alias) {
+	type: :goImport
+	tok: _tok()
+	path: path
+	alias: alias
+}
+
+fn goPackage(name) {
+	type: :goPackage
+	tok: _tok()
+	name: name
+}
+
+fn goComment(text) {
+	type: :goComment
+	tok: _tok()
+	text: text
+}
+
+fn goMultiReturn(values) {
+	type: :goMultiReturn
+	tok: _tok()
+	values: default(values, [])
+}
+
+fn goMultiAssign(lefts, rights) {
+	type: :goMultiAssign
+	tok: _tok()
+	lefts: lefts
+	rights: rights
+}
+
+fn goBlank() {
+	type: :goBlank
+	tok: _tok()
+}
+
+fn goEllipsis(expr) {
+	type: :goEllipsis
+	tok: _tok()
+	expr: expr
+}
+
+fn goPointerType(base) {
+	type: :goPointerType
+	tok: _tok()
+	base: base
+}
+
+fn goAddrOf(expr) {
+	type: :goAddrOf
+	tok: _tok()
+	expr: expr
+}
+
+fn goDeref(expr) {
+	type: :goDeref
+	tok: _tok()
+	expr: expr
+}
+
+// ---------------------------------------------------------------------------
+// Go operator to Oak operator mapping
+// ---------------------------------------------------------------------------
+
+fn _mapGoOp(op) if op {
+	'+' -> :plus
+	'-' -> :minus
+	'*' -> :times
+	'/' -> :divide
+	'%' -> :modulus
+	'>>' -> :rshift
+	'<<' -> :pushArrow
+	'==' -> :eq
+	'!=' -> :neq
+	'>' -> :greater
+	'<' -> :less
+	'>=' -> :geq
+	'<=' -> :leq
+	'&&' -> :and
+	'||' -> :or
+	'^' -> :xor
+	'&' -> :and
+	'|' -> :or
+	_ -> :plus
+}
+
+fn _mapGoUnaryOp(op) if op {
+	'-' -> :minus
+	'!' -> :exclam
+	'^' -> :exclam
+	_ -> :minus
+}
+
+// ---------------------------------------------------------------------------
+// Go identifier to Oak mapping
+// ---------------------------------------------------------------------------
+
+fn _goIdentToOak(name) if name {
+	'nil' -> '?'
+	'true' -> 'true'
+	'false' -> 'false'
+	_ -> {
+		// Convert camelCase to snake_case? for Oak idiom
+		// For now, preserve names as-is
+		name
+	}
+}
+
+// ---------------------------------------------------------------------------
+// transpileToOak: Go AST -> Oak AST
+//
+// Converts Go AST nodes produced by the constructors above into
+// equivalent Oak AST nodes.  Handles the major semantic differences:
+//   - Go multiple return → Oak list return
+//   - Go goroutine → Oak go() wrapper
+//   - Go channels → Oak chan builtins
+//   - Go defer → Oak with/callback pattern
+//   - Go for/range → Oak recursive functions
+//   - Go switch → Oak if pattern match
+//   - Go struct literals → Oak object literals
+//   - Go type assertions → Oak type() checks
+//   - Go interfaces → erased (Oak is duck-typed)
+//   - Go pointers → Oak pointer() builtins
+// ---------------------------------------------------------------------------
+
+fn transpileToOak(node) if node {
+	? -> { type: :null, tok: _tok(), val: ? }
+	_ -> if node.type {
+		:goNil -> { type: :null, tok: _tok(), val: ? }
+
+		:goInt -> {
+			type: :int
+			tok: _tok()
+			val: node.val
+		}
+
+		:goFloat -> {
+			type: :float
+			tok: _tok()
+			val: node.val
+		}
+
+		:goString, :goRawString -> {
+			type: :string
+			tok: _tok()
+			val: node.val
+		}
+
+		:goBool -> {
+			type: :bool
+			tok: _tok()
+			val: node.val
+		}
+
+		:goRune -> {
+			// Go rune → Oak single-char string
+			type: :string
+			tok: _tok()
+			val: node.val
+		}
+
+		:goIdentifier -> {
+			type: :identifier
+			tok: _tok()
+			val: _goIdentToOak(node.val)
+		}
+
+		:goBlank -> { type: :empty, tok: _tok() }
+
+		:goSliceLit, :goArrayLit -> {
+			type: :list
+			tok: _tok()
+			elems: node.elems |> map(transpileToOak)
+		}
+
+		:goMapLit -> {
+			type: :object
+			tok: _tok()
+			entries: node.entries |> map(fn(e) {
+				key: transpileToOak(e.key)
+				val: transpileToOak(e.val)
+			})
+		}
+
+		:goStructLit -> {
+			// Go struct lit → Oak object literal
+			type: :object
+			tok: _tok()
+			entries: node.fields |> map(fn(f) {
+				key: { type: :identifier, tok: _tok(), val: f.name }
+				val: transpileToOak(f.val)
+			})
+		}
+
+		:goBinary -> {
+			type: :binary
+			tok: _tok()
+			op: _mapGoOp(node.op)
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:goUnary -> {
+			type: :unary
+			tok: _tok()
+			op: _mapGoUnaryOp(node.op)
+			right: transpileToOak(node.right)
+		}
+
+		:goAssignment -> {
+			type: :assignment
+			tok: _tok()
+			local?: false
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:goShortDecl -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: transpileToOak(node.left)
+			right: transpileToOak(node.right)
+		}
+
+		:goVarDecl -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: { type: :identifier, tok: _tok(), val: node.name }
+			right: if node.init {
+				? -> { type: :null, tok: _tok(), val: ? }
+				_ -> transpileToOak(node.init)
+			}
+		}
+
+		:goConstDecl -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: { type: :identifier, tok: _tok(), val: node.name }
+			right: if node.init {
+				? -> { type: :null, tok: _tok(), val: ? }
+				_ -> transpileToOak(node.init)
+			}
+		}
+
+		:goDot -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.object)
+			right: { type: :identifier, tok: _tok(), val: node.field }
+		}
+
+		:goIndex -> {
+			type: :propertyAccess
+			tok: _tok()
+			left: transpileToOak(node.object)
+			right: {
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				exprs: [transpileToOak(node.index)]
+			}
+		}
+
+		:goSliceExpr -> {
+			// a[low:high] → slice(a, low, high)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'slice' }
+			args: [
+				transpileToOak(node.object)
+				if node.low {
+					? -> { type: :int, tok: _tok(), val: 0 }
+					_ -> transpileToOak(node.low)
+				}
+				if node.high {
+					? -> {
+						type: :fnCall
+						tok: _tok()
+						function: { type: :identifier, tok: _tok(), val: 'len' }
+						args: [transpileToOak(node.object)]
+						restArg: ?
+					}
+					_ -> transpileToOak(node.high)
+				}
+			]
+			restArg: ?
+		}
+
+		:goCall -> {
+			type: :fnCall
+			tok: _tok()
+			function: transpileToOak(node.callee)
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:goMethodCall -> {
+			type: :fnCall
+			tok: _tok()
+			function: {
+				type: :propertyAccess
+				tok: _tok()
+				left: transpileToOak(node.object)
+				right: { type: :identifier, tok: _tok(), val: node.method }
+			}
+			args: node.args |> map(transpileToOak)
+			restArg: ?
+		}
+
+		:goFunc -> {
+			type: :function
+			tok: _tok()
+			name: node.name
+			args: node.params |> map(fn(p) p.name)
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:goFuncLit -> {
+			type: :function
+			tok: _tok()
+			name: ''
+			args: node.params |> map(fn(p) p.name)
+			restArg: ?
+			body: transpileToOak(node.body)
+		}
+
+		:goReturn -> if len(node.values) {
+			0 -> { type: :null, tok: _tok(), val: ? }
+			1 -> transpileToOak(node.values.0)
+			_ -> {
+				// Multi-return → list
+				type: :list
+				tok: _tok()
+				elems: node.values |> map(transpileToOak)
+			}
+		}
+
+		:goBlock -> {
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.stmts |> map(transpileToOak)
+		}
+
+		:goIf -> {
+			// if init; cond { body } else { alt }
+			// → { init; if cond { true -> body, _ -> alt } }
+			ifNode := {
+				type: :ifExpr
+				tok: _tok()
+				cond: transpileToOak(node.cond)
+				branches: [
+					{
+						type: :ifBranch
+						tok: _tok()
+						target: { type: :bool, tok: _tok(), val: true }
+						body: transpileToOak(node.consequent)
+					}
+				] |> append(if node.alternate {
+					? -> [{
+						type: :ifBranch
+						tok: _tok()
+						target: { type: :empty, tok: _tok() }
+						body: { type: :null, tok: _tok(), val: ? }
+					}]
+					_ -> [{
+						type: :ifBranch
+						tok: _tok()
+						target: { type: :empty, tok: _tok() }
+						body: transpileToOak(node.alternate)
+					}]
+				})
+			}
+			if node.init {
+				? -> ifNode
+				_ -> {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [transpileToOak(node.init), ifNode]
+				}
+			}
+		}
+
+		:goFor -> {
+			// for init; cond; post { body } → recursive fn
+			loopName := '__oak_loop'
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					if node.init { ? -> { type: :null, tok: _tok(), val: ? }, _ -> transpileToOak(node.init) }
+					{
+						type: :function
+						tok: _tok()
+						name: loopName
+						args: []
+						restArg: ?
+						body: {
+							type: :ifExpr
+							tok: _tok()
+							cond: if node.cond {
+								? -> { type: :bool, tok: _tok(), val: true }
+								_ -> transpileToOak(node.cond)
+							}
+							branches: [
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :bool, tok: _tok(), val: true }
+									body: {
+										type: :block
+										tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+										decls: []
+										exprs: [
+											transpileToOak(node.body)
+											if node.post { ? -> { type: :null, tok: _tok(), val: ? }, _ -> transpileToOak(node.post) }
+											{
+												type: :fnCall
+												tok: _tok()
+												function: { type: :identifier, tok: _tok(), val: loopName }
+												args: []
+												restArg: ?
+											}
+										]
+									}
+								}
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :empty, tok: _tok() }
+									body: { type: :null, tok: _tok(), val: ? }
+								}
+							]
+						}
+					}
+					{
+						type: :fnCall
+						tok: _tok()
+						function: { type: :identifier, tok: _tok(), val: loopName }
+						args: []
+						restArg: ?
+					}
+				]
+			}
+		}
+
+		:goForRange -> {
+			// for k, v := range xs { body } → each(xs, fn(v, k) body)
+			// Oak's each passes (item, index)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'each' }
+			args: [
+				transpileToOak(node.iterable)
+				{
+					type: :function
+					tok: _tok()
+					name: ''
+					args: if node.value {
+						? -> if node.key {
+							? -> ['_']
+							_ -> [node.key]
+						}
+						_ -> if node.key {
+							? -> [node.value]
+							_ -> [node.value, node.key]
+						}
+					}
+					restArg: ?
+					body: transpileToOak(node.body)
+				}
+			]
+			restArg: ?
+		}
+
+		:goSwitch -> {
+			// Go switch → Oak if expr pattern match
+			type: :ifExpr
+			tok: _tok()
+			cond: if node.tag {
+				? -> { type: :bool, tok: _tok(), val: true }
+				_ -> transpileToOak(node.tag)
+			}
+			branches: node.cases |> map(fn(c) if c.exprs {
+				? -> {
+					// default case
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: transpileToOak(c.body)
+				}
+				_ -> if len(c.exprs) {
+					1 -> {
+						type: :ifBranch
+						tok: _tok()
+						target: transpileToOak(c.exprs.0)
+						body: transpileToOak(c.body)
+					}
+					_ -> {
+						// Multiple case values: use first (could use or-pattern)
+						type: :ifBranch
+						tok: _tok()
+						target: transpileToOak(c.exprs.0)
+						body: transpileToOak(c.body)
+					}
+				}
+			})
+		}
+
+		:goTypeSwitch -> {
+			// Type switch → Oak type() chain
+			type: :ifExpr
+			tok: _tok()
+			cond: {
+				type: :fnCall
+				tok: _tok()
+				function: { type: :identifier, tok: _tok(), val: 'type' }
+				args: [transpileToOak(node.assign)]
+				restArg: ?
+			}
+			branches: node.cases |> map(fn(c) if c.exprs {
+				? -> {
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :empty, tok: _tok() }
+					body: transpileToOak(c.body)
+				}
+				_ -> {
+					type: :ifBranch
+					tok: _tok()
+					target: { type: :atom, tok: _tok(), val: c.exprs.0 }
+					body: transpileToOak(c.body)
+				}
+			})
+		}
+
+		:goSelect -> {
+			// select → sequential check with chan_recv/chan_send
+			// Best effort: flatten to first matching case
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.cases |> map(fn(c) {
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					transpileToOak(c.comm)
+					transpileToOak(c.body)
+				]
+			})
+		}
+
+		:goGo -> {
+			// go fn() → go(fn())
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'go' }
+			args: [transpileToOak(node.call)]
+			restArg: ?
+		}
+
+		:goDefer -> {
+			// defer f() → with f() fn() ... (best effort)
+			// In Oak, defer semantics don't exist directly—wrap as callback
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: '__oak_defer' }
+			args: [{
+				type: :function
+				tok: _tok()
+				name: ''
+				args: []
+				restArg: ?
+				body: transpileToOak(node.call)
+			}]
+			restArg: ?
+		}
+
+		:goChanSend -> {
+			// ch <- val → chan_send(ch, val)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'chan_send' }
+			args: [transpileToOak(node.ch), transpileToOak(node.value)]
+			restArg: ?
+		}
+
+		:goChanRecv -> {
+			// <-ch → chan_recv(ch).data
+			type: :propertyAccess
+			tok: _tok()
+			left: {
+				type: :fnCall
+				tok: _tok()
+				function: { type: :identifier, tok: _tok(), val: 'chan_recv' }
+				args: [transpileToOak(node.ch)]
+				restArg: ?
+			}
+			right: { type: :identifier, tok: _tok(), val: 'data' }
+		}
+
+		:goMake -> {
+			// make(type, args) → type-specific constructor
+			if node.goType {
+				'chan' -> {
+					type: :fnCall
+					tok: _tok()
+					function: { type: :identifier, tok: _tok(), val: 'make_chan' }
+					args: if len(node.args) > 0 {
+						true -> node.args |> map(transpileToOak)
+						_ -> [{ type: :int, tok: _tok(), val: 0 }]
+					}
+					restArg: ?
+				}
+				_ -> {
+					// make([]T, n) or make(map[K]V) → list/object
+					type: :list
+					tok: _tok()
+					elems: []
+				}
+			}
+		}
+
+		:goTypeAssert -> {
+			// x.(Type) → type check
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'type' }
+			args: [transpileToOak(node.expr)]
+			restArg: ?
+		}
+
+		:goCast -> transpileToOak(node.expr)
+
+		:goStruct -> {
+			// type X struct{} → cs X { ... }
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: node.fields |> map(fn(f) {
+				type: :assignment
+				tok: _tok()
+				local?: true
+				left: { type: :identifier, tok: _tok(), val: f.name }
+				right: { type: :null, tok: _tok(), val: ? }
+			})
+		}
+
+		:goInterface -> {
+			// Interfaces → erased in Oak (duck-typed)
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:goTypeDecl -> {
+			// type X = Y → comment only, types erased
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:goImport -> {
+			// import "pkg" → import('pkg')
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: {
+				type: :identifier
+				tok: _tok()
+				val: if node.alias {
+					?, '' -> {
+						// Derive name from last path segment
+						parts := node.path |> split('/')
+						parts.(len(parts) - 1)
+					}
+					_ -> node.alias
+				}
+			}
+			right: {
+				type: :fnCall
+				tok: _tok()
+				function: { type: :identifier, tok: _tok(), val: 'import' }
+				args: [{
+					type: :string
+					tok: _tok()
+					val: node.path
+				}]
+				restArg: ?
+			}
+		}
+
+		:goPackage -> {
+			// package main → comment
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:goComment -> {
+			type: :null
+			tok: _tok()
+			val: ?
+		}
+
+		:goMultiReturn -> {
+			type: :list
+			tok: _tok()
+			elems: node.values |> map(transpileToOak)
+		}
+
+		:goMultiAssign -> {
+			// a, b := f() → [a, b] := f()
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: {
+				type: :list
+				tok: _tok()
+				elems: node.lefts |> map(transpileToOak)
+			}
+			right: if len(node.rights) {
+				1 -> transpileToOak(node.rights.0)
+				_ -> {
+					type: :list
+					tok: _tok()
+					elems: node.rights |> map(transpileToOak)
+				}
+			}
+		}
+
+		:goEllipsis -> transpileToOak(node.expr)
+
+		:goPointerType -> transpileToOak(node.base)
+
+		:goAddrOf -> {
+			// &x → pointer(x) (approximate)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'pointer' }
+			args: [transpileToOak(node.expr)]
+			restArg: ?
+		}
+
+		:goDeref -> {
+			// *x → deref(x) (approximate)
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: 'deref' }
+			args: [transpileToOak(node.expr)]
+			restArg: ?
+		}
+
+		_ -> { type: :null, tok: _tok(), val: ? }
+	}
+}

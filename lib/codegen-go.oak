@@ -1,0 +1,394 @@
+// codegen-go -- Oak AST to Go source code renderer
+//
+// Transpiles Oak/Magnolia AST nodes (as produced by the build pipeline)
+// into idiomatic Go 1.18+ source code.  The generated code uses a small
+// runtime preamble that provides Oak-compatible semantics:
+//   - interface{} for dynamic typing
+//   - __oak_eq for deep structural equality
+//   - __oak_push for list append
+//   - __oak_acc for safe property access
+//   - map[string]interface{} for Oak objects
+//   - []interface{} for Oak lists
+//   - closures via func(...interface{}) interface{}
+//
+// Module system: Oak modules become Go init-once functions stored in a
+// global registry, mirroring the JS/Lua/Java target patterns.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+	indexOf: indexOf
+} := import('std')
+{
+	replace: replace
+	contains?: strContains?
+	join: join
+	split: split
+	trim: trim
+} := import('str')
+{
+	format: format
+} := import('fmt')
+
+// ---------------------------------------------------------------------------
+// Go reserved words — identifiers matching these are mangled
+// ---------------------------------------------------------------------------
+
+GoReserved := [
+	'break', 'case', 'chan', 'const', 'continue', 'default', 'defer'
+	'else', 'fallthrough', 'for', 'func', 'go', 'goto', 'if', 'import'
+	'interface', 'map', 'package', 'range', 'return', 'select', 'struct'
+	'switch', 'type', 'var', 'nil', 'true', 'false', 'iota'
+	'append', 'cap', 'close', 'complex', 'copy', 'delete', 'imag'
+	'len', 'make', 'new', 'panic', 'print', 'println', 'real', 'recover'
+	'error', 'string', 'bool', 'int', 'float64', 'byte', 'rune'
+	'any', 'comparable'
+]
+
+fn goIdent(name) {
+	clean := name |> clone()
+	clean <- clean |> replace('?', '_qm') |> replace('!', '_bang')
+	found? := false
+	GoReserved |> each(fn(kw) if clean = kw {
+		true -> {
+			clean <- '__oak_go_' + clean
+			found? <- true
+		}
+	})
+	if clean = 'import' -> clean <- '__oak_module_import'
+	clean
+}
+
+fn goStr(s) {
+	'"' + s |> map(fn(c) if c {
+		'\\' -> '\\\\'
+		'"' -> '\\"'
+		'\n' -> '\\n'
+		'\r' -> '\\r'
+		'\t' -> '\\t'
+		_ -> c
+	}) + '"'
+}
+
+// ---------------------------------------------------------------------------
+// Go runtime preamble
+// ---------------------------------------------------------------------------
+
+GoRuntimePreamble := '// oak build --go
+// Magnolia/Oak to Go transpiled bundle
+package main
+
+import (
+	"fmt"
+	"math"
+	"os"
+	"reflect"
+	"strings"
+)
+
+// Ensure imports are used
+var _ = fmt.Sprint
+var _ = math.Abs
+var _ = os.Args
+var _ = reflect.DeepEqual
+var _ = strings.Contains
+
+// Oak value type aliases
+type OakValue = interface{}
+type OakFn = func(...OakValue) OakValue
+type OakList = []OakValue
+type OakObject = map[string]OakValue
+
+// Module registry
+var __Oak_Modules = map[string]OakValue{}
+var __Oak_Import_Aliases map[string]string
+
+func __oak_eq(a, b OakValue) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func __oak_push(list OakList, val OakValue) OakList {
+	return append(list, val)
+}
+
+func __oak_acc(obj OakValue, key OakValue) OakValue {
+	if obj == nil {
+		return nil
+	}
+	switch o := obj.(type) {
+	case OakObject:
+		if k, ok := key.(string); ok {
+			return o[k]
+		}
+		return nil
+	case OakList:
+		switch k := key.(type) {
+		case int:
+			if k >= 0 && k < len(o) {
+				return o[k]
+			}
+		case float64:
+			i := int(k)
+			if i >= 0 && i < len(o) {
+				return o[i]
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func __oak_set(obj OakValue, key string, val OakValue) OakValue {
+	if o, ok := obj.(OakObject); ok {
+		o[key] = val
+		return val
+	}
+	return nil
+}
+
+func __as_oak_string(v OakValue) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+func __oak_to_float(v OakValue) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case float64:
+		return n
+	default:
+		return 0
+	}
+}
+
+func __oak_to_bool(v OakValue) bool {
+	if v == nil {
+		return false
+	}
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return true
+}
+
+func __oak_modularize(name string, factory func() OakValue) {
+	__Oak_Modules[name] = factory
+}
+
+func __oak_module_import(name string) OakValue {
+	m, ok := __Oak_Modules[name]
+	if !ok && __Oak_Import_Aliases != nil {
+		if alias, aok := __Oak_Import_Aliases[name]; aok {
+			m, ok = __Oak_Modules[alias]
+		}
+	}
+	if !ok {
+		return nil
+	}
+	if factory, fok := m.(func() OakValue); fok {
+		result := factory()
+		__Oak_Modules[name] = result
+		return result
+	}
+	return m
+}
+
+func __oak_not(v OakValue) OakValue {
+	return !__oak_to_bool(v)
+}
+
+func __oak_and(a, b OakValue) OakValue {
+	if !__oak_to_bool(a) {
+		return false
+	}
+	return b
+}
+
+func __oak_or(a, b OakValue) OakValue {
+	if __oak_to_bool(a) {
+		return true
+	}
+	return b
+}
+
+'
+
+// ---------------------------------------------------------------------------
+// renderGoBundle -- main entry point called by the build system
+// ---------------------------------------------------------------------------
+
+fn renderGoBundle(bundleNode) {
+	output := GoRuntimePreamble
+
+	fn renderNode(node) if node {
+		? -> 'nil'
+		_ -> if node.type {
+			:null -> 'nil'
+			:empty -> 'nil'
+
+			:string -> goStr(node.val)
+
+			:int -> 'int(' + string(node.val) + ')'
+
+			:float -> {
+				s := string(node.val)
+				if strContains?(s, '.') {
+					true -> 'float64(' + s + ')'
+					_ -> 'float64(' + s + '.0)'
+				}
+			}
+
+			:bool -> if node.val {
+				true -> 'true'
+				_ -> 'false'
+			}
+
+			:identifier -> goIdent(node.val)
+
+			:atom -> '"' + node.val + '"'
+
+			:list -> 'OakList{' + (node.elems |> map(renderNode) |> join(', ')) + '}'
+
+			:object -> 'OakObject{' + (node.entries |> map(fn(entry) {
+				{ key: k, val: v } := entry
+				if k.type {
+					:identifier -> goStr(k.val) + ': ' + renderNode(v)
+					:string -> goStr(k.val) + ': ' + renderNode(v)
+					:int -> goStr(string(k.val)) + ': ' + renderNode(v)
+					_ -> renderNode(k) + ': ' + renderNode(v)
+				}
+			}) |> join(', ')) + '}'
+
+			:unary -> if node.op {
+				:minus -> '(-__oak_to_float(' + renderNode(node.right) + '))'
+				:exclam -> '(!__oak_to_bool(' + renderNode(node.right) + '))'
+			}
+
+			:binary -> if node.op {
+				:plus -> '(__as_oak_string(' + renderNode(node.left) + ') + __as_oak_string(' + renderNode(node.right) + '))'
+				:minus -> '(__oak_to_float(' + renderNode(node.left) + ') - __oak_to_float(' + renderNode(node.right) + '))'
+				:times -> '(__oak_to_float(' + renderNode(node.left) + ') * __oak_to_float(' + renderNode(node.right) + '))'
+				:divide -> '(__oak_to_float(' + renderNode(node.left) + ') / __oak_to_float(' + renderNode(node.right) + '))'
+				:modulus -> '(int(__oak_to_float(' + renderNode(node.left) + ')) % int(__oak_to_float(' + renderNode(node.right) + ')))'
+				:exponent -> 'math.Pow(__oak_to_float(' + renderNode(node.left) + '), __oak_to_float(' + renderNode(node.right) + '))'
+				:rshift -> '(int(__oak_to_float(' + renderNode(node.left) + ')) >> int(__oak_to_float(' + renderNode(node.right) + ')))'
+				:pushArrow -> '__oak_push(' + renderNode(node.left) + '.(OakList), ' + renderNode(node.right) + ')'
+				:and -> '__oak_and(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:or -> '__oak_or(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:xor -> '(int(__oak_to_float(' + renderNode(node.left) + ')) ^ int(__oak_to_float(' + renderNode(node.right) + ')))'
+				:eq -> '__oak_eq(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:neq -> '!__oak_eq(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:greater -> '(__oak_to_float(' + renderNode(node.left) + ') > __oak_to_float(' + renderNode(node.right) + '))'
+				:less -> '(__oak_to_float(' + renderNode(node.left) + ') < __oak_to_float(' + renderNode(node.right) + '))'
+				:geq -> '(__oak_to_float(' + renderNode(node.left) + ') >= __oak_to_float(' + renderNode(node.right) + '))'
+				:leq -> '(__oak_to_float(' + renderNode(node.left) + ') <= __oak_to_float(' + renderNode(node.right) + '))'
+				:pipe -> {
+					// a |> f(b, c) → f(a, b, c)
+					fnNode := node.right
+					if fnNode.type = :fnCall {
+						true -> renderNode(fnNode.function) + '(' + ([renderNode(node.left)] |> append(fnNode.args |> map(renderNode)) |> join(', ')) + ')'
+						_ -> renderNode(node.right) + '(' + renderNode(node.left) + ')'
+					}
+				}
+			}
+
+			:assignment -> {
+				leftStr := renderNode(node.left)
+				rightStr := renderNode(node.right)
+				if node.local? {
+					true -> leftStr + ' := ' + rightStr
+					_ -> leftStr + ' = ' + rightStr
+				}
+			}
+
+			:propertyAccess -> if node.right.type {
+				:identifier -> '__oak_acc(' + renderNode(node.left) + ', ' + goStr(node.right.val) + ')'
+				_ -> '__oak_acc(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			}
+
+			:ifExpr -> 'func() OakValue {' + {
+				result := ''
+				result <- result + '__oak_cond := ' + renderNode(node.cond) + '; '
+				node.branches |> each(fn(br, i) {
+					prefix := if i { 0 -> 'if ', _ -> ' else if ' }
+					if br.target.type = :empty {
+						true -> result <- result + ' else { return OakValue(' + renderNode(br.body) + ') }'
+						_ -> result <- result + prefix + '__oak_eq(__oak_cond, ' + renderNode(br.target) + ') { return OakValue(' + renderNode(br.body) + ') }'
+					}
+				})
+				result + '; return nil'
+			} + '}()'
+
+			:block -> 'func() OakValue {' + {
+				result := ''
+				lastIdx := len(node.exprs) - 1
+				node.exprs |> each(fn(expr, i) {
+					if i = lastIdx {
+						true -> result <- result + 'return OakValue(' + renderNode(expr) + ')'
+						_ -> result <- result + renderNode(expr) + '; '
+					}
+				})
+				result
+			} + '}()'
+
+			:function -> {
+				args := node.args
+				'OakFn(func(__oak_args ...OakValue) OakValue {' + {
+					argBindings := args |> map(fn(a, i) {
+						'var ' + goIdent(a) + ' OakValue; if len(__oak_args) > ' + string(i) + ' { ' + goIdent(a) + ' = __oak_args[' + string(i) + '] }; '
+					}) |> join('')
+
+					restBinding := if node.restArg {
+						?, '' -> ''
+						_ -> 'var ' + goIdent(node.restArg) + ' OakValue = OakList{}; if len(__oak_args) > ' + string(len(args)) + ' { ' + goIdent(node.restArg) + ' = OakList(__oak_args[' + string(len(args)) + ':]) }; '
+					}
+
+					bodyStr := if node.body.type = :block {
+						true -> {
+							bResult := ''
+							bLastIdx := len(node.body.exprs) - 1
+							node.body.exprs |> each(fn(expr, i) {
+								if i = bLastIdx {
+									true -> bResult <- bResult + 'return OakValue(' + renderNode(expr) + ')'
+									_ -> bResult <- bResult + renderNode(expr) + '; '
+								}
+							})
+							bResult
+						}
+						_ -> 'return OakValue(' + renderNode(node.body) + ')'
+					}
+					argBindings + restBinding + bodyStr
+				} + '})'
+			}
+
+			:fnCall -> {
+				fnStr := renderNode(node.function)
+				argsStr := node.args |> map(renderNode) |> join(', ')
+				fnStr + '.(' + 'OakFn' + ')(' + argsStr + ')'
+			}
+
+			_ -> 'nil /* unhandled: ' + string(node.type) + ' */'
+		}
+	}
+
+	output <- output + 'func main() {\n'
+	output <- output + '\t_ = ' + renderNode(bundleNode) + '\n'
+	output <- output + '}\n'
+	output
+}

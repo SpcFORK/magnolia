@@ -1,0 +1,156 @@
+// go-transpile.oak -- Demo of Go<->Oak transpilation
+//
+// Shows how to use the ast-go library (Go AST constructors + transpileToOak)
+// and the codegen-go library (renderGoBundle) to round-trip between Go and Oak.
+
+{
+	println: println
+	default: default
+	map: map
+} := import('std')
+{
+	format: fmt
+} := import('fmt')
+{
+	goFunc: goFunc
+	goFuncParam: goFuncParam
+	goBlock: goBlock
+	goReturn: goReturn
+	goBinary: goBinary
+	goIdentifier: goIdentifier
+	goInt: goInt
+	goCall: goCall
+	goIf: goIf
+	goShortDecl: goShortDecl
+	goString: goString
+	transpileToOak: transpileToOak
+} := import('ast-go')
+{
+	renderGoBundle: renderGoBundle
+} := import('codegen-go')
+
+// ---------------------------------------------------------------------------
+// Helper: print a section header
+// ---------------------------------------------------------------------------
+fn header(title) {
+	println('========================================')
+	println(title)
+	println('========================================')
+}
+
+// ---------------------------------------------------------------------------
+// Example 1: A simple Go function that adds two numbers
+//
+//   func add(a int, b int) int {
+//       return a + b
+//   }
+// ---------------------------------------------------------------------------
+header('Example 1: Go add(a, b) function')
+
+addFunc := goFunc(
+	'add'
+	[goFuncParam('a', 'int'), goFuncParam('b', 'int')]
+	['int']
+	goBlock([
+		goReturn([
+			goBinary('+', goIdentifier('a'), goIdentifier('b'))
+		])
+	])
+)
+
+println('Go AST node type: ' + string(addFunc.type))
+println('Function name:    ' + addFunc.name)
+
+// Transpile Go AST -> Oak AST
+addOak := transpileToOak(addFunc)
+
+println('')
+println('Oak AST node type: ' + string(addOak.type))
+println('Oak func name:     ' + addOak.name)
+println('Oak func args:     ' + string(addOak.args))
+
+// Render Oak AST -> Go source via codegen-go
+addGoSrc := renderGoBundle(addOak)
+println('')
+println('Rendered Go source (add):')
+println(addGoSrc)
+
+// ---------------------------------------------------------------------------
+// Example 2: Go function with if-else
+//
+//   func classify(n int) string {
+//       if n > 0 {
+//           return "positive"
+//       } else {
+//           return "non-positive"
+//       }
+//   }
+// ---------------------------------------------------------------------------
+header('Example 2: Go classify(n) with if-else')
+
+classifyFunc := goFunc(
+	'classify'
+	[goFuncParam('n', 'int')]
+	['string']
+	goBlock([
+		goIf(
+			?
+			goBinary('>', goIdentifier('n'), goInt(0))
+			goBlock([goReturn([goString('positive')])])
+			goBlock([goReturn([goString('non-positive')])])
+		)
+	])
+)
+
+classifyOak := transpileToOak(classifyFunc)
+
+println('Oak AST for classify:')
+println('  node type:  ' + string(classifyOak.type))
+println('  body type:  ' + string(classifyOak.body.type))
+
+classifyGoSrc := renderGoBundle(classifyOak)
+println('')
+println('Rendered Go source (classify):')
+println(classifyGoSrc)
+
+// ---------------------------------------------------------------------------
+// Example 3: Building a Go function call and transpiling it
+//
+//   fmt.Println("hello from Go")
+// ---------------------------------------------------------------------------
+header('Example 3: Go function call')
+
+printCall := goCall(
+	goIdentifier('fmt.Println')
+	[goString('hello from Go')]
+)
+
+printOak := transpileToOak(printCall)
+
+println('Oak AST for fmt.Println call:')
+println('  node type:     ' + string(printOak.type))
+println('  function name: ' + string(printOak.function.val))
+println('  first arg:     ' + string(printOak.args.0.val))
+
+// ---------------------------------------------------------------------------
+// Example 4: Short variable declaration + binary expression
+//
+//   sum := a + b
+// ---------------------------------------------------------------------------
+header('Example 4: Short declaration')
+
+declNode := goShortDecl(
+	goIdentifier('sum')
+	goBinary('+', goIdentifier('a'), goIdentifier('b'))
+)
+
+declOak := transpileToOak(declNode)
+
+println('Oak AST for sum := a + b:')
+println('  node type: ' + string(declOak.type))
+println('  local?:    ' + string(declOak.('local?')))
+println('  left:      ' + string(declOak.left.val))
+println('  right op:  ' + string(declOak.right.op))
+
+println('')
+println('Done! All examples completed.')

@@ -34,16 +34,16 @@ fn _esc(s) s |> map(fn(c) if c {
 
 fn _bareKey?(key) key |> split() |> with reduce(true) fn(ok, c, _) ok & (letter?(c) | digit?(c) | c = '-' | c = '_')
 
-fn _key(k) if _bareKey?(k) { true -> k, _ -> '"' << _esc(k) << '"' }
+fn _key(k) if _bareKey?(k) { true -> k, _ -> '"' + _esc(k) + '"' }
 
 fn _val(v) if type(v) {
 	:null, :empty -> '""'
 	:bool -> if v { true -> 'true', _ -> 'false' }
 	:int, :float -> string(v)
-	:string -> '"' << _esc(v) << '"'
-	:atom -> '"' << string(v) << '"'
-	:list -> '[' << v |> map(_val) |> join(', ') << ']'
-	:object -> '{' << entries(v) |> map(fn(e) _key(e.0) << ' = ' << _val(e.1)) |> join(', ') << '}'
+	:string -> '"' + _esc(v) + '"'
+	:atom -> '"' + string(v) + '"'
+	:list -> '[' + (v |> map(_val) |> join(', ')) + ']'
+	:object -> '{' + (entries(v) |> map(fn(e) _key(e.0) + ' = ' + _val(e.1)) |> join(', ')) + '}'
 }
 
 // serialize converts an Oak object to TOML.
@@ -53,27 +53,27 @@ fn _serTbl(obj, prefix) {
 	simple := []
 	tables := []
 	entries(obj) |> each(fn(e) {
-		fk := if prefix { '' -> e.0, _ -> prefix << '.' << e.0 }
+		fk := if prefix { '' -> e.0, _ -> prefix + '.' + e.0 }
 		if type(e.1) {
 			:object -> tables << [fk, e.1]
 			:list -> if len(e.1) > 0 & type(e.1.0) = :object {
 				true -> tables << [fk, e.1]
-				_ -> simple << _key(e.0) << ' = ' << _val(e.1)
+				_ -> simple << (_key(e.0) + ' = ' + _val(e.1))
 			}
-			_ -> simple << _key(e.0) << ' = ' << _val(e.1)
+			_ -> simple << (_key(e.0) + ' = ' + _val(e.1))
 		}
 	})
 	parts := []
 	if len(simple) > 0 -> {
-		if prefix != '' -> parts << '[' << prefix << ']\n'
-		simple |> each(fn(l) parts << l << '\n')
+		if prefix != '' -> parts << ('[' + prefix + ']' + char(10))
+		simple |> each(fn(l) parts << (l + char(10)))
 	}
 	tables |> each(fn(e) if type(e.1) = :list {
 		true -> e.1 |> each(fn(item) {
-			parts << '\n[[' << e.0 << ']]\n'
+			parts << (char(10) + '[[' + e.0 + ']]' + char(10))
 			parts << _serTbl(item, '')
 		})
-		_ -> { parts << '\n', parts << _serTbl(e.1, e.0) }
+		_ -> { parts << char(10), parts << _serTbl(e.1, e.0) }
 	})
 	parts |> join('')
 }

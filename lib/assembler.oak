@@ -1,0 +1,597 @@
+// assembler -- Multi-architecture assembler for Magnolia
+//
+// Assembles textual assembly source (x86-64 AT&T/Intel syntax and
+// ARM64) into machine code bytes.  The assembler operates in two passes:
+//   1. Label collection — scan for labels and record offsets
+//   2. Instruction encoding — emit bytes with resolved label references
+//
+// This module is used by the native codegen target and can also be
+// called directly from Oak programs for inline assembly or JIT scenarios.
+
+{
+	default: default
+	map: map
+	each: each
+	slice: slice
+	filter: filter
+	reduce: reduce
+	clone: clone
+	append: append
+	len: len
+	range: range
+	indexOf: indexOf
+} := import('std')
+{
+	replace: replace
+	contains?: strContains?
+	join: join
+	split: split
+	trim: trim
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+	lower: lower
+} := import('str')
+{
+	format: format
+	printf: printf
+} := import('fmt')
+
+// ---------------------------------------------------------------------------
+// Architecture constants
+// ---------------------------------------------------------------------------
+
+ARCH_X86_64 := :x86_64
+ARCH_ARM64 := :arm64
+
+// ---------------------------------------------------------------------------
+// x86-64 register tables
+// ---------------------------------------------------------------------------
+
+x86_64Regs := {
+	rax: 0, rcx: 1, rdx: 2, rbx: 3, rsp: 4, rbp: 5, rsi: 6, rdi: 7
+	r8: 8, r9: 9, r10: 10, r11: 11, r12: 12, r13: 13, r14: 14, r15: 15
+	eax: 0, ecx: 1, edx: 2, ebx: 3, esp: 4, ebp: 5, esi: 6, edi: 7
+	al: 0, cl: 1, dl: 2, bl: 3, spl: 4, bpl: 5, sil: 6, dil: 7
+}
+
+// ---------------------------------------------------------------------------
+// ARM64 register tables
+// ---------------------------------------------------------------------------
+
+arm64Regs := {}
+// x0-x30, sp(31), xzr(31)
+fn _initARM64Regs() {
+	range(31) |> each(fn(i) {
+		arm64Regs.('x' + string(i)) <- i
+		arm64Regs.('w' + string(i)) <- i
+	})
+	arm64Regs.sp <- 31
+	arm64Regs.xzr <- 31
+	arm64Regs.wzr <- 31
+}
+_initARM64Regs()
+
+// ---------------------------------------------------------------------------
+// Token types for assembly lexer
+// ---------------------------------------------------------------------------
+
+TOK_LABEL    := :label       // "name:"
+TOK_MNEMONIC := :mnemonic    // "mov", "add", etc.
+TOK_REG      := :register    // "%rax" or "rax"
+TOK_IMM      := :immediate   // "$42" or "#42" or "42"
+TOK_MEM      := :memory      // "(%rax)" or "[x0, #8]"
+TOK_SYMBOL   := :symbol      // reference to a label/symbol
+TOK_COMMA    := :comma       // ","
+TOK_NEWLINE  := :newline
+TOK_COMMENT  := :comment     // ";" or "//" or "#"
+TOK_DIRECTIVE := :directive  // ".text", ".data", ".global"
+
+// ---------------------------------------------------------------------------
+// Assembly lexer
+// ---------------------------------------------------------------------------
+
+fn tokenizeAsm(source) {
+	tokens := []
+	lines := source |> split('\n')
+
+	lines |> each(fn(line) {
+		line <- line |> trim()
+
+		// Skip empty lines and comments
+		if line = '' -> ()
+		if startsWith?(line, ';') | startsWith?(line, '//') | startsWith?(line, '#') {
+			true -> tokens << { type: TOK_COMMENT, val: line }
+			_ -> {
+				// Split by whitespace and commas
+				parts := line |> split(' ')
+				parts |> each(fn(part, idx) {
+					part <- part |> trim() |> replace('\t', '')
+					if part = '' -> ()
+					if part = ',' {
+						true -> tokens << { type: TOK_COMMA, val: ',' }
+						_ -> if endsWith?(part, ':') {
+							true -> tokens << { type: TOK_LABEL, val: slice(part, 0, len(part) - 1) }
+							_ -> if startsWith?(part, '.') {
+								true -> tokens << { type: TOK_DIRECTIVE, val: part }
+								_ -> if startsWith?(part, '%') | startsWith?(part, '$') {
+									true -> if startsWith?(part, '$') | startsWith?(part, '#') {
+										true -> tokens << { type: TOK_IMM, val: part }
+										_ -> tokens << { type: TOK_REG, val: part |> replace('%', '') |> replace(',', '') }
+									}
+									_ -> if idx = 0 {
+										true -> tokens << { type: TOK_MNEMONIC, val: part |> lower() }
+										_ -> {
+											// Could be register, immediate, or symbol
+											cleanPart := part |> replace(',', '')
+											if x86_64Regs.(cleanPart) != ? | arm64Regs.(cleanPart) != ? {
+												true -> tokens << { type: TOK_REG, val: cleanPart }
+												_ -> {
+													// Try parsing as number
+													tokens << { type: TOK_SYMBOL, val: cleanPart }
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				})
+			}
+		}
+		tokens << { type: TOK_NEWLINE, val: '\n' }
+	})
+
+	tokens
+}
+
+// ---------------------------------------------------------------------------
+// x86-64 assembler
+// ---------------------------------------------------------------------------
+
+fn assembleX86_64(source) {
+	tokens := tokenizeAsm(source)
+	code := []
+	labels := {}
+	relocations := []
+	sections := { current: '.text' }
+
+	// Helper to emit bytes
+	fn emitByte(b) code << (b & 255)
+	fn emitDword(d) {
+		emitByte(d & 255)
+		emitByte((d >> 8) & 255)
+		emitByte((d >> 16) & 255)
+		emitByte((d >> 24) & 255)
+	}
+	fn emitQword(q) {
+		emitDword(q & 4294967295)
+		emitDword((q >> 32) & 4294967295)
+	}
+
+	fn regNum(name) {
+		clean := name |> replace('%', '') |> replace(',', '') |> lower()
+		x86_64Regs.(clean) |> default(0)
+	}
+
+	fn rexW(r, b) 0x48 | (if r > 7 { true -> 4, _ -> 0 }) | (if b > 7 { true -> 1, _ -> 0 })
+	fn modRM(mod, reg, rm) ((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
+
+	fn parseImm(val) {
+		clean := val |> replace('$', '') |> replace('#', '') |> replace(',', '')
+		int(clean)
+	}
+
+	// Process tokens instruction by instruction
+	idx := [0]
+	fn peek() if idx.0 < len(tokens) { true -> tokens.(idx.0), _ -> ? }
+	fn advance() {
+		t := tokens.(idx.0)
+		idx.0 <- idx.0 + 1
+		t
+	}
+	fn skipCommas() {
+		fn loop() if peek() {
+			? -> ?
+			_ -> if peek().type = TOK_COMMA {
+				true -> {
+					advance()
+					loop()
+				}
+			}
+		}
+		loop()
+	}
+
+	fn assembleInstruction(mnemonic) if mnemonic |> lower() {
+		'nop' -> emitByte(0x90)
+		'ret' -> emitByte(0xC3)
+		'syscall' -> (
+			emitByte(0x0F)
+			emitByte(0x05)
+		)
+		'int3' -> emitByte(0xCC)
+		'hlt' -> emitByte(0xF4)
+		'push' -> {
+			skipCommas()
+			op := advance()
+			if op.type = TOK_REG {
+				true -> {
+					r := regNum(op.val)
+					if r > 7 -> emitByte(0x41)
+					emitByte(0x50 + (r & 7))
+				}
+			}
+		}
+		'pop' -> {
+			skipCommas()
+			op := advance()
+			if op.type = TOK_REG {
+				true -> {
+					r := regNum(op.val)
+					if r > 7 -> emitByte(0x41)
+					emitByte(0x58 + (r & 7))
+				}
+			}
+		}
+		'mov' -> {
+			skipCommas()
+			dst := advance()
+			skipCommas()
+			src := advance()
+			if dst.type = TOK_REG & src.type = TOK_REG {
+				true -> {
+					d := regNum(dst.val)
+					s := regNum(src.val)
+					emitByte(rexW(s, d))
+					emitByte(0x89)
+					emitByte(modRM(3, s, d))
+				}
+				_ -> if dst.type = TOK_REG & src.type = TOK_IMM {
+					true -> {
+						d := regNum(dst.val)
+						imm := parseImm(src.val)
+						emitByte(rexW(0, d))
+						emitByte(0xB8 + (d & 7))
+						emitQword(imm)
+					}
+				}
+			}
+		}
+		'add' -> {
+			skipCommas()
+			dst := advance()
+			skipCommas()
+			src := advance()
+			if dst.type = TOK_REG & src.type = TOK_REG {
+				true -> {
+					d := regNum(dst.val)
+					s := regNum(src.val)
+					emitByte(rexW(s, d))
+					emitByte(0x01)
+					emitByte(modRM(3, s, d))
+				}
+			}
+		}
+		'sub' -> {
+			skipCommas()
+			dst := advance()
+			skipCommas()
+			src := advance()
+			if dst.type = TOK_REG & src.type = TOK_REG {
+				true -> {
+					d := regNum(dst.val)
+					s := regNum(src.val)
+					emitByte(rexW(s, d))
+					emitByte(0x29)
+					emitByte(modRM(3, s, d))
+				}
+			}
+		}
+		'xor' -> {
+			skipCommas()
+			dst := advance()
+			skipCommas()
+			src := advance()
+			if dst.type = TOK_REG & src.type = TOK_REG {
+				true -> {
+					d := regNum(dst.val)
+					s := regNum(src.val)
+					emitByte(rexW(s, d))
+					emitByte(0x31)
+					emitByte(modRM(3, s, d))
+				}
+			}
+		}
+		'call' -> {
+			skipCommas()
+			target := advance()
+			// Near relative call (32-bit offset, placeholder)
+			emitByte(0xE8)
+			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
+			emitDword(0)
+		}
+		'jmp' -> {
+			skipCommas()
+			target := advance()
+			emitByte(0xE9)
+			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
+			emitDword(0)
+		}
+		'je', 'jz' -> {
+			skipCommas()
+			target := advance()
+			emitByte(0x0F)
+			emitByte(0x84)
+			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
+			emitDword(0)
+		}
+		'jne', 'jnz' -> {
+			skipCommas()
+			target := advance()
+			emitByte(0x0F)
+			emitByte(0x85)
+			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
+			emitDword(0)
+		}
+		'cmp' -> {
+			skipCommas()
+			dst := advance()
+			skipCommas()
+			src := advance()
+			if dst.type = TOK_REG & src.type = TOK_REG {
+				true -> {
+					d := regNum(dst.val)
+					s := regNum(src.val)
+					emitByte(rexW(s, d))
+					emitByte(0x39)
+					emitByte(modRM(3, s, d))
+				}
+			}
+		}
+	}
+
+	// Main assembly loop
+	fn assembleLoop() if idx.0 < len(tokens) {
+		true -> {
+			tok := advance()
+			if tok.type {
+				:label -> labels.(tok.val) <- len(code)
+				:directive -> {
+					if tok.val = '.text' -> sections.current <- '.text'
+					if tok.val = '.data' -> sections.current <- '.data'
+					if tok.val = '.global' | tok.val = '.globl' -> {
+						skipCommas()
+						advance()  // consume symbol name
+					}
+				}
+				:mnemonic -> assembleInstruction(tok.val)
+				:newline -> ?
+				:comment -> ?
+			}
+			assembleLoop()
+		}
+	}
+
+	assembleLoop()
+
+	// Resolve relocations
+	relocations |> each(fn(rel) {
+		if labels.(rel.symbol) != ? {
+			true -> {
+				target := labels.(rel.symbol)
+				source := rel.offset + 4  // after the 4-byte placeholder
+				offset := target - source
+				// Patch the 4-byte offset
+				code.(rel.offset) <- offset & 255
+				code.(rel.offset + 1) <- (offset >> 8) & 255
+				code.(rel.offset + 2) <- (offset >> 16) & 255
+				code.(rel.offset + 3) <- (offset >> 24) & 255
+			}
+		}
+	})
+
+	{
+		code: code
+		labels: labels
+		relocations: relocations
+		sections: sections
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ARM64 assembler
+// ---------------------------------------------------------------------------
+
+fn assembleARM64(source) {
+	tokens := tokenizeAsm(source)
+	code := []
+	labels := {}
+	relocations := []
+
+	fn emit32(inst) {
+		code << (inst & 255)
+		code << ((inst >> 8) & 255)
+		code << ((inst >> 16) & 255)
+		code << ((inst >> 24) & 255)
+	}
+
+	fn regNum(name) {
+		clean := name |> replace(',', '') |> lower()
+		arm64Regs.(clean) |> default(0)
+	}
+
+	fn parseImm(val) {
+		clean := val |> replace('#', '') |> replace('$', '') |> replace(',', '')
+		int(clean)
+	}
+
+	idx := [0]
+	fn peek() if idx.0 < len(tokens) { true -> tokens.(idx.0), _ -> ? }
+	fn advance() {
+		t := tokens.(idx.0)
+		idx.0 <- idx.0 + 1
+		t
+	}
+	fn skipCommas() {
+		fn loop() if peek() {
+			? -> ?
+			_ -> if peek().type = TOK_COMMA {
+				true -> {
+					advance()
+					loop()
+				}
+			}
+		}
+		loop()
+	}
+
+	fn assembleInstruction(mnemonic) if mnemonic |> lower() {
+		'nop' -> emit32(0xD503201F)
+		'ret' -> emit32(0xD65F03C0)
+		'mov' -> {
+			skipCommas()
+			dst := advance()
+			skipCommas()
+			src := advance()
+			if src.type = TOK_IMM {
+				true -> {
+					rd := regNum(dst.val)
+					imm := parseImm(src.val)
+					// MOVZ Xd, #imm16
+					emit32(0xD2800000 | ((imm & 0xFFFF) << 5) | (rd & 31))
+				}
+				_ -> if src.type = TOK_REG {
+					true -> {
+						rd := regNum(dst.val)
+						rm := regNum(src.val)
+						// MOV Xd, Xm (encoded as ORR Xd, XZR, Xm)
+						emit32(0xAA0003E0 | ((rm & 31) << 16) | (rd & 31))
+					}
+				}
+			}
+		}
+		'add' -> {
+			skipCommas()
+			rd := advance()
+			skipCommas()
+			rn := advance()
+			skipCommas()
+			rm := advance()
+			if rm.type = TOK_REG {
+				true -> {
+					// ADD Xd, Xn, Xm
+					emit32(0x8B000000 | ((regNum(rm.val) & 31) << 16) | ((regNum(rn.val) & 31) << 5) | (regNum(rd.val) & 31))
+				}
+				_ -> if rm.type = TOK_IMM {
+					true -> {
+						// ADD Xd, Xn, #imm12
+						imm := parseImm(rm.val)
+						emit32(0x91000000 | ((imm & 0xFFF) << 10) | ((regNum(rn.val) & 31) << 5) | (regNum(rd.val) & 31))
+					}
+				}
+			}
+		}
+		'sub' -> {
+			skipCommas()
+			rd := advance()
+			skipCommas()
+			rn := advance()
+			skipCommas()
+			rm := advance()
+			if rm.type = TOK_REG {
+				true -> emit32(0xCB000000 | ((regNum(rm.val) & 31) << 16) | ((regNum(rn.val) & 31) << 5) | (regNum(rd.val) & 31))
+				_ -> if rm.type = TOK_IMM {
+					true -> {
+						imm := parseImm(rm.val)
+						emit32(0xD1000000 | ((imm & 0xFFF) << 10) | ((regNum(rn.val) & 31) << 5) | (regNum(rd.val) & 31))
+					}
+				}
+			}
+		}
+		'svc' -> {
+			skipCommas()
+			imm := advance()
+			emit32(0xD4000001 | ((parseImm(imm.val) & 0xFFFF) << 5))
+		}
+		'b' -> {
+			skipCommas()
+			target := advance()
+			relocations << { offset: len(code), symbol: target.val, type: :rel26 }
+			emit32(0x14000000)
+		}
+		'bl' -> {
+			skipCommas()
+			target := advance()
+			relocations << { offset: len(code), symbol: target.val, type: :rel26 }
+			emit32(0x94000000)
+		}
+		'cbz' -> {
+			skipCommas()
+			rt := advance()
+			skipCommas()
+			target := advance()
+			relocations << { offset: len(code), symbol: target.val, type: :rel19 }
+			emit32(0xB4000000 | (regNum(rt.val) & 31))
+		}
+		'cbnz' -> {
+			skipCommas()
+			rt := advance()
+			skipCommas()
+			target := advance()
+			relocations << { offset: len(code), symbol: target.val, type: :rel19 }
+			emit32(0xB5000000 | (regNum(rt.val) & 31))
+		}
+	}
+
+	fn assembleLoop() if idx.0 < len(tokens) {
+		true -> {
+			tok := advance()
+			if tok.type {
+				:label -> labels.(tok.val) <- len(code)
+				:mnemonic -> assembleInstruction(tok.val)
+				:directive -> ?
+				:newline -> ?
+				:comment -> ?
+			}
+			assembleLoop()
+		}
+	}
+
+	assembleLoop()
+
+	// Resolve ARM64 relocations
+	relocations |> each(fn(rel) {
+		if labels.(rel.symbol) != ? {
+			true -> {
+				target := labels.(rel.symbol)
+				offset := (target - rel.offset) / 4  // ARM64 uses instruction-sized offsets
+				existing := code.(rel.offset) | (code.(rel.offset + 1) << 8) | (code.(rel.offset + 2) << 16) | (code.(rel.offset + 3) << 24)
+				patched := if rel.type {
+					:rel26 -> existing | (offset & 0x3FFFFFF)
+					:rel19 -> existing | ((offset & 0x7FFFF) << 5)
+					_ -> existing
+				}
+				code.(rel.offset) <- patched & 255
+				code.(rel.offset + 1) <- (patched >> 8) & 255
+				code.(rel.offset + 2) <- (patched >> 16) & 255
+				code.(rel.offset + 3) <- (patched >> 24) & 255
+			}
+		}
+	})
+
+	{
+		code: code
+		labels: labels
+		relocations: relocations
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+fn assemble(source, arch) if arch {
+	:arm64, :aarch64 -> assembleARM64(source)
+	_ -> assembleX86_64(source)
+}

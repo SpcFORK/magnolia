@@ -1,0 +1,148 @@
+// assembler-demo.oak
+// Demonstrates the Magnolia assembler library for x86-64 and ARM64
+//
+// Shows how to assemble instructions, inspect byte encodings,
+// work with labels, and view relocations.
+
+std := import('std')
+str := import('str')
+fmt := import('fmt')
+assembler := import('assembler')
+{
+	println: println
+	map: map
+	each: each
+	keys: keys
+} := std
+
+nl := char(10)
+
+// Helper: convert a list of bytes to a hex string like '48 c7 c0 3c'
+fn bytesToHex(bytes) {
+	map(bytes, fn(b) {
+		hi := std.toHex((b >> 4) & 15)
+		lo := std.toHex(b & 15)
+		hi + lo
+	}) |> str.join(' ')
+}
+
+// ============================================================
+// 1. Basic x86-64 instructions
+// ============================================================
+
+println('=== x86-64 Basic Instructions ===' + nl)
+
+instructions := [
+	['nop', 'nop']
+	['ret', 'ret']
+	['syscall', 'syscall']
+	['int3', 'int3']
+	['hlt', 'hlt']
+	['push rax', 'push rax']
+	['push rbp', 'push rbp']
+	['pop rax', 'pop rax']
+	['xor rdi rdi', 'xor rdi rdi']
+]
+
+each(instructions, fn(pair) {
+	label := pair.0
+	source := pair.1
+	result := assembler.assemble(source, :x86_64)
+	hex := bytesToHex(result.code)
+	println(fmt.format('  {{0}}  =>  {{1}}', label, hex))
+})
+
+println('')
+
+// ============================================================
+// 2. x86-64 program: Linux exit(0) syscall
+// ============================================================
+
+println('=== x86-64 Program: exit(0) ===' + nl)
+
+exitProgram := str.join([
+	'_start:'
+	'xor rdi rdi'
+	'syscall'
+], nl)
+
+exitResult := assembler.assemble(exitProgram, :x86_64)
+
+println('  Source:')
+println('    _start:')
+println('    xor rdi rdi    // exit code 0')
+println('    syscall        // invoke kernel')
+println('')
+println('  Machine code: ' + bytesToHex(exitResult.code))
+println('  Total bytes:  ' + string(len(exitResult.code)))
+println('  Labels:       _start -> offset ' + string(exitResult.labels._start))
+println('')
+
+// ============================================================
+// 3. x86-64 labels and jumps
+// ============================================================
+
+println('=== x86-64 Labels & Jumps ===' + nl)
+
+jumpProgram := str.join([
+	'start:'
+	'xor rax rax'
+	'jmp done'
+	'nop'
+	'done:'
+	'ret'
+], nl)
+
+jumpResult := assembler.assemble(jumpProgram, :x86_64)
+
+println('  Machine code: ' + bytesToHex(jumpResult.code))
+println('  Labels:')
+each(keys(jumpResult.labels), fn(name) {
+	println('    ' + name + ' -> byte offset ' + string(jumpResult.labels.(name)))
+})
+println('  Relocations:  ' + string(len(jumpResult.relocations)))
+println('')
+
+// ============================================================
+// 4. ARM64 basic instructions
+// ============================================================
+
+println('=== ARM64 Basic Instructions ===' + nl)
+
+armInstructions := [
+	['nop', 'nop']
+	['ret', 'ret']
+	['add x2 x0 x1', 'add x2 x0 x1']
+	['sub x3 x1 x0', 'sub x3 x1 x0']
+	['svc 0', 'svc 0']
+]
+
+each(armInstructions, fn(pair) {
+	label := pair.0
+	source := pair.1
+	result := assembler.assemble(source, :arm64)
+	hex := bytesToHex(result.code)
+	println(fmt.format('  {{0}}  =>  {{1}}  ({{2}} bytes)', label, hex, string(len(result.code))))
+})
+
+println('')
+
+// ============================================================
+// 5. ARM64 program: Linux exit(0) via svc
+// ============================================================
+
+println('=== ARM64 Program: exit(0) ===' + nl)
+
+armExit := str.join([
+	'_start:'
+	'svc 0'
+], nl)
+
+armResult := assembler.assemble(armExit, :arm64)
+
+println('  Machine code: ' + bytesToHex(armResult.code))
+println('  Total bytes:  ' + string(len(armResult.code)))
+println('  Labels:       _start -> offset ' + string(armResult.labels._start))
+println('')
+
+println('=== Done ===' + nl)

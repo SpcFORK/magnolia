@@ -190,6 +190,21 @@ var libastlua string
 //go:embed lib/ast-java.oak
 var libastjava string
 
+//go:embed lib/ast-go.oak
+var libastgo string
+
+//go:embed lib/codegen-go.oak
+var libcodegengo string
+
+//go:embed lib/codegen-native.oak
+var libcodegennative string
+
+//go:embed lib/assembler.oak
+var libassembler string
+
+//go:embed lib/linker.oak
+var liblinker string
+
 //go:embed lib/bundle-ast.oak
 var libbundleast string
 
@@ -646,6 +661,11 @@ var stdlibs = map[string]string{
 	"ast-ts":                          libastts,
 	"ast-lua":                         libastlua,
 	"ast-java":                        libastjava,
+	"ast-go":                          libastgo,
+	"codegen-go":                      libcodegengo,
+	"codegen-native":                  libcodegennative,
+	"assembler":                       libassembler,
+	"linker":                          liblinker,
 	"shell":                           libshell,
 	"thread":                          libthread,
 	"transpile":                       libtranspile,
@@ -831,6 +851,11 @@ var stdlibAutoLoadOrder = []string{
 	"ast-ts",
 	"ast-lua",
 	"ast-java",
+	"ast-go",
+	"codegen-go",
+	"codegen-native",
+	"assembler",
+	"linker",
 	"bundle-ast",
 	"shell",
 	"transpile",

@@ -1,0 +1,152 @@
+std := import('std')
+str := import('str')
+syntaxfmt := import('syntaxfmt')
+{
+	formatContent: formatContent
+	formatFile: formatFile
+} := syntaxfmt
+
+nl := char(10)
+tab := char(9)
+
+fn run(t) {
+	// formatContent: simple expressions
+	{
+		'formatContent: integer literal' |> t.eq(
+			formatContent('42')
+			'42'
+		)
+		'formatContent: float literal' |> t.eq(
+			formatContent('3.14')
+			'3.14'
+		)
+		'formatContent: string literal' |> t.eq(
+			formatContent(char(39) + 'hello' + char(39))
+			char(39) + 'hello' + char(39)
+		)
+		'formatContent: atom literal' |> t.eq(
+			formatContent(':ok')
+			':ok'
+		)
+		'formatContent: identifier' |> t.eq(
+			formatContent('x')
+			'x'
+		)
+		'formatContent: null literal' |> t.eq(
+			formatContent('?')
+			'?'
+		)
+	}
+
+	// formatContent: assignments
+	{
+		'formatContent: local assignment' |> t.eq(
+			formatContent('x := 10')
+			'x := 10'
+		)
+		'formatContent: nonlocal assignment' |> t.eq(
+			formatContent('x <- 20')
+			'x <- 20'
+		)
+	}
+
+	// formatContent: function definitions
+	{
+		'formatContent: simple fn' |> t.eq(
+			formatContent('fn foo(x) x + 1')
+			'fn foo(x) x + 1'
+		)
+		'formatContent: fn with block body' |> t.eq(
+			formatContent('fn bar(a, b) {' + nl + 'a + b' + nl + '}')
+			'fn bar(a, b) {' + nl + tab + 'a + b' + nl + '}'
+		)
+	}
+
+	// formatContent: if expressions
+	{
+		'formatContent: simple if' |> t.eq(
+			formatContent('if x {' + nl + 'true -> 1' + nl + '_ -> 0' + nl + '}')
+			'if x {' + nl + tab + 'true -> 1' + nl + tab + '_ -> 0' + nl + '}'
+		)
+	}
+
+	// formatContent: blocks
+	{
+		'formatContent: block with multiple exprs' |> t.eq(
+			formatContent('{' + nl + 'a := 1' + nl + 'b := 2' + nl + 'a + b' + nl + '}')
+			'{' + nl + tab + 'a := 1' + nl + tab + 'b := 2' + nl + tab + 'a + b' + nl + '}'
+		)
+	}
+
+	// formatContent: pipe expressions
+	{
+		'formatContent: pipe expression' |> t.eq(
+			formatContent('x |> f() |> g()')
+			'x |> f() |> g()'
+		)
+	}
+
+	// formatContent: list and object literals
+	{
+		'formatContent: list literal' |> t.eq(
+			formatContent('[1, 2, 3]')
+			'[1, 2, 3]'
+		)
+		'formatContent: object literal' |> t.eq(
+			formatContent('{ a: 1, b: 2 }')
+			'{ a: 1, b: 2 }'
+		)
+	}
+
+	// formatContent: binary expressions
+	{
+		'formatContent: addition' |> t.eq(
+			formatContent('1 + 2')
+			'1 + 2'
+		)
+		'formatContent: comparison' |> t.eq(
+			formatContent('x > 0')
+			'x > 0'
+		)
+	}
+
+	// formatContent: idempotency (roundtrip)
+	{
+		sample := 'fn add(a, b) {' + nl + tab + 'a + b' + nl + '}' + nl
+		'formatContent: idempotent roundtrip' |> t.eq(
+			formatContent(formatContent(sample))
+			formatContent(sample)
+		)
+
+		sample2 := 'x := [1, 2, 3]' + nl + 'x |> std.map(fn(n) n * 2)' + nl
+		'formatContent: idempotent roundtrip complex' |> t.eq(
+			formatContent(formatContent(sample2))
+			formatContent(sample2)
+		)
+	}
+
+	// formatContent: edge cases
+	{
+		'formatContent: empty string' |> t.eq(
+			formatContent('')
+			''
+		)
+	}
+
+	// formatFile: error handling
+	{
+		'formatFile: non-existent file returns error' |> t.eq(
+			formatFile('/tmp/__nonexistent_file_for_test__.oak')
+			{ ok: false, error: 'Could not read file' }
+		)
+	}
+
+	// formatContent: import statement
+	{
+		inp := 'std := import(' + char(39) + 'std' + char(39) + ')'
+		'formatContent: import expression' |> t.eq(
+			formatContent(inp)
+			inp
+		)
+	}
+}

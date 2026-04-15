@@ -59,12 +59,12 @@ fn _serNode(node) if node.type {
 
 // --- parse ---
 
-fn parse(text) {
+fn parse(src) {
 	idx := [0]
-	max := len(text)
-	fn pk text.(idx.0)
-	fn adv { idx.0 <- idx.0 + 1, text.(idx.0 - 1) }
-	fn at(i) text.(i)
+	max := len(src)
+	fn pk src.(idx.0)
+	fn adv { idx.0 <- idx.0 + 1, src.(idx.0 - 1) }
+	fn at(i) src.(i)
 
 	fn skipSp {
 		fn sub if idx.0 < max & space?(pk()) { true -> { idx.0 <- idx.0 + 1, sub() } }
@@ -82,7 +82,7 @@ fn parse(text) {
 			}
 		}
 		sub()
-		text |> slice(s, idx.0)
+		src |> slice(s, idx.0)
 	}
 
 	fn readAttrVal {
@@ -90,7 +90,7 @@ fn parse(text) {
 		s := idx.0
 		fn sub if idx.0 < max & pk() != q { true -> { idx.0 <- idx.0 + 1, sub() } }
 		sub()
-		v := text |> slice(s, idx.0)
+		v := src |> slice(s, idx.0)
 		idx.0 <- idx.0 + 1
 		_unesc(v)
 	}
@@ -118,10 +118,10 @@ fn parse(text) {
 		s := idx.0
 		fn sub if idx.0 < max & pk() != '<' { true -> { idx.0 <- idx.0 + 1, sub() } }
 		sub()
-		_unesc(text |> slice(s, idx.0))
+		_unesc(src |> slice(s, idx.0))
 	}
 
-	fn matchStr(str) if text |> slice(idx.0, idx.0 + len(str)) {
+	fn matchStr(str) if src |> slice(idx.0, idx.0 + len(str)) {
 		str -> { idx.0 <- idx.0 + len(str), true }
 		_ -> false
 	}
@@ -130,7 +130,7 @@ fn parse(text) {
 		s := idx.0
 		fn sub if idx.0 + 2 < max {
 			true -> if at(idx.0) = ']' & at(idx.0 + 1) = ']' & at(idx.0 + 2) = '>' {
-				true -> { c := text |> slice(s, idx.0), idx.0 <- idx.0 + 3, cdata(c) }
+				true -> { c := src |> slice(s, idx.0), idx.0 <- idx.0 + 3, cdata(c) }
 				_ -> { idx.0 <- idx.0 + 1, sub() }
 			}
 		}
@@ -141,7 +141,7 @@ fn parse(text) {
 		s := idx.0
 		fn sub if idx.0 + 2 < max {
 			true -> if at(idx.0) = '-' & at(idx.0 + 1) = '-' & at(idx.0 + 2) = '>' {
-				true -> { c := text |> slice(s, idx.0), idx.0 <- idx.0 + 3, comment(c) }
+				true -> { c := src |> slice(s, idx.0), idx.0 <- idx.0 + 3, comment(c) }
 				_ -> { idx.0 <- idx.0 + 1, sub() }
 			}
 		}
@@ -156,9 +156,9 @@ fn parse(text) {
 
 	fn parseNodes(_stopTag) {
 		nodes := []
-		fn sub {
-			if idx.0 >= max -> nodes
-			if pk() {
+		fn sub if idx.0 >= max {
+			true -> nodes
+			_ -> if pk() {
 				'<' -> {
 					idx.0 <- idx.0 + 1
 					if pk() {

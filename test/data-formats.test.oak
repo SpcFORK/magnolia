@@ -1,0 +1,502 @@
+std := import('std')
+str := import('str')
+csv := import('data-csv')
+ini := import('data-ini')
+toml := import('data-toml')
+xml := import('data-xml')
+yaml := import('data-yaml')
+
+nl := char(10)
+crlf := char(13) + char(10)
+dq := char(34)
+sq := char(39)
+tab := char(9)
+
+fn run(t) {
+
+// -------------------------------------------------------
+// data-csv tests
+// -------------------------------------------------------
+
+'csv: parse simple rows' |> t.eq(
+csv.parse('a,b,c' + crlf + '1,2,3' + crlf)
+[['a', 'b', 'c'], ['1', '2', '3']]
+)
+
+'csv: parse with quoted fields' |> t.eq(
+csv.parse(dq + 'hello, world' + dq + ',b,c' + crlf)
+[['hello, world', 'b', 'c']]
+)
+
+'csv: parse with escaped quotes' |> t.eq(
+csv.parse(dq + 'say ' + dq + dq + 'hi' + dq + dq + dq + ',b' + crlf)
+[['say ' + dq + 'hi' + dq, 'b']]
+)
+
+'csv: parse empty input' |> t.eq(
+csv.parse('')
+[]
+)
+
+'csv: parse single field' |> t.eq(
+csv.parse('hello' + crlf)
+[['hello']]
+)
+
+'csv: serialize simple rows' |> t.eq(
+csv.serialize([['a', 'b'], ['1', '2']])
+'a,b' + crlf + '1,2' + crlf
+)
+
+'csv: serialize with quoting needed' |> t.eq(
+csv.serialize([['hello, world', 'plain']])
+dq + 'hello, world' + dq + ',plain' + crlf
+)
+
+'csv: roundtrip simple data' |> t.eq(
+csv.parse(csv.serialize([['name', 'age'], ['Alice', '30']]))
+[['name', 'age'], ['Alice', '30']]
+)
+
+'csv: custom delimiter' |> t.eq(
+csv.parse('a;b;c' + crlf + '1;2;3' + crlf, { delimiter: ';' })
+[['a', 'b', 'c'], ['1', '2', '3']]
+)
+
+'csv: parseWithHeader basic' |> t.eq(
+csv.parseWithHeader('name,age' + crlf + 'Alice,30' + crlf + 'Bob,25' + crlf)
+[{ name: 'Alice', age: '30' }, { name: 'Bob', age: '25' }]
+)
+
+'csv: parseWithHeader empty body' |> t.eq(
+csv.parseWithHeader('name,age' + crlf)
+[]
+)
+
+'csv: serializeWithHeader basic' |> t.eq(
+csv.serializeWithHeader(
+[{ name: 'Alice', age: '30' }]
+['name', 'age']
+)
+'name,age' + crlf + 'Alice,30' + crlf
+)
+
+'csv: parse newline-only line endings' |> t.eq(
+csv.parse('a,b' + nl + '1,2' + nl)
+[['a', 'b'], ['1', '2']]
+)
+
+// -------------------------------------------------------
+// data-ini tests
+// -------------------------------------------------------
+
+'ini: parse simple key-value' |> t.eq(
+ini.parse('key=value' + nl)
+{ key: 'value' }
+)
+
+'ini: parse with section' |> t.eq(
+ini.parse('[section]' + nl + 'key=value' + nl)
+{ section: { key: 'value' } }
+)
+
+'ini: parse boolean values' |> t.eq(
+ini.parse('a=true' + nl + 'b=false' + nl)
+{ a: true, b: false }
+)
+
+'ini: parse integer values' |> t.eq(
+ini.parse('port=8080' + nl)
+{ port: 8080 }
+)
+
+'ini: parse float values' |> t.eq(
+ini.parse('rate=3.14' + nl)
+{ rate: 3.14 }
+)
+
+'ini: parse comments' |> t.eq(
+ini.parse('# this is a comment' + nl + 'key=value' + nl)
+{ key: 'value' }
+)
+
+'ini: parse semicolon comments' |> t.eq(
+ini.parse('; comment' + nl + 'x=1' + nl)
+{ x: 1 }
+)
+
+'ini: parse empty input' |> t.eq(
+ini.parse('')
+{}
+)
+
+'ini: parse multiple sections' |> t.eq(
+ini.parse('[db]' + nl + 'host=localhost' + nl + '[app]' + nl + 'debug=true' + nl)
+{ db: { host: 'localhost' }, app: { debug: true } }
+)
+
+'ini: parse quoted string value' |> t.eq(
+ini.parse('msg=' + dq + 'hello world' + dq + nl)
+{ msg: 'hello world' }
+)
+
+'ini: serialize simple key-value' |> t.assert(
+str.contains?(ini.serialize({ key: 'value' }), 'key=value')
+)
+
+'ini: serialize section' |> t.assert(
+str.contains?(ini.serialize({ sec: { a: 1 } }), '[sec]')
+)
+
+'ini: serialize booleans' |> t.assert(
+str.contains?(ini.serialize({ flag: true }), 'flag=true')
+)
+
+'ini: roundtrip basic' |> t.eq(
+ini.parse(ini.serialize({ name: 'test', port: 3000 }))
+{ name: 'test', port: 3000 }
+)
+
+'ini: roundtrip with section' |> t.eq(
+ini.parse(ini.serialize({ db: { host: 'localhost', port: 5432 } }))
+{ db: { host: 'localhost', port: 5432 } }
+)
+
+// -------------------------------------------------------
+// data-toml tests
+// -------------------------------------------------------
+
+'toml: parse simple key-value' |> t.eq(
+toml.parse('title = ' + dq + 'hello' + dq + nl)
+{ title: 'hello' }
+)
+
+'toml: parse integer' |> t.eq(
+toml.parse('port = 8080' + nl)
+{ port: 8080 }
+)
+
+'toml: parse float' |> t.eq(
+toml.parse('pi = 3.14' + nl)
+{ pi: 3.14 }
+)
+
+'toml: parse boolean' |> t.eq(
+toml.parse('flag = true' + nl)
+{ flag: true }
+)
+
+'toml: parse table' |> t.eq(
+toml.parse('[server]' + nl + 'host = ' + dq + 'localhost' + dq + nl + 'port = 80' + nl)
+{ server: { host: 'localhost', port: 80 } }
+)
+
+'toml: parse inline array' |> t.eq(
+toml.parse('nums = [1, 2, 3]' + nl)
+{ nums: [1, 2, 3] }
+)
+
+'toml: parse inline table' |> t.eq(
+toml.parse('point = {x = 1, y = 2}' + nl)
+{ point: { x: 1, y: 2 } }
+)
+
+'toml: parse empty string value' |> t.eq(
+toml.parse('name = ' + dq + dq + nl)
+{ name: '' }
+)
+
+'toml: parse multiple tables' |> t.eq(
+toml.parse('[a]' + nl + 'x = 1' + nl + '[b]' + nl + 'y = 2' + nl)
+{ a: { x: 1 }, b: { y: 2 } }
+)
+
+'toml: parse nested tables' |> t.eq(
+toml.parse('[a.b]' + nl + 'c = 3' + nl)
+{ a: { b: { c: 3 } } }
+)
+
+'toml: parse array of tables' |> t.eq(
+toml.parse('[[items]]' + nl + 'name = ' + dq + 'a' + dq + nl + '[[items]]' + nl + 'name = ' + dq + 'b' + dq + nl)
+{ items: [{ name: 'a' }, { name: 'b' }] }
+)
+
+'toml: parse comments ignored' |> t.eq(
+toml.parse('# comment' + nl + 'key = ' + dq + 'val' + dq + nl)
+{ key: 'val' }
+)
+
+'toml: serialize simple key-value' |> t.assert(
+str.contains?(toml.serialize({ title: 'hello' }), 'title = ' + dq + 'hello' + dq)
+)
+
+'toml: serialize table' |> t.assert(
+str.contains?(toml.serialize({ db: { port: 5432 } }), '[db]')
+)
+
+'toml: roundtrip flat object' |> t.eq(
+toml.parse(toml.serialize({ name: 'test', count: 42 }))
+{ name: 'test', count: 42 }
+)
+
+'toml: roundtrip nested object' |> t.eq(
+toml.parse(toml.serialize({ server: { host: 'localhost', port: 80 } }))
+{ server: { host: 'localhost', port: 80 } }
+)
+
+// -------------------------------------------------------
+// data-xml tests
+// -------------------------------------------------------
+
+'xml: element constructor' |> t.eq(
+xml.element('div', { class: 'main' }, [xml.text('hi')])
+{ type: :element, tag: 'div', attrs: { class: 'main' }, children: [{ type: :text, content: 'hi' }] }
+)
+
+'xml: text constructor' |> t.eq(
+xml.text('hello')
+{ type: :text, content: 'hello' }
+)
+
+'xml: cdata constructor' |> t.eq(
+xml.cdata('raw content')
+{ type: :cdata, content: 'raw content' }
+)
+
+'xml: comment constructor' |> t.eq(
+xml.comment(' a comment ')
+{ type: :comment, content: ' a comment ' }
+)
+
+'xml: serialize self-closing element' |> t.eq(
+xml.serialize(xml.element('br'))
+'<br/>'
+)
+
+'xml: serialize element with text child' |> t.eq(
+xml.serialize(xml.element('p', {}, [xml.text('hello')]))
+'<p>hello</p>'
+)
+
+'xml: serialize element with attributes' |> t.eq(
+xml.serialize(xml.element('a', { href: 'http://x.com' }, [xml.text('link')]))
+'<a href=' + dq + 'http://x.com' + dq + '>link</a>'
+)
+
+'xml: serialize cdata' |> t.eq(
+xml.serialize(xml.cdata('raw'))
+'<![CDATA[raw]]>'
+)
+
+'xml: serialize comment' |> t.eq(
+xml.serialize(xml.comment(' note '))
+'<!-- note -->'
+)
+
+'xml: serialize nested elements' |> t.eq(
+xml.serialize(xml.element('div', {}, [
+xml.element('span', {}, [xml.text('inner')])
+]))
+'<div><span>inner</span></div>'
+)
+
+'xml: serialize escapes text content' |> t.eq(
+xml.serialize(xml.element('p', {}, [xml.text('a < b & c > d')]))
+'<p>a &lt; b &amp; c &gt; d</p>'
+)
+
+'xml: serialize list of nodes' |> t.eq(
+xml.serialize([xml.text('a'), xml.text('b')])
+'ab'
+)
+
+'xml: parse simple element' |> t.eq(
+xml.parse('<p>hello</p>') |> std.map(fn(n) n.tag)
+['p']
+)
+
+'xml: parse self-closing' |> t.eq(
+xml.parse('<br/>') |> std.map(fn(n) n.tag)
+['br']
+)
+
+'xml: parse element with attribute' |> t.assert({
+nodes := xml.parse('<a href=' + dq + 'http://x.com' + dq + '>link</a>')
+nodes.0.attrs.href = 'http://x.com'
+})
+
+'xml: parse nested elements' |> t.assert({
+nodes := xml.parse('<div><span>inner</span></div>')
+nodes.0.children.0.tag = 'span'
+})
+
+'xml: parse text content' |> t.eq(
+xml.textContent(xml.parse('<p>hello</p>').0)
+'hello'
+)
+
+'xml: parse cdata section' |> t.assert({
+nodes := xml.parse('<r><![CDATA[raw data]]></r>')
+nodes.0.children.0.type = :cdata
+})
+
+'xml: parse comment' |> t.assert({
+nodes := xml.parse('<!-- my comment --><r/>')
+nodes.0.type = :comment
+})
+
+'xml: querySelector finds element' |> t.assert({
+nodes := xml.parse('<root><item>found</item></root>')
+result := xml.querySelector(nodes, 'item')
+result.tag = 'item'
+})
+
+'xml: querySelectorAll finds all matches' |> t.eq({
+nodes := xml.parse('<root><li>a</li><li>b</li></root>')
+xml.querySelectorAll(nodes, 'li') |> std.map(fn(n) xml.textContent(n))
+}, ['a', 'b'])
+
+'xml: textContent deep' |> t.eq(
+xml.textContent(xml.element('div', {}, [
+xml.text('a')
+xml.element('span', {}, [xml.text('b')])
+xml.text('c')
+]))
+'abc'
+)
+
+'xml: roundtrip simple element' |> t.eq(
+xml.serialize(xml.parse('<p>test</p>').0)
+'<p>test</p>'
+)
+
+'xml: parse escaped text' |> t.eq(
+xml.textContent(xml.parse('<p>a &lt; b &amp; c</p>').0)
+'a < b & c'
+)
+
+// -------------------------------------------------------
+// data-yaml tests
+// -------------------------------------------------------
+
+'yaml: parse simple mapping' |> t.eq(
+yaml.parse('name: Alice' + nl + 'age: 30' + nl)
+{ name: 'Alice', age: 30 }
+)
+
+'yaml: parse integer' |> t.eq(
+yaml.parse('x: 42' + nl)
+{ x: 42 }
+)
+
+'yaml: parse float' |> t.eq(
+yaml.parse('pi: 3.14' + nl)
+{ pi: 3.14 }
+)
+
+'yaml: parse boolean true' |> t.eq(
+yaml.parse('flag: true' + nl)
+{ flag: true }
+)
+
+'yaml: parse boolean false' |> t.eq(
+yaml.parse('flag: false' + nl)
+{ flag: false }
+)
+
+'yaml: parse null' |> t.eq(
+yaml.parse('val: null' + nl)
+{ val: ? }
+)
+
+'yaml: parse tilde null' |> t.eq(
+yaml.parse('val: ~' + nl)
+{ val: ? }
+)
+
+'yaml: parse sequence' |> t.eq(
+yaml.parse('- a' + nl + '- b' + nl + '- c' + nl)
+['a', 'b', 'c']
+)
+
+'yaml: parse nested mapping' |> t.eq(
+yaml.parse('db:' + nl + '  host: localhost' + nl + '  port: 5432' + nl)
+{ db: { host: 'localhost', port: 5432 } }
+)
+
+'yaml: parse nested sequence' |> t.eq(
+yaml.parse('items:' + nl + '  - x' + nl + '  - y' + nl)
+{ items: ['x', 'y'] }
+)
+
+'yaml: parse double-quoted string' |> t.eq(
+yaml.parse('msg: ' + dq + 'hello world' + dq + nl)
+{ msg: 'hello world' }
+)
+
+'yaml: parse single-quoted string' |> t.eq(
+yaml.parse('msg: ' + sq + 'hello' + sq + nl)
+{ msg: 'hello' }
+)
+
+'yaml: parse flow sequence' |> t.eq(
+yaml.parse('items: [1, 2, 3]' + nl)
+{ items: [1, 2, 3] }
+)
+
+'yaml: parse flow mapping' |> t.eq(
+yaml.parse('point: {x: 1, y: 2}' + nl)
+{ point: { x: 1, y: 2 } }
+)
+
+'yaml: parse empty mapping' |> t.eq(
+yaml.parse('obj: {}' + nl)
+{ obj: {} }
+)
+
+'yaml: parse empty sequence' |> t.eq(
+yaml.parse('arr: []' + nl)
+{ arr: [] }
+)
+
+'yaml: parse comments ignored' |> t.eq(
+yaml.parse('# comment' + nl + 'key: val' + nl)
+{ key: 'val' }
+)
+
+'yaml: serialize simple mapping' |> t.assert(
+str.contains?(yaml.serialize({ name: 'Alice' }), 'name: Alice')
+)
+
+'yaml: serialize integer' |> t.assert(
+str.contains?(yaml.serialize({ x: 42 }), 'x: 42')
+)
+
+'yaml: serialize boolean' |> t.assert(
+str.contains?(yaml.serialize({ flag: true }), 'flag: true')
+)
+
+'yaml: serialize null' |> t.assert(
+str.contains?(yaml.serialize({ val: ? }), 'null')
+)
+
+'yaml: serialize list' |> t.assert(
+str.contains?(yaml.serialize(['a', 'b']), '- a')
+)
+
+'yaml: roundtrip simple mapping' |> t.eq(
+yaml.parse(yaml.serialize({ name: 'test', count: 5 }))
+{ name: 'test', count: 5 }
+)
+
+'yaml: roundtrip nested mapping' |> t.eq(
+yaml.parse(yaml.serialize({ server: { host: 'localhost', port: 80 } }))
+{ server: { host: 'localhost', port: 80 } }
+)
+
+'yaml: roundtrip list' |> t.eq(
+yaml.parse(yaml.serialize(['a', 'b', 'c']))
+['a', 'b', 'c']
+)
+
+}
