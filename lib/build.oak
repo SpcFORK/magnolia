@@ -644,102 +644,148 @@ fn renderLuaBundle(bundleNode) {
 	output <- output << 'end\n\n'
 
 	// Render the AST to Lua
+	fn renderReturnLua(node) ?
 	fn renderNode(node) if node.type {
 		:null -> 'nil'
 		:empty -> 'nil'
-		:string -> '\'' << node.val |> map(fn(c) if c {
+		:string -> '\'' + (node.val |> map(fn(c) if c {
 			'\\' -> '\\\\'
 			'\'' -> '\\\''
 			'\n' -> '\\n'
 			'\r' -> '\\r'
 			'\t' -> '\\t'
 			_ -> c
-		}) << '\''
+		})) + '\''
 		:int, :float, :bool -> string(node.val)
 		:identifier -> luaIdent(node.val)
-		:atom -> '\'' << node.val << '\''
-		:list -> '{' << node.elems |> map(renderNode) |> join(', ') << '}'
-		:object -> '{' << node.entries |> map(fn(entry) {
+		:atom -> '\'' + node.val + '\''
+		:list -> '{' + (node.elems |> map(renderNode) |> join(', ')) + '}'
+		:object -> '{' + (node.entries |> map(fn(entry) {
 			{ key: k, val: v } := entry
 			if k.type {
-				:identifier -> '[\"' << k.val << '\"]=' << renderNode(v)
-				:string -> '[\"' << k.val << '\"]=' << renderNode(v)
-				:int -> '[' << string(k.val) << ']=' << renderNode(v)
-				_ -> '[' << renderNode(k) << ']=' << renderNode(v)
+				:identifier -> '["' + k.val + '"]=' + renderNode(v)
+				:string -> '["' + k.val + '"]=' + renderNode(v)
+				:int -> '[' + string(k.val) + ']=' + renderNode(v)
+				_ -> '[' + renderNode(k) + ']=' + renderNode(v)
 			}
-		}) |> join(', ') << '}'
+		}) |> join(', ')) + '}'
 		:unary -> if node.op {
-			:minus -> '(-' << renderNode(node.right) << ')'
-			:exclam -> '(not ' << renderNode(node.right) << ')'
+			:minus -> '(-' + renderNode(node.right) + ')'
+			:exclam -> '(not ' + renderNode(node.right) + ')'
 		}
 		:binary -> if node.op {
-			:plus -> '__as_oak_string(' << renderNode(node.left) << ' + ' << renderNode(node.right) << ')'
-			:minus -> '(' << renderNode(node.left) << ' - ' << renderNode(node.right) << ')'
-			:times -> '(' << renderNode(node.left) << ' * ' << renderNode(node.right) << ')'
-			:divide -> '(' << renderNode(node.left) << ' / ' << renderNode(node.right) << ')'
-			:modulus -> '(' << renderNode(node.left) << ' % ' << renderNode(node.right) << ')'
-			:rshift -> '(' << renderNode(node.left) << ' >> ' << renderNode(node.right) << ')'
-			:and -> '__oak_and(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
-			:xor -> '__oak_xor(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
-			:or -> '__oak_or(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
-			:eq -> '__oak_eq(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
-			:neq -> '(not __oak_eq(' << renderNode(node.left) << ', ' << renderNode(node.right) << '))'
-			:greater -> '(' << renderNode(node.left) << ' > ' << renderNode(node.right) << ')'
-			:less -> '(' << renderNode(node.left) << ' < ' << renderNode(node.right) << ')'
-			:geq -> '(' << renderNode(node.left) << ' >= ' << renderNode(node.right) << ')'
-			:leq -> '(' << renderNode(node.left) << ' <= ' << renderNode(node.right) << ')'
-			:pushArrow -> '__oak_push(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:plus -> '__as_oak_string(' + renderNode(node.left) + ' + ' + renderNode(node.right) + ')'
+			:minus -> '(' + renderNode(node.left) + ' - ' + renderNode(node.right) + ')'
+			:times -> '(' + renderNode(node.left) + ' * ' + renderNode(node.right) + ')'
+			:divide -> '(' + renderNode(node.left) + ' / ' + renderNode(node.right) + ')'
+			:modulus -> '(' + renderNode(node.left) + ' % ' + renderNode(node.right) + ')'
+			:rshift -> '(' + renderNode(node.left) + ' >> ' + renderNode(node.right) + ')'
+			:and -> '__oak_and(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			:xor -> '__oak_xor(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			:or -> '__oak_or(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			:eq -> '__oak_eq(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			:neq -> '(not __oak_eq(' + renderNode(node.left) + ', ' + renderNode(node.right) + '))'
+			:greater -> '(' + renderNode(node.left) + ' > ' + renderNode(node.right) + ')'
+			:less -> '(' + renderNode(node.left) + ' < ' + renderNode(node.right) + ')'
+			:geq -> '(' + renderNode(node.left) + ' >= ' + renderNode(node.right) + ')'
+			:leq -> '(' + renderNode(node.left) + ' <= ' + renderNode(node.right) + ')'
+			:pushArrow -> '__oak_push(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
 		}
-		:assignment -> luaIdent(node.left.val) << ' = ' << renderNode(node.right)
+		:assignment -> if node.left.type {
+			:propertyAccess -> {
+				container := renderNode(node.left.left)
+				key := if node.left.right.type {
+					:identifier -> '"' + node.left.right.val + '"'
+					:block -> if len(node.left.right.exprs) = 1 {
+						true -> renderNode(node.left.right.exprs.0)
+						_ -> renderNode(node.left.right)
+					}
+					_ -> renderNode(node.left.right)
+				}
+				container + '[' + key + '] = ' + renderNode(node.right)
+			}
+			:object -> '(function()\nlocal __oak_assgn = ' + renderNode(node.right) + '\n' + {
+				result := ''
+				node.left.entries |> each(fn(entry) {
+					{ key: k, val: v } := entry
+					name := if v.type {
+						:identifier -> v.val
+						_ -> k.val
+					}
+					result <- result + luaIdent(name) + ' = __oak_assgn["' + k.val + '"]\n'
+				})
+				result
+			} + 'return __oak_assgn\nend)()\n'
+			:list -> '(function()\nlocal __oak_assgn = ' + renderNode(node.right) + '\n' + {
+				result := ''
+				node.left.elems |> each(fn(elem, i) if elem.type {
+					:identifier -> result <- result + luaIdent(elem.val) + ' = __oak_assgn[' + string(i + 1) + ']\n'
+					:empty -> ?
+				})
+				result
+			} + 'return __oak_assgn\nend)()\n'
+			_ -> luaIdent(node.left.val) + ' = ' + renderNode(node.right)
+		}
 		:propertyAccess -> if node.right.type {
-			:identifier -> renderNode(node.left) << '["' << node.right.val << '"]'
-			_ -> '__oak_acc(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
+			:identifier -> renderNode(node.left) + '["' + node.right.val + '"]'
+			_ -> '__oak_acc(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
 		}
-		:ifExpr -> '(function()\n' << {
+		:ifExpr -> '(function()\n' + {
 			result := ''
 			node.branches |> each(fn(br, i) {
 				prefix := if i { 0 -> 'if ', _ -> 'elseif ' }
 				if br.target.type = :empty {
-					true -> result <- result << 'else return ' << renderNode(br.body) << '\n'
-					_ -> result <- result << prefix << '__oak_eq(__oak_cond, ' << renderNode(br.target) << ') then return ' << renderNode(br.body) << '\n'
+					true -> result <- result + 'else ' + renderReturnLua(br.body) + '\n'
+					_ -> result <- result + prefix + '__oak_eq(__oak_cond, ' + renderNode(br.target) + ') then ' + renderReturnLua(br.body) + '\n'
 				}
 			})
-			'local __oak_cond = ' << renderNode(node.cond) << '\n' << result << 'end\nend)()\n'
+			'local __oak_cond = ' + renderNode(node.cond) + '\n' + result + 'end\nend)()\n'
 		}
-		:block -> '(function()\n' << {
+		:block -> '(function()\n' + {
 			result := ''
 			lastIdx := len(node.exprs) - 1
 			node.exprs |> each(fn(expr, i) {
 				if i = lastIdx {
-					true -> result <- result << 'return ' << renderNode(expr) << '\n'
-					_ -> result <- result << renderNode(expr) << '\n'
+					true -> result <- result + renderReturnLua(expr) + '\n'
+					_ -> result <- result + renderNode(expr) + '\n'
 				}
 			})
 			result
-		} << 'end)()\n'
+		} + 'end)()\n'
 		:function -> {
 			args := node.args |> map(luaIdent) |> join(', ')
-			'function(' << args << ')\n' << {
+			fnBody := 'function(' + args + ')\n' + {
 				if node.body.type = :block {
 					true -> {
 						result := ''
 						lastIdx := len(node.body.exprs) - 1
 						node.body.exprs |> each(fn(expr, i) {
 							if i = lastIdx {
-								true -> result <- result << 'return ' << renderNode(expr) << '\n'
-								_ -> result <- result << renderNode(expr) << '\n'
+								true -> result <- result + renderReturnLua(expr) + '\n'
+								_ -> result <- result + renderNode(expr) + '\n'
 							}
 						})
 						result
 					}
-					_ -> 'return ' << renderNode(node.body) << '\n'
+					_ -> renderReturnLua(node.body) + '\n'
 				}
-			} << 'end'
+			} + 'end'
+			if node.name {
+				'' -> fnBody
+				_ -> luaIdent(node.name) + ' = ' + fnBody
+			}
 		}
-		:fnCall -> renderNode(node.function) << '(' << node.args |> map(renderNode) |> join(', ') << ')'
+		:fnCall -> renderNode(node.function) + '(' + (node.args |> map(renderNode) |> join(', ')) + ')'
 	}
 
-	output <- output << renderNode(bundleNode) << '\n'
+	renderReturnLua <- fn(node) if {
+		node.type = :function & node.name != '' -> renderNode(node) + '\nreturn ' + luaIdent(node.name)
+		node.type = :assignment & node.left.type = :propertyAccess -> renderNode(node) + '\nreturn ' + renderNode(node.left)
+		node.type = :assignment & !(node.left.type = :object | node.left.type = :list) -> renderNode(node) + '\nreturn ' + luaIdent(node.left.val)
+		_ -> 'return ' + renderNode(node)
+	}
+
+	output <- output + renderNode(bundleNode) + '\n'
 	output
 }
 
@@ -874,7 +920,37 @@ fn renderJavaBundle(bundleNode) {
 			:leq -> '(((Comparable) ' << renderNode(node.left) << ').compareTo(' << renderNode(node.right) << ') <= 0)'
 			:pushArrow -> '__oak_push((List<Object>) ' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
 		}
-		:assignment -> javaIdent(node.left.val) << ' = ' << renderNode(node.right)
+		:assignment -> if node.left.type {
+			:propertyAccess -> {
+				container := renderNode(node.left.left)
+				key := if node.left.right.type {
+					:identifier -> '"' << node.left.right.val << '"'
+					_ -> 'String.valueOf(' << renderNode(node.left.right) << ')'
+				}
+				'((HashMap<String, Object>) ' << container << ').put(' << key << ', ' << renderNode(node.right) << ')'
+			}
+			:object -> '((Function<Void, Object>) (__oak_v) -> {\n' << {
+				result := 'Object __oak_assgn = ' << renderNode(node.right) << ';\n'
+				node.left.entries |> each(fn(entry) {
+					{ key: k, val: v } := entry
+					name := if v.type {
+						:identifier -> v.val
+						_ -> k.val
+					}
+					result <- result << javaIdent(name) << ' = __oak_acc(__oak_assgn, "' << k.val << '");\n'
+				})
+				result
+			} << 'return __oak_assgn;\n}).apply(null)'
+			:list -> '((Function<Void, Object>) (__oak_v) -> {\n' << {
+				result := 'Object __oak_assgn = ' << renderNode(node.right) << ';\n'
+				node.left.elems |> each(fn(elem, i) if elem.type {
+					:identifier -> result <- result << javaIdent(elem.val) << ' = ((List<Object>) __oak_assgn).get(' << string(i) << ');\n'
+					:empty -> ?
+				})
+				result
+			} << 'return __oak_assgn;\n}).apply(null)'
+			_ -> javaIdent(node.left.val) << ' = ' << renderNode(node.right)
+		}
 		:propertyAccess -> if node.right.type {
 			:identifier -> '__oak_acc(' << renderNode(node.left) << ', "' << node.right.val << '")'
 			_ -> '__oak_acc(' << renderNode(node.left) << ', ' << renderNode(node.right) << ')'
@@ -904,24 +980,28 @@ fn renderJavaBundle(bundleNode) {
 		:function -> {
 			args := node.args
 			// Java lambdas with multiple statements need Function interface
-			'(Function<Object[], Object>) (__oak_args) -> {\n' << {
+			fnBody := '(Function<Object[], Object>) (__oak_args) -> {\n' + {
 				// Destructure args
-				argBindings := args |> map(fn(a, i) 'Object ' << javaIdent(a) << ' = __oak_args.length > ' << string(i) << ' ? __oak_args[' << string(i) << '] : null;\n') |> join('')
-				argBindings << if node.body.type = :block {
+				argBindings := args |> map(fn(a, i) 'Object ' + javaIdent(a) + ' = __oak_args.length > ' + string(i) + ' ? __oak_args[' + string(i) + '] : null;\n') |> join('')
+				argBindings + if node.body.type = :block {
 					true -> {
 						result := ''
 						lastIdx := len(node.body.exprs) - 1
 						node.body.exprs |> each(fn(expr, i) {
 							if i = lastIdx {
-								true -> result <- result << 'return (Object) (' << renderNode(expr) << ');\n'
-								_ -> result <- result << renderNode(expr) << ';\n'
+								true -> result <- result + 'return (Object) (' + renderNode(expr) + ');\n'
+								_ -> result <- result + renderNode(expr) + ';\n'
 							}
 						})
 						result
 					}
-					_ -> 'return (Object) (' << renderNode(node.body) << ');\n'
+					_ -> 'return (Object) (' + renderNode(node.body) + ');\n'
 				}
-			} << '}'
+			} + '}'
+			if node.name {
+				'' -> fnBody
+				_ -> javaIdent(node.name) + ' = ' + fnBody
+			}
 		}
 		:fnCall -> '((Function<Object[], Object>) ' << renderNode(node.function) << ').apply(new Object[]{' << node.args |> map(renderNode) |> join(', ') << '})'
 	}

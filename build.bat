@@ -131,6 +131,7 @@ set "_SPEC_FAIL=0"
 for %%F in (lib\*.oak) do (
     set "_BASE=%%~nF"
     .\build\magnolia.exe build --entry "%%F" --doc --output "docs\spec\!_BASE!.md" >nul 2>&1
+    echo   Generating spec for %%F...
     if errorlevel 1 (
         echo   Failed to generate spec for %%F
         set /a _SPEC_FAIL+=1
@@ -141,6 +142,7 @@ for %%F in (lib\*.oak) do (
 for %%F in (lib\*.oak) do (
     set "_BASE=%%~nF"
     .\build\magnolia.exe build --entry "%%F" --graph --output "docs\spec\!_BASE!.mmd" >nul 2>&1
+    echo   Generating graph for %%F...
     if errorlevel 1 (
         echo   Failed to generate spec for %%F
         set /a _SPEC_FAIL+=1
