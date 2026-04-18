@@ -7,6 +7,8 @@
 
 > **Highlights:** 3.7x faster bytecode VM · Cross-platform GUI (Win32/X11/WebGL) with Vulkan · CPU shader engine · P2P mesh networking · Thread pools & async event bus · 9 compilation targets · Self-hosted bytecode VM · Mermaid dependency graphs · 67 sample programs
 
+<!-- Roadmap: GUI becomes an external library -->
+
 ---
 
 ## Table of Contents
