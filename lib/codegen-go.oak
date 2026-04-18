@@ -49,7 +49,7 @@ GoReserved := [
 	'append', 'cap', 'close', 'complex', 'copy', 'delete', 'imag'
 	'len', 'make', 'new', 'panic', 'print', 'println', 'real', 'recover'
 	'error', 'string', 'bool', 'int', 'float64', 'byte', 'rune'
-	'any', 'comparable'
+	'any', 'comparable', 'rand'
 ]
 
 fn goIdent(name) {
@@ -84,18 +84,28 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math"
+	"math/rand"
+	"net/http"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Ensure imports are used
 var _ = fmt.Sprint
+var _ = io.ReadAll
 var _ = math.Abs
+var _ = http.Get
 var _ = os.Args
 var _ = reflect.DeepEqual
+var _ = strconv.Itoa
 var _ = strings.Contains
+var _ = time.Now
+var _ = rand.Intn
 
 // Oak value type aliases
 type OakValue = interface{}
@@ -105,7 +115,7 @@ type OakObject = map[string]OakValue
 
 // Module registry
 var __Oak_Modules = map[string]OakValue{}
-var __Oak_Import_Aliases map[string]string
+var __Oak_Import_Aliases OakObject
 
 func __oak_eq(a, b OakValue) bool {
 	if a == nil && b == nil {
@@ -117,8 +127,14 @@ func __oak_eq(a, b OakValue) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func __oak_push(list OakList, val OakValue) OakList {
-	return append(list, val)
+func __oak_push(listVal OakValue, val OakValue) OakValue {
+	if list, ok := listVal.(OakList); ok {
+		return OakValue(append(list, val))
+	}
+	if s, ok := listVal.(string); ok {
+		return s + __as_oak_string(val)
+	}
+	return listVal
 }
 
 func __oak_acc(obj OakValue, key OakValue) OakValue {
@@ -144,6 +160,19 @@ func __oak_acc(obj OakValue, key OakValue) OakValue {
 			}
 		}
 		return nil
+	case string:
+		switch k := key.(type) {
+		case int:
+			if k >= 0 && k < len(o) {
+				return string(o[k])
+			}
+		case float64:
+			i := int(k)
+			if i >= 0 && i < len(o) {
+				return string(o[i])
+			}
+		}
+		return nil
 	}
 	return nil
 }
@@ -160,7 +189,19 @@ func __as_oak_string(v OakValue) string {
 	if v == nil {
 		return ""
 	}
-	return fmt.Sprint(v)
+	switch s := v.(type) {
+	case string:
+		return s
+	case int:
+		return strconv.Itoa(s)
+	case float64:
+		return strconv.FormatFloat(s, 102, -1, 64)
+	case bool:
+		if s { return "true" }
+		return "false"
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 func __oak_to_float(v OakValue) float64 {
@@ -169,6 +210,10 @@ func __oak_to_float(v OakValue) float64 {
 		return float64(n)
 	case float64:
 		return n
+	case string:
+		f, err := strconv.ParseFloat(n, 64)
+		if err != nil { return 0 }
+		return f
 	default:
 		return 0
 	}
@@ -182,28 +227,6 @@ func __oak_to_bool(v OakValue) bool {
 		return b
 	}
 	return true
-}
-
-func __oak_modularize(name string, factory func() OakValue) {
-	__Oak_Modules[name] = factory
-}
-
-func __oak_module_import(name string) OakValue {
-	m, ok := __Oak_Modules[name]
-	if !ok && __Oak_Import_Aliases != nil {
-		if alias, aok := __Oak_Import_Aliases[name]; aok {
-			m, ok = __Oak_Modules[alias]
-		}
-	}
-	if !ok {
-		return nil
-	}
-	if factory, fok := m.(func() OakValue); fok {
-		result := factory()
-		__Oak_Modules[name] = result
-		return result
-	}
-	return m
 }
 
 func __oak_not(v OakValue) OakValue {
@@ -224,6 +247,303 @@ func __oak_or(a, b OakValue) OakValue {
 	return b
 }
 
+// Module system as OakValue so type assertions work
+var __oak_modularize OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) >= 2 {
+		name := __as_oak_string(__oak_args[0])
+		__Oak_Modules[name] = __oak_args[1]
+	}
+	return nil
+})
+
+var __oak_module_import OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return nil
+	}
+	name := __as_oak_string(__oak_args[0])
+	m, ok := __Oak_Modules[name]
+	if !ok && __Oak_Import_Aliases != nil {
+		if alias, aok := __Oak_Import_Aliases[name]; aok {
+			m, ok = __Oak_Modules[__as_oak_string(alias)]
+		}
+	}
+	if !ok {
+		return nil
+	}
+	if factory, fok := m.(OakFn); fok {
+		result := factory()
+		__Oak_Modules[name] = result
+		return result
+	}
+	return m
+})
+
+// Platform detection: nil means native (not JS)
+var __Is_Oak_Node OakValue = nil
+
+// Oak builtin: len()
+var __oak_go_len OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 || __oak_args[0] == nil {
+		return int(0)
+	}
+	switch v := __oak_args[0].(type) {
+	case string:
+		return int(len(v))
+	case OakList:
+		return int(len(v))
+	case OakObject:
+		return int(len(v))
+	default:
+		return int(0)
+	}
+})
+
+// Oak builtin: string()
+var __oak_go_string OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return ""
+	}
+	return __as_oak_string(__oak_args[0])
+})
+
+// Oak builtin: type()
+var __oak_go_type OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 || __oak_args[0] == nil {
+		return "null"
+	}
+	switch __oak_args[0].(type) {
+	case string:
+		return "string"
+	case int:
+		return "int"
+	case float64:
+		return "float"
+	case bool:
+		return "bool"
+	case OakList:
+		return "list"
+	case OakObject:
+		return "object"
+	case OakFn:
+		return "function"
+	default:
+		return "unknown"
+	}
+})
+
+// Oak builtin: int()
+var __oak_go_int OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return int(0)
+	}
+	switch v := __oak_args[0].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	case string:
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			f, ferr := strconv.ParseFloat(v, 64)
+			if ferr != nil { return nil }
+			return int(f)
+		}
+		return i
+	case bool:
+		if v { return int(1) }
+		return int(0)
+	default:
+		return int(0)
+	}
+})
+
+// Oak builtin: float()
+var __oak_go_float64 OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return float64(0)
+	}
+	return __oak_to_float(__oak_args[0])
+})
+
+// Oak builtin: print()
+var __oak_go_print OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	for _, v := range __oak_args {
+		fmt.Print(__as_oak_string(v))
+	}
+	return nil
+})
+
+// Oak builtin: slice()
+var slice OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 || __oak_args[0] == nil {
+		return nil
+	}
+	start := 0
+	if len(__oak_args) > 1 && __oak_args[1] != nil {
+		start = int(__oak_to_float(__oak_args[1]))
+	}
+	switch v := __oak_args[0].(type) {
+	case string:
+		end := len(v)
+		if len(__oak_args) > 2 && __oak_args[2] != nil {
+			end = int(__oak_to_float(__oak_args[2]))
+		}
+		if start < 0 { start = 0 }
+		if end > len(v) { end = len(v) }
+		if start >= end { return "" }
+		return v[start:end]
+	case OakList:
+		end := len(v)
+		if len(__oak_args) > 2 && __oak_args[2] != nil {
+			end = int(__oak_to_float(__oak_args[2]))
+		}
+		if start < 0 { start = 0 }
+		if end > len(v) { end = len(v) }
+		if start >= end { return OakList{} }
+		result := make(OakList, end-start)
+		copy(result, v[start:end])
+		return result
+	}
+	return nil
+})
+
+// Oak builtin: keys()
+var keys OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 || __oak_args[0] == nil {
+		return OakList{}
+	}
+	if obj, ok := __oak_args[0].(OakObject); ok {
+		result := OakList{}
+		for k := range obj {
+			result = append(result, k)
+		}
+		return result
+	}
+	return OakList{}
+})
+
+// Oak builtin: values()
+var values OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 || __oak_args[0] == nil {
+		return OakList{}
+	}
+	if obj, ok := __oak_args[0].(OakObject); ok {
+		result := OakList{}
+		for _, v := range obj {
+			result = append(result, v)
+		}
+		return result
+	}
+	return OakList{}
+})
+
+// Oak builtin: codepoint()
+var codepoint OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return nil
+	}
+	s := __as_oak_string(__oak_args[0])
+	if len(s) == 0 { return nil }
+	return int(s[0])
+})
+
+// Oak builtin: char()
+var char OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return ""
+	}
+	return string(rune(int(__oak_to_float(__oak_args[0]))))
+})
+
+// Oak builtin: args()
+var args OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	result := OakList{}
+	for _, a := range os.Args {
+		result = append(result, a)
+	}
+	return result
+})
+
+// Oak builtin: rand()
+var __oak_go_rand OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	return rand.Float64()
+})
+
+// Oak builtin: nanotime()
+var nanotime OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	return float64(time.Now().UnixNano())
+})
+
+// Oak builtin: req() — synchronous HTTP
+var req OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 1 {
+		return nil
+	}
+	data, _ := __oak_args[0].(OakObject)
+	if data == nil {
+		return nil
+	}
+	method := __as_oak_string(data["method"])
+	url := __as_oak_string(data["url"])
+	bodyStr := __as_oak_string(data["body"])
+	if method == "" { method = "GET" }
+	var bodyReader io.Reader
+	if bodyStr != "" {
+		bodyReader = strings.NewReader(bodyStr)
+	}
+	httpReq, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return OakObject{"type": "error", "error": err.Error()}
+	}
+	if headers, ok := data["headers"].(OakObject); ok {
+		for k, v := range headers {
+			httpReq.Header.Set(k, __as_oak_string(v))
+		}
+	}
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return OakObject{"type": "error", "error": err.Error()}
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	respHeaders := OakObject{}
+	for k, v := range resp.Header {
+		if len(v) > 0 {
+			respHeaders[strings.ToLower(k)] = v[0]
+		}
+	}
+	return OakObject{
+		"type": "resp",
+		"resp": OakObject{
+			"status":  int(resp.StatusCode),
+			"headers": respHeaders,
+			"body":    string(respBody),
+		},
+	}
+})
+
+// Oak builtin: filter() — not a real builtin but commonly used from std
+var filter OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
+	if len(__oak_args) < 2 {
+		return OakList{}
+	}
+	list, ok := __oak_args[0].(OakList)
+	if !ok {
+		return OakList{}
+	}
+	pred, ok := __oak_args[1].(OakFn)
+	if !ok {
+		return OakList{}
+	}
+	result := OakList{}
+	for i, v := range list {
+		if __oak_to_bool(pred(v, int(i))) {
+			result = append(result, v)
+		}
+	}
+	return result
+})
+
 '
 
 // ---------------------------------------------------------------------------
@@ -236,6 +556,53 @@ fn renderGoBundle(bundleNode) {
 	// renderReturnExpr renders "return OakValue(expr)" but handles
 	// assignments specially since Go assignments are statements, not expressions.
 	fn renderReturnExpr(node) ?
+
+	// collectBlockLocals scans direct children of a block for local variable
+	// declarations and named functions, returning a list of identifier names.
+	// Used to hoist var declarations to the top of Go blocks/function bodies
+	// since Oak hoists all locals but Go does not.
+	fn collectBlockLocals(exprs) {
+		names := []
+		exprs |> each(fn(expr) if {
+			expr.type = :assignment & expr.local? -> if expr.left.type {
+				:identifier -> names << expr.left.val
+				:object -> expr.left.entries |> each(fn(entry) {
+					{ key: k, val: v } := entry
+					name := if v.type { :identifier -> v.val, _ -> k.val }
+					names << name
+				})
+				:list -> expr.left.elems |> each(fn(elem) if elem.type {
+					:identifier -> names << elem.val
+				})
+			}
+			expr.type = :function & expr.name != ? & expr.name != '' ->
+				names << expr.name
+		})
+		names
+	}
+
+	// renderHoistedBlockExprs renders a list of block expressions with
+	// variable hoisting: emits var declarations at top, then renders exprs
+	// with local? cleared (so := becomes =).
+	fn renderHoistedBlockExprs(exprs) {
+		result := ''
+		locals := collectBlockLocals(exprs)
+		locals |> each(fn(name) {
+			result <- result + 'var ' + goIdent(name) + ' OakValue; '
+		})
+		lastIdx := len(exprs) - 1
+		exprs |> each(fn(expr, i) {
+			wasLocal := expr.local?
+			if expr.type = :assignment & expr.local? -> expr.local? <- false
+			if i = lastIdx {
+				true -> result <- result + renderReturnExpr(expr)
+				_ -> result <- result + renderNode(expr) + '; '
+			}
+			if wasLocal != ? -> expr.local? <- wasLocal
+		})
+		result
+	}
+
 	fn renderNode(node) if node {
 		? -> 'nil'
 		_ -> if node.type {
@@ -272,7 +639,7 @@ fn renderGoBundle(bundleNode) {
 					:identifier -> goStr(k.val) + ': ' + renderNode(v)
 					:string -> goStr(k.val) + ': ' + renderNode(v)
 					:int -> goStr(string(k.val)) + ': ' + renderNode(v)
-					_ -> renderNode(k) + ': ' + renderNode(v)
+					_ -> '__as_oak_string(' + renderNode(k) + '): ' + renderNode(v)
 				}
 			}) |> join(', ')) + '}'
 
@@ -289,7 +656,7 @@ fn renderGoBundle(bundleNode) {
 				:modulus -> '(int(__oak_to_float(' + renderNode(node.left) + ')) % int(__oak_to_float(' + renderNode(node.right) + ')))'
 				:exponent -> 'math.Pow(__oak_to_float(' + renderNode(node.left) + '), __oak_to_float(' + renderNode(node.right) + '))'
 				:rshift -> '(int(__oak_to_float(' + renderNode(node.left) + ')) >> int(__oak_to_float(' + renderNode(node.right) + ')))'
-				:pushArrow -> '__oak_push(' + renderNode(node.left) + '.(OakList), ' + renderNode(node.right) + ')'
+				:pushArrow -> '__oak_push(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
 				:and -> '__oak_and(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
 				:or -> '__oak_or(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
 				:xor -> '(int(__oak_to_float(' + renderNode(node.left) + ')) ^ int(__oak_to_float(' + renderNode(node.right) + ')))'
@@ -318,26 +685,48 @@ fn renderGoBundle(bundleNode) {
 					}
 					'__oak_set(' + container + ', ' + key + ', ' + renderNode(node.right) + ')'
 				}
-				:object -> 'func() OakValue {' + {
-					result := '__oak_assgn := ' + renderNode(node.right) + '; '
-					node.left.entries |> each(fn(entry) {
-						{ key: k, val: v } := entry
-						name := if v.type {
-							:identifier -> v.val
-							_ -> k.val
-						}
-						result <- result + goIdent(name) + ' = __oak_acc(__oak_assgn, ' + goStr(k.val) + '); '
-					})
-					result
-				} + 'return __oak_assgn}()'
-				:list -> 'func() OakValue {' + {
-					result := '__oak_assgn := ' + renderNode(node.right) + '; '
-					node.left.elems |> each(fn(elem, i) if elem.type {
-						:identifier -> result <- result + goIdent(elem.val) + ' = __oak_acc(__oak_assgn, ' + string(i) + '); '
-						:empty -> ?
-					})
-					result
-				} + 'return __oak_assgn}()'
+				:object -> {
+					prefix := ''
+					if node.local? {
+						true -> node.left.entries |> each(fn(entry) {
+							{ key: k, val: v } := entry
+							name := if v.type {
+								:identifier -> v.val
+								_ -> k.val
+							}
+							prefix <- prefix + 'var ' + goIdent(name) + ' OakValue; '
+						})
+					}
+					prefix + 'func() OakValue {' + {
+						result := '__oak_assgn := ' + renderNode(node.right) + '; '
+						node.left.entries |> each(fn(entry) {
+							{ key: k, val: v } := entry
+							name := if v.type {
+								:identifier -> v.val
+								_ -> k.val
+							}
+							result <- result + goIdent(name) + ' = __oak_acc(__oak_assgn, ' + goStr(k.val) + '); '
+						})
+						result
+					} + 'return __oak_assgn}()'
+				}
+				:list -> {
+					prefix := ''
+					if node.local? {
+						true -> node.left.elems |> each(fn(elem, i) if elem.type {
+							:identifier -> prefix <- prefix + 'var ' + goIdent(elem.val) + ' OakValue; '
+							:empty -> ?
+						})
+					}
+					prefix + 'func() OakValue {' + {
+						result := '__oak_assgn := ' + renderNode(node.right) + '; '
+						node.left.elems |> each(fn(elem, i) if elem.type {
+							:identifier -> result <- result + goIdent(elem.val) + ' = __oak_acc(__oak_assgn, ' + string(i) + '); '
+							:empty -> ?
+						})
+						result
+					} + 'return __oak_assgn}()'
+				}
 				_ -> {
 					leftStr := renderNode(node.left)
 					rightStr := renderNode(node.right)
@@ -373,23 +762,13 @@ fn renderGoBundle(bundleNode) {
 				}
 			} + '}()'
 
-			:block -> 'func() OakValue {' + {
-				result := ''
-				lastIdx := len(node.exprs) - 1
-				node.exprs |> each(fn(expr, i) {
-					if i = lastIdx {
-						true -> result <- result + renderReturnExpr(expr)
-						_ -> result <- result + renderNode(expr) + '; '
-					}
-				})
-				result
-			} + '}()'
+			:block -> 'func() OakValue {' + renderHoistedBlockExprs(node.exprs) + '}()'
 
 			:function -> {
 				args := node.args
-				'OakFn(func(__oak_args ...OakValue) OakValue {' + {
+				fnExpr := 'OakFn(func(__oak_args ...OakValue) OakValue {' + {
 					argBindings := args |> map(fn(a, i) {
-						'var ' + goIdent(a) + ' OakValue; if len(__oak_args) > ' + string(i) + ' { ' + goIdent(a) + ' = __oak_args[' + string(i) + '] }; '
+						'var ' + goIdent(a) + ' OakValue; if len(__oak_args) > ' + string(i) + ' { ' + goIdent(a) + ' = __oak_args[' + string(i) + '] }; _ = ' + goIdent(a) + '; '
 					}) |> join('')
 
 					restBinding := if node.restArg {
@@ -398,21 +777,16 @@ fn renderGoBundle(bundleNode) {
 					}
 
 					bodyStr := if node.body.type = :block {
-						true -> {
-							bResult := ''
-							bLastIdx := len(node.body.exprs) - 1
-							node.body.exprs |> each(fn(expr, i) {
-								if i = bLastIdx {
-									true -> bResult <- bResult + renderReturnExpr(expr)
-									_ -> bResult <- bResult + renderNode(expr) + '; '
-								}
-							})
-							bResult
-						}
+						true -> renderHoistedBlockExprs(node.body.exprs)
 						_ -> renderReturnExpr(node.body)
 					}
 					argBindings + restBinding + bodyStr
 				} + '})'
+				// Named functions: just assignment (var is hoisted by block)
+				if node.name {
+					?, '' -> fnExpr
+					_ -> goIdent(node.name) + ' = ' + fnExpr
+				}
 			}
 
 			:fnCall -> {
@@ -425,8 +799,53 @@ fn renderGoBundle(bundleNode) {
 		}
 	}
 
-	renderReturnExpr <- fn(node) if node.type = :assignment & !(node.left.type = :propertyAccess | node.left.type = :object | node.left.type = :list) {
-		true -> renderNode(node) + '; return OakValue(' + renderNode(node.left) + ')'
+	renderReturnExpr <- fn(node) if {
+		// Named functions: declare + assign, then return the name
+		node.type = :function & node.name != ? & node.name != '' ->
+			renderNode(node) + '; return OakValue(' + goIdent(node.name) + ')'
+		// Object destructuring: emit var decls + assignments + return
+		node.type = :assignment & node.left.type = :object -> {
+			prefix := ''
+			if node.local? {
+				true -> node.left.entries |> each(fn(entry) {
+					{ key: k, val: v } := entry
+					name := if v.type {
+						:identifier -> v.val
+						_ -> k.val
+					}
+					prefix <- prefix + 'var ' + goIdent(name) + ' OakValue; '
+				})
+			}
+			body := '__oak_assgn := ' + renderNode(node.right) + '; '
+			node.left.entries |> each(fn(entry) {
+				{ key: k, val: v } := entry
+				name := if v.type {
+					:identifier -> v.val
+					_ -> k.val
+				}
+				body <- body + goIdent(name) + ' = __oak_acc(__oak_assgn, ' + goStr(k.val) + '); '
+			})
+			prefix + body + 'return OakValue(__oak_assgn)'
+		}
+		// List destructuring: emit var decls + assignments + return
+		node.type = :assignment & node.left.type = :list -> {
+			prefix := ''
+			if node.local? {
+				true -> node.left.elems |> each(fn(elem, i) if elem.type {
+					:identifier -> prefix <- prefix + 'var ' + goIdent(elem.val) + ' OakValue; '
+					:empty -> ?
+				})
+			}
+			body := '__oak_assgn := ' + renderNode(node.right) + '; '
+			node.left.elems |> each(fn(elem, i) if elem.type {
+				:identifier -> body <- body + goIdent(elem.val) + ' = __oak_acc(__oak_assgn, ' + string(i) + '); '
+				:empty -> ?
+			})
+			prefix + body + 'return OakValue(__oak_assgn)'
+		}
+		// Regular assignments: assign then return the left-hand side
+		node.type = :assignment & !(node.left.type = :propertyAccess) ->
+			renderNode(node) + '; return OakValue(' + renderNode(node.left) + ')'
 		_ -> 'return OakValue(' + renderNode(node) + ')'
 	}
 

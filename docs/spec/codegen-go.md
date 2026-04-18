@@ -6,7 +6,7 @@ _Auto-generated from Magnolia source._
 
 ## Module: `lib\codegen-go.oak`
 
-- `GoReserved` · `[53 items]`
+- `GoReserved` · `[54 items]`
 ### `goIdent(name)`
 
 ### `goStr(s)`
