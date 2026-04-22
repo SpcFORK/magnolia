@@ -170,7 +170,7 @@ func runFileBinary(filePath string) {
 		os.Exit(1)
 	}
 
-	ctx := NewContext(filepath.Dir(absFilePath))
+	ctx := NewContextWithCwd()
 	ctx.currentFile = absFilePath
 	defer ctx.Wait()
 	ctx.LoadBuiltins()

@@ -7,6 +7,8 @@
 	default: default
 	slice: slice
 	map: map
+	toHex: toHex
+	fromHex: fromHex
 } := import('std')
 {
 	space?: space?
@@ -14,6 +16,8 @@
 } := import('str')
 
 // string escape '"'
+// Escapes control chars, quotes, backslash, and any byte >= 0x80
+// to ensure binary data in JSON strings survives UTF-8 encoding.
 fn esc(c) if c {
 	'\t' -> '\\t'
 	'\n' -> '\\n'
@@ -21,8 +25,22 @@ fn esc(c) if c {
 	'\f' -> '\\f'
 	'"' -> '\\"'
 	'\\' -> '\\\\'
-	_ -> c
+	_ -> uEscape(c)
 }
+
+fn uEscape(c) {
+	cp := codepoint(c)
+	if cp < 32 | cp >= 128 {
+		true -> '\\u00' << toHex(cp >> 4) << toHex(cp & 15)
+		_ -> c
+	}
+}
+
+fn uParse(uc) {
+	cp := ((fromHex(uc.(0)) << 4) | fromHex(uc.(1)))
+	codepoint(cp)
+}
+
 
 // escapes whole string
 fn escape(s) {
@@ -106,6 +124,7 @@ fn parseNull(r) if r.nextWord(4) {
 
 fn parseString(r) {
 	next := r.next
+	nextWord := r.nextWord
 
 	next() // eat the double quote
 
@@ -117,6 +136,7 @@ fn parseString(r) {
 			'r' -> '\r'
 			'f' -> '\f'
 			'"' -> '"'
+			'u' -> uParse(nextWord(4))
 			_ -> c
 		})
 		'"' -> acc

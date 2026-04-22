@@ -13,6 +13,7 @@ std := import('std')
 	merge: merge
 	contains?: contains?
 	range: stdRange
+	values: values
 } := std
 
 syntax := import('syntax')
@@ -21,9 +22,41 @@ fmt := import('fmt')
 printf := fmt.printf
 str := import('str')
 join := str.join
+strSplit := str.split
 
 builtinKeys := keys
 builtinValues := values
+
+// Detect JS runtime: Reflect is a global in browsers/Node but undefined in Go.
+// Cache once at load time so vmGetProp can cheaply decide whether to bind methods.
+__jsReflectApply := if Reflect != ? {
+	true -> Reflect.('apply')
+	_ -> ?
+}
+
+// setTimeout is present in browser/Node.js JS runtimes but absent in Go native.
+// Cache once at module load time so the async step dispatch can check cheaply.
+__jsSetTimeout := if setTimeout != ? {
+	true -> setTimeout
+	_ -> ?
+}
+
+// __jsTryCall wraps a function call in JS try/catch so host exceptions
+// surface as Oak error objects instead of crashing the VM synchronously.
+// Returns {ok: true, value: result} or {ok: false, error: message}.
+// In native (no Function), falls back to ? so callers can bypass.
+__jsTryCall := if Function != ? {
+	true -> Function('fn', 'args',
+		'try { return { ok: true, value: fn.apply(null, args) } } ' <<
+		'catch (e) { return { ok: false, error: String((e && e.stack) || e) } }'
+	)
+	_ -> ?
+}
+
+// vmDebugLog prints debug/error messages via the host environment's print
+// mechanism. Works on both native (stdout) and web (console.log via printf).
+// Prefixes with '[VM]' so messages can be filtered from application output.
+fn vmDebugLog(msg) printf('[VM] ' << string(msg) << '\n')
 
 MODE_WASM := :wasm
 MODE_GO := :go
@@ -34,6 +67,10 @@ CONST_FLOAT := 2
 
 I32_SIGN := 2147483648
 I32_WRAP := 4294967296
+
+// Pre-allocated VM stack capacity. Slots beyond this auto-extend via Oak list
+// index assignment, but pre-allocating avoids resize overhead in the common case.
+_STACK_CAPACITY := 2048
 
 // rangeN(n) returns [0, 1, 2, ..., n-1]
 fn rangeN(n) if n <= 0 {
@@ -52,14 +89,17 @@ fn bytesFromAny(v) if type(v) {
 }
 
 fn readU16(bs, at) {
-	(bs.(at) & 0xFF) | ((bs.(at + 1) & 0xFF) << 8)
+	a := bs.(at) |> default(0)
+	b := bs.(at + 1) |> default(0)
+	(a & 0xFF) | ((b & 0xFF) << 8)
 }
 
 fn readU32(bs, at) {
-	(bs.(at) & 0xFF) |
-	((bs.(at + 1) & 0xFF) << 8) |
-	((bs.(at + 2) & 0xFF) << 16) |
-	((bs.(at + 3) & 0xFF) << 24)
+	a := bs.(at) |> default(0)
+	b := bs.(at + 1) |> default(0)
+	c := bs.(at + 2) |> default(0)
+	d := bs.(at + 3) |> default(0)
+	(a & 0xFF) | ((b & 0xFF) << 8) | ((c & 0xFF) << 16) | ((d & 0xFF) << 24)
 }
 
 fn readI32(bs, at) {
@@ -154,19 +194,125 @@ fn decodeFunctionTableBytes(raw) {
 					lc := readU16(bs, cursor + 6)
 					hr := bs.(cursor + 8) != 0
 					cursor <- cursor + 9
+
+					// Parse local names if present
+					localNames := []
+					if cursor + 2 <= len(bs) {
+						true -> {
+							nameCount := readU16(bs, cursor)
+							cursor <- cursor + 2
+							fn readName(j) if j < nameCount & cursor + 2 <= len(bs) {
+								true -> {
+									nl := readU16(bs, cursor)
+									cursor <- cursor + 2
+									nameStr := bytesToString(bs, cursor, nl)
+									cursor <- cursor + nl
+									localNames <- localNames |> append([nameStr])
+									readName(j + 1)
+								}
+							}
+							readName(0)
+						}
+					}
+
 					out <- out |> append([{
 						offset: off
 						arity: ar
 						localCount: lc
 						hasRestArg: hr
 						name: ''
-						localNames: []
+						localNames: localNames
 					}])
 					readEntry(i + 1)
 				}
 			}
 			readEntry(0)
 			out
+		}
+	}
+}
+
+fn decodeNameListBytes(raw) {
+	bs := bytesFromAny(raw)
+	if len(bs) < 4 {
+		true -> []
+		_ -> {
+			count := readU32(bs, 0)
+			cursor := 4
+			out := []
+
+			fn readEntry(i) if i < count & cursor + 2 <= len(bs) {
+				true -> {
+					nl := readU16(bs, cursor)
+					cursor <- cursor + 2
+					nameStr := bytesToString(bs, cursor, nl)
+					cursor <- cursor + nl
+					out <- out |> append([nameStr])
+					readEntry(i + 1)
+				}
+			}
+			readEntry(0)
+			out
+		}
+	}
+}
+
+// Parse a raw MBC binary blob ("MGbc" header) into a structured chunk object
+fn parseMBCBinary(raw) {
+	bs := bytesFromAny(raw)
+	if len(bs) < 10 {
+		true -> ?
+		_ -> {
+			// Verify magic "MGbc"
+			magic := bytesToString(bs, 0, 4)
+			if magic != 'MGbc' {
+				true -> ?
+				_ -> {
+					_version := readU16(bs, 4)
+					cursor := 6
+
+					// Section 1: Bytecode
+					bcLen := readU32(bs, cursor)
+					cursor <- cursor + 4
+					code := stdSlice(bs, cursor, cursor + bcLen)
+					cursor <- cursor + bcLen
+
+					// Section 2: Constant Pool
+					cpLen := readU32(bs, cursor)
+					cursor <- cursor + 4
+					cpData := stdSlice(bs, cursor, cursor + cpLen)
+					cursor <- cursor + cpLen
+					constants := decodeConstantPoolBytes(cpData)
+
+					// Section 3: Function Table
+					ftLen := readU32(bs, cursor)
+					cursor <- cursor + 4
+					ftData := stdSlice(bs, cursor, cursor + ftLen)
+					cursor <- cursor + ftLen
+					functions := decodeFunctionTableBytes(ftData)
+
+					// Section 4: Top-Level Names (optional)
+					topLevelNames := if cursor + 4 <= len(bs) {
+						true -> {
+							tlLen := readU32(bs, cursor)
+							cursor <- cursor + 4
+							tlData := stdSlice(bs, cursor, cursor + tlLen)
+							cursor <- cursor + tlLen
+							decodeNameListBytes(tlData)
+						}
+						_ -> []
+					}
+
+					{
+						mode: :go
+						code: code
+						constants: constants
+						functions: functions
+						topLevelNames: topLevelNames
+						metadata: {}
+					}
+				}
+			}
 		}
 	}
 }
@@ -340,38 +486,37 @@ fn defaultOpcodes(mode) if mode {
 		TAIL_CALL: 44
 		BUILTIN: 45
 		IMPORT: 46
-		DEEP_EQ: 47
-		SWAP: 48
-		MATCH_JUMP: 49
-		SCOPE_PUSH: 50
-		SCOPE_POP: 51
-		CALL_SPREAD: ?
-		IMPORT_DYN: ?
+		IMPORT_DYN: 47
+		DEEP_EQ: 48
+		SWAP: 49
+		MATCH_JUMP: 50
+		SCOPE_PUSH: 51
+		SCOPE_POP: 52
+		CALL_SPREAD: 53
 		UPVAL_BY_NAME: true
 	}
 }
 
 fn stackPush(vm, v) {
-	vm.stack <- vm.stack |> append([v])
+	if vm.sp < 0 -> vm.sp <- 0
+	vm.stack.(vm.sp) <- v
+	vm.sp <- vm.sp + 1
 }
 
 fn stackPop(vm) {
-	n := len(vm.stack)
-	if n <= 0 {
+	if vm.sp <= 0 {
 		true -> ?
 		_ -> {
-			v := vm.stack.(n - 1)
-			vm.stack <- stdSlice(vm.stack, 0, n - 1)
-			v
+			vm.sp <- vm.sp - 1
+			vm.stack.(vm.sp)
 		}
 	}
 }
 
 fn stackPeek(vm) {
-	n := len(vm.stack)
-	if n <= 0 {
+	if vm.sp <= 0 {
 		true -> ?
-		_ -> vm.stack.(n - 1)
+		_ -> vm.stack.(vm.sp - 1)
 	}
 }
 
@@ -383,6 +528,17 @@ fn currentFrame(vm) {
 		true -> vm.frames.(i)
 		_ -> ?
 	}
+}
+
+// Find a top-level local by name and return its value
+fn findTopLocal(vm, name) {
+	fn search(i) if i < len(vm.chunk.topLevelNames) {
+		true -> if vm.chunk.topLevelNames.(i) = name {
+			true -> vm.topLocals.(i)
+			_ -> search(i + 1)
+		}
+	}
+	search(0)
 }
 
 fn setCurrentFrame(vm, frame) {
@@ -475,7 +631,7 @@ fn scopeSetByDepthSlot(scope, depth, slot, val) {
 }
 
 fn fetchU8(vm) {
-	v := vm.chunk.code.(vm.pc)
+	v := vm.chunk.code.(vm.pc) |> default(0)
 	vm.pc <- vm.pc + 1
 	v & 0xFF
 }
@@ -519,10 +675,17 @@ fn vmGetProp(obj, key) if type(obj) {
 			i := key
 			if i < 0 | i >= len(obj) {
 				true -> ?
-				_ -> slice(obj, i, i + 1)
+				_ -> stdSlice(obj, i, i + 1)
 			}
 		}
-		_ -> ?
+		_ -> if key {
+			// Support JS-like method calls needed for DOM interop
+			'toString' -> fn() obj
+			'valueOf' -> fn() obj
+			'split' -> fn(sep) strSplit(obj, sep)
+			'length' -> len(obj)
+			_ -> ?
+		}
 	}
 	:list -> if type(key) = :int {
 		true -> {
@@ -534,7 +697,18 @@ fn vmGetProp(obj, key) if type(obj) {
 		}
 		_ -> ?
 	}
-	:object -> obj.(keyToString(key)) |> default(?)
+	:object -> {
+		k := keyToString(key)
+		val := obj.(k) |> default(?)
+		// Wrap native JS functions to preserve `this` binding (needed for DOM methods
+		// like document.createElement, element.appendChild, etc.).
+		// Only applies in the browser JS runtime where __jsReflectApply is set.
+		// In the Go runtime, host functions are Oak closures that don't need `this`.
+		if type(val) = :function & __jsReflectApply != ? {
+			true -> fn(args...) __jsReflectApply(val, obj, args)
+			_ -> val
+		}
+	}
 	_ -> ?
 }
 
@@ -548,11 +722,11 @@ fn vmSetProp(obj, key, val) if type(obj) {
 				}
 			}
 		}
-		val
+		obj
 	}
 	:object -> {
 		obj.(keyToString(key)) <- val
-		val
+		obj
 	}
 	_ -> val
 }
@@ -681,23 +855,51 @@ fn vmDiv(a, b) {
 }
 
 fn vmMod(a, b) {
-	if (type(b) = :int & b = 0) | (type(b) = :float & b = 0.0) {
+	if a = ? | b = ? {
 		true -> ?
-		_ -> if type(a) = :int & type(b) = :int {
-			true -> a % b
-			_ -> float(a) % float(b)
+		_ -> if (type(b) = :int & b = 0) | (type(b) = :float & b = 0.0) {
+			true -> ?
+			_ -> if type(a) {
+				:int -> if type(b) {
+					:int -> a % b
+					:float -> float(a) % b
+					_ -> ?
+				}
+				:float -> if type(b) {
+					:int -> a % float(b)
+					:float -> a % b
+					_ -> ?
+				}
+				_ -> ?
+			}
 		}
 	}
 }
 
-fn vmPow(a, b) pow(float(a), float(b))
+fn vmPow(a, b) if a = ? {
+	true -> ?
+	_ -> if b = ? {
+		true -> ?
+		_ -> {
+			fa := float(a)
+			fb := float(b)
+			if fa = ? | fb = ? {
+				true -> ?
+				_ -> pow(fa, fb)
+			}
+		}
+	}
+}
 
-fn vmCompare(op, a, b) if op {
-	:gt -> a > b
-	:lt -> a < b
-	:geq -> a >= b
-	:leq -> a <= b
-	_ -> false
+fn vmCompare(op, a, b) if a = ? | b = ? {
+	true -> false
+	_ -> if op {
+		:gt -> a > b
+		:lt -> a < b
+		:geq -> a >= b
+		:leq -> a <= b
+		_ -> false
+	}
 }
 
 fn vmConcat(a, b) if type(a) {
@@ -711,9 +913,9 @@ fn vmConcat(a, b) if type(a) {
 		_ -> ?
 	}
 	:list -> {
-		out := clone(a)
-		out <- out << b
-		out
+		// Oak semantics: `<<` on list mutates in-place and returns the list.
+		a << b
+		a
 	}
 	_ -> ?
 }
@@ -752,7 +954,13 @@ fn callBuiltin(idx, args) if idx {
 	}
 	2 -> if len(args) < 1 {
 		true -> :null
-		_ -> type(args.(0))
+		_ -> {
+			v := args.(0)
+			if type(v) = :object & v.type = :closure {
+				true -> :function
+				_ -> type(v)
+			}
+		}
 	}
 	3 -> if len(args) < 1 {
 		true -> ''
@@ -778,7 +986,13 @@ fn callBuiltin(idx, args) if idx {
 	}
 	7 -> if len(args) < 1 {
 		true -> ''
-		_ -> char(int(args.(0)) & 0xFF)
+		_ -> {
+			n := int(args.(0))
+			if n = ? {
+				true -> char(0)
+				_ -> char(n & 0xFF)
+			}
+		}
 	}
 	8 -> if len(args) < 1 {
 		true -> []
@@ -794,9 +1008,20 @@ fn callBuiltin(idx, args) if idx {
 			_ -> []
 		}
 	}
-	10 -> if len(args) < 3 {
+	10 -> if len(args) < 1 {
 		true -> ?
-		_ -> slice(args.(0), args.(1), args.(2))
+		_ -> {
+			xs := args.(0)
+			start := if len(args) > 1 {
+				true -> args.(1)
+				_ -> 0
+			}
+			end := if len(args) > 2 {
+				true -> args.(2)
+				_ -> len(xs)
+			}
+			stdSlice(xs, start, end)
+		}
 	}
 	11 -> if len(args) < 2 {
 		true -> ?
@@ -860,7 +1085,7 @@ fn makeFrame(vm, closure, args, returnPC) {
 
 	{
 		returnPC: returnPC
-		baseSlot: len(vm.stack)
+		baseSlot: vm.sp
 		fnIdx: closure.fnIdx
 		locals: locals
 		scope: scope
@@ -875,26 +1100,82 @@ fn invokeCallable(vm, callee, args) {
 			vm.pc <- vm.chunk.functions.(callee.fnIdx).offset
 		}
 		_ -> if type(callee) = :function {
-			true -> stackPush(vm, callee(args...))
-			_ -> stackPush(vm, ?)
+			true -> {
+				// Wrap any bytecode closures in args so host functions can call them
+				wrappedArgs := wrapClosureArgs(vm, args)
+
+				// In JS runtime, wrap in try/catch so host exceptions don't crash the VM
+				// with a bare JS error and instead propagate as a logged VM error.
+				result := if __jsTryCall != ? {
+					true -> {
+						r := __jsTryCall(callee, wrappedArgs)
+						if r.ok {
+							true -> r.value
+							_ -> {
+								vmDebugLog('ERROR in host call name=' << string(name(callee)) <<
+									' args=(' << (wrappedArgs |> map(fn(a) string(type(a))) |> join(',')) <<
+									') pc=' << string(vm.pc) << ': ' << string(r.error))
+								?
+							}
+						}
+					}
+					_ -> callee(wrappedArgs...)
+				}
+				stackPush(vm, result)
+			}
+			_ -> {
+				stackPush(vm, ?)
+			}
 		}
+	}
+}
+
+// wrapClosureArgs replaces any bytecode closure objects in the given args
+// list with callable host functions so that host code (e.g. std.each) can
+// invoke them seamlessly. Uses vm.callClosureSync which is set inside runChunk.
+fn wrapClosureArgs(vm, args) {
+	fn hasClosure(i) if i < len(args) {
+		true -> if type(args.(i)) = :object & args.(i).type = :closure {
+			true -> true
+			_ -> hasClosure(i + 1)
+		}
+		_ -> false
+	}
+	if !hasClosure(0) {
+		true -> args
+		_ -> args |> map(fn(a) if type(a) = :object & a.type = :closure {
+			true -> fn(innerArgs...) vm.callClosureSync(a, innerArgs)
+			_ -> a
+		})
 	}
 }
 
 fn popArgs(vm, arity) {
-	out := rangeN(arity) |> map(fn(_) ?)
-	fn fill(i) if i >= 0 {
-		true -> {
-			out.(i) <- stackPop(vm)
-			fill(i - 1)
+	if arity <= 0 {
+		true -> []
+		_ -> {
+			newSp := vm.sp - arity
+			safeNewSp := if newSp < 0 { true -> 0, _ -> newSp }
+			out := stdSlice(vm.stack, safeNewSp, vm.sp)
+			vm.sp <- safeNewSp
+			out
 		}
 	}
-	fill(arity - 1)
-	out
 }
 
 fn runChunk(rawChunk, opts) {
-	chunk := normalizeChunk(rawChunk)
+	// Detect raw MBC binary (string starting with "MGbc") and parse it first
+	parsedChunk := if type(rawChunk) = :string {
+		true -> {
+			parsed := parseMBCBinary(rawChunk)
+			if parsed != ? {
+				true -> parsed
+				_ -> rawChunk
+			}
+		}
+		_ -> rawChunk
+	}
+	chunk := normalizeChunk(parsedChunk)
 	op := defaultOpcodes(chunk.mode)
 	opts := opts |> default({})
 	globals := opts.globals |> default({})
@@ -917,7 +1198,8 @@ fn runChunk(rawChunk, opts) {
 		chunk: chunk
 		op: op
 		pc: 0
-		stack: []
+		stack: rangeN(_STACK_CAPACITY) |> map(fn(_) ?)
+		sp: 0
 		frames: []
 		topLocals: topLocals
 		topScope: topScope
@@ -925,15 +1207,39 @@ fn runChunk(rawChunk, opts) {
 		importFn: importFn
 		finished: false
 		result: ?
+		stepCount: 0
+		trace: opts.trace |> default(false)
+		debug: opts.debug |> default(false)
 	}
 
-	fn step() {
+	if vm.debug -> {
+		vmDebugLog('runChunk: start, codeLen=' << string(len(chunk.code)) <<
+			' fnCount=' << string(len(chunk.functions)) <<
+			' topNames=' << string(len(chunk.topLevelNames)) <<
+			' jsRuntime=' << string(__jsTryCall != ?))
+	}
+
+	// Cache the slot index of __oak_module_import in topLevelNames so the
+	// IMPORT opcode can resolve the module closure in O(1) instead of O(n).
+	_moduleImportSlot := {
+		fn findSlot(i) if i < len(chunk.topLevelNames) {
+			true -> if chunk.topLevelNames.(i) = '__oak_module_import' {
+				true -> i
+				_ -> findSlot(i + 1)
+			}
+			_ -> -1
+		}
+		findSlot(0)
+	}
+
+	fn stepOnce() {
 		if !vm.finished {
 			true -> {
 			if vm.pc >= len(vm.chunk.code) {
 				true -> {
+					if vm.trace -> print('[VM] PC overflow at ' << string(vm.pc) << ' (code len=' << string(len(vm.chunk.code)) << ') after ' << string(vm.stepCount) << ' steps')
 					vm.finished <- true
-					vm.result <- if len(vm.stack) > 0 {
+					vm.result <- if vm.sp > 0 {
 						true -> stackPop(vm)
 						_ -> ?
 					}
@@ -942,11 +1248,13 @@ fn runChunk(rawChunk, opts) {
 
 			if !vm.finished {
 				true -> {
+					vm.stepCount <- vm.stepCount + 1
 					opcode := fetchU8(vm)
 					if {
 					opcode = op.HALT -> {
+						if vm.trace -> print('[VM] HALT after ' << string(vm.stepCount) << ' steps')
 						vm.finished <- true
-						vm.result <- if len(vm.stack) > 0 {
+						vm.result <- if vm.sp > 0 {
 							true -> stackPop(vm)
 							_ -> ?
 						}
@@ -963,10 +1271,9 @@ fn runChunk(rawChunk, opts) {
 					opcode = op.POP -> stackPop(vm)
 					opcode = op.DUP -> stackPush(vm, stackPeek(vm))
 					opcode = op.SWAP -> {
-						a := stackPop(vm)
-						b := stackPop(vm)
-						stackPush(vm, a)
-						stackPush(vm, b)
+						tmp := vm.stack.(vm.sp - 1)
+						vm.stack.(vm.sp - 1) <- vm.stack.(vm.sp - 2)
+						vm.stack.(vm.sp - 2) <- tmp
 					}
 					opcode = op.LOAD_LOCAL -> {
 						slot := fetchU16(vm)
@@ -1094,27 +1401,54 @@ fn runChunk(rawChunk, opts) {
 					}
 					opcode = op.NEG -> {
 						x := stackPop(vm)
-						stackPush(vm, -x)
+						if x = ? {
+							true -> stackPush(vm, 0)
+							_ -> stackPush(vm, -x)
+						}
 					}
 					opcode = op.BAND -> {
 						r := stackPop(vm)
 						l := stackPop(vm)
-						stackPush(vm, l & r)
+						if l = ? {
+							true -> stackPush(vm, 0)
+							_ -> if r = ? {
+								true -> stackPush(vm, 0)
+								_ -> stackPush(vm, l & r)
+							}
+						}
 					}
 					opcode = op.BOR -> {
 						r := stackPop(vm)
 						l := stackPop(vm)
-						stackPush(vm, l | r)
+						if l = ? {
+							true -> stackPush(vm, 0)
+							_ -> if r = ? {
+								true -> stackPush(vm, 0)
+								_ -> stackPush(vm, l | r)
+							}
+						}
 					}
 					opcode = op.BXOR -> {
 						r := stackPop(vm)
 						l := stackPop(vm)
-						stackPush(vm, l ^ r)
+						if l = ? {
+							true -> stackPush(vm, 0)
+							_ -> if r = ? {
+								true -> stackPush(vm, 0)
+								_ -> stackPush(vm, l ^ r)
+							}
+						}
 					}
 					opcode = op.BRSHIFT -> {
 						r := stackPop(vm)
 						l := stackPop(vm)
-						stackPush(vm, l >> r)
+						if l = ? {
+							true -> stackPush(vm, 0)
+							_ -> if r = ? {
+								true -> stackPush(vm, 0)
+								_ -> stackPush(vm, l >> r)
+							}
+						}
 					}
 					opcode = op.EQ -> {
 						r := stackPop(vm)
@@ -1158,27 +1492,31 @@ fn runChunk(rawChunk, opts) {
 					opcode = op.CONCAT -> {
 						r := stackPop(vm)
 						l := stackPop(vm)
-						stackPush(vm, vmConcat(l, r))
+						result := vmConcat(l, r)
+						// Tracks `<<` on list/string which should never return null
+						// for non-null inputs.
+						if vm.debug & result = ? & l != ? -> {
+							vmDebugLog('CONCAT returned null! l=' << string(type(l)) << ' r=' << string(type(r)) << ' pc=' << string(vm.pc))
+						}
+						stackPush(vm, result)
 					}
 					opcode = op.MAKE_LIST -> {
 						count := fetchU16(vm)
-						items := []
-						fn loop(i) if i < count {
-							true -> {
-								items <- [stackPop(vm)] |> append(items)
-								loop(i + 1)
-							}
-						}
-						loop(0)
+						newSp := vm.sp - count
+						safeNewSp := if newSp < 0 { true -> 0, _ -> newSp }
+						items := stdSlice(vm.stack, safeNewSp, vm.sp)
+						vm.sp <- safeNewSp
 						stackPush(vm, items)
 					}
 					opcode = op.MAKE_OBJECT -> {
 						count := fetchU16(vm)
 						obj := {}
-						fn loop(i) if i < count {
+						fn loop(i) if i < count & vm.sp >= 2 {
 							true -> {
-								val := stackPop(vm)
-								key := stackPop(vm)
+								vm.sp <- vm.sp - 1
+								val := vm.stack.(vm.sp)
+								vm.sp <- vm.sp - 1
+								key := vm.stack.(vm.sp)
 								obj.(keyToString(key)) <- val
 								loop(i + 1)
 							}
@@ -1246,6 +1584,7 @@ fn runChunk(rawChunk, opts) {
 								frame := vm.frames.(len(vm.frames) - 1)
 								vm.frames <- stdSlice(vm.frames, 0, len(vm.frames) - 1)
 								vm.pc <- frame.returnPC
+								vm.sp <- frame.baseSlot
 								stackPush(vm, ret)
 							}
 						}
@@ -1277,22 +1616,52 @@ fn runChunk(rawChunk, opts) {
 						stackPush(vm, callBuiltin(bi, args))
 					}
 					opcode = op.IMPORT -> {
-						// OP_IMPORT always has a u16 constant-pool index in both modes.
+						// OP_IMPORT: prefer the bytecode's OWN bundled module registry
+						// (__oak_module_import) over the host-provided importFn.
+						// This ensures bundled modules use keys matching the bytecode's
+						// compilation target (e.g. unmungled 'default' for --bin), rather
+						// than the host's potentially name-mangled objects (e.g. JS-target
+						// '__oak_js_default'). importFn is consulted only as a fallback for
+						// modules not bundled into the chunk.
 						idx := fetchU16(vm)
 						name := string(constValueAt(vm, idx) |> default(''))
-						result := if vm.importFn != ? {
-							true -> vm.importFn(name)
-							_ -> vm.globals.(name) |> default(?)
+						modImportClosure := if _moduleImportSlot >= 0 {
+							true -> vm.topLocals.(_moduleImportSlot)
+							_ -> findTopLocal(vm, '__oak_module_import')
 						}
-						stackPush(vm, result)
+						if type(modImportClosure) = :object & modImportClosure.type = :closure {
+							true -> invokeCallable(vm, modImportClosure, [name])
+							_ -> {
+								importFnResult := if vm.importFn != ? {
+									true -> vm.importFn(name)
+									_ -> ?
+								}
+								if importFnResult != ? {
+									true -> stackPush(vm, importFnResult)
+									_ -> stackPush(vm, vm.globals.(name) |> default(?))
+								}
+							}
+						}
 					}
 					opcode = op.IMPORT_DYN -> {
 						name := string(stackPop(vm) |> default(''))
-						result := if vm.importFn != ? {
-							true -> vm.importFn(name)
-							_ -> vm.globals.(name) |> default(?)
+						if vm.trace -> print('[VM] IMPORT_DYN: ' << name)
+						// Same priority as OP_IMPORT: bundled modules first, importFn fallback.
+						modImportClosure := if _moduleImportSlot >= 0 {
+							true -> vm.topLocals.(_moduleImportSlot)
+							_ -> findTopLocal(vm, '__oak_module_import')
 						}
-						stackPush(vm, result)
+						if type(modImportClosure) = :object & modImportClosure.type = :closure {
+							true -> invokeCallable(vm, modImportClosure, [name])
+							_ -> {
+								result := if vm.importFn != ? {
+									true -> vm.importFn(name)
+									_ -> vm.globals.(name) |> default(?)
+								}
+								if vm.trace -> print('[VM] IMPORT_DYN result type: ' << string(type(result)))
+								stackPush(vm, result)
+							}
+						}
 					}
 					opcode = op.SCOPE_PUSH -> ?
 					opcode = op.SCOPE_POP -> ?
@@ -1315,14 +1684,98 @@ fn runChunk(rawChunk, opts) {
 					}
 				}
 			}
-
-				step()
 			}
 		}
 	}
 
-	step()
-	vm.result
+	fn step() {
+		fn loop() if !vm.finished {
+			true -> {
+				stepOnce()
+				loop()
+			}
+		}
+		loop()
+	}
+
+	// stepBatch: run up to n steps synchronously. Tail-recursive so TCO applies
+	// in native Oak; the web target trampolines it without growing the JS stack.
+	fn stepBatch(n) if n > 0 & !vm.finished {
+		true -> {
+			stepOnce()
+			stepBatch(n - 1)
+		}
+	}
+
+	// stepAsync: run the VM in time-sliced batches, yielding to the browser event
+	// loop between each batch via setTimeout(fn, 0). This prevents the UI from
+	// freezing when the compiled web bundle executes a bytecode program.
+	// Calls opts.onDone(result) when the VM halts.
+	fn stepAsync(onDone) {
+		batchSize := opts.batchSize |> default(50000)
+		fn runBatch() {
+			stepBatch(batchSize)
+			if vm.finished {
+				true -> if onDone != ? -> onDone(vm.result)
+				_ -> __jsSetTimeout(fn() runBatch(), 0)
+			}
+		}
+		runBatch()
+	}
+
+	// callClosureSync: run a bytecode closure to completion in a nested
+	// step loop. Used by wrapClosureArgs to let host functions call
+	// bytecode closures as callbacks (e.g. std.each).
+	vm.callClosureSync <- fn(closure, callArgs) {
+		baseFrames := len(vm.frames)
+		savedPC := vm.pc
+		savedSP := vm.sp
+		wasFinished := vm.finished
+		vm.finished <- false
+		frame := makeFrame(vm, closure, callArgs, savedPC)
+		vm.frames <- vm.frames |> append([frame])
+		ft := vm.chunk.functions.(closure.fnIdx) |> default({})
+		vm.pc <- ft.offset |> default(len(vm.chunk.code))
+
+		fn innerLoop() if !vm.finished & len(vm.frames) > baseFrames {
+			true -> {
+				stepOnce()
+				innerLoop()
+			}
+		}
+		innerLoop()
+		// If the inner execution halted (error or HALT opcode), clean up any
+		// orphaned frames and restore the stack pointer. Without this, leaked
+		// frames corrupt the caller's RETURN path and eventually cause the main
+		// step loop to read an operand byte as an opcode (misaligned PC).
+		result := if vm.finished {
+			true -> {
+				if len(vm.frames) != baseFrames -> vm.frames <- stdSlice(vm.frames, 0, baseFrames)
+				vm.sp <- savedSP
+				?
+			}
+			_ -> stackPop(vm)
+		}
+		vm.finished <- wasFinished
+		vm.pc <- savedPC
+		result
+	}
+
+	// In a browser/JS context (__jsSetTimeout is available), run asynchronously
+	// in time-sliced batches so we do not block the event loop. The caller may
+	// supply opts.onDone to receive the VM result. In native Oak (Go), run
+	// synchronously and return the result directly.
+	onDone := opts.onDone |> default(?)
+	if __jsSetTimeout != ? {
+		true -> {
+			stepAsync(onDone)
+			?
+		}
+		_ -> {
+			step()
+			vm.result
+		}
+	}
 }
 
 fn compileAst(ast) {

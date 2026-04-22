@@ -9,4 +9,4 @@ _Auto-generated from Magnolia source._
 - `OakNativeRuntime` · `'
 __Oak_Modules := {}
 __Oak_Import_Aliases := ?
-fn __oa...'`
+fn ___p...'`

@@ -358,10 +358,28 @@ cs VirtualMachine {
 		compileAstToBytecode: fn(ast) vbc.compileAst(ast)
 
 		// run a pre-compiled bytecode chunk
-		runChunk: fn(chunk, opts) vbc.runChunk(chunk, opts)
+		runChunk: fn(chunk, opts) {
+			opts := opts |> default({})
+			g := merge(clone(globalScope), opts.globals |> default({}))
+			opts.globals := g
+			// Provide an importFn so bytecode IMPORT/IMPORT_DYN
+			// opcodes can resolve standard library modules via
+			// the host VM's import().
+			if opts.importFn = ? -> opts.importFn <- fn(name) {
+				if ___runtime_lib?(name) {
+					true -> import(name)
+					_ -> g.(name)
+				}
+			}
+			vbc.runChunk(chunk, opts)
+		}
 
 		// compile and run source via bytecode VM
-		runBytecode: fn(source, opts) vbc.run(source, opts)
+		runBytecode: fn(source, opts) {
+			opts := opts |> default({})
+			opts.globals := merge(clone(globalScope), opts.globals |> default({}))
+			vbc.run(source, opts)
+		}
 	}
 }
 
@@ -388,7 +406,10 @@ cs StandardVM {
 			:bool -> :bool
 			:function -> :function
 			:list -> :list
-			:object -> :object
+			:object -> if x.type = :closure {
+				true -> :function
+				_ -> :object
+			}
 			_ -> :unknown
 		}
 	})
@@ -441,7 +462,7 @@ cs StandardVM {
 	vm.registerBuiltin('pointer', fn(x) pointer(x))
 	vm.registerBuiltin('memread', fn(address, length) memread(address, length))
 	vm.registerBuiltin('memwrite', fn(address, data) memwrite(address, data))
-	vm.registerBuiltin('go', fn(f) go(f))
+	vm.registerBuiltin('go', fn(f) if type(f) = :function -> go(f))
 	vm.registerBuiltin('lock_thread', fn() lock_thread())
 	vm.registerBuiltin('unlock_thread', fn() unlock_thread())
 	vm.registerBuiltin('make_chan', fn() make_chan())

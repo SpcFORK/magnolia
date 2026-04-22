@@ -221,9 +221,21 @@ func MakeList(xs ...Value) *ListValue {
 	return &v
 }
 func (v *ListValue) String() string {
+	return v.stringWithDepth(0)
+}
+func (v *ListValue) stringWithDepth(depth int) string {
+	if depth > 64 {
+		return "[...]"
+	}
 	valStrings := make([]string, len(*v))
 	for i, val := range *v {
-		valStrings[i] = val.String()
+		if ov, ok := val.(ObjectValue); ok {
+			valStrings[i] = ov.stringWithSeen(make(map[uintptr]bool), depth+1)
+		} else if lv, ok := val.(*ListValue); ok {
+			valStrings[i] = lv.stringWithDepth(depth + 1)
+		} else {
+			valStrings[i] = val.String()
+		}
 	}
 	return "[" + strings.Join(valStrings, ", ") + "]"
 }
@@ -323,14 +335,18 @@ type serializedObjEntry struct {
 }
 
 func (v ObjectValue) String() string {
-	return v.stringWithSeen(make(map[*ObjectValue]bool))
+	return v.stringWithSeen(make(map[uintptr]bool), 0)
 }
 
-func (v ObjectValue) stringWithSeen(seen map[*ObjectValue]bool) string {
-	if seen[&v] {
+func (v ObjectValue) stringWithSeen(seen map[uintptr]bool, depth int) string {
+	if depth > 64 {
 		return "{...}"
 	}
-	seen[&v] = true
+	ptr := reflect.ValueOf(v).Pointer()
+	if seen[ptr] {
+		return "{...}"
+	}
+	seen[ptr] = true
 
 	// Snapshot key-value pairs under read lock, then release before
 	// recursing into child ObjectValues (avoids recursive RLock).
@@ -349,7 +365,9 @@ func (v ObjectValue) stringWithSeen(seen map[*ObjectValue]bool) string {
 	for i, p := range pairs {
 		valStr := ""
 		if ov, ok := p.v.(ObjectValue); ok {
-			valStr = ov.stringWithSeen(seen)
+			valStr = ov.stringWithSeen(seen, depth+1)
+		} else if lv, ok := p.v.(*ListValue); ok {
+			valStr = lv.stringWithDepth(depth + 1)
 		} else {
 			valStr = p.v.String()
 		}

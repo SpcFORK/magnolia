@@ -2,6 +2,7 @@
 
 { _default: _default, _err: _err } := import('gui-common')
 guiThread := import('gui-thread')
+{ filter: filter } := import('std')
 
 fn _isFn?(value) type(value) = :function
 
@@ -343,5 +344,109 @@ fn webglFlush(window) if window.type {
 		}
 		_ -> _err('webglFlush is only available on web backend', window.backend)
 	}
+	_ -> window
+}
+
+// --- Canvas 2D helpers ---
+
+// colorToCss converts a packed RGBA integer (0xAABBGGRR or 0x00RRGGBB) to
+// a CSS 'rgba(r,g,b,a)' string suitable for Canvas 2D fillStyle / strokeStyle.
+fn colorToCss(packed) {
+	r := packed & 255
+	g := (packed >> 8) & 255
+	b := (packed >> 16) & 255
+	a := (packed >> 24) & 255
+	alpha := if a = 0 { true -> 1, _ -> float(a) / 255.0 }
+	'rgba(' + string(r) + ',' + string(g) + ',' + string(b) + ',' + string(alpha) + ')'
+}
+
+// beginFrame clears the message queue and records a :frame_begin marker.
+fn beginFrame(window) if window.type = :ok {
+	true -> {
+		window.messages <- []
+		if type(window.webgl) = :object -> window.webgl.commands <- []
+		_webRecord(window, { type: :frame_begin, width: window.width, height: window.height })
+		window
+	}
+	_ -> window
+}
+
+// endFrame records a :frame_end marker and fires the webBridge with the full
+// message snapshot so the JS renderer can paint in one pass.
+fn endFrame(window) if window.type = :ok {
+	true -> {
+		_webRecord(window, { type: :frame_end })
+		window
+	}
+	_ -> window
+}
+
+// runFrameLoop records a :raf_start command.  The JS renderer should call
+// requestAnimationFrame repeatedly, invoking onFrame(dt) via the VM each tick.
+fn runFrameLoop(window, onFrame) if window.type = :ok {
+	true -> {
+		_webRecord(window, {
+			type: :raf_start
+			frameMs: window.frameMs
+		})
+		// Store callback so the JS bridge can invoke it.
+		window.onFrame <- onFrame
+		window
+	}
+	_ -> window
+}
+
+// stopFrameLoop records a :raf_stop command.
+fn stopFrameLoop(window) if window.type = :ok {
+	true -> {
+		_webRecord(window, { type: :raf_stop })
+		window.onFrame <- ?
+		window
+	}
+	_ -> window
+}
+
+// dispatchEvent pushes a browser input event object into window.messages.
+// evt should carry { type: :keydown/:mousedown/:mousemove/:resize, ... }.
+fn dispatchEvent(window, evt) if window.type = :ok {
+	true -> {
+		window.messages <- window.messages << evt
+		window
+	}
+	_ -> window
+}
+
+// pollEvents drains and returns all :input-category messages (type starting
+// with :key, :mouse, :resize, :scroll, :touch) then clears them.
+fn pollEvents(window) if window.type = :ok {
+	true -> {
+		inputTypes := { keydown: true, keyup: true, keypress: true
+		                mousedown: true, mouseup: true, mousemove: true
+		                wheel: true, resize: true, scroll: true, touchstart: true
+		                touchmove: true, touchend: true }
+		evts := window.messages |> filter(fn(m) inputTypes.(string(m.type)) = true)
+		window.messages <- window.messages |> filter(fn(m) inputTypes.(string(m.type)) != true)
+		evts
+	}
+	_ -> []
+}
+
+// setAlpha records a :alpha command that the renderer maps to ctx.globalAlpha.
+fn setAlpha(window, alpha) if window.type = :ok {
+	true -> _webRecord(window, { type: :alpha, alpha: alpha })
+	_ -> window
+}
+
+// drawImageData records a :image_data command for blitting a pixel byte string
+// (e.g. from gui-shader CPU render) onto the canvas at (x, y).
+fn drawImageData(window, x, y, w, h, pixelBytes) if window.type = :ok {
+	true -> _webRecord(window, {
+		type: :image_data
+		x: x
+		y: y
+		width: w
+		height: h
+		data: pixelBytes
+	})
 	_ -> window
 }
