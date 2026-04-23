@@ -261,6 +261,7 @@ _Auto-generated from Magnolia source._
 
 - `builtinKeys` — constant
 - `syntax` · `import(...)`
+- `path` · `import(...)`
 - `fs` · `import(...)`
 - `syntax` · `import(...)`
 - `vbc` · `import(...)`
@@ -367,6 +368,36 @@ _Auto-generated from Magnolia source._
 ### `pbatchStddev(datasets)`
 
 ### `round(n, decimals)`
+
+## Module: `path`
+
+### `abs?(path)`
+
+### `rel?(path)`
+
+### `_lastSlash(path)`
+
+> returns `:int`
+
+### `dir(path)`
+
+### `base(path)`
+
+### `cut(path)`
+
+> returns `:list`
+
+### `clean(path)`
+
+> returns `:string`
+
+### `join(parts...)`
+
+### `split(path)`
+
+> returns `:list`
+
+### `resolve(path, base)`
 
 ## Module: `sort`
 

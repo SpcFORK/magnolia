@@ -1,0 +1,84 @@
+// web-fetch — platform-adaptive HTTP request layer.
+//
+// Provides a Thenable type and a platform-aware fetch helper that
+// works synchronously on native Oak and asynchronously on JS runtimes
+// (browser / Node.js) by delegating to req(data, callback).
+//
+// Platform detection is delegated to the `web-runtime` module.
+
+{
+	jsRuntime?: jsRuntime?
+} := import('web-runtime')
+
+// --- Thenable ----------------------------------------------------------------
+//
+// A lightweight promise-like wrapper.  On native Oak every Thenable resolves
+// synchronously — .then() chains execute in-line.  On JS runtimes the
+// underlying req(data, cb) is async, so .then() queues callbacks that fire
+// when the response arrives.
+//
+// Usage:
+//   fetch({method:'GET', url:'...'})
+//     .then(fn(raw) raw.resp)
+//     .then(fn(resp) json.parse(resp.body))
+
+// resolved wraps a value in an already-resolved Thenable.
+fn resolved(val) {
+	{
+		then: fn(f) resolved(f(val))
+		value: val
+	}
+}
+
+// pending creates a Thenable that resolves later via ._resolve(v).
+fn pending() {
+	state := { done: false, val: ?, cbs: [] }
+	t := {
+		value: ?
+		then: fn(f) if state.done {
+			true -> resolved(f(state.val))
+			_ -> {
+				next := pending()
+				state.cbs << [f, next]
+				next
+			}
+		}
+		_resolve: fn(v) {
+			state.done <- true
+			state.val <- v
+			t.value <- v
+			fn drain(i) if i < len(state.cbs) -> {
+				pair := state.cbs.(i)
+				(pair.1)._resolve((pair.0)(v))
+				drain(i + 1)
+			}
+			drain(0)
+			state.cbs <- []
+		}
+	}
+}
+
+// fetch performs an HTTP request and returns a Thenable of the raw
+// req() response envelope ({type: :resp, resp: {status,headers,body}}).
+//
+// On native Oak:  req() is synchronous → resolved Thenable.
+// On JS runtimes: req(data, cb) is async → pending Thenable.
+fn fetch(data) {
+	// Strip null/empty body to avoid req() type errors (GET/HEAD/DELETE etc.)
+	clean := if data.body {
+		?, '' -> {
+			method: if data.method { ?, '' -> 'GET', _ -> data.method }
+			url: data.url
+			headers: data.headers
+		}
+		_ -> data
+	}
+	if jsRuntime?() {
+		true -> {
+			t := pending()
+			req(clean, fn(raw) t._resolve(raw))
+			t
+		}
+		_ -> resolved(req(clean))
+	}
+}

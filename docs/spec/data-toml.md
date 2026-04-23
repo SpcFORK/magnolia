@@ -34,6 +34,12 @@ _Auto-generated from Magnolia source._
 
 ### `_pLit(s)`
 
+### `_escBasicMulti(s)`
+
+### `_escLitMulti(s)`
+
+### `_normMulti(text)`
+
 ### `_pNum(s)`
 
 ### `_pVal(s)`

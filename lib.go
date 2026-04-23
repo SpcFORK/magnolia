@@ -592,6 +592,18 @@ var libdatayaml string
 //go:embed lib/data.oak
 var libdata string
 
+//go:embed lib/web-fetch.oak
+var libwebfetch string
+
+//go:embed lib/web-runtime.oak
+var libwebruntime string
+
+//go:embed lib/b64.oak
+var libb64 string
+
+//go:embed lib/b64-hex.oak
+var libb64hex string
+
 var stdlibs = map[string]string{
 	"std":                             libstd,
 	"str":                             libstr,
@@ -795,6 +807,10 @@ var stdlibs = map[string]string{
 	"data-ini":                        libdataini,
 	"data-yaml":                       libdatayaml,
 	"data":                            libdata,
+	"web-fetch":                       libwebfetch,
+	"web-runtime":                     libwebruntime,
+	"b64":                             libb64,
+	"b64-hex":                         libb64hex,
 }
 
 var stdlibAutoLoadOrder = []string{
@@ -980,6 +996,10 @@ var stdlibAutoLoadOrder = []string{
 	"data-xml",
 	"data-ini",
 	"data-yaml",
+	"web-runtime",
+	"web-fetch",
+	"b64-hex",
+	"b64",
 }
 
 func isStdLib(name string) bool {

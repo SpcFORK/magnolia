@@ -1,0 +1,160 @@
+// b64 — Base64URL (RFC 4648 §5) encoding utilities.
+//
+// URL-safe alphabet (A-Z a-z 0-9 - _), no padding characters.
+//
+// Key design choice: all entry points work on hex strings or integer-byte
+// lists rather than raw binary strings from srand(). This avoids the Oak
+// string-indexing hazard where bytes > 0x7F form multi-byte UTF-8 sequences,
+// causing len() and character indexing to disagree on byte count.
+//
+// Hex-string helpers live in the companion `b64-hex` module.
+//
+// Usage:
+//   b64 := import('b64')
+//   b64.fromHex('4d616e')          // => 'TWFu'
+//   b64.encodeBytes([77, 97, 110]) // => 'TWFu'
+
+{
+	default: default
+	slice: slice
+} := import('std')
+
+{
+	hexToBytes: hexToBytes
+	bytesToHex: bytesToHex
+} := import('b64-hex')
+
+// _alphabet is the base64url character set (RFC 4648 Table 2).
+_alphabet := 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+// _lookup maps each base64url character back to its 6-bit integer value.
+// Accepts both URL-safe (-, _) and standard (+, /) alphabets for leniency.
+_lookup := {
+	'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7
+	'I': 8, 'J': 9, 'K': 10, 'L': 11, 'M': 12, 'N': 13, 'O': 14, 'P': 15
+	'Q': 16, 'R': 17, 'S': 18, 'T': 19, 'U': 20, 'V': 21, 'W': 22, 'X': 23
+	'Y': 24, 'Z': 25
+	'a': 26, 'b': 27, 'c': 28, 'd': 29, 'e': 30, 'f': 31, 'g': 32, 'h': 33
+	'i': 34, 'j': 35, 'k': 36, 'l': 37, 'm': 38, 'n': 39, 'o': 40, 'p': 41
+	'q': 42, 'r': 43, 's': 44, 't': 45, 'u': 46, 'v': 47, 'w': 48, 'x': 49
+	'y': 50, 'z': 51
+	'0': 52, '1': 53, '2': 54, '3': 55, '4': 56
+	'5': 57, '6': 58, '7': 59, '8': 60, '9': 61
+	'-': 62, '_': 63
+	'+': 62, '/': 63
+}
+
+// encodeBytes encodes a list of integer byte values (0–255) as a base64url
+// string without padding. Missing tail bytes are zero-padded per RFC 4648.
+//
+// IMPORTANT – Oak operator precedence gotcha:
+//   << and >> both have precedence 1 (the LOWEST), while | has precedence 10.
+//   This means `a << 4 | b >> 4` parses as `a << (4 | b) >> 4`, NOT as the
+//   intended `(a << 4) | (b >> 4)`. Every shift-before-OR expression MUST use
+//   explicit inner parentheses: `(a << 4) | (b >> 4)`.
+//
+// Example:
+//   encodeBytes([77, 97, 110])    // => 'TWFu'   ("Man")
+//   encodeBytes([77, 97])         // => 'TWE'    ("Ma", no padding)
+//   encodeBytes([77])             // => 'TQ'     ("M", no padding)
+fn encodeBytes(bytes) {
+	n := len(bytes)
+	fn enc(i, acc) if i >= n {
+		true -> acc
+		_ -> {
+			b0 := bytes.(i)
+			b1 := default(bytes.(i + 1), 0)
+			b2 := default(bytes.(i + 2), 0)
+			c0 := _alphabet.(b0 >> 2)
+			c1 := _alphabet.(((b0 & 3) << 4) | (b1 >> 4))
+			c2 := default(if i + 1 < n -> _alphabet.(((b1 & 15) << 2) | (b2 >> 6)), '')
+			c3 := default(if i + 2 < n -> _alphabet.(b2 & 63), '')
+			enc(i + 3, acc + c0 + c1 + c2 + c3)
+		}
+	}
+	enc(0, '')
+}
+
+
+
+// fromHex encodes a lowercase hexadecimal string as base64url without padding.
+// The input must contain an even number of hex characters (0–9, a–f).
+//
+// This is the preferred way to base64url-encode data obtained from
+// crypto.randomBytes() or crypto.sha256(), since those return safe ASCII hex.
+//
+// Example:
+//   fromHex('4d616e')    // => 'TWFu'   (same as encodeBytes([77, 97, 110]))
+//   fromHex('000000')    // => 'AAAA'
+//   fromHex('ffffff')    // => '____'
+//   fromHex('')          // => ''
+fn fromHex(hex) encodeBytes(hexToBytes(hex))
+
+// _stripPadding returns s with any trailing '=' characters removed.
+fn _stripPadding(s) {
+	n := len(s)
+	fn scan(i) if i > 0 & s.(i - 1) = '=' {
+		true -> scan(i - 1)
+		_ -> i
+	}
+	end := scan(n)
+	if end = n {
+		true -> s
+		_ -> s |> slice(0, end)
+	}
+}
+
+// decodeBytes decodes a base64url (or standard base64) string into a list
+// of integer byte values (0–255). Trailing '=' padding is tolerated but
+// not required. Returns ? on invalid input characters.
+//
+// Example:
+//   decodeBytes('TWFu')      // => [77, 97, 110]
+//   decodeBytes('TWFu=')     // => [77, 97, 110]  (padding tolerated)
+//   decodeBytes('TQ')        // => [77]
+fn decodeBytes(s) {
+	src := _stripPadding(s)
+	n := len(src)
+	fn dec(i, acc) if i >= n {
+		true -> acc
+		_ -> {
+			// Need at least 2 input chars to decode 1 output byte.
+			v0 := _lookup.(src.(i))
+			v1 := _lookup.(src.(i + 1))
+			if v0 != ? | v1 != ? -> {
+                acc << ((v0 << 2) | (v1 >> 4))
+                if i + 2 < n {
+                    true -> {
+                        v2 := _lookup.(src.(i + 2))
+                        if v2 != ? -> {
+                            acc << (((v1 & 15) << 4) | (v2 >> 2))
+                            if i + 3 < n {
+                                true -> {
+                                    v3 := _lookup.(src.(i + 3))
+                                    if v3 != ? -> {
+                                        acc << (((v2 & 3) << 6) | v3)
+                                        dec(i + 4, acc)
+                                    }
+                                }
+                                _ -> acc
+                            }
+                        }
+                    }
+                    _ -> acc
+                }
+            }
+		}
+	}
+	dec(0, [])
+}
+
+// toHex decodes a base64url string into its lowercase hex representation.
+// Inverse of fromHex.
+//
+// Example:
+//   toHex('TWFu')      // => '4d616e'
+//   toHex('AAAA')      // => '000000'
+fn toHex(s) if decoded := decodeBytes(s) {
+	? -> ?
+	_ -> bytesToHex(decoded)
+}

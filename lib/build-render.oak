@@ -29,31 +29,47 @@ let __Oak_VFS_Cache = null;
 function ___packed_vfs() {
 	if (!__Oak_VFS_Cache) {
 		const _f = __Oak_VFS_Data;
-		function _normPath(p) { return p.replace(/\\\\/g, "/").replace(/\\/\\//g, "/"); }
-		__Oak_VFS_Cache = {
-			files: _f,
-			readFile: function(path, cb) {
-				var c = _f[_normPath(path)]; if (c === undefined) c = null;
-				return typeof cb === "function" ? cb(c) : c;
-			},
-			writeFile: function(path, content, cb) {
-				_f[_normPath(path)] = content;
-				return typeof cb === "function" ? cb(true) : true;
-			},
-			statFile: function(path, cb) {
-				var np = _normPath(path), c = _f[np], r = null;
-				if (c != null) r = { name: __as_oak_string(np), size: c.length || 0, dir: false, mod: 0 };
-				return typeof cb === "function" ? cb(r) : r;
-			},
-			listFiles: function(cb) {
-				var ks = Object.getOwnPropertyNames(_f).map(__as_oak_string);
-				return typeof cb === "function" ? cb(ks) : ks;
-			},
-			deleteFile: function(path, cb) {
-				var np = _normPath(path), ok = _f[np] != null; if (ok) delete _f[np];
-				return typeof cb === "function" ? cb(ok) : ok;
-			},
-		};
+		function _normPath(p) { return String(p).replace(/\\\\/g, "/").replace(/\\/\\//g, "/"); }
+		function _cleanPath(p) {
+            var s = _normPath(p);
+            if (!s) return "";
+            var rooted = s.charAt(0) === "/";
+            var parts = s.split("/");
+            var stack = [];
+            for (var i = 0; i < parts.length; i++) {
+                var part = parts[i];
+                if (part === "" || part === ".") continue;
+                if (part === "..") {
+                    if (stack.length && stack[stack.length - 1] !== "..") stack.pop();
+                    else if (!rooted) stack.push("..");
+                    continue;
+                }
+                stack.push(part);
+            }
+            var out = stack.join("/");
+            return rooted ? "/" + out : out;
+        }
+        function _dirPrefix(p) {
+            var d = _cleanPath(p);
+            if (d === "" || d === "." || d === "/") return "";
+            return d + "/";
+        }
+        function _under(k, prefix) {
+            return prefix === "" || (k.length >= prefix.length && k.substr(0, prefix.length) === prefix);
+        }
+        __Oak_VFS_Cache = {
+            files: _f,
+            readFile: function(path, cb) { var c = _f[_normPath(path)]; if (c === undefined) c = null; return typeof cb === "function" ? cb(c) : c; },
+            writeFile: function(path, content, cb) { _f[_normPath(path)] = content; return typeof cb === "function" ? cb(true) : true; },
+            statFile: function(path, cb) { var np = _normPath(path), c = _f[np], r = null; if (c != null) r = { name: __as_oak_string(np), size: c.length || 0, dir: false, mod: 0 }; return typeof cb === "function" ? cb(r) : r; },
+            listFiles: function(cb) { var ks = Object.getOwnPropertyNames(_f).map(__as_oak_string); return typeof cb === "function" ? cb(ks) : ks; },
+            deleteFile: function(path, cb) { var np = _normPath(path), ok = _f[np] != null; if (ok) delete _f[np]; return typeof cb === "function" ? cb(ok) : ok; },
+            "exists__oak_qm": function(path) { return _f[_normPath(path)] != null; },
+            "dirExists__oak_qm": function(path) { var prefix = _dirPrefix(path); var ks = Object.getOwnPropertyNames(_f); for (var i = 0; i < ks.length; i++) if (_under(ks[i], prefix)) return true; return false; },
+            statDir: function(path, cb) { var prefix = _dirPrefix(path); var ks = Object.getOwnPropertyNames(_f); var count = 0, size = 0; for (var i = 0; i < ks.length; i++) { var k = ks[i]; if (!_under(k, prefix)) continue; count++; var v = _f[k]; size += v ? v.length : 0; } var r = null; if (count > 0) { var name = _cleanPath(path); if (name === "/" || name === ".") name = ""; r = { name: __as_oak_string(name), size: size, dir: true, count: count, mod: 0 }; } return typeof cb === "function" ? cb(r) : r; },
+            listDir: function(path, cb) { var prefix = _dirPrefix(path); var seen = Object.create(null); var out = []; var ks = Object.getOwnPropertyNames(_f); for (var i = 0; i < ks.length; i++) { var k = ks[i]; if (!_under(k, prefix)) continue; var rest = k.substr(prefix.length); var slash = rest.indexOf("/"); if (slash < 0) { if (seen[rest]) continue; seen[rest] = true; var v = _f[k]; out.push({ name: __as_oak_string(rest), dir: false, size: v ? v.length : 0 }); } else { var sub = rest.substr(0, slash), key = sub + "/"; if (seen[key]) continue; seen[key] = true; out.push({ name: __as_oak_string(sub), dir: true, size: 0 }); } } return typeof cb === "function" ? cb(out) : out; },
+            deleteDir: function(path, cb) { var prefix = _dirPrefix(path); var ks = Object.getOwnPropertyNames(_f); var removed = 0; for (var i = 0; i < ks.length; i++) { var k = ks[i]; if (_under(k, prefix)) { delete _f[k]; removed++; } } return typeof cb === "function" ? cb(removed) : removed; },
+        };
 	}
 	return __Oak_VFS_Cache;
 }

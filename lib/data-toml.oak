@@ -176,6 +176,107 @@ fn _unesc(chars) {
 
 fn _pStr(s) s |> slice(1, len(s) - 1) |> _unesc()
 fn _pLit(s) s |> slice(1, len(s) - 1)
+
+// _escBasicMulti escapes the body of a """-delimited TOML string so it can
+// be represented as a single-line "..." basic string. Real newlines become
+// the two-char escape \n (later turned back into a newline by _unesc),
+// existing backslash sequences are preserved as-is so \n, \\, \", \t keep
+// their meaning, and literal " characters are escaped.
+fn _escBasicMulti(s) s |> map(fn(c) if c {
+	'\n' -> '\\n'
+	'\r' -> '\\r'
+	'"' -> '\\"'
+	_ -> c
+})
+
+// _escLitMulti escapes the body of a '''-delimited literal string. No
+// escape processing is performed on the original content, so we must
+// double-escape backslashes and quote-escape " so that the resulting
+// basic-string form round-trips through _unesc unchanged.
+fn _escLitMulti(s) s |> map(fn(c) if c {
+	'\\' -> '\\\\'
+	'\n' -> '\\n'
+	'\r' -> '\\r'
+	'"' -> '\\"'
+	_ -> c
+})
+
+// _normMulti rewrites TOML text so that any triple-quoted string literal
+// (""" or ''') is collapsed onto a single logical line as a basic "..."
+// string. This lets the simple line-oriented parser below treat multi-line
+// values the same as single-line ones.
+fn _normMulti(text) {
+	out := ''
+	max := len(text)
+	fn findClose(j, d) if j + 3 > max {
+		true -> max
+		_ -> if text.(j) = d & text.(j + 1) = d & text.(j + 2) = d {
+			true -> j
+			_ -> findClose(j + 1, d)
+		}
+	}
+	fn skipStr(j, q) if j >= max {
+		true -> j
+		_ -> if text.(j) {
+			'\\' -> {
+				out << text.(j)
+				if j + 1 < max -> out << text.(j + 1)
+				skipStr(j + 2, q)
+			}
+			_ -> if text.(j) = q {
+				true -> { out << q, j + 1 }
+				_ -> { out << text.(j), skipStr(j + 1, q) }
+			}
+		}
+	}
+	fn skipLit(j) if j >= max {
+		true -> j
+		_ -> if text.(j) {
+			'\'' -> { out << '\'', j + 1 }
+			_ -> { out << text.(j), skipLit(j + 1) }
+		}
+	}
+	fn skipCmt(j) if j >= max {
+		true -> j
+		_ -> if text.(j) {
+			'\n' -> { out << '\n', j + 1 }
+			_ -> { out << text.(j), skipCmt(j + 1) }
+		}
+	}
+	fn sub(i) if i >= max {
+		true -> out
+		_ -> {
+			c := text.(i)
+			triple? := i + 3 <= max & (
+				c = '"' & text.(i + 1) = '"' & text.(i + 2) = '"' |
+				c = '\'' & text.(i + 1) = '\'' & text.(i + 2) = '\''
+			)
+			if triple? {
+				true -> {
+					start := if i + 3 < max & text.(i + 3) = '\n' {
+						true -> i + 4
+						_ -> i + 3
+					}
+					close := findClose(start, c)
+					body := text |> slice(start, close)
+					escaped := if c {
+						'"' -> _escBasicMulti(body)
+						_ -> _escLitMulti(body)
+					}
+					out << '"' << escaped << '"'
+					sub(close + 3)
+				}
+				_ -> if c {
+					'"' -> { out << '"', sub(skipStr(i + 1, '"')) }
+					'\'' -> { out << '\'', sub(skipLit(i + 1)) }
+					'#' -> { out << '#', sub(skipCmt(i + 1)) }
+					_ -> { out << c, sub(i + 1) }
+				}
+			}
+		}
+	}
+	sub(0)
+}
 fn _pNum(s) {
 	s := replace(s, '_', '')
 	if contains?(s, '.') {
@@ -226,6 +327,7 @@ fn _ensPath(obj, parts) parts |> with reduce(obj) fn(n, p, _) {
 
 // parse takes a TOML string and returns an Oak object.
 fn parse(text) {
+	text := _normMulti(text)
 	lines := text |> split('\n')
 	root := {}
 	cur := root

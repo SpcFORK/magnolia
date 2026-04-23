@@ -27,6 +27,7 @@ syntax := import('syntax')
 	printf: printf
 	format: format
 } := import('fmt')
+path := import('path')
 fs := import('fs')
 syntax := import('syntax')
 vbc := import('Virtual-Bytecode')
@@ -633,15 +634,53 @@ fn createVirtualContext(initialScope) VirtualContext(initialScope)
 cs VirtualFS(initialFiles) {
 	files := initialFiles |> default({})
 
-	// Normalize path separators to forward slashes
-	fn normalizePath(path) path |>
-		replace('\\', '/') |>
-		replace('//', '/')
+	// Normalize path separators to forward slashes and clean via libpath
+	// (removes '.', collapses '..' and duplicate slashes).
+	fn normalizePath(p) {
+		s := p |> default('') |> replace('\\', '/')
+		if s {
+			'' -> ''
+			_ -> path.clean(s)
+		}
+	}
+
+	// Normalize a directory path: cleaned, no trailing slash, '' for root.
+	fn normalizeDirPath(p) {
+		cleaned := normalizePath(p)
+		if cleaned {
+			'', '.', '/' -> ''
+			_ -> cleaned
+		}
+	}
+
+	// Build the prefix used to test dir membership. '' means root (match all).
+	fn dirPrefix(p) {
+		d := normalizeDirPath(p)
+		if d {
+			'' -> ''
+			_ -> d + '/'
+		}
+	}
+
+	// Returns true if key k lives under dir prefix (or prefix = '' = root).
+	fn underPrefix?(k, prefix) if prefix {
+		'' -> true
+		_ -> len(k) >= len(prefix) & take(k, len(prefix)) = prefix
+	}
 
 	// Check if a file exists in the VFS
-	fn exists?(path) {
-		normalizedPath := normalizePath(path)
-		files.(normalizedPath) != ?
+	fn exists?(p) files.(normalizePath(p)) != ?
+
+	// Check if a directory (any file with this prefix) exists in the VFS
+	fn dirExists?(p) {
+		prefix := dirPrefix(p)
+		found := false
+		files |> builtinKeys() |> each(fn(k) if found {
+			false -> if underPrefix?(k, prefix) {
+				true -> found <- true
+			}
+		})
+		found
 	}
 
 	// Read file contents from the VFS
@@ -691,6 +730,99 @@ cs VirtualFS(initialFiles) {
 		}
 	}
 
+	// Stat a directory by aggregating all files under its prefix.
+	// Emulated by counting how many file keys start with the resolved prefix.
+	fn statDir(p, withStat) {
+		d := normalizeDirPath(p)
+		prefix := dirPrefix(p)
+		count := 0
+		size := 0
+		files |> entries() |> each(fn(kv) if underPrefix?(kv.0, prefix) {
+			true -> {
+				count <- count + 1
+				size <- size + len(kv.1 |> default(''))
+			}
+		})
+		result := if count {
+			0 -> ?
+			_ -> {
+				name: d
+				size: size
+				dir: true
+				count: count
+				mod: 0
+			}
+		}
+		if withStat {
+			? -> result
+			_ -> withStat(result)
+		}
+	}
+
+	// List direct children (files + sub-directories) of a directory.
+	// Returns a list of { name, dir, size } entries.
+	fn listDir(p, withList) {
+		prefix := dirPrefix(p)
+		seen := {}
+		entriesList := []
+		files |> entries() |> each(fn(kv) {
+			k := kv.0
+			v := kv.1
+			if underPrefix?(k, prefix) {
+				true -> {
+					rest := slice(k, len(prefix))
+					// path.split drops empties; first segment is the child name
+					segs := path.split(rest)
+					if len(segs) {
+						0 -> ?
+						1 -> if seen.(segs.0) {
+							? -> {
+								seen.(segs.0) := true
+								entriesList << {
+									name: segs.0
+									dir: false
+									size: len(v |> default(''))
+								}
+							}
+						}
+						_ -> {
+							key := segs.0 + '/'
+							if seen.(key) {
+								? -> {
+									seen.(key) := true
+									entriesList << {
+										name: segs.0
+										dir: true
+										size: 0
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		})
+		if withList {
+			? -> entriesList
+			_ -> withList(entriesList)
+		}
+	}
+
+	// Delete all files under a directory prefix. Returns number of files removed.
+	fn deleteDir(p, withResult) {
+		prefix := dirPrefix(p)
+		toRemove := []
+		files |> builtinKeys() |> each(fn(k) if underPrefix?(k, prefix) {
+			true -> toRemove << k
+		})
+		toRemove |> each(fn(k) files.(k) := ?)
+		removed := len(toRemove)
+		if withResult {
+			? -> removed
+			_ -> withResult(removed)
+		}
+	}
+
 	// Delete a file from the VFS
 	fn deleteFile(path, withResult) {
 		normalizedPath := normalizePath(path)
@@ -726,6 +858,10 @@ cs VirtualFS(initialFiles) {
 		deleteFile: deleteFile
 		getFiles: getFiles
 		setFiles: setFiles
+		dirExists?: dirExists?
+		statDir: statDir
+		listDir: listDir
+		deleteDir: deleteDir
 	}
 }
 

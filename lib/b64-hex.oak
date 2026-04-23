@@ -1,0 +1,48 @@
+// b64-hex — hex-string helpers for base64url encoding.
+//
+// Split from the main `b64` module so callers that already have integer
+// byte lists (e.g. from crypto primitives) don't need to pull in hex
+// decoding logic.
+
+{
+	range: range
+	map: map
+	each: each
+} := import('std')
+
+// _hexNibble maps a single lowercase hex character to its integer nibble value.
+_hexNibble := {
+	'0': 0, '1': 1, '2': 2, '3': 3, '4': 4
+	'5': 5, '6': 6, '7': 7, '8': 8, '9': 9
+	'a': 10, 'b': 11, 'c': 12, 'd': 13, 'e': 14, 'f': 15
+}
+
+// hexToBytes decodes a lowercase hexadecimal string into a list of integer
+// byte values (0–255). The input must contain an even number of hex
+// characters (0–9, a–f).
+//
+// Example:
+//   hexToBytes('4d616e')    // => [77, 97, 110]
+//   hexToBytes('')          // => []
+fn getByte(hex, i) _hexNibble.(hex.(i * 2)) * 16 + _hexNibble.(hex.(i * 2 + 1))
+fn hexToBytes(hex) {
+	n := len(hex) / 2
+	range(n) |> with map() fn(i) getByte(hex, i)
+}
+
+// _hexDigits is the ordered lowercase hex alphabet, indexed by nibble value.
+_hexDigits := '0123456789abcdef'
+
+// bytesToHex encodes a list of integer byte values (0–255) as a lowercase
+// hex string. Inverse of hexToBytes.
+//
+// Example:
+//   bytesToHex([77, 97, 110])    // => '4d616e'
+//   bytesToHex([])               // => ''
+fn bytesToHex(bytes) {
+	acc := ''
+	bytes |> with each() fn(b) {
+		acc << _hexDigits.(b >> 4) << _hexDigits.(b & 15)
+	}
+	acc
+}
