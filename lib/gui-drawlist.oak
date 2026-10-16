@@ -1,0 +1,79 @@
+// gui-drawlist — present a UI core DrawList through existing GUI backends.
+//
+// DrawList ops (from ui-surface.DRAW_OP) are interpreted using a deps object
+// that supplies fillRect / drawText / etc. Compatible with GUI.oak windows.
+
+std := import('std')
+default := std.default
+each := std.each
+surface := import('ui-surface')
+
+// present(deps, window, drawList) walks the list and draws.
+// deps: { fillRect, drawText, rgb? } — typically from GUI facade methods
+//   bound as fn(window, ...).
+//
+// Convenience: if deps has window-first methods matching gui-draw, pass them.
+fn present(deps, window, drawList) {
+	d := default(deps, {})
+	list := default(drawList, [])
+	list |> each(fn(op) {
+		code := default(op.op, 0)
+		if code = surface.DRAW_OP.clear {
+			true -> {
+				if d.fillRect != ? {
+					true -> d.fillRect(window, op.x, op.y, op.w, op.h, op.color)
+				}
+			}
+			_ -> if code = surface.DRAW_OP.rect {
+				true -> {
+					if op.borderOnly? {
+						true -> {
+							// simple border as four thin rects
+							bw := default(op.borderWidth, 1)
+							c := op.color
+							if d.fillRect != ? {
+								true -> {
+									d.fillRect(window, op.x, op.y, op.w, bw, c)
+									d.fillRect(window, op.x, op.y + op.h - bw, op.w, bw, c)
+									d.fillRect(window, op.x, op.y, bw, op.h, c)
+									d.fillRect(window, op.x + op.w - bw, op.y, bw, op.h, c)
+								}
+							}
+						}
+						_ -> {
+							if d.fillRect != ? {
+								true -> d.fillRect(window, op.x, op.y, op.w, op.h, op.color)
+							}
+						}
+					}
+				}
+				_ -> if code = surface.DRAW_OP.glyphRun {
+					true -> {
+						if d.drawText != ? {
+							true -> d.drawText(window, op.x, op.y, op.text, op.color)
+						}
+					}
+					_ -> if code = surface.DRAW_OP.scissor | code = surface.DRAW_OP.scissorPop {
+						true -> ? // host optional; software path ignores for now
+						_ -> ?
+					}
+				}
+			}
+		}
+	})
+	{ type: :ok }
+}
+
+// presentGUI(gui, window, drawList) uses the GUI module's draw helpers.
+fn presentGUI(gui, window, drawList) {
+	present({
+		fillRect: fn(w, x, y, width, height, color) gui.fillRect(w, x, y, width, height, color)
+		drawText: fn(w, x, y, text, color) gui.drawText(w, x, y, text, color)
+	}, window, drawList)
+}
+
+// hash is re-exported convenience for tests.
+fn hash(drawList) {
+	uiCore := import('ui-core')
+	uiCore.drawListHash(drawList)
+}

@@ -1,0 +1,221 @@
+// ui-surface — single source of truth for the Magnolia UI surface contract.
+//
+// PocketJS grammar (adapted): closed, versioned, append-only ops/props/enums.
+// Never renumber shipped codes; only append.
+//
+// Import as: surface := import('ui-surface')
+
+// ---------------------------------------------------------------------------
+// Versions & screen defaults
+// ---------------------------------------------------------------------------
+
+SURFACE_VERSION := 1
+SCREEN_W := 480
+SCREEN_H := 272
+FIXED_DT := 1.0 / 60.0
+MAX_TREE_DEPTH := 64
+ROOT_ID := 1
+STYLE_ID_NONE := -1
+SIZE_FULL := -1
+ID_SLOT_BITS := 20
+ID_SLOT_MASK := 1048575 // 0xfffff
+
+// ---------------------------------------------------------------------------
+// Node types
+// ---------------------------------------------------------------------------
+
+NODE_TYPE := {
+	view: 0
+	text: 1
+	image: 2
+}
+
+// ---------------------------------------------------------------------------
+// Ops (guest → core intent). 0 reserved. Append-only.
+// ---------------------------------------------------------------------------
+
+OP := {
+	createNode: 1
+	destroyNode: 2
+	insertBefore: 3
+	removeChild: 4
+	setStyle: 5
+	setProp: 6
+	setText: 7
+	replaceText: 8
+	setFocus: 9
+	setActive: 10
+	animate: 11
+	cancelAnim: 12
+	loadStyles: 13
+	measureText: 14
+	tick: 15
+	draw: 16
+	hitTest: 17
+	debugPause: 18
+	debugStep: 19
+}
+
+// ---------------------------------------------------------------------------
+// Props (append-only within groups)
+//   1..63 layout · 64..95 visual · 96..127 text · 128..159 transform
+// ---------------------------------------------------------------------------
+
+PROP := {
+	width: 1
+	height: 2
+	minW: 3
+	minH: 4
+	maxW: 5
+	maxH: 6
+	paddingT: 8
+	paddingR: 9
+	paddingB: 10
+	paddingL: 11
+	marginT: 12
+	marginR: 13
+	marginB: 14
+	marginL: 15
+	gap: 16
+	flexDir: 17
+	justify: 18
+	align: 19
+	grow: 20
+	shrink: 21
+	basis: 22
+	posType: 24
+	insetT: 25
+	insetR: 26
+	insetB: 27
+	insetL: 28
+	display: 29
+	overflow: 30
+	zIndex: 31
+	bgColor: 64
+	radius: 68
+	opacity: 69
+	borderColor: 70
+	borderWidth: 71
+	textColor: 96
+	fontSize: 97
+	textAlign: 98
+	lineHeight: 99
+	translateX: 128
+	translateY: 129
+	scale: 130
+	rotate: 131
+}
+
+// Props that invalidate layout when changed
+LAYOUT_DIRTYING := [
+	'width', 'height', 'minW', 'minH', 'maxW', 'maxH'
+	'paddingT', 'paddingR', 'paddingB', 'paddingL'
+	'marginT', 'marginR', 'marginB', 'marginL'
+	'gap', 'flexDir', 'justify', 'align', 'grow', 'shrink', 'basis'
+	'posType', 'insetT', 'insetR', 'insetB', 'insetL', 'display', 'overflow'
+	'fontSize', 'textAlign', 'lineHeight'
+]
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+ENUMS := {
+	FlexDir: { Row: 0, Col: 1 }
+	Justify: { Start: 0, Center: 1, End: 2, Between: 3 }
+	Align: { Start: 0, Center: 1, End: 2, Stretch: 3 }
+	PosType: { Relative: 0, Absolute: 1 }
+	Display: { Flex: 0, None: 1 }
+	Overflow: { Visible: 0, Hidden: 1 }
+	TextAlign: { Left: 0, Center: 1, Right: 2 }
+	Easing: { Linear: 0, EaseIn: 1, EaseOut: 2, EaseInOut: 3 }
+}
+
+// ---------------------------------------------------------------------------
+// DrawList opcodes (core → host)
+// ---------------------------------------------------------------------------
+
+DRAW_OP := {
+	rect: 1
+	glyphRun: 2
+	scissor: 3
+	scissorPop: 4
+	clear: 5
+}
+
+// ---------------------------------------------------------------------------
+// Style table binary format (MGST)
+// ---------------------------------------------------------------------------
+
+STYLE_MAGIC := 1414745933 // 'MGST' LE: 0x4d + 0x47*256 + 0x53*65536 + 0x54*16777216
+STYLE_VERSION := 1
+STYLE_HEADER_SIZE := 8
+
+// ---------------------------------------------------------------------------
+// Contract fingerprint — bump when any code above changes meaning
+// ---------------------------------------------------------------------------
+
+// fingerprint returns a stable string identifying this surface revision.
+// Used by drift tests and host ABI checks.
+fn fingerprint() {
+	'ui-surface/v' + string(SURFACE_VERSION) +
+		'/ops=' + string(OP.debugStep) +
+		'/props=' + string(PROP.rotate) +
+		'/draw=' + string(DRAW_OP.clear)
+}
+
+// opName returns the string name for an op code, or ? if unknown.
+fn opName(code) {
+	ks := keys(OP)
+	fn loop(i) if i < len(ks) {
+		true -> {
+			k := ks.(i)
+			if OP.(k) = code {
+				true -> k
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
+// propName returns the string name for a prop id, or ?.
+fn propName(code) {
+	ks := keys(PROP)
+	fn loop(i) if i < len(ks) {
+		true -> {
+			k := ks.(i)
+			if PROP.(k) = code {
+				true -> k
+				_ -> loop(i + 1)
+			}
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
+// knownOp? reports whether code is a defined surface op.
+fn knownOp?(code) opName(code) != ?
+
+// knownProp? reports whether code is a defined prop id.
+fn knownProp?(code) propName(code) != ?
+
+// packId builds a generation-tagged handle from slot + generation.
+fn packId(slot, gen) (gen * 1048576) + (slot % 1048576)
+
+// unpackSlot extracts the arena slot from a generation-tagged id.
+fn unpackSlot(id) id % 1048576
+
+// unpackGen extracts the generation from a generation-tagged id.
+fn unpackGen(id) int(id / 1048576)
+
+// abgr packs r,g,b,a (0..255) into a u32 ABGR color (low byte = R).
+fn abgr(r, g, b, a) {
+	aa := if a { ? -> 255, _ -> a }
+	(aa % 256) * 16777216 + (b % 256) * 65536 + (g % 256) * 256 + (r % 256)
+}
+
+// rgb is abgr with full alpha.
+fn rgb(r, g, b) abgr(r, g, b, 255)

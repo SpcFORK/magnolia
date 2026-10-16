@@ -1,0 +1,100 @@
+// font-bake — collect codepoints and produce a lightweight atlas descriptor.
+//
+// Full glyph rasterization stays host-side (gui-fonts / platform fonts).
+// This module freezes *which* codepoints and sizes a product needs so pack
+// can embed a coverage set and the sim host can measure text deterministically.
+
+std := import('std')
+default := std.default
+map := std.map
+each := std.each
+filter := std.filter
+styleBake := import('style-bake')
+
+// defaultSlots — font sizes matching style utilities text-xs..2xl
+DEFAULT_SLOTS := [12, 14, 16, 18, 20, 24]
+
+// emptyAtlas returns a new atlas plan.
+fn emptyAtlas() {
+	{
+		codepoints: []
+		seen: {}
+		slots: DEFAULT_SLOTS
+		// advance table: codepoint → approximate width factor (1.0 = em)
+		// populated for collected set
+		advances: {}
+	}
+}
+
+// addCodepoint records a unicode scalar.
+fn addCodepoint(atlas, cp) {
+	key := string(cp)
+	if atlas.seen.(key) {
+		? -> {
+			atlas.seen.(key) := true
+			atlas.codepoints := atlas.codepoints << cp
+			// monospaced-ish advance for ASCII letters, narrower for space
+			adv := if cp = 32 {
+				true -> 0.3
+				_ -> if cp < 128 {
+					true -> 0.55
+					_ -> 0.6
+				}
+			}
+			atlas.advances.(key) := adv
+		}
+		_ -> ?
+	}
+	atlas
+}
+
+// addString records every codepoint in s.
+fn addString(atlas, s) {
+	text := default(s, '')
+	fn loop(i) if i < len(text) {
+		true -> {
+			addCodepoint(atlas, codepoint(text.(i)))
+			loop(i + 1)
+		}
+	}
+	loop(0)
+	atlas
+}
+
+// collectFromAst merges style-bake codepoint scan into atlas.
+fn collectFromAst(atlas, node) {
+	cps := styleBake.collectCodepointsFromAst(node)
+	cps |> each(fn(cp) addCodepoint(atlas, cp))
+	atlas
+}
+
+// measure returns { w, h } for text at fontSize using atlas advances.
+fn measure(atlas, text, fontSize) {
+	fs := default(fontSize, 14)
+	s := default(text, '')
+	w := 0.0
+	fn loop(i) if i < len(s) {
+		true -> {
+			cp := codepoint(s.(i))
+			adv := atlas.advances.(string(cp))
+			factor := if adv { ? -> 0.55, _ -> adv }
+			w <- w + fs * factor
+			loop(i + 1)
+		}
+	}
+	loop(0)
+	{ w: w, h: fs * 1.25 }
+}
+
+// serializeAtlas → simple JSON-friendly object for VFS embedding.
+fn serializeAtlas(atlas) {
+	{
+		version: 1
+		slots: atlas.slots
+		codepoints: atlas.codepoints
+		advances: atlas.advances
+	}
+}
+
+// VFS key used by pack for the atlas blob
+VFS_KEY := 'ui/font-atlas.json'

@@ -1,0 +1,671 @@
+// style-bake — compile utility class tokens (and style objects) into a style table.
+//
+// Utilities are a Magnolia-native subset inspired by PocketJS Tailwind rules:
+// all tokens in a class string must parse or the whole literal is rejected.
+//
+// Binary format MGST v1 (little-endian):
+//   header: magic u32, version u16, styleCount u16
+//   each style: propCount u8, then propCount × (propId u8, reserved u8, value i32 LE)
+
+std := import('std')
+default := std.default
+map := std.map
+filter := std.filter
+each := std.each
+keys := std.keys
+contains? := std.contains?
+str := import('str')
+split := str.split
+join := str.join
+trim := str.trim
+startsWith? := str.startsWith?
+containsStr? := str.contains?
+sliceStr := std.slice
+surface := import('ui-surface')
+
+// spacing scale (0..12 → px), Tailwind-ish 4px base
+fn _space(n) n * 4
+
+// parse color token: slate-50, blue-600, red-500, black, white, or #rrggbb
+fn _parseColor(token) if token {
+	'black' -> surface.rgb(0, 0, 0)
+	'white' -> surface.rgb(255, 255, 255)
+	'slate-50' -> surface.rgb(248, 250, 252)
+	'slate-100' -> surface.rgb(241, 245, 249)
+	'slate-200' -> surface.rgb(226, 232, 240)
+	'slate-500' -> surface.rgb(100, 116, 139)
+	'slate-700' -> surface.rgb(51, 65, 85)
+	'slate-900' -> surface.rgb(15, 23, 42)
+	'slate-950' -> surface.rgb(2, 6, 23)
+	'blue-500' -> surface.rgb(59, 130, 246)
+	'blue-600' -> surface.rgb(37, 99, 235)
+	'red-500' -> surface.rgb(239, 68, 68)
+	'green-500' -> surface.rgb(34, 197, 94)
+	'amber-500' -> surface.rgb(245, 158, 11)
+	_ -> if startsWith?(token, '#') & len(token) = 7 {
+		true -> {
+			// parse hex #rrggbb manually
+			hex := '0123456789abcdef'
+			fn dig(c) {
+				ch := string(c)
+				fn loop(i) if i < 16 {
+					true -> if hex.(i) = ch | hex.(i) = string(char(codepoint(ch) - 32)) {
+						true -> i
+						_ -> loop(i + 1)
+					}
+					_ -> 0
+				}
+				// simpler: use int from known hex via codepoint ranges
+				cp := codepoint(ch)
+				if cp >= 48 & cp <= 57 {
+					true -> cp - 48
+					_ -> if cp >= 97 & cp <= 102 {
+						true -> cp - 87
+						_ -> if cp >= 65 & cp <= 70 {
+							true -> cp - 55
+							_ -> 0
+						}
+					}
+				}
+			}
+			r := dig(token.1) * 16 + dig(token.2)
+			g := dig(token.3) * 16 + dig(token.4)
+			b := dig(token.5) * 16 + dig(token.6)
+			surface.rgb(r, g, b)
+		}
+		_ -> ?
+	}
+}
+
+fn _parseIntSuffix(token, prefix) if startsWith?(token, prefix) {
+	true -> {
+		rest := sliceStr(token, len(prefix), len(token))
+		// strip optional brackets for arbitrary: w-[120]
+		if startsWith?(rest, '[') & rest.(len(rest) - 1) = ']' {
+			true -> {
+				inner := sliceStr(rest, 1, len(rest) - 1)
+				n := int(inner)
+				if string(n) = inner | startsWith?(string(n), inner) {
+					true -> n
+					_ -> if rest = 'full' {
+						true -> surface.SIZE_FULL
+						_ -> ?
+					}
+				}
+			}
+			_ -> if rest = 'full' {
+				true -> surface.SIZE_FULL
+				_ -> {
+					n := int(rest)
+					if rest = string(n) {
+						true -> _space(n)
+						_ -> ?
+					}
+				}
+			}
+		}
+	}
+	_ -> ?
+}
+
+// parse one utility token into [propName, value] or ? if unknown
+fn parseToken(token) {
+	t := trim(token)
+	if t = '' {
+		true -> ?
+		_ -> if t = 'flex' {
+			true -> ['display', surface.ENUMS.Display.Flex]
+			_ -> if t = 'flex-row' {
+				true -> ['flexDir', surface.ENUMS.FlexDir.Row]
+				_ -> if t = 'flex-col' {
+					true -> ['flexDir', surface.ENUMS.FlexDir.Col]
+					_ -> if t = 'items-start' {
+						true -> ['align', surface.ENUMS.Align.Start]
+						_ -> if t = 'items-center' {
+							true -> ['align', surface.ENUMS.Align.Center]
+							_ -> if t = 'items-end' {
+								true -> ['align', surface.ENUMS.Align.End]
+								_ -> if t = 'items-stretch' {
+									true -> ['align', surface.ENUMS.Align.Stretch]
+									_ -> if t = 'justify-start' {
+										true -> ['justify', surface.ENUMS.Justify.Start]
+										_ -> if t = 'justify-center' {
+											true -> ['justify', surface.ENUMS.Justify.Center]
+											_ -> if t = 'justify-end' {
+												true -> ['justify', surface.ENUMS.Justify.End]
+												_ -> if t = 'justify-between' {
+													true -> ['justify', surface.ENUMS.Justify.Between]
+													_ -> if t = 'absolute' {
+														true -> ['posType', surface.ENUMS.PosType.Absolute]
+														_ -> if t = 'relative' {
+															true -> ['posType', surface.ENUMS.PosType.Relative]
+															_ -> if t = 'hidden' {
+																true -> ['display', surface.ENUMS.Display.None]
+																_ -> if t = 'overflow-hidden' {
+																	true -> ['overflow', surface.ENUMS.Overflow.Hidden]
+																	_ -> if t = 'grow' {
+																		true -> ['grow', 1]
+																		_ -> if t = 'grow-0' {
+																			true -> ['grow', 0]
+																			_ -> if t = 'shrink-0' {
+																				true -> ['shrink', 0]
+																				_ -> if t = 'text-left' {
+																					true -> ['textAlign', surface.ENUMS.TextAlign.Left]
+																					_ -> if t = 'text-center' {
+																						true -> ['textAlign', surface.ENUMS.TextAlign.Center]
+																						_ -> if t = 'text-right' {
+																							true -> ['textAlign', surface.ENUMS.TextAlign.Right]
+																							_ -> if t = 'text-xs' {
+																								true -> ['fontSize', 12]
+																								_ -> if t = 'text-sm' {
+																									true -> ['fontSize', 14]
+																									_ -> if t = 'text-base' {
+																										true -> ['fontSize', 16]
+																										_ -> if t = 'text-lg' {
+																											true -> ['fontSize', 18]
+																											_ -> if t = 'text-xl' {
+																												true -> ['fontSize', 20]
+																												_ -> if t = 'text-2xl' {
+																													true -> ['fontSize', 24]
+																													_ -> _parseSized(t)
+																												}
+																											}
+																										}
+																									}
+																								}
+																							}
+																						}
+																					}
+																				}
+																			}
+																		}
+																	}
+																}
+															}
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _parseSized(t) {
+	// gap-N, p-N, px-N, py-N, pt/pr/pb/pl, m*, w-N, h-N, rounded-*, bg-*, text-*, opacity-N, border
+	if startsWith?(t, 'gap-') {
+		true -> {
+			v := _parseIntSuffix(t, 'gap-')
+			if v { ? -> ?, _ -> ['gap', v] }
+		}
+		_ -> if startsWith?(t, 'p-') & !startsWith?(t, 'pt-') & !startsWith?(t, 'pr-') &
+			!startsWith?(t, 'pb-') & !startsWith?(t, 'pl-') & !startsWith?(t, 'px-') & !startsWith?(t, 'py-') {
+			true -> {
+				v := _parseIntSuffix(t, 'p-')
+				if v {
+					? -> ?
+					_ -> ['paddingAll', v]
+				}
+			}
+			_ -> if startsWith?(t, 'px-') {
+				true -> {
+					v := _parseIntSuffix(t, 'px-')
+					if v { ? -> ?, _ -> ['paddingX', v] }
+				}
+				_ -> if startsWith?(t, 'py-') {
+					true -> {
+						v := _parseIntSuffix(t, 'py-')
+						if v { ? -> ?, _ -> ['paddingY', v] }
+					}
+					_ -> if startsWith?(t, 'pt-') {
+						true -> {
+							v := _parseIntSuffix(t, 'pt-')
+							if v { ? -> ?, _ -> ['paddingT', v] }
+						}
+						_ -> if startsWith?(t, 'pr-') {
+							true -> {
+								v := _parseIntSuffix(t, 'pr-')
+								if v { ? -> ?, _ -> ['paddingR', v] }
+							}
+							_ -> if startsWith?(t, 'pb-') {
+								true -> {
+									v := _parseIntSuffix(t, 'pb-')
+									if v { ? -> ?, _ -> ['paddingB', v] }
+								}
+								_ -> if startsWith?(t, 'pl-') {
+									true -> {
+										v := _parseIntSuffix(t, 'pl-')
+										if v { ? -> ?, _ -> ['paddingL', v] }
+									}
+									_ -> if startsWith?(t, 'w-') {
+										true -> {
+											v := _parseIntSuffix(t, 'w-')
+											if v { ? -> ?, _ -> ['width', v] }
+										}
+										_ -> if startsWith?(t, 'h-') {
+											true -> {
+												v := _parseIntSuffix(t, 'h-')
+												if v { ? -> ?, _ -> ['height', v] }
+											}
+											_ -> if startsWith?(t, 'rounded') {
+												true -> {
+													rad := if t {
+														'rounded' -> 4
+														'rounded-sm' -> 2
+														'rounded-md' -> 6
+														'rounded-lg' -> 8
+														'rounded-xl' -> 12
+														'rounded-full' -> 9999
+														_ -> ?
+													}
+													if rad { ? -> ?, _ -> ['radius', rad] }
+												}
+												_ -> if startsWith?(t, 'bg-') {
+													true -> {
+														c := _parseColor(sliceStr(t, 3, len(t)))
+														if c { ? -> ?, _ -> ['bgColor', c] }
+													}
+													_ -> if startsWith?(t, 'text-') {
+														true -> {
+															// text-{color} if not size
+															rest := sliceStr(t, 5, len(t))
+															c := _parseColor(rest)
+															if c { ? -> ?, _ -> ['textColor', c] }
+														}
+														_ -> if startsWith?(t, 'opacity-') {
+															true -> {
+																v := int(sliceStr(t, 8, len(t)))
+																if string(v) = sliceStr(t, 8, len(t)) {
+																	true -> ['opacity', v] // store as percent 0..100
+																	_ -> ?
+																}
+															}
+															_ -> if t = 'border' {
+																true -> ['borderWidth', 1]
+																_ -> if startsWith?(t, 'border-') {
+																	true -> {
+																		c := _parseColor(sliceStr(t, 7, len(t)))
+																		if c { ? -> ?, _ -> ['borderColor', c] }
+																	}
+																	_ -> ?
+																}
+															}
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// expand special multi-prop tokens into a prop map mutation
+fn _applyEntry(props, entry) if entry {
+	? -> props
+	_ -> {
+		name := entry.0
+		val := entry.1
+		if name = 'paddingAll' {
+			true -> {
+				props.paddingT := val
+				props.paddingR := val
+				props.paddingB := val
+				props.paddingL := val
+				props
+			}
+			_ -> if name = 'paddingX' {
+				true -> {
+					props.paddingL := val
+					props.paddingR := val
+					props
+				}
+				_ -> if name = 'paddingY' {
+					true -> {
+						props.paddingT := val
+						props.paddingB := val
+						props
+					}
+					_ -> {
+						props.(name) := val
+						props
+					}
+				}
+			}
+		}
+	}
+}
+
+// compileClassString parses a full class literal. Returns
+// { ok?: true, props: {...} } or { ok?: false, error: string }.
+// All-or-nothing: any unknown token fails the whole string.
+fn compileClassString(classStr) {
+	raw := default(classStr, '')
+	parts := split(raw, ' ') |> filter(fn(p) trim(p) != '')
+	if len(parts) = 0 {
+		true -> { ok?: true, props: {} }
+		_ -> {
+			props := {}
+			fn loop(i) if i < len(parts) {
+				true -> {
+					tok := parts.(i)
+					entry := parseToken(tok)
+					if entry {
+						? -> { ok?: false, error: 'unknown utility: ' + tok }
+						_ -> {
+							props <- _applyEntry(props, entry)
+							loop(i + 1)
+						}
+					}
+				}
+				_ -> { ok?: true, props: props }
+			}
+			loop(0)
+		}
+	}
+}
+
+// StyleTable holds compiled styles: list of prop maps + class → styleId map
+fn emptyTable() {
+	{
+		styles: []
+		byClass: {}
+		nextId: 0
+	}
+}
+
+// ensureClass compiles classStr if new; returns styleId or -1 on failure.
+fn ensureClass(table, classStr) {
+	key := default(classStr, '')
+	existing := table.byClass.(key)
+	if existing != ? {
+		// already compiled, return existing id
+		existing
+	}
+	// compile new class
+	compiled := compileClassString(key)
+	if compiled.ok? {
+		id := table.nextId
+		table.styles := table.styles << compiled.props
+		table.byClass.(key) := id
+		table.nextId := id + 1
+		id
+	}
+	-1
+}
+
+// ensureProps inserts a raw prop map (for style={{...}} paths).
+fn ensureProps(table, props) {
+	id := table.nextId
+	table.styles := table.styles << default(props, {})
+	table.nextId := id + 1
+	id
+}
+
+// getStyle returns the prop map for styleId, or {}.
+fn getStyle(table, styleId) if styleId < 0 | styleId >= len(table.styles) {
+	true -> {}
+	_ -> table.styles.(styleId)
+}
+
+// --- binary encode/decode ---------------------------------------------------
+
+fn _u8(n) char(n % 256)
+fn _u16le(n) char(n % 256) + char(int(n / 256) % 256)
+fn _u32le(n) {
+	char(n % 256) +
+		char(int(n / 256) % 256) +
+		char(int(n / 65536) % 256) +
+		char(int(n / 16777216) % 256)
+}
+fn _i32le(n) {
+	// two's complement for negative
+	v := if n < 0 {
+		true -> 4294967296 + n
+		_ -> n
+	}
+	_u32le(v)
+}
+
+fn _propId(name) {
+	id := surface.PROP.(name)
+	if id { ? -> ?, _ -> id }
+}
+
+// encodeTable → binary string (MGST)
+fn encodeTable(table) {
+	styles := table.styles
+	header := _u32le(surface.STYLE_MAGIC) + _u16le(surface.STYLE_VERSION) + _u16le(len(styles))
+	body := styles |> map(fn(props) {
+		// collect named props that map to PROP ids
+		pkeys := keys(props)
+		entries := []
+		fn collect(i) if i < len(pkeys) {
+			true -> {
+				k := pkeys.(i)
+				pid := _propId(k)
+				if pid {
+					? -> collect(i + 1)
+					_ -> {
+						entries <- entries << [pid, props.(k)]
+						collect(i + 1)
+					}
+				}
+			}
+		}
+		collect(0)
+		rec := _u8(len(entries))
+		fn emit(i) if i < len(entries) {
+			true -> {
+				e := entries.(i)
+				rec <- rec + _u8(e.0) + _u8(0) + _i32le(int(e.1))
+				emit(i + 1)
+			}
+		}
+		emit(0)
+		rec
+	}) |> join('')
+	header + body
+}
+
+fn _readU8(s, o) codepoint(s.(o))
+fn _readU16le(s, o) codepoint(s.(o)) + codepoint(s.(o + 1)) * 256
+fn _readU32le(s, o) {
+	codepoint(s.(o)) +
+		codepoint(s.(o + 1)) * 256 +
+		codepoint(s.(o + 2)) * 65536 +
+		codepoint(s.(o + 3)) * 16777216
+}
+fn _readI32le(s, o) {
+	u := _readU32le(s, o)
+	if u >= 2147483648 {
+		true -> u - 4294967296
+		_ -> u
+	}
+}
+
+// decodeTable parses MGST bytes into a StyleTable (byClass empty).
+fn decodeTable(bytes) {
+	if len(bytes) < 8 {
+		true -> { type: :error, error: 'styles.bin too short' }
+		_ -> {
+			magic := _readU32le(bytes, 0)
+			if magic != surface.STYLE_MAGIC {
+				true -> { type: :error, error: 'bad styles magic' }
+				_ -> {
+					ver := _readU16le(bytes, 4)
+					count := _readU16le(bytes, 6)
+					styles := []
+					o := 8
+					fn loop(i) if i < count {
+						true -> {
+							if o >= len(bytes) {
+								true -> { type: :error, error: 'truncated styles' }
+								_ -> {
+									n := _readU8(bytes, o)
+									o <- o + 1
+									props := {}
+									fn propsLoop(j) if j < n {
+										true -> {
+											if o + 6 > len(bytes) {
+												true -> { type: :error, error: 'truncated prop' }
+												_ -> {
+													pid := _readU8(bytes, o)
+													// skip reserved
+													val := _readI32le(bytes, o + 2)
+													o <- o + 6
+													name := surface.propName(pid)
+													if name != ? -> props.(name) := val
+													propsLoop(j + 1)
+												}
+											}
+										}
+										_ -> {
+											styles <- styles << props
+											loop(i + 1)
+										}
+									}
+									propsLoop(0)
+								}
+							}
+						}
+						_ -> {
+							type: :ok
+							table: {
+								styles: styles
+								byClass: {}
+								nextId: len(styles)
+							}
+						}
+					}
+					loop(0)
+				}
+			}
+		}
+	}
+}
+
+// collectClassesFromAst walks an Oak AST and returns unique string literals
+// that look like utility class lists (contain a known token).
+fn collectClassesFromAst(node) {
+	found := {}
+	list := []
+	fn visit(n) if n {
+		? -> ?
+		_ -> if type(n) = :object {
+			true -> {
+				if n.type = :string {
+					true -> {
+						s := n.val
+						// heuristic: contains flex or known size util
+						if containsStr?(s, 'flex') | containsStr?(s, 'p-') |
+							containsStr?(s, 'gap-') | containsStr?(s, 'bg-') |
+							containsStr?(s, 'text-') | containsStr?(s, 'items-') {
+							true -> if found.(s) {
+								? -> {
+									found.(s) := true
+									list <- list << s
+								}
+								_ -> ?
+							}
+							_ -> ?
+						}
+					}
+					_ -> ?
+				}
+				// recurse known AST fields
+				if n.exprs != ? -> n.exprs |> each(visit)
+				if n.args != ? -> n.args |> each(visit)
+				if n.elems != ? -> n.elems |> each(visit)
+				if n.entries != ? -> n.entries |> each(fn(e) {
+					visit(e.key)
+					visit(e.val)
+				})
+				if n.body != ? -> visit(n.body)
+				if n.left != ? -> visit(n.left)
+				if n.right != ? -> visit(n.right)
+				if n.cond != ? -> visit(n.cond)
+				if n.branches != ? -> n.branches |> each(visit)
+				if n.target != ? -> visit(n.target)
+				if n.function != ? -> visit(n.function)
+				if n.restArg != ? -> visit(n.restArg)
+				?
+			}
+			_ -> if type(n) = :list {
+				true -> n |> each(visit)
+				_ -> ?
+			}
+		}
+	}
+	visit(node)
+	list
+}
+
+// collectCodepoints gathers unique unicode codepoints from string literals in AST.
+fn collectCodepointsFromAst(node) {
+	seen := {}
+	list := []
+	// always include ASCII printable
+	fn addCp(cp) if seen.(string(cp)) {
+		? -> {
+			seen.(string(cp)) := true
+			list <- list << cp
+		}
+		_ -> ?
+	}
+	std.range(32, 127) |> each(addCp)
+	fn visit(n) if n {
+		? -> ?
+		_ -> if type(n) = :object {
+			true -> {
+				if n.type = :string {
+					true -> {
+						s := n.val
+						fn loop(i) if i < len(s) {
+							true -> {
+								addCp(codepoint(s.(i)))
+								loop(i + 1)
+							}
+						}
+						loop(0)
+					}
+					_ -> ?
+				}
+				if n.exprs != ? -> n.exprs |> each(visit)
+				if n.args != ? -> n.args |> each(visit)
+				if n.elems != ? -> n.elems |> each(visit)
+				if n.entries != ? -> n.entries |> each(fn(e) {
+					visit(e.key)
+					visit(e.val)
+				})
+				if n.body != ? -> visit(n.body)
+				if n.left != ? -> visit(n.left)
+				if n.right != ? -> visit(n.right)
+				if n.cond != ? -> visit(n.cond)
+				if n.branches != ? -> n.branches |> each(visit)
+				if n.target != ? -> visit(n.target)
+				if n.function != ? -> visit(n.function)
+				?
+			}
+			_ -> if type(n) = :list {
+				true -> n |> each(visit)
+				_ -> ?
+			}
+		}
+	}
+	visit(node)
+	list
+}

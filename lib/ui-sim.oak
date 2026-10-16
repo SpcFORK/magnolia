@@ -1,0 +1,232 @@
+// ui-sim — deterministic simulation host for UI surfaces.
+//
+// Frame content is a pure fold:
+//   state[n+1] = F(state[n], input[n])
+//   pixels/draw[n] = G(state[n])
+//
+// Time is a frame counter. The virtual rate (hz) is host policy; core still
+// ticks FIXED_DT. after(seconds) schedules by virtual time.
+
+std := import('std')
+default := std.default
+map := std.map
+filter := std.filter
+each := std.each
+clone := std.clone
+surface := import('ui-surface')
+uiCore := import('ui-core')
+uiSdk := import('ui-sdk')
+
+// createSim(options?) — wraps an app (or creates one).
+// options: { app, width, height, hz }
+fn createSim(options) {
+	opts := default(options, {})
+	app := if opts.app {
+		? -> uiSdk.createApp({
+			width: default(opts.width, surface.SCREEN_W)
+			height: default(opts.height, surface.SCREEN_H)
+		})
+		_ -> opts.app
+	}
+	hz := default(opts.hz, 60)
+	// hz must divide 60 for clean subsampling
+	if 60 % hz != 0 -> hz := 60
+	{
+		app: app
+		hz: hz
+		// cores ticks per virtual frame
+		ticksPerFrame: int(60 / hz)
+		frame: 0
+		// scheduled callbacks: list of { atFrame, fn, order }
+		timers: []
+		timerSeq: 0
+		// effect deliveries queued for next frame boundary
+		effects: []
+		// effect trace for goldens
+		effectTrace: []
+		// input currently held (buttons bitmask or object)
+		buttons: 0
+		// last drawlist + hash
+		lastDraw: []
+		lastHash: 0
+	}
+}
+
+// virtualNow(sim) — virtual seconds since start
+fn virtualNow(sim) sim.frame / sim.hz
+
+// after(sim, seconds, callback) — fire at virtual deadline
+fn after(sim, seconds, callback) {
+	deadline := sim.frame + int(seconds * sim.hz + 0.0001)
+	seq := sim.timerSeq
+	sim.timerSeq := seq + 1
+	sim.timers := sim.timers << {
+		atFrame: deadline
+		callback: callback
+		order: seq
+	}
+}
+
+// queueEffect(sim, name, payload) — delivery at next frame start
+fn queueEffect(sim, name, payload) {
+	sim.effects := sim.effects << {
+		name: name
+		payload: payload
+		queuedAt: sim.frame
+	}
+}
+
+// setButtons(sim, buttons) — held input for upcoming frame
+fn setButtons(sim, buttons) {
+	sim.buttons := buttons
+}
+
+// step(sim) — one virtual frame: effects → timers → ticks → draw
+fn step(sim) {
+	// 1. deliver effects (frame-boundary)
+	pending := sim.effects
+	sim.effects := []
+	pending |> each(fn(e) {
+		sim.effectTrace := sim.effectTrace << {
+			frame: sim.frame
+			name: e.name
+			payload: e.payload
+		}
+	})
+
+	// 2. fire timers due at this frame
+	due := sim.timers |> filter(fn(t) t.atFrame <= sim.frame)
+	sim.timers := sim.timers |> filter(fn(t) t.atFrame > sim.frame)
+	// sort by order
+	// simple insertion order already preserved if we filter stably
+	due |> each(fn(t) t.callback())
+
+	// 3. core ticks
+	fn tickLoop(i) if i < sim.ticksPerFrame {
+		true -> {
+			uiCore.tick(sim.app.core, surface.FIXED_DT)
+			tickLoop(i + 1)
+		}
+	}
+	tickLoop(0)
+
+	// 4. draw
+	dl := uiCore.draw(sim.app.core)
+	sim.lastDraw := dl
+	sim.lastHash := uiCore.drawListHash(dl)
+	sim.frame := sim.frame + 1
+	{
+		frame: sim.frame - 1
+		hash: sim.lastHash
+		drawList: dl
+		buttons: sim.buttons
+	}
+}
+
+// run(sim, frames) — step N virtual frames; returns list of {frame, hash}
+fn run(sim, frames) {
+	n := default(frames, 1)
+	trace := []
+	fn loop(i) if i < n {
+		true -> {
+			r := step(sim)
+			trace <- trace << { frame: r.frame, hash: r.hash }
+			loop(i + 1)
+		}
+	}
+	loop(0)
+	trace
+}
+
+// runScenario(opts) — create sim, apply scripted inputs, return full trace.
+// opts: {
+//   app?, width?, height?, hz?,
+//   frames | seconds,
+//   script: [ { at: virtualSeconds, press?: buttons, release?: buttons, click?: {x,y}, fn?: callback } ]
+//   setup?: fn(app, sim)
+// }
+fn runScenario(opts) {
+	o := default(opts, {})
+	sim := createSim(o)
+	if o.setup != ? -> o.setup(sim.app, sim)
+
+	totalFrames := if o.frames {
+		? -> if o.seconds {
+			? -> 1
+			_ -> int(o.seconds * sim.hz + 0.0001)
+		}
+		_ -> o.frames
+	}
+
+	script := default(o.script, [])
+	// index script events by frame
+	eventsByFrame := {}
+	script |> each(fn(ev) {
+		f := int(default(ev.at, 0) * sim.hz + 0.0001)
+		list := eventsByFrame.(string(f))
+		if list {
+			? -> eventsByFrame.(string(f)) := [ev]
+			_ -> eventsByFrame.(string(f)) := list << ev
+		}
+	})
+
+	hashes := []
+	fn loop(i) if i < totalFrames {
+		true -> {
+			// apply script at this frame (before step)
+			evs := eventsByFrame.(string(i))
+			if evs != ? {
+				true -> evs |> each(fn(ev) {
+					if ev.press != ? -> sim.buttons := ev.press
+					if ev.release != ? -> sim.buttons := 0
+					if ev.click != ? {
+						true -> {
+							id := uiSdk.hitTest(sim.app, ev.click.x, ev.click.y)
+							if id != 0 {
+								true -> {
+									uiSdk.setFocus(sim.app, id)
+									uiSdk.setActive(sim.app, id)
+								}
+							}
+						}
+					}
+					if ev.action != ? -> ev.action(sim.app, sim)
+				})
+			}
+			r := step(sim)
+			hashes <- hashes << r.hash
+			loop(i + 1)
+		}
+	}
+	loop(0)
+
+	{
+		hz: sim.hz
+		frames: totalFrames
+		hashes: hashes
+		finalHash: sim.lastHash
+		finalDraw: sim.lastDraw
+		effects: sim.effectTrace
+		tree: sim.app.mirror
+	}
+}
+
+// assertGolden(trace, expectedHash) — true if final hash matches
+fn assertGolden(trace, expectedHash) trace.finalHash = expectedHash
+
+// assertTraceEqual(a, b) — same per-frame hashes
+fn assertTraceEqual(a, b) {
+	if len(a.hashes) != len(b.hashes) {
+		true -> false
+		_ -> {
+			fn loop(i) if i < len(a.hashes) {
+				true -> if a.hashes.(i) != b.hashes.(i) {
+					true -> false
+					_ -> loop(i + 1)
+				}
+				_ -> true
+			}
+			loop(0)
+		}
+	}
+}

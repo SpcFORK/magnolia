@@ -1,0 +1,199 @@
+// tests for the Magnolia UI surface stack (Pocket-grammar integration)
+
+std := import('std')
+surface := import('ui-surface')
+styleBake := import('style-bake')
+fontBake := import('font-bake')
+uiCore := import('ui-core')
+uiSdk := import('ui-sdk')
+uiSim := import('ui-sim')
+transpileUi := import('transpile-ui')
+drawlist := import('gui-drawlist')
+
+fn run(t) {
+	{
+		// --- surface contract ---
+		'surface fingerprint is stable string' |> t.eq(
+			type(surface.fingerprint())
+			:string
+		)
+
+		'surface knownOp? for createNode' |> t.eq(
+			surface.knownOp?(surface.OP.createNode)
+			true
+		)
+
+		'surface unknown op rejected' |> t.eq(
+			surface.knownOp?(0)
+			false
+		)
+
+		'surface packId/unpack roundtrip' |> t.eq(
+			{
+				id := surface.packId(7, 3)
+				[surface.unpackSlot(id), surface.unpackGen(id)]
+			}
+			[7, 3]
+		)
+
+		'surface abgr packs red channel low' |> t.eq(
+			surface.abgr(255, 0, 0, 255) % 256
+			255
+		)
+
+		// --- style-bake ---
+		'compileClassString accepts known utilities' |> t.eq(
+			styleBake.compileClassString('flex flex-col gap-4 p-2').ok?
+			true
+		)
+
+		'compileClassString rejects unknown token' |> t.eq(
+			styleBake.compileClassString('flex hover:bg-red').ok?
+			false
+		)
+
+		'compileClassString gap-4 is 16px' |> t.eq(
+			styleBake.compileClassString('gap-4').props.gap
+			16
+		)
+
+		'style table encode/decode roundtrip' |> t.eq(
+			{
+				table := styleBake.emptyTable()
+				styleBake.ensureClass(table, 'flex flex-col p-2 bg-slate-50')
+				bin := styleBake.encodeTable(table)
+				dec := styleBake.decodeTable(bin)
+				dec.type = :ok & len(dec.table.styles) = 1
+			}
+			true
+		)
+
+		// --- ui-core ---
+		'createCore root is id 1' |> t.eq(
+			{
+				core := uiCore.createCore({ width: 100, height: 80 })
+				core.nodes.(1).id
+			}
+			surface.ROOT_ID
+		)
+
+		'createNode + insertBefore builds tree' |> t.eq(
+			{
+				core := uiCore.createCore({})
+				id := uiCore.createNode(core, surface.NODE_TYPE.view)
+				uiCore.insertBefore(core, surface.ROOT_ID, id, 0)
+				len(core.nodes.(1).children)
+			}
+			1
+		)
+
+		'setText + draw emits glyphRun' |> t.eq(
+			{
+				core := uiCore.createCore({})
+				id := uiCore.createNode(core, surface.NODE_TYPE.text)
+				uiCore.insertBefore(core, surface.ROOT_ID, id, 0)
+				uiCore.setText(core, id, 'Hi')
+				dl := uiCore.draw(core)
+				// find glyphRun
+				found := { v: false }
+				dl |> std.each(fn(op) {
+					if op.op = surface.DRAW_OP.glyphRun & op.text = 'Hi' -> found.v := true
+				})
+				found.v
+			}
+			true
+		)
+
+		'drawListHash is deterministic' |> t.eq(
+			{
+				core := uiCore.createCore({ width: 200, height: 100 })
+				id := uiCore.createNode(core, surface.NODE_TYPE.view)
+				uiCore.insertBefore(core, surface.ROOT_ID, id, 0)
+				uiCore.setProp(core, id, 'bgColor', surface.rgb(10, 20, 30))
+				uiCore.setProp(core, id, 'width', 50)
+				uiCore.setProp(core, id, 'height', 40)
+				a := uiCore.drawListHash(uiCore.draw(core))
+				b := uiCore.drawListHash(uiCore.draw(core))
+				a = b
+			}
+			true
+		)
+
+		// --- ui-sdk ---
+		'sdk View/Text builds mirror' |> t.eq(
+			{
+				app := uiSdk.createApp({ width: 320, height: 200 })
+				box := uiSdk.View(app, surface.ROOT_ID, 'flex flex-col p-4 bg-slate-50')
+				uiSdk.Text(app, box, 'Hello', 'text-lg text-slate-900')
+				m := uiSdk.mirrorNode(app, box)
+				m != ? & len(m.children) = 1
+			}
+			true
+		)
+
+		// --- ui-sim determinism ---
+		'sim same scenario same hashes' |> t.eq(
+			{
+				setup := fn(app, sim) {
+					box := uiSdk.View(app, surface.ROOT_ID, 'flex flex-col gap-2 p-4 bg-slate-50')
+					uiSdk.Text(app, box, 'Sim', 'text-base text-slate-900')
+				}
+				a := uiSim.runScenario({ width: 320, height: 200, hz: 60, frames: 8, setup: setup })
+				b := uiSim.runScenario({ width: 320, height: 200, hz: 60, frames: 8, setup: setup })
+				uiSim.assertTraceEqual(a, b)
+			}
+			true
+		)
+
+		'sim after timer fires by virtual time' |> t.eq(
+			{
+				fired := { n: 0 }
+				uiSim.runScenario({
+					width: 100
+					height: 100
+					hz: 10
+					seconds: 1.0
+					setup: fn(app, sim) {
+						uiSim.after(sim, 0.5, fn() {
+							fired.n := fired.n + 1
+						})
+					}
+				})
+				fired.n = 1
+			}
+			true
+		)
+
+		// --- transpile-ui collect ---
+		'transpile-ui bake empty ok' |> t.eq(
+			{
+				st := transpileUi.emptyState()
+				baked := transpileUi.bake(st)
+				baked.ok?
+			}
+			true
+		)
+
+		// --- font-bake ---
+		'font-bake measure grows with string length' |> t.eq(
+			{
+				atlas := fontBake.emptyAtlas()
+				fontBake.addString(atlas, 'abc')
+				a := fontBake.measure(atlas, 'a', 16)
+				b := fontBake.measure(atlas, 'aaa', 16)
+				b.w > a.w
+			}
+			true
+		)
+
+		// --- drawlist hash helper ---
+		'gui-drawlist hash matches ui-core' |> t.eq(
+			{
+				core := uiCore.createCore({})
+				dl := uiCore.draw(core)
+				drawlist.hash(dl) = uiCore.drawListHash(dl)
+			}
+			true
+		)
+	}
+}

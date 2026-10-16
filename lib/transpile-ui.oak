@@ -1,0 +1,156 @@
+// transpile-ui — two-pass UI asset collection for Magnolia builds.
+//
+// Pass 1 (collect): walk AST → class strings + codepoints + static hints.
+// Pass 1b (bake):   style-bake + font-bake → styles.bin / atlas plan.
+// Pass 2:           existing build/pack bundles the guest; assets go in VFS.
+//
+// Register collectors with transpile.registerTranspiler or call collect()
+// explicitly from a custom build script.
+
+std := import('std')
+default := std.default
+clone := std.clone
+merge := std.merge
+each := std.each
+styleBake := import('style-bake')
+fontBake := import('font-bake')
+transpile := import('transpile')
+surface := import('ui-surface')
+
+// CollectState is mutated during an AST walk.
+fn emptyState() {
+	{
+		classes: []
+		classSet: {}
+		codepoints: []
+		codeSet: {}
+		errors: []
+	}
+}
+
+// collect(node) → CollectState from one AST root (or list of nodes).
+fn collect(node) {
+	state := emptyState()
+	classes := styleBake.collectClassesFromAst(node)
+	classes |> each(fn(c) {
+		if state.classSet.(c) {
+			? -> {
+				state.classSet.(c) := true
+				state.classes := state.classes << c
+			}
+			_ -> ?
+		}
+	})
+	cps := styleBake.collectCodepointsFromAst(node)
+	cps |> each(fn(cp) {
+		k := string(cp)
+		if state.codeSet.(k) {
+			? -> {
+				state.codeSet.(k) := true
+				state.codepoints := state.codepoints << cp
+			}
+			_ -> ?
+		}
+	})
+	// validate each class (all-or-nothing)
+	state.classes |> each(fn(c) {
+		compiled := styleBake.compileClassString(c)
+		if !compiled.ok? {
+			true -> state.errors := state.errors << {
+				class: c
+				error: compiled.error
+			}
+		}
+	})
+	state
+}
+
+// bake(state) → { stylesTable, stylesBin, atlas, ok?, errors }
+fn bake(state) {
+	st := default(state, emptyState())
+	table := styleBake.emptyTable()
+	st.classes |> each(fn(c) {
+		id := styleBake.ensureClass(table, c)
+		if id < 0 {
+			true -> st.errors := st.errors << {
+				class: c
+				error: 'failed to ensure class'
+			}
+		}
+	})
+	atlas := fontBake.emptyAtlas()
+	st.codepoints |> each(fn(cp) fontBake.addCodepoint(atlas, cp))
+	bin := styleBake.encodeTable(table)
+	{
+		ok?: len(st.errors) = 0
+		errors: st.errors
+		stylesTable: table
+		stylesBin: bin
+		atlas: atlas
+		atlasJson: fontBake.serializeAtlas(atlas)
+		surfaceFingerprint: surface.fingerprint()
+	}
+}
+
+// collectAndBake(node) convenience.
+fn collectAndBake(node) bake(collect(node))
+
+// VFS keys for pack includeVFS embedding
+VFS_STYLES := 'ui/styles.bin'
+VFS_ATLAS := fontBake.VFS_KEY
+VFS_META := 'ui/surface-meta.json'
+
+// makeCollectorTranspiler returns a transpile visitor that records into state
+// without transforming the AST. Call after registerTranspiler; read state after build.
+fn makeCollectorTranspiler(state) {
+	transpile.createTranspiler(fn(node) {
+		// only harvest string leaves; walkNode already recurses
+		if node.type = :string {
+			true -> {
+				s := node.val
+				// class heuristic
+				if strContainsUtil?(s) {
+					true -> if state.classSet.(s) {
+						? -> {
+							state.classSet.(s) := true
+							state.classes := state.classes << s
+						}
+						_ -> ?
+					}
+				}
+				// codepoints
+				fn loop(i) if i < len(s) {
+					true -> {
+						cp := codepoint(s.(i))
+						k := string(cp)
+						if state.codeSet.(k) {
+							? -> {
+								state.codeSet.(k) := true
+								state.codepoints := state.codepoints << cp
+							}
+							_ -> ?
+						}
+						loop(i + 1)
+					}
+				}
+				loop(0)
+			}
+		}
+		node
+	})
+}
+
+fn strContainsUtil?(s) {
+	str := import('str')
+	str.contains?(s, 'flex') | str.contains?(s, 'gap-') |
+		str.contains?(s, 'bg-') | str.contains?(s, 'items-') |
+		str.contains?(s, 'p-') | str.contains?(s, 'text-')
+}
+
+// registerCollector installs a shared collector into the transpile registry.
+// Returns the mutable state object.
+fn registerCollector() {
+	state := emptyState()
+	transpile.registerTranspiler(makeCollectorTranspiler(state))
+	state
+}

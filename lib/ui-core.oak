@@ -1,0 +1,936 @@
+// ui-core — retained-mode 2D UI core (Magnolia-native Pocket grammar).
+//
+// Laws:
+//   1. State lives here; guests hold only mirrors.
+//   2. Intent crosses as ops; facts as events (later).
+//   3. tick(dt) advances a pure simulation; draw() emits a DrawList.
+//
+// The core never calls into guest code.
+
+std := import('std')
+default := std.default
+map := std.map
+filter := std.filter
+each := std.each
+clone := std.clone
+keys := std.keys
+contains? := std.contains?
+surface := import('ui-surface')
+styleBake := import('style-bake')
+
+// ---------------------------------------------------------------------------
+// Defaults
+// ---------------------------------------------------------------------------
+
+fn _defaultProps() {
+	{
+		width: ?
+		height: ?
+		minW: 0
+		minH: 0
+		maxW: 100000
+		maxH: 100000
+		paddingT: 0
+		paddingR: 0
+		paddingB: 0
+		paddingL: 0
+		marginT: 0
+		marginR: 0
+		marginB: 0
+		marginL: 0
+		gap: 0
+		flexDir: surface.ENUMS.FlexDir.Col
+		justify: surface.ENUMS.Justify.Start
+		align: surface.ENUMS.Align.Stretch
+		grow: 0
+		shrink: 1
+		basis: ?
+		posType: surface.ENUMS.PosType.Relative
+		insetT: ?
+		insetR: ?
+		insetB: ?
+		insetL: ?
+		display: surface.ENUMS.Display.Flex
+		overflow: surface.ENUMS.Overflow.Visible
+		zIndex: 0
+		bgColor: ?
+		radius: 0
+		opacity: 100
+		borderColor: ?
+		borderWidth: 0
+		textColor: surface.rgb(15, 23, 42)
+		fontSize: 14
+		textAlign: surface.ENUMS.TextAlign.Left
+		lineHeight: 0
+		translateX: 0
+		translateY: 0
+		scale: 1
+		rotate: 0
+	}
+}
+
+fn _mergeProps(base, over) {
+	out := clone(base)
+	if over = ? -> out
+	ks := keys(over)
+	fn loop(i) if i < len(ks) {
+		true -> {
+			k := ks.(i)
+			v := over.(k)
+			if v != ? -> out.(k) := v
+			loop(i + 1)
+		}
+		_ -> out
+	}
+	loop(0)
+}
+
+fn _measureText(text, fontSize) {
+	// approximate advance: 0.55 * fontSize per character (Inter-ish)
+	w := len(default(text, '')) * fontSize * 0.55
+	h := if fontSize > 0 { true -> fontSize * 1.25, _ -> 14 }
+	{ w: w, h: h }
+}
+
+// ---------------------------------------------------------------------------
+// Core constructor
+// ---------------------------------------------------------------------------
+
+// createCore(options?) builds a new UI simulation.
+// options: { width, height, styles (StyleTable) }
+fn createCore(options) {
+	opts := default(options, {})
+	vw := default(opts.width, surface.SCREEN_W)
+	vh := default(opts.height, surface.SCREEN_H)
+	styles := default(opts.styles, styleBake.emptyTable())
+	// node 0 unused; node 1 = root
+	root := {
+		id: surface.ROOT_ID
+		slot: 1
+		gen: 0
+		alive?: true
+		kind: surface.NODE_TYPE.view
+		parent: 0
+		children: []
+		text: ''
+		styleId: surface.STYLE_ID_NONE
+		props: _defaultProps()
+		// layout box (filled by layout pass)
+		x: 0
+		y: 0
+		w: vw
+		h: vh
+	}
+	root.props.width := vw
+	root.props.height := vh
+	root.props.flexDir := surface.ENUMS.FlexDir.Col
+
+	{
+		version: surface.SURFACE_VERSION
+		width: vw
+		height: vh
+		nodes: [?, root] // index by slot
+		free: []
+		nextSlot: 2
+		focus: 0
+		active: 0
+		frame: 0
+		layoutDirty?: true
+		styles: styles
+		paused?: false
+		stepArmed?: false
+		// last drawlist for goldens
+		drawList: []
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ID helpers
+// ---------------------------------------------------------------------------
+
+fn _node(core, id) {
+	if id <= 0 {
+		true -> ?
+		_ -> {
+			slot := surface.unpackSlot(id)
+			gen := surface.unpackGen(id)
+			if slot < 0 | slot >= len(core.nodes) {
+				true -> ?
+				_ -> {
+					n := core.nodes.(slot)
+					if n = ? | !n.alive? | n.gen != gen {
+						true -> ?
+						_ -> n
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _resolveProps(core, node) {
+	base := _defaultProps()
+	if node.styleId >= 0 {
+		true -> {
+			st := styleBake.getStyle(core.styles, node.styleId)
+			_mergeProps(base, _mergeProps(st, node.props))
+		}
+		_ -> _mergeProps(base, node.props)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Ops
+// ---------------------------------------------------------------------------
+
+fn createNode(core, kind) {
+	k := default(kind, surface.NODE_TYPE.view)
+	slot := if len(core.free) > 0 {
+		true -> {
+			s := core.free.(len(core.free) - 1)
+			core.free := std.slice(core.free, 0, len(core.free) - 1)
+			s
+		}
+		_ -> {
+			s := core.nextSlot
+			core.nextSlot := s + 1
+			// grow nodes list
+			fn grow() if len(core.nodes) <= s {
+				true -> {
+					core.nodes := core.nodes << ?
+					grow()
+				}
+			}
+			grow()
+			s
+		}
+	}
+	prev := core.nodes.(slot)
+	gen := if prev {
+		? -> 0
+		_ -> prev.gen + 1
+	}
+	id := surface.packId(slot, gen)
+	node := {
+		id: id
+		slot: slot
+		gen: gen
+		alive?: true
+		kind: k
+		parent: 0
+		children: []
+		text: ''
+		styleId: surface.STYLE_ID_NONE
+		props: {}
+		x: 0
+		y: 0
+		w: 0
+		h: 0
+	}
+	core.nodes.(slot) := node
+	core.layoutDirty? := true
+	id
+}
+
+fn destroyNode(core, id) {
+	node := _node(core, id)
+	if node = ? | id = surface.ROOT_ID {
+		true -> ?
+		_ -> {
+			// destroy children first
+			kids := clone(node.children)
+			kids |> each(fn(cid) destroyNode(core, cid))
+			// detach from parent
+			if node.parent != 0 {
+				true -> {
+					p := _node(core, node.parent)
+					if p != ? {
+						true -> {
+							p.children := p.children |> filter(fn(c) c != id)
+						}
+					}
+				}
+			}
+			if core.focus = id -> core.focus := 0
+			if core.active = id -> core.active := 0
+			node.alive? := false
+			node.children := []
+			node.parent := 0
+			core.free := core.free << node.slot
+			core.layoutDirty? := true
+		}
+	}
+}
+
+fn insertBefore(core, parentId, childId, anchorId) {
+	parent := _node(core, parentId)
+	child := _node(core, childId)
+	if parent = ? | child = ? {
+		true -> ?
+		_ -> {
+			// depth check
+			fn depthOf(n, d) if d >= surface.MAX_TREE_DEPTH {
+				true -> d
+				_ -> if n.parent = 0 {
+					true -> d
+					_ -> {
+						p := _node(core, n.parent)
+						if p = ? {
+							true -> d
+							_ -> depthOf(p, d + 1)
+						}
+					}
+				}
+			}
+			if depthOf(parent, 0) >= surface.MAX_TREE_DEPTH - 1 {
+				true -> ? // silent no-op
+				_ -> {
+					// DOM move: unlink child first
+					if child.parent != 0 {
+						true -> {
+							oldP := _node(core, child.parent)
+							if oldP != ? {
+								true -> {
+									oldP.children := oldP.children |> filter(fn(c) c != childId)
+								}
+							}
+						}
+					}
+					child.parent := parentId
+					anchor := default(anchorId, 0)
+					if anchor = 0 {
+						true -> {
+							parent.children := parent.children << childId
+						}
+						_ -> {
+							// insert before anchor
+							idx := -1
+							fn find(i) if i < len(parent.children) {
+								true -> if parent.children.(i) = anchor {
+									true -> idx := i
+									_ -> find(i + 1)
+								}
+							}
+							find(0)
+							if idx < 0 {
+								true -> parent.children := parent.children << childId
+								_ -> {
+									// rebuild list
+									before := std.slice(parent.children, 0, idx)
+									after := std.slice(parent.children, idx, len(parent.children))
+									parent.children := before << childId
+									after |> each(fn(c) {
+										parent.children := parent.children << c
+									})
+								}
+							}
+						}
+					}
+					core.layoutDirty? := true
+				}
+			}
+		}
+	}
+}
+
+fn removeChild(core, parentId, childId) {
+	parent := _node(core, parentId)
+	child := _node(core, childId)
+	if parent = ? | child = ? {
+		true -> ?
+		_ -> {
+			parent.children := parent.children |> filter(fn(c) c != childId)
+			if child.parent = parentId -> child.parent := 0
+			core.layoutDirty? := true
+		}
+	}
+}
+
+fn setStyle(core, id, styleId) {
+	node := _node(core, id)
+	if node = ? {
+		true -> ?
+		_ -> {
+			node.styleId := styleId
+			core.layoutDirty? := true
+		}
+	}
+}
+
+fn setProp(core, id, propNameOrId, value) {
+	node := _node(core, id)
+	if node = ? {
+		true -> ?
+		_ -> {
+			name := if type(propNameOrId) = :string {
+				true -> propNameOrId
+				_ -> surface.propName(propNameOrId)
+			}
+			if name = ? {
+				true -> ?
+				_ -> {
+					node.props.(name) := value
+					// layout dirty if layout prop
+					if LAYOUT_DIRTYING_SET.(name) {
+						true -> core.layoutDirty? := true
+						_ -> if name {
+							'width', 'height', 'paddingT', 'paddingR', 'paddingB', 'paddingL'
+							'marginT', 'marginR', 'marginB', 'marginL', 'gap', 'flexDir'
+							'justify', 'align', 'grow', 'shrink', 'display', 'posType'
+							'fontSize', 'textAlign' -> core.layoutDirty? := true
+							_ -> ? // paint-only
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// local set for layout dirtying (object lookup)
+LAYOUT_DIRTYING_SET := {
+	width: true
+	height: true
+	minW: true
+	minH: true
+	maxW: true
+	maxH: true
+	paddingT: true
+	paddingR: true
+	paddingB: true
+	paddingL: true
+	marginT: true
+	marginR: true
+	marginB: true
+	marginL: true
+	gap: true
+	flexDir: true
+	justify: true
+	align: true
+	grow: true
+	shrink: true
+	basis: true
+	posType: true
+	insetT: true
+	insetR: true
+	insetB: true
+	insetL: true
+	display: true
+	overflow: true
+	fontSize: true
+	textAlign: true
+	lineHeight: true
+}
+
+fn setText(core, id, text) {
+	node := _node(core, id)
+	if node = ? {
+		true -> ?
+		_ -> {
+			node.text := default(text, '')
+			core.layoutDirty? := true
+		}
+	}
+}
+
+fn replaceText(core, id, text) setText(core, id, text)
+
+fn setFocus(core, id) {
+	if id = 0 {
+		true -> core.focus := 0
+		_ -> {
+			node := _node(core, id)
+			if node != ? -> core.focus := id
+		}
+	}
+}
+
+fn setActive(core, id) {
+	if id = 0 {
+		true -> core.active := 0
+		_ -> {
+			node := _node(core, id)
+			if node != ? -> core.active := id
+		}
+	}
+}
+
+fn loadStyles(core, table) {
+	core.styles := table
+	core.layoutDirty? := true
+}
+
+// ---------------------------------------------------------------------------
+// Layout (simple flex subset)
+// ---------------------------------------------------------------------------
+
+fn _layoutNode(core, node, x, y, availW, availH) {
+	props := _resolveProps(core, node)
+	if props.display = surface.ENUMS.Display.None {
+		true -> {
+			node.x := x
+			node.y := y
+			node.w := 0
+			node.h := 0
+		}
+		_ -> {
+			// measure intrinsic for text
+			iw := 0
+			ih := 0
+			if node.kind = surface.NODE_TYPE.text {
+				true -> {
+					m := _measureText(node.text, props.fontSize)
+					iw <- m.w
+					ih <- m.h
+				}
+			}
+
+			// explicit sizes
+			w := if props.width {
+				? -> if node.kind = surface.NODE_TYPE.text {
+					true -> iw + props.paddingL + props.paddingR
+					_ -> availW
+				}
+				_ -> if props.width = surface.SIZE_FULL {
+					true -> availW
+					_ -> props.width
+				}
+			}
+			h := if props.height {
+				? -> if node.kind = surface.NODE_TYPE.text {
+					true -> ih + props.paddingT + props.paddingB
+					_ -> 0 // content height
+				}
+				_ -> if props.height = surface.SIZE_FULL {
+					true -> availH
+					_ -> props.height
+				}
+			}
+
+			// absolute positioning
+			if props.posType = surface.ENUMS.PosType.Absolute {
+				true -> {
+					ax := if props.insetL { ? -> x, _ -> x + props.insetL }
+					ay := if props.insetT { ? -> y, _ -> y + props.insetT }
+					node.x := ax + props.translateX
+					node.y := ay + props.translateY
+					node.w := w
+					node.h := if h > 0 { true -> h, _ -> availH }
+					// still layout children
+					_layoutChildren(core, node, props)
+				}
+				_ -> {
+					node.x := x + props.marginL + props.translateX
+					node.y := y + props.marginT + props.translateY
+					node.w := w
+					// content height from children if not fixed
+					if h > 0 {
+						true -> {
+							node.h := h
+							_layoutChildren(core, node, props)
+						}
+						_ -> {
+							// provisional height; children determine
+							node.h := 0
+							contentH := _layoutChildren(core, node, props)
+							node.h := contentH + props.paddingT + props.paddingB
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _layoutChildren(core, node, props) {
+	kids := node.children
+	if len(kids) = 0 {
+		true -> 0
+		_ -> {
+			innerX := node.x + props.paddingL
+			innerY := node.y + props.paddingT
+			innerW := node.w - props.paddingL - props.paddingR
+			if innerW < 0 -> innerW <- 0
+			innerH := if node.h > 0 {
+				true -> node.h - props.paddingT - props.paddingB
+				_ -> 100000
+			}
+			if innerH < 0 -> innerH <- 0
+			gap := props.gap
+			col? := props.flexDir = surface.ENUMS.FlexDir.Col
+
+			// first pass: measure non-grow children
+			sizes := kids |> map(fn(cid) {
+				ch := _node(core, cid)
+				if ch = ? {
+					true -> { id: cid, w: 0, h: 0, grow: 0, node: ? }
+					_ -> {
+						cp := _resolveProps(core, ch)
+						// tentative layout into infinite avail for measure
+						_layoutNode(core, ch, 0, 0, innerW, innerH)
+						{
+							id: cid
+							w: ch.w + cp.marginL + cp.marginR
+							h: ch.h + cp.marginT + cp.marginB
+							grow: cp.grow
+							node: ch
+							props: cp
+						}
+					}
+				}
+			})
+
+			mainTotal := 0
+			growSum := 0
+			sizes |> each(fn(s) {
+				mainTotal <- mainTotal + if col? { true -> s.h, _ -> s.w }
+				growSum <- growSum + s.grow
+			})
+			gaps := if len(sizes) > 1 { true -> gap * (len(sizes) - 1), _ -> 0 }
+			free := if col? {
+				true -> innerH - mainTotal - gaps
+				_ -> innerW - mainTotal - gaps
+			}
+			if free < 0 -> free := 0
+
+			// justify offset
+			cursor := 0
+			if props.justify = surface.ENUMS.Justify.Center {
+				true -> cursor := free / 2
+				_ -> if props.justify = surface.ENUMS.Justify.End {
+					true -> cursor := free
+					_ -> if props.justify = surface.ENUMS.Justify.Between & len(sizes) > 1 {
+						true -> {
+							// distribute free as gap
+							gap <- gap + free / (len(sizes) - 1)
+							cursor <- 0
+						}
+					}
+				}
+			}
+
+			// place
+			contentMain := 0
+			fn place(i) if i < len(sizes) {
+				true -> {
+					s := sizes.(i)
+					if s.node != ? {
+						true -> {
+							extra := if growSum > 0 & s.grow > 0 {
+								true -> free * s.grow / growSum
+								_ -> 0
+							}
+							if col? {
+								true -> {
+									// cross axis align
+									cx := innerX
+									cw := s.node.w
+									if props.align = surface.ENUMS.Align.Center {
+										true -> cx := innerX + (innerW - s.w) / 2
+										_ -> if props.align = surface.ENUMS.Align.End {
+											true -> cx := innerX + innerW - s.w
+											_ -> if props.align = surface.ENUMS.Align.Stretch {
+												true -> {
+													// stretch width
+													s.node.w := innerW - s.props.marginL - s.props.marginR
+													if s.node.w < 0 -> s.node.w := 0
+													cw <- s.node.w
+													cx <- innerX + s.props.marginL
+												}
+												_ -> cx := innerX + s.props.marginL
+											}
+										}
+									}
+									cy := innerY + cursor + s.props.marginT
+									// re-layout at final position with final size
+									if extra > 0 -> s.node.h := s.node.h + extra
+									_layoutNode(core, s.node, cx, cy, s.node.w, s.node.h)
+									// force position (layoutNode sets relative)
+									s.node.x := cx + s.props.translateX
+									s.node.y := cy + s.props.translateY
+									step := s.node.h + s.props.marginT + s.props.marginB + extra
+									cursor <- cursor + step + gap
+									contentMain <- contentMain + step + if i < len(sizes) - 1 { true -> gap, _ -> 0 }
+								}
+								_ -> {
+									// row
+									cy <- innerY
+									ch <- s.node.h
+									if props.align = surface.ENUMS.Align.Center {
+										true -> cy := innerY + (innerH - s.h) / 2
+										_ -> if props.align = surface.ENUMS.Align.End {
+											true -> cy := innerY + innerH - s.h
+											_ -> if props.align = surface.ENUMS.Align.Stretch {
+												true -> {
+													s.node.h := innerH - s.props.marginT - s.props.marginB
+													if s.node.h < 0 -> s.node.h := 0
+													ch <- s.node.h
+													cy <- innerY + s.props.marginT
+												}
+												_ -> cy := innerY + s.props.marginT
+											}
+										}
+									}
+									cx <- innerX + cursor + s.props.marginL
+									if extra > 0 -> s.node.w := s.node.w + extra
+									_layoutNode(core, s.node, cx, cy, s.node.w, s.node.h)
+									s.node.x := cx + s.props.translateX
+									s.node.y := cy + s.props.translateY
+									step <- s.node.w + s.props.marginL + s.props.marginR + extra
+									cursor <- cursor + step + gap
+									contentMain <- contentMain + step + if i < len(sizes) - 1 { true -> gap, _ -> 0 }
+								}
+							}
+						}
+					}
+					place(i + 1)
+				}
+			}
+			place(0)
+			contentMain
+		}
+	}
+}
+
+fn layout(core) {
+	root := core.nodes.(1)
+	if root = ? {
+		true -> ?
+		_ -> {
+			root.x := 0
+			root.y := 0
+			root.w := core.width
+			root.h := core.height
+			props := _resolveProps(core, root)
+			_layoutChildren(core, root, props)
+			core.layoutDirty? := false
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DrawList
+// ---------------------------------------------------------------------------
+
+fn _emitNode(core, node, list) {
+	if node = ? | !node.alive? {
+		true -> list
+		_ -> {
+			props := _resolveProps(core, node)
+			if props.display = surface.ENUMS.Display.None {
+				true -> list
+				_ -> {
+					// background rect
+					if props.bgColor != ? & node.w > 0 & node.h > 0 {
+						true -> {
+							list := list << {
+								op: surface.DRAW_OP.rect
+								x: int(node.x)
+								y: int(node.y)
+								w: int(node.w)
+								h: int(node.h)
+								color: props.bgColor
+								radius: int(props.radius)
+							}
+						}
+					}
+					// border
+					if props.borderWidth > 0 & props.borderColor != ? {
+						true -> {
+							list <- list << {
+								op: surface.DRAW_OP.rect
+								x: int(node.x)
+								y: int(node.y)
+								w: int(node.w)
+								h: int(node.h)
+								color: props.borderColor
+								radius: int(props.radius)
+								borderOnly?: true
+								borderWidth: int(props.borderWidth)
+							}
+						}
+					}
+					// text
+					if node.kind = surface.NODE_TYPE.text & node.text != '' {
+						true -> {
+							tx := node.x + props.paddingL
+							ty := node.y + props.paddingT
+							if props.textAlign = surface.ENUMS.TextAlign.Center {
+								true -> {
+									m := _measureText(node.text, props.fontSize)
+									tx <- node.x + (node.w - m.w) / 2
+								}
+								_ -> if props.textAlign = surface.ENUMS.TextAlign.Right {
+									true -> {
+										m := _measureText(node.text, props.fontSize)
+										tx <- node.x + node.w - m.w - props.paddingR
+									}
+								}
+							}
+							list <- list << {
+								op: surface.DRAW_OP.glyphRun
+								x: int(tx)
+								y: int(ty)
+								text: node.text
+								color: props.textColor
+								fontSize: int(props.fontSize)
+							}
+						}
+					}
+					// children in order
+					node.children |> each(fn(cid) {
+						ch := _node(core, cid)
+						list <- _emitNode(core, ch, list)					})
+					list
+				}
+			}
+		}
+	}
+}
+
+fn draw(core) {
+	if core.layoutDirty? -> layout(core)
+	list := [{
+		op: surface.DRAW_OP.clear
+		x: 0
+		y: 0
+		w: core.width
+		h: core.height
+		color: surface.rgb(255, 255, 255)
+	}]
+	root := core.nodes.(1)
+	list <- _emitNode(core, root, list)
+	core.drawList := list
+	list
+}
+
+// ---------------------------------------------------------------------------
+// Tick / frame
+// ---------------------------------------------------------------------------
+
+fn tick(core, dt) {
+	if core.paused? & !core.stepArmed? {
+		true -> core.frame
+		_ -> {
+			core.stepArmed? := false
+			// future: animation tracks advance here
+			if core.layoutDirty? -> layout(core)
+			core.frame := core.frame + 1
+			core.frame
+		}
+	}
+}
+
+fn debugPause(core, on?) {
+	core.paused? := default(on?, true)
+}
+
+fn debugStep(core) {
+	core.stepArmed? := true
+}
+
+// hitTest returns topmost node id at (x,y), or 0.
+fn hitTest(core, x, y) {
+	if core.layoutDirty? -> layout(core)
+	hit := 0
+	fn walk(node) if node = ? | !node.alive? {
+		true -> ?
+		_ -> {
+			props := _resolveProps(core, node)
+			if props.display = surface.ENUMS.Display.None {
+				true -> ?
+				_ -> {
+					// children first (topmost last painted)
+					node.children |> each(fn(cid) walk(_node(core, cid)))
+					inside? := x >= node.x & x < node.x + node.w & y >= node.y & y < node.y + node.h
+					// only claim if paints something
+					paints? := props.bgColor != ? | node.kind = surface.NODE_TYPE.text | props.borderWidth > 0
+					if inside? & paints? -> hit := node.id
+				}
+			}
+		}
+	}
+	walk(core.nodes.(1))
+	hit
+}
+
+// applyOp dispatches a surface op by code.
+fn applyOp(core, code, args) {
+	a := default(args, [])
+	if code = surface.OP.createNode {
+		true -> createNode(core, a.0)
+		_ -> if code = surface.OP.destroyNode {
+			true -> destroyNode(core, a.0)
+			_ -> if code = surface.OP.insertBefore {
+				true -> insertBefore(core, a.0, a.1, default(a.2, 0))
+				_ -> if code = surface.OP.removeChild {
+					true -> removeChild(core, a.0, a.1)
+					_ -> if code = surface.OP.setStyle {
+						true -> setStyle(core, a.0, a.1)
+						_ -> if code = surface.OP.setProp {
+							true -> setProp(core, a.0, a.1, a.2)
+							_ -> if code = surface.OP.setText | code = surface.OP.replaceText {
+								true -> setText(core, a.0, a.1)
+								_ -> if code = surface.OP.setFocus {
+									true -> setFocus(core, a.0)
+									_ -> if code = surface.OP.setActive {
+										true -> setActive(core, a.0)
+										_ -> if code = surface.OP.tick {
+											true -> tick(core, default(a.0, surface.FIXED_DT))
+											_ -> if code = surface.OP.draw {
+												true -> draw(core)
+												_ -> if code = surface.OP.hitTest {
+													true -> hitTest(core, a.0, a.1)
+													_ -> if code = surface.OP.debugPause {
+														true -> debugPause(core, a.0)
+														_ -> if code = surface.OP.debugStep {
+															true -> debugStep(core)
+															_ -> { type: :error, error: 'unknown op' }
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// drawListHash — FNV-1a-ish 32-bit hash of the draw list for goldens.
+fn drawListHash(list) {
+	h := 2166136261
+	list |> each(fn(op) {
+		h <- (h * 16777619) % 4294967296
+		h <- (h + default(op.op, 0)) % 4294967296
+		h <- (h * 16777619) % 4294967296
+		h <- (h + default(op.x, 0)) % 4294967296
+		h <- (h * 16777619) % 4294967296
+		h <- (h + default(op.y, 0)) % 4294967296
+		h <- (h * 16777619) % 4294967296
+		h <- (h + default(op.w, 0)) % 4294967296
+		h <- (h * 16777619) % 4294967296
+		h <- (h + default(op.h, 0)) % 4294967296
+		h <- (h * 16777619) % 4294967296
+		h <- (h + default(op.color, 0)) % 4294967296
+		if op.text != ? {
+			true -> {
+				s := op.text
+				fn loop(i) if i < len(s) {
+					true -> {
+						h <- (h * 16777619) % 4294967296
+						h <- (h + codepoint(s.(i))) % 4294967296
+						loop(i + 1)
+					}
+				}
+				loop(0)
+			}
+		}
+	})
+	h
+}

@@ -1,0 +1,188 @@
+// ui-sdk — guest-side helpers for the UI surface (mirror tree + builders).
+//
+// Apps talk to the core only through ops. The mirror lets product code
+// read structure without re-entering the core on every frame.
+
+std := import('std')
+default := std.default
+map := std.map
+filter := std.filter
+each := std.each
+clone := std.clone
+surface := import('ui-surface')
+uiCore := import('ui-core')
+styleBake := import('style-bake')
+
+// createApp(options?) — core + style table + empty mirror registry
+fn createApp(options) {
+	opts := default(options, {})
+	styles := default(opts.styles, styleBake.emptyTable())
+	core := uiCore.createCore({
+		width: default(opts.width, surface.SCREEN_W)
+		height: default(opts.height, surface.SCREEN_H)
+		styles: styles
+	})
+	{
+		core: core
+		styles: styles
+		// mirror: id → { id, kind, parent, children, text, class, styleId }
+		mirror: {
+			(string(surface.ROOT_ID)): {
+				id: surface.ROOT_ID
+				kind: surface.NODE_TYPE.view
+				parent: 0
+				children: []
+				text: ''
+				class: ''
+				styleId: surface.STYLE_ID_NONE
+			}
+		}
+	}
+}
+
+fn _mkey(id) string(id)
+
+fn _mirrorGet(app, id) app.mirror.(_mkey(id))
+
+fn _mirrorSet(app, id, rec) {
+	app.mirror.(_mkey(id)) := rec
+}
+
+// View creates a view node under parent, applies class, returns id.
+fn View(app, parentId, classStr, opts) {
+	o := default(opts, {})
+	id := uiCore.createNode(app.core, surface.NODE_TYPE.view)
+	uiCore.insertBefore(app.core, default(parentId, surface.ROOT_ID), id, 0)
+	styleId := surface.STYLE_ID_NONE
+	if classStr != ? & classStr != '' {
+		true -> {
+			styleId := styleBake.ensureClass(app.styles, classStr)
+			if styleId >= 0 {
+				true -> {
+					uiCore.loadStyles(app.core, app.styles)
+					uiCore.setStyle(app.core, id, styleId)
+				}
+			}
+		}
+	}
+	// optional style object overrides
+	if o.style != ? {
+		true -> {
+			ks := std.keys(o.style)
+			ks |> each(fn(k) uiCore.setProp(app.core, id, k, o.style.(k)))
+		}
+	}
+	_mirrorSet(app, id, {
+		id: id
+		kind: surface.NODE_TYPE.view
+		parent: default(parentId, surface.ROOT_ID)
+		children: []
+		text: ''
+		class: default(classStr, '')
+		styleId: styleId
+	})
+	// update parent mirror children
+	p := _mirrorGet(app, default(parentId, surface.ROOT_ID))
+	if p != ? {
+		true -> {
+			p.children := p.children << id
+		}
+	}
+	id
+}
+
+// Text creates a text node with string content.
+fn Text(app, parentId, text, classStr, opts) {
+	o := default(opts, {})
+	id := uiCore.createNode(app.core, surface.NODE_TYPE.text)
+	uiCore.insertBefore(app.core, default(parentId, surface.ROOT_ID), id, 0)
+	uiCore.setText(app.core, id, default(text, ''))
+	styleId := surface.STYLE_ID_NONE
+	if classStr != ? & classStr != '' {
+		true -> {
+			styleId := styleBake.ensureClass(app.styles, classStr)
+			if styleId >= 0 {
+				true -> {
+					uiCore.loadStyles(app.core, app.styles)
+					uiCore.setStyle(app.core, id, styleId)
+				}
+			}
+		}
+	}
+	if o.style != ? {
+		true -> {
+			ks := std.keys(o.style)
+			ks |> each(fn(k) uiCore.setProp(app.core, id, k, o.style.(k)))
+		}
+	}
+	_mirrorSet(app, id, {
+		id: id
+		kind: surface.NODE_TYPE.text
+		parent: default(parentId, surface.ROOT_ID)
+		children: []
+		text: default(text, '')
+		class: default(classStr, '')
+		styleId: styleId
+	})
+	p := _mirrorGet(app, default(parentId, surface.ROOT_ID))
+	if p != ? {
+		true -> p.children := p.children << id
+	}
+	id
+}
+
+// setText updates text content on a text node + mirror.
+fn setText(app, id, text) {
+	uiCore.setText(app.core, id, text)
+	m := _mirrorGet(app, id)
+	if m != ? -> m.text := text
+}
+
+// setClass recompiles class and applies style.
+fn setClass(app, id, classStr) {
+	styleId := styleBake.ensureClass(app.styles, classStr)
+	uiCore.loadStyles(app.core, app.styles)
+	if styleId >= 0 -> uiCore.setStyle(app.core, id, styleId)
+	m := _mirrorGet(app, id)
+	if m != ? {
+		true -> {
+			m.class := classStr
+			m.styleId := styleId
+		}
+	}
+}
+
+// destroy removes a subtree from core + mirror.
+fn destroy(app, id) {
+	m := _mirrorGet(app, id)
+	if m != ? {
+		true -> {
+			// remove from parent mirror
+			p := _mirrorGet(app, m.parent)
+			if p != ? {
+				true -> p.children := p.children |> filter(fn(c) c != id)
+			}
+			// destroy children mirrors
+			kids := clone(m.children)
+			kids |> each(fn(cid) {
+				app.mirror.(_mkey(cid)) := ?
+			})
+			app.mirror.(_mkey(id)) := ?
+		}
+	}
+	uiCore.destroyNode(app.core, id)
+}
+
+// frame advances one fixed tick and returns the DrawList.
+fn frame(app) {
+	uiCore.tick(app.core, surface.FIXED_DT)
+	uiCore.draw(app.core)
+}
+
+// focus / press helpers
+fn setFocus(app, id) uiCore.setFocus(app.core, id)
+fn setActive(app, id) uiCore.setActive(app.core, id)
+fn hitTest(app, x, y) uiCore.hitTest(app.core, x, y)
+
+// mirrorNode returns the guest mirror record for id.
+fn mirrorNode(app, id) _mirrorGet(app, id)

@@ -1,0 +1,66 @@
+// ui-surface-demo — retained UI surface demo (Pocket-grammar integration).
+//
+// Builds a simple counter screen with View/Text, advances fixed-dt frames
+// headlessly, and prints DrawList stats + deterministic hash.
+//
+// Run: magnolia samples/ui-surface-demo.oak
+
+std := import('std')
+surface := import('ui-surface')
+uiSdk := import('ui-sdk')
+uiCore := import('ui-core')
+uiSim := import('ui-sim')
+styleBake := import('style-bake')
+
+std.println('=== Magnolia UI Surface Demo ===')
+std.println('fingerprint: ' + surface.fingerprint())
+
+// --- Declarative-ish SDK build ---
+app := uiSdk.createApp({ width: 480, height: 272 })
+root := surface.ROOT_ID
+
+screen := uiSdk.View(app, root, 'flex flex-col items-center justify-center gap-4 p-4 bg-slate-50')
+title := uiSdk.Text(app, screen, 'Pocket grammar on Magnolia', 'text-xl text-slate-950')
+countLabel := uiSdk.Text(app, screen, 'Count: 0', 'text-lg text-slate-700')
+btn := uiSdk.View(app, screen, 'p-2 rounded-md bg-blue-600')
+btnLabel := uiSdk.Text(app, btn, 'Press', 'text-base text-white')
+
+// Simulate 3 presses by updating text (product logic lives in guest)
+count := { n: 0 }
+fn bump() {
+	count.n := count.n + 1
+	uiSdk.setText(app, countLabel, 'Count: ' + string(count.n))
+}
+bump()
+bump()
+bump()
+
+dl := uiSdk.frame(app)
+std.println('draw ops: ' + string(len(dl)))
+std.println('draw hash: ' + string(uiCore.drawListHash(dl)))
+
+// --- Deterministic sim scenario ---
+trace := uiSim.runScenario({
+	width: 480
+	height: 272
+	hz: 60
+	frames: 30
+	setup: fn(a, sim) {
+		box := uiSdk.View(a, surface.ROOT_ID, 'flex flex-col gap-2 p-4 bg-slate-100')
+		uiSdk.Text(a, box, 'Sim frame lab', 'text-base text-slate-900')
+		uiSim.after(sim, 0.25, fn() {
+			uiSdk.Text(a, box, 'timer fired', 'text-sm text-blue-600')
+		})
+	}
+})
+std.println('sim frames: ' + string(trace.frames))
+std.println('sim finalHash: ' + string(trace.finalHash))
+
+// --- Two-pass bake illustration ---
+table := styleBake.emptyTable()
+styleBake.ensureClass(table, 'flex flex-col gap-4 p-4 bg-slate-50')
+styleBake.ensureClass(table, 'text-xl text-slate-950')
+bin := styleBake.encodeTable(table)
+std.println('styles.bin bytes: ' + string(len(bin)))
+
+std.println('=== done ===')
