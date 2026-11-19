@@ -34,7 +34,11 @@ _nwImportTimings := {
 
 fn getNativeWinImportTimings() _nwImportTimings
 
-{ _default: _default, _err: _err } := import('gui-common')
+{
+	_default: _default
+	_err: _err
+	_screenPositionFor: _screenPositionFor
+} := import('gui-common')
 { _ptrRead: _ptrRead, _comCall: _comCall, _releaseOk?: _releaseOk? } := import('win-common')
 
 D3D_SDK_VERSION := 32
@@ -1450,6 +1454,90 @@ fn moveToMonitor(window, hMonitor) {
 		x := info.work.left + int((workW - window.width) / 2)
 		y := info.work.top + int((workH - window.height) / 2)
 		moveWindow(window, x, y)
+	}
+}
+
+// ─── Easy window positioning ────────────────────────────────────────────────
+
+// getPrimaryScreenSize(window) -> { type: :ok, width, height, left, top } | { type: :error, ... }
+// Returns the work area (taskbar-excluded bounds) of the primary monitor.
+// left/top are the origin of that work area; width/height are its dimensions.
+fn getPrimaryScreenSize(window) {
+	hMon := windows.monitorFromPoint(0, 0, windows.MONITOR_DEFAULTTOPRIMARY)
+	if hMon != 0 {
+		true -> {
+			info := windows.getMonitorInfo(hMon)
+			if info != ? {
+				true -> {
+					{
+						type: :ok
+						width: info.work.right - info.work.left
+						height: info.work.bottom - info.work.top
+						left: info.work.left
+						top: info.work.top
+					}
+				}
+				_ -> _err('getMonitorInfo failed for primary monitor', hMon)
+			}
+		}
+		_ -> _err('monitorFromPoint returned no primary monitor', ?)
+	}
+}
+
+// centerWindow(window) — move the window to the center of the primary
+// monitor's work area (the "screen middle").  Returns the window on success.
+// Differs from centerOnMonitor() which centers on the *current* monitor.
+fn centerWindow(window) {
+	size := getPrimaryScreenSize(window)
+	if size.type = :ok {
+		true -> {
+			coords := _screenPositionFor(size, window.width, window.height, :center, 0)
+			moveWindow(window, coords.x, coords.y)
+			window
+		}
+		_ -> _err('centerWindow failed', size)
+	}
+}
+
+// positionWindow(window, position, options) — move the window to a named
+// screen position (e.g. :center for the screen middle, :topLeft,
+// :bottomRight, …).  options.margin (pixels, default 0) insets the window
+// from the relevant work-area edge for the corner/edge positions.
+//
+// :monitorCenter centers on the monitor the window is *currently* on; every
+// other position uses the primary monitor's work area.
+fn positionWindow(window, position, options) {
+	size := if position = :monitorCenter {
+		true -> _currentMonitorWorkArea(window)
+		_ -> getPrimaryScreenSize(window)
+	}
+	if size.type = :ok {
+		true -> {
+			margin := _default(_default(options, {}).margin, 0)
+			coords := _screenPositionFor(size, window.width, window.height, position, margin)
+			moveWindow(window, coords.x, coords.y)
+			window
+		}
+		_ -> _err('positionWindow failed to resolve screen size', size)
+	}
+}
+
+// _currentMonitorWorkArea(window) -> { type: :ok, width, height, left, top } | error
+// Work area of the monitor the window currently sits on (used by
+// positionWindow's :monitorCenter case).
+fn _currentMonitorWorkArea(window) {
+	info := getWindowMonitor(window)
+	if info != ? {
+		true -> {
+			{
+				type: :ok
+				width: info.work.right - info.work.left
+				height: info.work.bottom - info.work.top
+				left: info.work.left
+				top: info.work.top
+			}
+		}
+		_ -> _err('getWindowMonitor returned no monitor for current window', ?)
 	}
 }
 

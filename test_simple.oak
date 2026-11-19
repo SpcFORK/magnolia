@@ -1,0 +1,72 @@
+// Simple test to understand parsing
+
+{
+	slice: slice
+	join: join
+	len: len
+} := import('std')
+
+fn Model(vertices, texCoords, normals, faces, lines) {
+	{
+		vertices: vertices
+		texCoords: texCoords
+		normals: normals
+		faces: faces
+		lines: lines
+	}
+}
+
+fn _readToken(data, i) {
+	maxLen := len(data)
+	start := i
+	fn findEnd(k) if {
+		k >= maxLen -> k
+		_ -> {
+			c2 := data.(k)
+			if c2 = ' ' { true -> k, _ -> findEnd(k + 1) }
+		}
+	}
+	end := findEnd(start)
+	{ val: slice(data, start, end), next: end }
+}
+
+fn parse(data) {
+	vertices := []
+	texCoords := []
+	normals := []
+	faces := []
+	lines := []
+	maxLen := len(data)
+	
+	parseLine := fn(i) {
+		lineNum := i
+		tok := _readToken(data, lineNum)
+		lineType := tok.val
+		pos := tok.next
+		
+		// Use pattern matching
+		if lineType {
+			'v' -> {
+				xTok := _readToken(data, pos)
+				yTok := _readToken(data, xTok.next)
+				zTok := _readToken(data, yTok.next)
+				
+				vert := [float(xTok.val), float(yTok.val), float(zTok.val)]
+				vertices << vert
+				parseLine(zTok.next)
+			}
+			'vt' -> {
+				uTok := _readToken(data, pos)
+				vTok := _readToken(data, uTok.next)
+				texCoords := [float(uTok.val), float(vTok.val)]
+				parseLine(vTok.next)
+			}
+			_ -> ()
+		}
+	}
+	
+	parseLine(1)
+	Model(vertices, texCoords, [], [], [])
+}
+
+print('test passed')

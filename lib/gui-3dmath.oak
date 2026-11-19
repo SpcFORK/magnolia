@@ -1,9 +1,12 @@
 // gui-3dmath contains reusable 3D transform and projection helpers.
 
 { _default: _default } := import('gui-common')
+{ flatten: flatten, map: map } := import('std')
 threadLib := import('thread')
+{ Pi: Pi } := import('math-base')
 
-PI := 3.141592653589793
+// PI is an alias for Pi (the circle constant)
+PI := Pi
 
 fn degToRad(deg) deg * PI / 180
 
@@ -211,6 +214,92 @@ fn _transformVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz) {
 	}
 }
 
+// Per-vertex helper: transform a vertex to world-space (rotation, scale,
+// translation) and project to screen-space in a single pass.
+// Returns { world: vec3, screen: vec3 }.
+//   v        — input vertex { x, y, z }
+//   scale    — uniform scale
+//   tx,ty,tz — translation
+//   cx,sx    — cos/sin of rotation around X axis (in radians)
+//   cy,sy    — cos/sin of rotation around Y axis
+//   cz,sz    — cos/sin of rotation around Z axis
+//   isOrtho  — true if orthographic projection
+//   pHalfW   — half viewport width
+//   pHalfH   — half viewport height
+//   pCamZ    — camera Z offset
+//   pFocal   — perspective focal length
+//   orthoS   — orthographic scale factor
+fn _transformAndProjectVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz, isOrtho, pHalfW, pHalfH, pCamZ, pFocal, orthoS) {
+	x0 := v.x * scale
+	y0 := v.y * scale
+	z0 := v.z * scale
+	y1 := y0 * cx - z0 * sx
+	z1 := y0 * sx + z0 * cx
+	x2 := x0 * cy + z1 * sy
+	z2 := 0 - x0 * sy + z1 * cy
+	x3 := x2 * cz - y1 * sz
+	y3 := x2 * sz + y1 * cz
+
+	wx := x3 + tx
+	wy := y3 + ty
+	wz := z2 + tz
+
+	depth := wz + pCamZ
+	screen := if isOrtho {
+		true -> {
+			x: int(pHalfW + wx * orthoS)
+			y: int(pHalfH - wy * orthoS)
+			z: depth
+		}
+		_ -> if depth <= 0.05 {
+			true -> ?
+			_ -> {
+				x: int(pHalfW + (wx * pFocal) / depth)
+				y: int(pHalfH - (wy * pFocal) / depth)
+				z: depth
+			}
+		}
+	}
+	{
+		world: { x: wx, y: wy, z: wz }
+		screen: screen
+	}
+}
+
+// Per-vertex helper: transform a vertex to world-space and project to
+// screen-space, returning only the screen-space coordinate.
+fn _projectVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz, isOrtho, pHalfW, pHalfH, pCamZ, pFocal, orthoS) {
+	x0 := v.x * scale
+	y0 := v.y * scale
+	z0 := v.z * scale
+	y1 := y0 * cx - z0 * sx
+	z1 := y0 * sx + z0 * cx
+	x2 := x0 * cy + z1 * sy
+	z2 := 0 - x0 * sy + z1 * cy
+	x3 := x2 * cz - y1 * sz
+	y3 := x2 * sz + y1 * cz
+
+	wx := x3 + tx
+	wy := y3 + ty
+	wz := z2 + tz
+	depth := wz + pCamZ
+	if isOrtho {
+		true -> {
+			x: int(pHalfW + wx * orthoS)
+			y: int(pHalfH - wy * orthoS)
+			z: depth
+		}
+		_ -> if depth <= 0.05 {
+			true -> ?
+			_ -> {
+				x: int(pHalfW + (wx * pFocal) / depth)
+				y: int(pHalfH - (wy * pFocal) / depth)
+				z: depth
+			}
+		}
+	}
+}
+
 fn transformVerticesBatch(meshes, transforms, i, out) if i {
 	len(meshes) -> out
 	_ -> {
@@ -335,6 +424,83 @@ fn transformAndProjectVertices(vertices, transform, projParams) {
 		}
 	}
 	sub(0, [], [])
+}
+
+// Screen-only transform + project path for wireframe rendering.
+// Avoids building world-space vertices when callers only need projected points.
+fn transformAndProjectScreen(vertices, transform, projParams) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	_rx := _default(ts.rx, 0)
+	_ry := _default(ts.ry, 0)
+	_rz := _default(ts.rz, 0)
+	rx := degToRad(_rx)
+	ry := degToRad(_ry)
+	rz := degToRad(_rz)
+
+	cxr := if ts._cRx = _rx { true -> ts._cx, _ -> cos(rx) }
+	sxr := if ts._cRx = _rx { true -> ts._sx, _ -> sin(rx) }
+	cyr := if ts._cRy = _ry { true -> ts._cy, _ -> cos(ry) }
+	syr := if ts._cRy = _ry { true -> ts._sy, _ -> sin(ry) }
+	czr := if ts._cRz = _rz { true -> ts._cz, _ -> cos(rz) }
+	szr := if ts._cRz = _rz { true -> ts._sz, _ -> sin(rz) }
+	ts._cRx <- _rx
+	ts._cx <- cxr
+	ts._sx <- sxr
+	ts._cRy <- _ry
+	ts._cy <- cyr
+	ts._sy <- syr
+	ts._cRz <- _rz
+	ts._cz <- czr
+	ts._sz <- szr
+
+	isOrtho := projParams.mode = 'orthographic'
+	pHalfW := projParams.halfW
+	pHalfH := projParams.halfH
+	pCamZ := projParams.camZ
+	pFocal := projParams.focal
+	pOrthoScale := projParams.orthoScale
+	orthoS := if isOrtho { true -> pHalfW / pOrthoScale, _ -> 0 }
+
+	fn sub(j, sAcc) if j {
+		len(vertices) -> sAcc
+		_ -> {
+			v := vertices.(j)
+			x0 := v.x * scale
+			y0 := v.y * scale
+			z0 := v.z * scale
+			y1 := y0 * cxr - z0 * sxr
+			z1 := y0 * sxr + z0 * cxr
+			x2 := x0 * cyr + z1 * syr
+			z2 := 0 - x0 * syr + z1 * cyr
+			x3 := x2 * czr - y1 * szr
+			y3 := x2 * szr + y1 * czr
+			wx := x3 + tx
+			wy := y3 + ty
+			wz := z2 + tz
+			sz := wz + pCamZ
+			sp := if isOrtho {
+				true -> {
+					x: int(pHalfW + wx * orthoS)
+					y: int(pHalfH - wy * orthoS)
+					z: sz
+				}
+				_ -> if sz <= 0.05 {
+					true -> ?
+					_ -> {
+						x: int(pHalfW + (wx * pFocal) / sz)
+						y: int(pHalfH - (wy * pFocal) / sz)
+						z: sz
+					}
+				}
+			}
+			sub(j + 1, sAcc << sp)
+		}
+	}
+	sub(0, [])
 }
 
 // Matrix4: 4x4 transformation matrices for advanced 3D transforms
@@ -684,9 +850,17 @@ fn aabb3HalfExtents(box) Vec3(
 )
 
 // ─── Parallel vertex transforms ─────────────────────────────────────────────
-// Transform a list of vertices in parallel using worker goroutines.
-// Each vertex is transformed independently (rotation, scale, translation).
-// Safe for worker threads: pure math only.
+// Transform a list of vertices using worker goroutines when the mesh is large
+// enough to benefit from parallelism.  Each vertex is transformed independently
+// (rotation, scale, translation).  Safe for worker threads: pure math only.
+//
+// Optimizations over the naive per-vertex pmap approach:
+//   - Trig values are cached on the transform object (same pattern as
+//     transformPoint / transformAndProjectVertices).
+//   - Small meshes fall back to sequential processing to avoid goroutine
+//     spawn/channel overhead.
+//   - Large meshes are split into worker-sized batches so that only `workers`
+//     goroutines are spawned (not one per vertex).
 
 fn parallelTransformVertices(vertices, transform, numWorkers) {
 	ts := _default(transform, {})
@@ -694,26 +868,230 @@ fn parallelTransformVertices(vertices, transform, numWorkers) {
 	tx := _default(ts.tx, 0)
 	ty := _default(ts.ty, 0)
 	tz := _default(ts.tz, 0)
-	rx := degToRad(_default(ts.rx, 0))
-	ry := degToRad(_default(ts.ry, 0))
-	rz := degToRad(_default(ts.rz, 0))
-	cxr := cos(rx)
-	sxr := sin(rx)
-	cyr := cos(ry)
-	syr := sin(ry)
-	czr := cos(rz)
-	szr := sin(rz)
+	_rx := _default(ts.rx, 0)
+	_ry := _default(ts.ry, 0)
+	_rz := _default(ts.rz, 0)
+	rx := degToRad(_rx)
+	ry := degToRad(_ry)
+	rz := degToRad(_rz)
 
-	threadLib.pmap(vertices, fn(v) {
-		x0 := v.x * scale
-		y0 := v.y * scale
-		z0 := v.z * scale
-		y1 := y0 * cxr - z0 * sxr
-		z1 := y0 * sxr + z0 * cxr
-		x2 := x0 * cyr + z1 * syr
-		z2 := 0 - x0 * syr + z1 * cyr
-		x3 := x2 * czr - y1 * szr
-		y3 := x2 * szr + y1 * czr
-		Vec3(x3 + tx, y3 + ty, z2 + tz)
-	})
+	// Reuse cached trig values when rotation hasn't changed.
+	cxr := if ts._cRx = _rx { true -> ts._cx, _ -> cos(rx) }
+	sxr := if ts._cRx = _rx { true -> ts._sx, _ -> sin(rx) }
+	cyr := if ts._cRy = _ry { true -> ts._cy, _ -> cos(ry) }
+	syr := if ts._cRy = _ry { true -> ts._sy, _ -> sin(ry) }
+	czr := if ts._cRz = _rz { true -> ts._cz, _ -> cos(rz) }
+	szr := if ts._cRz = _rz { true -> ts._sz, _ -> sin(rz) }
+	// Store trig values for next call
+	ts._cRx <- _rx
+	ts._cx <- cxr
+	ts._sx <- sxr
+	ts._cRy <- _ry
+	ts._cy <- cyr
+	ts._sy <- syr
+	ts._cRz <- _rz
+	ts._cz <- czr
+	ts._sz <- szr
+
+	workers := _default(numWorkers, 4)
+	n := len(vertices)
+	if n < workers * 4 {
+		// Too few vertices — parallel overhead exceeds the benefit.
+		// Transform sequentially using the shared _transformVertex helper.
+		true -> {
+			fn sub(j, acc) if j {
+				len(vertices) -> acc
+				_ -> sub(j + 1, acc << _transformVertex(vertices.(j), scale, tx, ty, tz, cxr, sxr, cyr, syr, czr, szr))
+			}
+			sub(0, [])
+		}
+		_ -> {
+			// Batch: split vertices into worker-sized chunks so that only
+			// `workers` goroutines are spawned (not one per vertex).
+			batchSize := int(n / workers) + 1
+
+			fn buildRanges(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > n -> end <- n
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			batchResults := threadLib.pmap(ranges, fn(r) {
+				fn sub(j, acc) if j >= r.end {
+					true -> acc
+					_ -> sub(j + 1, acc << _transformVertex(vertices.(j), scale, tx, ty, tz, cxr, sxr, cyr, syr, czr, szr))
+				}
+				sub(r.start, [])
+			})
+
+			flatten(batchResults)
+		}
+	}
+}
+
+// ─── Parallel transform + project ───────────────────────────────────────────
+// Parallel versions of transformAndProjectVertices and transformAndProjectScreen.
+// Same caching / batching strategy as parallelTransformVertices.
+//
+//   - Trig values cached on the transform object
+//   - Small meshes fall back to sequential processing
+//   - Large meshes split into worker-sized batches (workers goroutines, not
+//     one per vertex)
+
+fn parallelTransformAndProjectVertices(vertices, transform, projParams, numWorkers) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	_rx := _default(ts.rx, 0)
+	_ry := _default(ts.ry, 0)
+	_rz := _default(ts.rz, 0)
+	rx := degToRad(_rx)
+	ry := degToRad(_ry)
+	rz := degToRad(_rz)
+
+	// Reuse cached trig values when rotation hasn't changed.
+	cxr := if ts._cRx = _rx { true -> ts._cx, _ -> cos(rx) }
+	sxr := if ts._cRx = _rx { true -> ts._sx, _ -> sin(rx) }
+	cyr := if ts._cRy = _ry { true -> ts._cy, _ -> cos(ry) }
+	syr := if ts._cRy = _ry { true -> ts._sy, _ -> sin(ry) }
+	czr := if ts._cRz = _rz { true -> ts._cz, _ -> cos(rz) }
+	szr := if ts._cRz = _rz { true -> ts._sz, _ -> sin(rz) }
+	// Store trig values for next call
+	ts._cRx <- _rx
+	ts._cx <- cxr
+	ts._sx <- sxr
+	ts._cRy <- _ry
+	ts._cy <- cyr
+	ts._sy <- syr
+	ts._cRz <- _rz
+	ts._cz <- czr
+	ts._sz <- szr
+
+	isOrtho := projParams.mode = 'orthographic'
+	pHalfW := projParams.halfW
+	pHalfH := projParams.halfH
+	pCamZ := projParams.camZ
+	pFocal := projParams.focal
+	pOrthoScale := projParams.orthoScale
+	orthoS := if isOrtho { true -> pHalfW / pOrthoScale, _ -> 0 }
+
+	workers := _default(numWorkers, 4)
+	n := len(vertices)
+	if n < workers * 4 {
+		// Too few vertices — use the sequential path (one pass, no batching).
+		true -> transformAndProjectVertices(vertices, transform, projParams)
+		_ -> {
+			batchSize := int(n / workers) + 1
+
+			fn buildRanges(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > n -> end <- n
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			batchResults := threadLib.pmap(ranges, fn(r) {
+				fn sub(j, wAcc, sAcc) if j >= r.end {
+					true -> { world: wAcc, screen: sAcc }
+					_ -> {
+						vp := _transformAndProjectVertex(vertices.(j), scale, tx, ty, tz,
+							cxr, sxr, cyr, syr, czr, szr,
+							isOrtho, pHalfW, pHalfH, pCamZ, pFocal, orthoS)
+						sub(j + 1, wAcc << vp.world, sAcc << vp.screen)
+					}
+				}
+				sub(r.start, [], [])
+			})
+
+			worldLists := batchResults |> map(fn(b) b.world)
+			screenLists := batchResults |> map(fn(b) b.screen)
+			world := flatten(worldLists)
+			screen := flatten(screenLists)
+			{ world: world, screen: screen }
+		}
+	}
+}
+
+fn parallelTransformAndProjectScreen(vertices, transform, projParams, numWorkers) {
+	ts := _default(transform, {})
+	scale := _default(ts.scale, 1)
+	tx := _default(ts.tx, 0)
+	ty := _default(ts.ty, 0)
+	tz := _default(ts.tz, 0)
+	_rx := _default(ts.rx, 0)
+	_ry := _default(ts.ry, 0)
+	_rz := _default(ts.rz, 0)
+	rx := degToRad(_rx)
+	ry := degToRad(_ry)
+	rz := degToRad(_rz)
+
+	// Reuse cached trig values when rotation hasn't changed.
+	cxr := if ts._cRx = _rx { true -> ts._cx, _ -> cos(rx) }
+	sxr := if ts._cRx = _rx { true -> ts._sx, _ -> sin(rx) }
+	cyr := if ts._cRy = _ry { true -> ts._cy, _ -> cos(ry) }
+	syr := if ts._cRy = _ry { true -> ts._sy, _ -> sin(ry) }
+	czr := if ts._cRz = _rz { true -> ts._cz, _ -> cos(rz) }
+	szr := if ts._cRz = _rz { true -> ts._sz, _ -> sin(rz) }
+	// Store trig values for next call
+	ts._cRx <- _rx
+	ts._cx <- cxr
+	ts._sx <- sxr
+	ts._cRy <- _ry
+	ts._cy <- cyr
+	ts._sy <- syr
+	ts._cRz <- _rz
+	ts._cz <- czr
+	ts._sz <- szr
+
+	isOrtho := projParams.mode = 'orthographic'
+	pHalfW := projParams.halfW
+	pHalfH := projParams.halfH
+	pCamZ := projParams.camZ
+	pFocal := projParams.focal
+	pOrthoScale := projParams.orthoScale
+	orthoS := if isOrtho { true -> pHalfW / pOrthoScale, _ -> 0 }
+
+	workers := _default(numWorkers, 4)
+	n := len(vertices)
+	if n < workers * 4 {
+		// Too few vertices — use the sequential path.
+		true -> transformAndProjectScreen(vertices, transform, projParams)
+		_ -> {
+			batchSize := int(n / workers) + 1
+
+			fn buildRanges(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > n -> end <- n
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			batchResults := threadLib.pmap(ranges, fn(r) {
+				fn sub(j, acc) if j >= r.end {
+					true -> acc
+					_ -> sub(j + 1, acc << _projectVertex(vertices.(j), scale, tx, ty, tz,
+						cxr, sxr, cyr, syr, czr, szr,
+						isOrtho, pHalfW, pHalfH, pCamZ, pFocal, orthoS))
+				}
+				sub(r.start, [])
+			})
+
+			flatten(batchResults)
+		}
+	}
 }

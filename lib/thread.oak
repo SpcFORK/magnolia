@@ -310,9 +310,6 @@ fn pmap(list, fnToRun) {
 	parallel(fns)
 }
 
-// pmapConcurrent is like pmap but limits concurrency to n goroutines.
-// Usage:
-//   results := pmapConcurrent([1, 2, 3, 4], fn(x) x * x, 2)
 fn pmapConcurrent(list, fnToRun, maxConcurrent) {
 	pool := Pool(maxConcurrent)
 	resultCh := make_chan(len(list))
@@ -335,6 +332,44 @@ fn pmapConcurrent(list, fnToRun, maxConcurrent) {
 	})
 
 	pool.wait()
+	results
+}
+
+// pmapWithPool is like pmapConcurrent but accepts an existing Pool
+// instead of creating (and immediately closing) one.  This lets you
+// reuse the same pool of worker goroutines across many calls, avoiding
+// the goroutine-spawn overhead on every invocation — a significant
+// win for render loops that call the parallel function dozens of times
+// per frame.
+//
+// The caller is responsible for eventually calling pool.close() +
+// pool.wait() on the pool (e.g. at application shutdown).
+//
+// Usage:
+//   pool := Pool(4)
+//   results := pmapWithPool([1, 2, 3, 4], fn(x) x * x, pool)
+//   // … results are in original order …
+//   results2 := pmapWithPool([5, 6, 7, 8], fn(x) x * x, pool)
+//   pool.close()
+//   pool.wait()
+fn pmapWithPool(list, fnToRun, pool) {
+	resultCh := make_chan(len(list))
+
+	list |> each(fn(item, i) pool.submit(fn() {
+		result := fnToRun(item)
+		chan_send(resultCh, {
+			index: i
+			value: result
+		})
+	}))
+
+	// Collect results (same collection logic as pmapConcurrent, minus close/wait)
+	results := range(len(list)) |> map(fn(_) ?)
+	range(len(list)) |> each(fn(_) {
+		item := chan_recv(resultCh)
+		results.(item.data.index) := item.data.value
+	})
+
 	results
 }
 

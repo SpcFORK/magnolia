@@ -1,0 +1,360 @@
+// libobj provides encoding and decoding for the OBJ file format.
+// OBJ is a simple text-based format for 3D geometry.
+
+{
+	slice: slice
+	join: join
+	filter: filter
+	default: default
+	len: len
+	map: map
+} := import('std')
+{
+	trim: trim
+	split: split
+	replace: replace
+	string: string
+	int: int
+	float: float
+	char: char
+	codepoint: codepoint
+} := import('str')
+
+// Model represents a parsed OBJ model
+fn Model(vertices, texCoords, normals, faces, lines) {
+	{
+		vertices: default(vertices, [])
+		texCoords: default(texCoords, [])
+		normals: default(normals, [])
+		faces: default(faces, [])
+		lines: default(lines, [])
+	}
+}
+
+// VertRef represents a face vertex reference
+// Indices are 0-based internally, converted to 1-based for OBJ output
+fn VertRef(v, vt, vn) {
+	{
+		v: v
+		vt: vt
+		vn: vn
+	}
+}
+
+// _skipLine skips to end of line and returns position after newline
+fn _skipLine(data, i) {
+	maxLen := len(data)
+	fn findEOL(j) if {
+		j >= maxLen -> maxLen
+		data.(j) = '\n' -> j + 1
+		_ -> findEOL(j + 1)
+	}
+	findEOL(i)
+}
+
+// _readToken reads next whitespace-delimited token
+fn _readToken(data, i) {
+	maxLen := len(data)
+	
+	// Skip whitespace and comments
+	fn skipWS(j) if {
+		j >= maxLen -> maxLen
+		_ -> {
+			c := data.(j)
+			if {
+				c = ' ' | c = '\t' | c = '\n' | c = '\r' -> skipWS(j + 1)
+				c = '#' -> _skipLine(data, j)
+				_ -> j
+			}
+		}
+	}
+	
+	start := skipWS(i)
+	if start >= maxLen -> { val: '', next: start, done: true }
+	
+	// Check if we're at a newline
+	c := data.(start)
+	if c = '\n' | c = '\r' -> { val: '', next: start + 1, done: true }
+	
+	// Find end of token
+	fn findEnd(k) if {
+		k >= maxLen -> k
+		_ -> {
+			c2 := data.(k)
+			if {
+				c2 = ' ' | c2 = '\t' | c2 = '\n' | c2 = '\r' -> k
+				c2 = '#' -> _skipLine(data, k)
+				_ -> findEnd(k + 1)
+			}
+		}
+	}
+	
+	end := findEnd(start)
+	{ val: data |> slice(start, end), next: end, done: end >= maxLen }
+}
+
+// _adjustIdx adjusts a negative index to positive, converts to 0-based
+fn _adjustIdx(idx, count) {
+	idx <- if idx < 0 { true -> idx + count, _ -> idx }
+	idx - 1
+}
+
+// _parseVertRef parses a vertex reference like "1", "1/2", "1/2/3", "1//3", "-1"
+fn _parseVertRef(s, vCount, tcCount, nCount) {
+	parts := split(s, '/')
+	
+	// Parse vertex index (v) - OBJ uses 1-based, we use 0-based
+	vStr := parts.0
+	v := int(vStr)
+	if v < 0 -> v <- v + vCount
+	v <- v - 1
+	
+	// p1 is texture coord (empty for "v//vn" format)
+	p1 := parts.1
+	p2 := parts.2
+	
+	// Compute texture coord and normal indices
+	// Use expression form to avoid if blocks
+	vt := if p1 != '' { _adjustIdx(int(p1), tcCount), _ -> ? }
+	vn := if p2 != '' { _adjustIdx(int(p2), nCount), _ -> ? }
+	
+	VertRef(v, vt, vn)
+}
+
+// ---- Parser ----
+
+// parse takes an OBJ file text string and returns a Model
+fn parse(data) {
+	vertices := []
+	texCoords := []
+	normals := []
+	faces := []
+	lines := []
+	
+	maxLen := len(data)
+	
+	parseLine := fn(i) {
+		// Skip whitespace and comments to find line type
+		fn skipWS(j) if {
+			j >= maxLen -> maxLen
+			_ -> {
+				c := data.(j)
+				if {
+					c = ' ' | c = '\t' | c = '\n' | c = '\r' -> skipWS(j + 1)
+					c = '#' -> _skipLine(data, j)
+					_ -> j
+				}
+			}
+		}
+		
+		lineNum := skipWS(i)
+		
+		// Check for end of data
+		if lineNum >= maxLen -> ()
+		
+		// Read line type
+		tok := _readToken(data, lineNum)
+		
+		// If we're at end, skip processing
+		if tok.done -> ()
+		
+		// Only process if we have a valid token
+		lineType := tok.val
+		pos := tok.next
+		
+		// Dispatch on line type using pattern matching
+		if lineType {
+			'v' -> {
+				// Vertex
+				xTok := _readToken(data, pos)
+				yTok := _readToken(data, xTok.next)
+				zTok := _readToken(data, yTok.next)
+				
+				vert := [float(xTok.val), float(yTok.val), float(zTok.val)]
+				vertices << vert
+				parseLine(zTok.next)
+			}
+			'vt' -> {
+				// Texture coordinate
+				uTok := _readToken(data, pos)
+				vTok := _readToken(data, uTok.next)
+				
+				tc := [float(uTok.val), float(vTok.val)]
+				wTok := _readToken(data, vTok.next)
+				// Append w if present and not done
+				wVal := if !wTok.done { float(wTok.val), _ -> ? }
+				tc <- tc << wVal
+				texCoords << tc
+				parseLine(vTok.next)
+			}
+			'vn' -> {
+				// Normal
+				xTok := _readToken(data, pos)
+				yTok := _readToken(data, xTok.next)
+				zTok := _readToken(data, yTok.next)
+				
+				normals << [float(xTok.val), float(yTok.val), float(zTok.val)]
+				parseLine(zTok.next)
+			}
+			'f' -> {
+				// Face
+				vertCount := len(vertices)
+				texCount := len(texCoords)
+				normCount := len(normals)
+				
+				faceVerts := []
+				
+				// Parse face vertex refs
+				fn parseFaceVerts(fv, fp) {
+					tok := _readToken(data, fp)
+					if {
+						tok.done | tok.val = '' -> fv
+						_ -> {
+							ref := _parseVertRef(tok.val, vertCount, texCount, normCount)
+							parseFaceVerts(fv << ref, tok.next)
+						}
+					}
+				}
+				
+				faceVerts <- parseFaceVerts([], pos)
+				face <- { vertices: faceVerts }
+				faces << face
+				
+				parseLine(tok.next)
+			}
+			'l' -> {
+				// Line
+				lineVerts := []
+				
+				// Parse line vertex indices
+				fn parseLineVerts(lv, lp) {
+					tok := _readToken(data, lp)
+					if {
+						tok.done | tok.val = '' -> lv
+						_ -> {
+							vi := int(tok.val)
+							if vi < 0 -> vi <- vi + len(vertices)
+							vi <- vi - 1
+							parseLineVerts(lv << vi, tok.next)
+						}
+					}
+				}
+				
+				lineVerts <- parseLineVerts([], pos)
+				ln <- { vertices: lineVerts }
+				lines << ln
+				
+				parseLine(tok.next)
+			}
+			// Unknown - skip to end of line
+			_ -> {
+				eol := _skipLine(data, pos)
+				parseLine(eol)
+			}
+		}
+	}
+	
+	parseLine(0)
+	
+	Model(vertices, texCoords, normals, faces, lines)
+}
+
+// ---- Encoder ----
+
+// fmtRef formats a vertex reference for OBJ output (1-based indices)
+fn fmtRef(vr) {
+	s := string(vr.v + 1)
+	if vr.vt != ? -> s <- s + '/' + string(vr.vt + 1)
+	if vr.vn != ? -> s <- s + '/' + string(vr.vn + 1)
+	s
+}
+
+// _writeLines joins lines with newlines
+fn _writeLines(linesList) {
+	if len(linesList) = 0 -> ''
+	
+	if len(linesList) = 1 -> linesList.0
+	
+	// Use recursion to join
+	fn joinFrom(acc, i) if i {
+		0 -> acc
+		_ -> joinFrom(acc + '\n' + linesList.(i), i - 1)
+	}
+	joinFrom(linesList.0, len(linesList) - 1)
+}
+
+// encode takes a Model and returns an OBJ file string
+fn encode(model) {
+	lines := []
+	
+	// Write vertices
+	fn writeVerts(i) if i {
+		len(model.vertices) -> ?
+		_ -> {
+			v := model.vertices.(i)
+			lines << ('v ' + string(v.0) + ' ' + string(v.1) + ' ' + string(v.2))
+			writeVerts(i + 1)
+		}
+	}
+	writeVerts(0)
+	
+	// Write texture coordinates
+	fn writeTCs(i) if i {
+		len(model.texCoords) -> ?
+		_ -> {
+			tc := model.texCoords.(i)
+			line := 'vt ' + string(tc.0) + ' ' + string(tc.1)
+			if len(tc) > 2 -> line <- line + ' ' + string(tc.2)
+			lines << line
+			writeTCs(i + 1)
+		}
+	}
+	writeTCs(0)
+	
+	// Write normals
+	fn writeNorms(i) if i {
+		len(model.normals) -> ?
+		_ -> {
+			n := model.normals.(i)
+			lines << ('vn ' + string(n.0) + ' ' + string(n.1) + ' ' + string(n.2))
+			writeNorms(i + 1)
+		}
+	}
+	writeNorms(0)
+	
+	// Write faces
+	fn writeFaces(i) if i {
+		len(model.faces) -> ?
+		_ -> {
+			face := model.faces.(i)
+			
+			vertStrs := []
+			fn collectVerts(j) if j {
+				len(face.vertices) -> []
+				_ -> {
+					vertStrs << fmtRef(face.vertices.(j))
+					collectVerts(j + 1)
+				}
+			}
+			collectVerts(0)
+			
+			lines << ('f ' + join(vertStrs, ' '))
+			writeFaces(i + 1)
+		}
+	}
+	writeFaces(0)
+	
+	// Write lines
+	fn writeLines(i) if i {
+		len(model.lines) -> ?
+		_ -> {
+			ln := model.lines.(i)
+			vertStrs := ln.vertices |> map(fn(v) string(v + 1))
+			lines << ('l ' + join(vertStrs, ' '))
+			writeLines(i + 1)
+		}
+	}
+	writeLines(0)
+	
+	_writeLines(lines)
+}
