@@ -61,6 +61,9 @@ var libcompressionhuffman string
 //go:embed lib/compression-lzw.oak
 var libcompressionlzw string
 
+//go:embed lib/compression-ans.oak
+var libcompressionans string
+
 //go:embed lib/dataprot.oak
 var libdataprot string
 
@@ -114,6 +117,9 @@ var libcrypto string
 
 //go:embed lib/bitwise.oak
 var libbitwise string
+
+//go:embed lib/rmqr.oak
+var librmqr string
 
 //go:embed lib/bytes.oak
 var libbytes string
@@ -745,6 +751,7 @@ var stdlibs = map[string]string{
 	"compression-rle":                 libcompressionrle,
 	"compression-huffman":             libcompressionhuffman,
 	"compression-lzw":                 libcompressionlzw,
+	"compression-ans":                 libcompressionans,
 	"dataprot":                        libdataprot,
 	"http":                            libhttp,
 	"socket":                          libsocket,
@@ -774,6 +781,7 @@ var stdlibs = map[string]string{
 	"ppm":                             libimageppm,
 	"tga":                             libimagetga,
 	"qoi":                             libimageqoi,
+	"rmqr":                            librmqr,
 	"image-bmp":                       libimagebmp,
 	"image-ico":                       libimageico,
 	"image-ppm":                       libimageppm,
@@ -988,6 +996,7 @@ var stdlibAutoLoadOrder = []string{
 	"compression-rle",
 	"compression-huffman",
 	"compression-lzw",
+	"compression-ans",
 	"dataprot",
 	"http",
 	"socket",
@@ -1002,6 +1011,7 @@ var stdlibAutoLoadOrder = []string{
 	"md",
 	"crypto",
 	"bitwise",
+	"rmqr",
 	"hex",
 	"image",
 	"image-bmp",

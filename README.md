@@ -537,19 +537,36 @@ Lossless compression codecs and compact binary serialization.
 
 ```js
 compression := import('compression')
-compressed := compression.huffmanCompress('hello world hello world')
-original := compression.huffmanDecompress(compressed)
+compressed := compression.compress('hello world hello world', :ans)
+original := compression.decompress(compressed, :ans)
 
 msgpack := import('msgpack')
 packed := msgpack.serializeSafe({ name: 'alice', scores: [98, 87, 95] })
 ```
 
+- **ANS**: context-adaptive Asymmetric Numeral Systems — the entropy coder
+  behind zstd and JPEG XL. Beats LZW by 70–85% on natural text because it
+  prices each byte *by the context it appears in* ([docs](docs/compression-ans.md))
 - **RLE**: run-length encoding for simple repeated patterns
 - **Huffman**: frequency-optimized variable-length bit packing
 - **LZW**: dictionary-based compression for repeated phrases
 - **MessagePack**: compact binary serialization (smaller/faster than JSON)
 
-See [docs/compression.md](docs/compression.md) and [docs/msgpack.md](docs/msgpack.md).
+Measured on the repository's own benchmark corpus
+(`samples/compression-ans-demo.oak`):
+
+| corpus | bytes | huffman | lzw | ans | vs lzw |
+|---|---|---|---|---|---|
+| US Constitution | 327 | 3721 | 745 | **222** | −70% |
+| prose ×20 | 2200 | 11395 | 1704 | **309** | −81% |
+| Oak source ×6 | 492 | 4145 | 687 | **131** | −80% |
+| JSON ×4 | 380 | 3583 | 614 | **151** | −75% |
+| long runs ×4 | 128 | 249 | 111 | 115 | +4% (use RLE) |
+
+Model constants are swept and held-out validated, not hand-picked — see
+[docs/compression-ans.md](docs/compression-ans.md#tuning-measured-not-guessed).
+
+See [docs/compression.md](docs/compression.md), [docs/compression-ans.md](docs/compression-ans.md) and [docs/msgpack.md](docs/msgpack.md).
 
 ---
 

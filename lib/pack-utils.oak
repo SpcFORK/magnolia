@@ -62,11 +62,25 @@ fn serializeVFS(vfsFiles) {
 	}
 }
 
-// deserializeVFS converts a JSON string back into a VFS files object
+// deserializeVFS converts MessagePack VFS data back into a VFS files object.
+//
+// The return type is guaranteed to be an object. This matters more than it
+// looks: any byte string is *some* valid MessagePack prefix, so a caller that
+// passes JSON (or corrupt data) gets an integer or atom back rather than an
+// error - e.g. '{"test.txt":"data"}' starts with 0x7b, which decodes as the
+// fixint 123. Returning that to a caller that expects a files map produced a
+// confusing "Expected string, list, or object in left-hand side of property
+// access, got 123" crash far from the real mistake. Validate here instead.
 fn deserializeVFS(vfsData) {
 	if vfsData {
 		?, '' -> {}
-		_ -> mp_parse(vfsData) |> default({})
+		_ -> {
+			parsed := mp_parse(vfsData)
+			if type(parsed) = :object {
+				true -> parsed
+				_ -> {}
+			}
+		}
 	}
 }
 
