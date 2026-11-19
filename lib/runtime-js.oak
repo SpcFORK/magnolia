@@ -51,6 +51,10 @@ function __oak_module_import(name) {
 
 // language primitives
 let __oak_empty_assgn_tgt;
+// Oak has no JS receiver binding; the web backend lowers the Oak
+// identifier `this` to __oak_js_this, which must always be defined.
+// `undefined` mirrors strict-mode JS top level and plain calls.
+let __oak_js_this = undefined;
 function __oak_eq(a, b) {
 	if (a === __Oak_Empty || b === __Oak_Empty) return true;
 
@@ -162,6 +166,15 @@ function __as_oak_string(x) {
 	if (typeof x === \'string\') return __Oak_String(x);
 	return x;
 }
+// coerce string-API arguments the way host JS does: Oak strings unwrap to
+// their primitive, absent values become 'null'/'undefined', host values
+// (RegExp, numbers, booleans) pass through for native ToString coercion
+function __oak_str_arg(x) {
+	if (x === undefined) return \'undefined\';
+	if (x === null) return \'null\';
+	if (__is_oak_string(x)) return x.valueOf();
+	return x;
+}
 const { __Oak_String } = class __Oak_String_Instance {
 	static __Oak_String = s => new __Oak_String_Instance(s);
 
@@ -186,6 +199,69 @@ const { __Oak_String } = class __Oak_String_Instance {
 	get length() {
 		return this._s.length;
 	}
+
+	// Oak strings masquerade as host String for transpiled
+	// `x.constructor === String` checks (named class expression name
+	// is in scope in static blocks)
+	static { __Oak_String_Instance.prototype.constructor = String; }
+
+	// -- JS String API compatibility --
+	// Transpiled JavaScript (e.g. jQuery) calls native string methods on
+	// receivers that are actually Oak strings. Delegate to the wrapped
+	// primitive; string results are wrapped back into Oak strings.
+	toLowerCase() { return __Oak_String(this._s.toLowerCase()); }
+	toUpperCase() { return __Oak_String(this._s.toUpperCase()); }
+	trim() { return __Oak_String(this._s.trim()); }
+	charAt(i) { return __Oak_String(this._s.charAt(i)); }
+	charCodeAt(i) { return this._s.charCodeAt(i); }
+	concat(...parts) { return __Oak_String(this._s.concat(...parts.map(p => __oak_str_arg(p)))); }
+	slice(start, end) { return __Oak_String(this._s.slice(start, end)); }
+	substring(a, b) { return __Oak_String(this._s.substring(a, b)); }
+	substr(a, b) { return __Oak_String(this._s.substr(a, b)); }
+	indexOf(part, from) { return this._s.indexOf(__oak_str_arg(part), from); }
+	lastIndexOf(part, from) { return this._s.lastIndexOf(__oak_str_arg(part), from); }
+	includes(part, from) { return this._s.includes(__oak_str_arg(part), from); }
+	startsWith(part, from) { return this._s.startsWith(__oak_str_arg(part), from); }
+	endsWith(part, len) { return this._s.endsWith(__oak_str_arg(part), len); }
+	search(re) { return this._s.search(re); }
+	split(sep, limit) {
+		const s = sep === undefined ? undefined : __oak_str_arg(sep);
+		return this._s.split(s, limit).map(__Oak_String);
+	}
+	match(re) { return this._s.match(re); }
+	replace(search, replacement) {
+		const s = typeof search === \'string\' || search instanceof RegExp
+			? search : __oak_str_arg(search);
+		const rep = typeof replacement === \'function\' ? replacement : __oak_str_arg(replacement);
+		return __Oak_String(this._s.replace(s, rep));
+	}
+	replaceAll(search, replacement) {
+		const s = typeof search === \'string\' || search instanceof RegExp
+			? search : __oak_str_arg(search);
+		const rep = typeof replacement === \'function\' ? replacement : __oak_str_arg(replacement);
+		return __Oak_String(this._s.replaceAll(s, rep));
+	}
+}
+
+// host constructors referenced by transpiled JS as free identifiers
+// (String/Array/... constructor identity checks). Oak arrays ARE host arrays,
+// Oak objects are host objects, Oak numbers/booleans are primitives; Oak
+// strings masquerade as String (see __Oak_String_Instance above).
+const __Array = Array;
+const __Object = Object;
+const __String = String;
+const __Number = Number;
+const __Boolean = Boolean;
+const __Function = Function;
+const __Date = Date;
+const __RegExp = RegExp;
+const __Promise = Promise;
+
+// native RegExp construction for transpiled code (see __jsRegExp in js-runtime.oak)
+function __js_RegExp(pattern, flags) {
+	const r = new RegExp(__as_oak_string(pattern).valueOf(), __as_oak_string(flags).valueOf());
+	r.__t = \'jsRegExp\';
+	return r;
 }
 
 // tail recursion trampoline helpers
@@ -332,6 +408,14 @@ function keys(x) {
 		return Object.getOwnPropertyNames(x).map(__as_oak_string);
 	}
 	throw new Error(\'keys() takes a composite value, but got \' + string(x).valueOf());
+}
+function values(x) {
+	if (Array.isArray(x)) {
+		return x.slice();
+	} else if (typeof x === \'object\' && x !== null) {
+		return Object.getOwnPropertyNames(x).map(k => x[k]);
+	}
+	throw new Error(\'values() takes a composite value, but got \' + string(x).valueOf());
 }
 function name(x) {
 	if (x == null) return Symbol.for(\'null\');
@@ -1589,49 +1673,4 @@ function __oak_js_try(fn) {
 		}
 	}
 }
-
-
-// builtin aliases for the __std_builtin_<name> := <name> capture idiom
-// (lib/std.oak). Module closures shadow bare global builtin names with
-// their own same-named bindings; these never-shadowed aliases give the
-// capture idiom a path back to the real globals.
-var __oak_builtin_acos = (typeof acos === "function") ? acos : undefined;
-var __oak_builtin_addr = (typeof addr === "function") ? addr : undefined;
-var __oak_builtin_args = (typeof args === "function") ? args : undefined;
-var __oak_builtin_asin = (typeof asin === "function") ? asin : undefined;
-var __oak_builtin_atan = (typeof atan === "function") ? atan : undefined;
-var __oak_builtin_atom = (typeof atom === "function") ? atom : undefined;
-var __oak_builtin_bits = (typeof bits === "function") ? bits : undefined;
-var __oak_builtin_char = (typeof char === "function") ? char : undefined;
-var __oak_builtin_codepoint = (typeof codepoint === "function") ? codepoint : undefined;
-var __oak_builtin_cos = (typeof cos === "function") ? cos : undefined;
-var __oak_builtin_env = (typeof env === "function") ? env : undefined;
-var __oak_builtin_exec = (typeof exec === "function") ? exec : undefined;
-var __oak_builtin_exit = (typeof exit === "function") ? exit : undefined;
-var __oak_builtin_float = (typeof float === "function") ? float : undefined;
-var __oak_builtin_go = (typeof go === "function") ? go : undefined;
-var __oak_builtin_input = (typeof input === "function") ? input : undefined;
-var __oak_builtin_int = (typeof int === "function") ? int : undefined;
-var __oak_builtin_interpreter = (typeof interpreter === "function") ? interpreter : undefined;
-var __oak_builtin_keys = (typeof keys === "function") ? keys : undefined;
-var __oak_builtin_len = (typeof len === "function") ? len : undefined;
-var __oak_builtin_log = (typeof log === "function") ? log : undefined;
-var __oak_builtin_memread = (typeof memread === "function") ? memread : undefined;
-var __oak_builtin_memwrite = (typeof memwrite === "function") ? memwrite : undefined;
-var __oak_builtin_name = (typeof name === "function") ? name : undefined;
-var __oak_builtin_nanotime = (typeof nanotime === "function") ? nanotime : undefined;
-var __oak_builtin_pointer = (typeof pointer === "function") ? pointer : undefined;
-var __oak_builtin_pow = (typeof pow === "function") ? pow : undefined;
-var __oak_builtin_print = (typeof print === "function") ? print : undefined;
-var __oak_builtin_rand = (typeof rand === "function") ? rand : undefined;
-var __oak_builtin_read = (typeof read === "function") ? read : undefined;
-var __oak_builtin_sin = (typeof sin === "function") ? sin : undefined;
-var __oak_builtin_srand = (typeof srand === "function") ? srand : undefined;
-var __oak_builtin_string = (typeof string === "function") ? string : undefined;
-var __oak_builtin_tan = (typeof tan === "function") ? tan : undefined;
-var __oak_builtin_time = (typeof time === "function") ? time : undefined;
-var __oak_builtin_type = (typeof type === "function") ? type : undefined;
-var __oak_builtin_utf16 = (typeof utf16 === "function") ? utf16 : undefined;
-var __oak_builtin_wait = (typeof wait === "function") ? wait : undefined;
-var __oak_builtin_write = (typeof write === "function") ? write : undefined;
 '

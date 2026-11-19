@@ -1,0 +1,268 @@
+// jvm-bridge — Oak VM transition layer for Java inputs and verified execution.
+// The frontends normalize .class/.jar/.zip/.java into the SAME class-byte list;
+// one linker verifies reachable JVM instructions before any native, web or
+// standalone Oak execution. A Java JDK is OPTIONAL and only a source frontend.
+// There is no browser-side JVM and no Go applet-specific implementation.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+classfile := import('./applet-class.oak')
+bytecode := import('./applet-bytecode.oak')
+vmLib := import('./jvm-vm-libs.oak')
+archive := import('./applet-zip.oak')
+app := import('./applet.oak')
+javaInput := import('./jvm-java-input.oak')
+
+fn _error(message) {type: :error, message: message}
+
+// {entry, source?}; opts supports javaBackend: auto|javac|oak, javaFiles,
+// javaRelease, javacPath, preserveJar?, entryClass and selectClass. The
+// selected-JAR route returns exactly one validated class, never embeds the
+// original giant JAR, and cannot silently satisfy missing dependencies.
+// No loader executes source, class initializers or JARs.
+fn load(config, opts) if type(config.entry) = :string {
+    true -> _load(config, opts)
+    _ -> _error('JVM bridge requires an entry path')
+}
+fn _load(config, opts) {
+    opts := opts |> std.default({})
+    file := config.entry
+    suffix := str.lower(file)
+    if opts.selectClass != ? & !(str.endsWith?(suffix, '.jar') |
+        str.endsWith?(suffix, '.zip')) {
+        true -> _error('selectClass is only valid for .jar/.zip input')
+        _ -> if str.endsWith?(suffix, '.java') {
+        true -> javaInput.load(config, opts)
+        _ -> if str.endsWith?(suffix, '.jar') | str.endsWith?(suffix, '.zip') {
+            true -> {
+                bytes := fs.readFile(file)
+                if bytes = ? {
+                    true -> _error('cannot read JVM archive: ' + file)
+                    _ -> {
+                        if opts.selectClass != ? {
+                            true -> {
+                                selected := archive.selectClass(bytes, opts.selectClass)
+                                if selected.type = :error {
+                                    true -> selected
+                                    _ -> if opts.entryClass != ? &
+                                        opts.entryClass != selected.name {
+                                        true -> _error('entryClass must match selectClass in selective JAR mode')
+                                        _ -> {type: :ok, classes: [selected.value],
+                                            entry: selected.name, backend: 'jar-selected',
+                                            jar: ?, archiveEntries: selected.archiveEntries}
+                                    }
+                                }
+                            }
+                            _ -> {
+                                found := archive.entries(bytes)
+                                if found.type = :error {
+                                    true -> found
+                                    _ -> {type: :ok, classes: found.classes,
+                                        entry: found.entry, backend: 'jar',
+                                        jar: if opts.preserveJar? = false {true -> ?, _ -> bytes}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ -> if str.endsWith?(suffix, '.class') {
+                true -> {
+                    bytes := fs.readFile(file)
+                    if bytes = ? {
+                        true -> _error('cannot read JVM class: ' + file)
+                        _ -> {
+                            checked := classfile.parseClass(bytes)
+                            if checked.type = :error {
+                                true -> checked
+                                _ -> {type: :ok, classes: [bytes], entry: ?, jar: ?, backend: 'class'}
+                            }
+                        }
+                    }
+                }
+                _ -> _error('JVM bridge expects .class, .jar, .zip or .java input')
+            }
+        }
+    }
+    }
+}
+// A portable image consists of predecoded instructions and metadata. The
+// same image drives applet-runtime.oak, Builder's bundled JS/HTML and Java
+// emitters, avoiding independent Java-specific execution in the host Go VM.
+fn link(loaded, opts) {
+    if loaded.type = :error {
+        true -> loaded
+        _ -> {
+            opts := opts |> std.default({})
+            app.compile(loaded.classes, {
+                entry: opts.entry |> std.default(loaded.entry)
+                method: opts.method
+                desc: opts.desc |> std.default('()V')
+                paint?: opts.paint? = true
+                optimize?: opts.optimize? != false
+            })
+        }
+    }
+}
+
+// Scan EVERY method body and field of the input class set, including bodies
+// that the selected entrypoint never calls. This is an inventory of bounded
+// decoder coverage, not a proof of JVM verification, linking or execution.
+// A reachable-only build may succeed while this report still has blockers.
+fn coverage(loaded) if type(loaded) != :object {
+    true -> _error('coverage requires a loaded class set')
+    _ -> if loaded.type = :error {true -> loaded, _ -> _coverage(loaded)}
+}
+fn _coverage(loaded) {
+    originals := loaded.classes
+    if type(originals) != :list | len(originals) = 0 | len(originals) > 256 {
+        true -> _error('coverage expects 1..256 class files')
+        _ -> _coverageClasses(originals, loaded.entry)
+    }
+}
+fn _coverageClasses(originals, entry) {
+    classes := {}
+    problem := ?
+    total := 0
+    originals |> std.each(fn(raw) if problem = ? {
+        true -> if type(raw) != :string {
+            true -> problem <- 'coverage expects binary class bytes'
+            _ -> {
+                total <- total + len(raw)
+                if total > 33554432 {
+                    true -> problem <- 'coverage class bytes exceed 32 MiB'
+                    _ -> {
+                        parsed := classfile.parseClass(raw)
+                        if parsed.type = :error {
+                            true -> problem <- parsed.message
+                            _ -> if classes.(parsed.value.name) != ? {
+                                true -> problem <- 'duplicate class ' + parsed.value.name
+                                _ -> classes.(parsed.value.name) <- parsed.value
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if problem != ? {
+        true -> _error(problem)
+        _ -> _coverageMethods(classes, entry)
+    }
+}
+// Signatures can mention dependencies that no instruction currently uses.
+// Inventory those too; this still does not promise Java lazy linking parity.
+fn _missingSignatureType(desc, classes) {
+    inside? := false
+    reference := ''
+    issue := ?
+    std.range(len(desc)) |> std.each(fn(i) if issue = ? {
+        true -> {
+            c := desc.(i)
+            if inside? {
+                true -> if c = ';' {
+                    true -> {
+                        if reference = '' | (classes.(reference) = ? &
+                            vmLib.jvmReference(reference) = ?) ->
+                            issue <- 'missing or unmodeled reference type ' + reference
+                        inside? <- false
+                        reference <- ''
+                    }
+                    _ -> reference <- reference + c
+                }
+                _ -> if c = 'L' -> inside? <- true
+            }
+        }
+    })
+    if issue = ? & inside? -> issue <- 'unterminated reference descriptor'
+    issue
+}
+fn _coverageMethods(classes, entry) {
+    blockers := []
+    overflow? := false
+    methods := 0
+    decoded := 0
+    abstract := 0
+    fields := 0
+    fn block(member, message) if len(blockers) < 1024 {
+        true -> blockers << {member: member, message: message}
+        _ -> overflow? <- true
+    }
+    keys(classes) |> std.each(fn(owner) if !overflow? {
+        true -> {
+            cls := classes.(owner)
+            if cls.super != ? & classes.(cls.super) = ? &
+                vmLib.jvmReference(cls.super) = ? ->
+                block(owner, 'missing or unmodeled superclass ' + cls.super)
+            cls.interfaces |> std.each(fn(iface) if !overflow? &
+                classes.(iface) = ? & vmLib.jvmReference(iface) = ? ->
+                block(owner, 'missing or unmodeled interface ' + iface))
+            cls.fields |> std.each(fn(field) if !overflow? {
+                true -> {
+                    fields <- fields + 1
+                    name := owner + '.' + field.name + ':' + field.desc
+                    if !bytecode.fieldType?(field.desc) {
+                        true -> block(name, 'unsupported field descriptor ' + field.desc)
+                        _ -> if missing := _missingSignatureType(field.desc, classes) {
+                            ? -> ?
+                            _ -> block(name, missing)
+                        }
+                    }
+                }
+            })
+            cls.methods |> std.each(fn(method) if !overflow? {
+                true -> {
+                    methods <- methods + 1
+                    name := owner + '.' + method.name + method.desc
+                    if bytecode.arity(method.desc) = ? |
+                        !bytecode.returnType?(method.desc) {
+                        true -> block(name, 'unsupported method descriptor')
+                        _ -> {
+                            missing := _missingSignatureType(method.desc, classes)
+                            if missing != ? -> block(name, missing)
+                            if !overflow? {
+                                true -> if method.code = ? {
+                                    true -> if method.flags & 1024 {
+                                        0 -> block(name, 'native or missing Code body')
+                                        _ -> abstract <- abstract + 1
+                                    }
+                                    _ -> if (cls.flags & 512) != 0 &
+                                        (method.flags & 8) = 0 & method.name != '<clinit>' {
+                                        true -> block(name,
+                                            'interface default/instance method bodies are not linked')
+                                        _ -> {
+                                            checked := bytecode.lowerMethod(cls, method, classes, false)
+                                            if checked.type = :error {
+                                                true -> block(name, checked.message)
+                                                _ -> decoded <- decoded + 1
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        }
+    })
+    if overflow? {
+        true -> _error('coverage report exceeds 1024 blockers')
+        _ -> {type: :ok, entry: entry, classes: len(keys(classes)),
+            fields: fields, methods: methods, decodedBodies: decoded,
+            abstractDeclarations: abstract, blockers: blockers,
+            allBodiesPreflighted?: len(blockers) = 0}
+    }
+}
+
+// Native Oak VM facade; callers may also feed link(...).value to the
+// standalone Oak/JS/Java emitters. Execution remains step/depth bounded.
+fn execute(image, parameters, options) app.run(image, parameters, options)
+fn run(loaded, selection, parameters, options) {
+    checked := link(loaded, selection)
+    if checked.type = :error {
+        true -> checked
+        _ -> execute(checked.value, parameters, options)
+    }
+}

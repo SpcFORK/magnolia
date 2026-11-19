@@ -1,0 +1,260 @@
+// libint64 — exact signed 64-bit integers in two integral 32-bit limbs.
+// No JS Number intermediates are involved anywhere: addition/subtraction
+// touch at most 33-bit intermediates, products of 16-bit limbs stay far
+// below 2^53, and division uses a bit-by-bit unsigned magnitude algorithm.
+//
+// Values are plain Oak objects tagged {jvmLong: true, hi, lo}, where hi is
+// the signed high 32-bit limb and lo is the unsigned low 32-bit limb. This
+// is the same interchange shape used by the bounded JVM execution layer and
+// by its generated Java (`WideLong`), so Oak programs can pass exact 64-bit
+// values across that boundary unchanged.
+//
+// This module was abstracted from the JVM execution layer so any Oak program
+// can use exact 64-bit integers. It depends on libstd only.
+
+std := import('std')
+
+// Exact signed 64-bit JVM longs use two integral 32-bit limbs, never a JS
+// Number. Addition/subtraction touch at most 33-bit intermediates (<2^53).
+fn u32(n) {
+    rem := n % 4294967296
+    if rem < 0 {true -> rem + 4294967296, _ -> rem}
+}
+fn s32(n) {
+    u := u32(n)
+    if u >= 2147483648 {true -> u - 4294967296, _ -> u}
+}
+fn long?(v) type(v) = :object & v.jvmLong = true &
+    type(v.hi) = :int & type(v.lo) = :int &
+    v.hi >= -2147483648 & v.hi <= 2147483647 &
+    v.lo >= 0 & v.lo <= 4294967295
+fn long(hi, lo) {jvmLong: true, hi: s32(hi), lo: u32(lo)}
+fn add(a, b) {
+    low := a.lo + b.lo
+    long(a.hi + b.hi + if low >= 4294967296 {true -> 1, _ -> 0}, low)
+}
+fn sub(a, b) long(a.hi - b.hi - if a.lo < b.lo {true -> 1, _ -> 0}, a.lo - b.lo)
+fn cmp(a, b) if a.hi < b.hi {true -> -1,
+    _ -> if a.hi > b.hi {true -> 1,
+        _ -> if a.lo < b.lo {true -> -1,
+            _ -> if a.lo > b.lo {true -> 1, _ -> 0}}}}
+// Unsigned 64-bit comparison: compares the two limbs as an unsigned
+// 64-bit integer, returning -1, 0 or 1. Wraps the private _cmpU64 helper.
+fn cmpUnsigned(a, b) _cmpU64(a.hi, a.lo, b.hi, b.lo)
+
+// Two's complement negation, limb-exact. Negation of MIN_VALUE wraps to
+// itself, exactly as the JVM requires.
+fn neg(a) {
+    invLo := 4294967295 - u32(a.lo)
+    invHi := 4294967295 - u32(a.hi)
+    if invLo = 4294967295 {
+        true -> long(s32((invHi + 1) % 4294967296), 0)
+        _ -> long(s32(invHi), invLo + 1)
+    }
+}
+// Unsigned 32x32 -> 64 multiply. Products of 16-bit limbs stay far below
+// 2^53, so no floating point is involved. Returns [hi32, lo32] of the
+// 64-bit product; hi32 may need the full 32 bits. (The earlier packing
+// carried an incorrect low limb/high word — see docs/int64.md.)
+fn _uMul32(a, b) {
+    a0 := a % 65536
+    a1 := int(a / 65536)
+    b0 := b % 65536
+    b1 := int(b / 65536)
+    t := a0 * b0
+    w0 := t % 65536
+    carry := int(t / 65536)
+    t := a1 * b0 + carry
+    w1 := t % 65536
+    carry1 := int(t / 65536)
+    t := a0 * b1 + w1
+    w2 := t % 65536
+    carry := int(t / 65536)
+    t := a1 * b1 + carry + carry1
+    // hi word can need the full 32 bits (a1*b1 + carry + carry1 <= 4294967295)
+    [t % 4294967296, w2 * 65536 + w0]
+}
+// Exact-limb lmul: the a*b product modulo 2^64. hi words beyond 64 bits are
+// discarded by construction; no floating point is involved.
+fn mul(a, b) {
+    p := _uMul32(u32(a.lo), u32(b.lo))
+    mA := _uMul32(u32(a.lo), u32(b.hi))
+    mB := _uMul32(u32(a.hi), u32(b.lo))
+    hiSum := p.(0) + mA.(1) + mB.(1)
+    long(s32(hiSum % 4294967296), p.(1))
+}
+fn _cmpU64(hiA, loA, hiB, loB) {
+    if u32(hiA) != u32(hiB) {
+        true -> if u32(hiA) < u32(hiB) {true -> -1, _ -> 1}
+        _ -> if u32(loA) != u32(loB) {
+            true -> if u32(loA) < u32(loB) {true -> -1, _ -> 1}
+            _ -> 0
+        }
+    }
+}
+fn _subU64(hiA, loA, hiB, loB) {
+    if u32(loA) >= u32(loB) {
+        true -> [u32(hiA) - u32(hiB), u32(loA) - u32(loB)]
+        _ -> [u32(hiA) - u32(hiB) - 1, u32(loA) + 4294967296 - u32(loB)]
+    }
+}
+fn _divStep(qHi, qLo, rHi, rLo, aHi, aLo, bHi, bLo, bit) {
+    if bit < 0 {
+        true -> [qHi, qLo, rHi, rLo]
+        _ -> {
+            top := if aHi >= 2147483648 {true -> 1, _ -> 0}
+            aHi2 := (aHi & 2147483647) * 2 + (if aLo >= 2147483648 {true -> 1, _ -> 0})
+            aLo2 := (aLo & 2147483647) * 2
+            rHi2 := (rHi & 2147483647) * 2 + (if rLo >= 2147483648 {true -> 1, _ -> 0})
+            rLo2 := (rLo & 2147483647) * 2 + top
+            qHi2 := (qHi & 2147483647) * 2 + (if qLo >= 2147483648 {true -> 1, _ -> 0})
+            qLo2 := (qLo & 2147483647) * 2
+            if _cmpU64(rHi2, rLo2, bHi, bLo) >= 0 {
+                true -> {
+                    d := _subU64(rHi2, rLo2, bHi, bLo)
+                    _divStep(qHi2, qLo2 + 1, d.(0), d.(1), aHi2, aLo2, bHi, bLo, bit - 1)
+                }
+                _ -> _divStep(qHi2, qLo2, rHi2, rLo2, aHi2, aLo2, bHi, bLo, bit - 1)
+            }
+        }
+    }
+}
+// Exact-limb divRem: truncated division on unsigned magnitudes, then the
+// JVM sign rules. MIN_VALUE / -1 wraps to MIN_VALUE, matching the JVM.
+// Returns {type: :ok, quotient, remainder}; division by zero returns
+// {type: :error, message: 'long division by zero'}.
+fn divRem(a, b) if !long?(a) | !long?(b) {
+    true -> {type: :error, message: 'long division requires two JVM long values'}
+    _ -> if b.hi = 0 & b.lo = 0 {
+        true -> {type: :error, message: 'long division by zero'}
+        _ -> {
+            aNeg := a.hi < 0
+            bNeg := b.hi < 0
+            num := if aNeg {true -> neg(a), _ -> a}
+            den := if bNeg {true -> neg(b), _ -> b}
+            res := _divStep(0, 0, 0, 0, u32(num.hi), u32(num.lo),
+                u32(den.hi), u32(den.lo), 63)
+            quot := long(s32(res.(0)), res.(1))
+            rem := long(s32(res.(2)), res.(3))
+            qNeg := (aNeg & !bNeg) | (!aNeg & bNeg)
+            if qNeg {true -> quot <- neg(quot), _ -> quot}
+            if aNeg {true -> rem <- neg(rem), _ -> rem}
+            {type: :ok, quotient: quot, remainder: rem}
+        }
+    }
+}
+fn _shlStep(hi, lo) {
+    [(hi & 2147483647) * 2 + (if lo >= 2147483648 {true -> 1, _ -> 0}),
+        (lo & 2147483647) * 2]
+}
+fn _shrUStep(hi, lo) {
+    [int(hi / 2), (hi & 1) * 2147483648 + int(lo / 2)]
+}
+fn _shrSStep(hi, lo) {
+    uHi := u32(hi)
+    uLo := u32(lo)
+    rHi := if hi >= 0 {true -> int(hi / 2), _ -> int((hi - 1) / 2)}
+    [rHi, (uHi & 1) * 2147483648 + int(uLo / 2)]
+}
+fn _shlN(hi, lo, i, k) {
+    if i >= k {true -> [hi, lo]}
+    _ -> {
+        r := _shlStep(hi, lo)
+        _shlN(r.(0), r.(1), i + 1, k)
+    }
+}
+fn _shrUN(hi, lo, i, k) {
+    if i >= k {true -> [hi, lo]}
+    _ -> {
+        r := _shrUStep(hi, lo)
+        _shrUN(r.(0), r.(1), i + 1, k)
+    }
+}
+fn _shrSN(hi, lo, i, k) {
+    if i >= k {true -> [hi, lo]}
+    _ -> {
+        r := _shrSStep(hi, lo)
+        _shrSN(r.(0), r.(1), i + 1, k)
+    }
+}
+fn and(a, b) long(s32(u32(a.hi) & u32(b.hi)), u32(a.lo) & u32(b.lo))
+fn or(a, b) long(s32(u32(a.hi) | u32(b.hi)), u32(a.lo) | u32(b.lo))
+fn xor(a, b) long(s32(u32(a.hi) ^ u32(b.hi)), u32(a.lo) ^ u32(b.lo))
+// Decimal formatting avoids a 64-bit or floating-point intermediate. Each
+// long has at most twenty digits; chunk division stays below 655360.
+fn toText(value) {
+    negative? := value.hi < 0
+    lo := if negative? {true -> u32(0 - value.lo), _ -> value.lo}
+    hi := if negative? {
+        true -> u32(0 - u32(value.hi) - if value.lo = 0 {true -> 0, _ -> 1})
+        _ -> u32(value.hi)
+    }
+    chunks := [int(hi / 65536), hi % 65536,
+        int(lo / 65536), lo % 65536]
+    text := ''
+    fn digits() if chunks |> std.every(fn(part) part = 0) {
+        true -> ?
+        _ -> {
+            carry := 0
+            next := []
+            chunks |> std.each(fn(part) {
+                dividend := carry * 65536 + part
+                next << int(dividend / 10)
+                carry <- dividend % 10
+            })
+            chunks <- next
+            text <- char(48 + carry) + text
+            digits()
+        }
+    }
+    digits()
+    if text = '' -> text <- '0'
+    if negative? {true -> '-' + text, _ -> text}
+}
+
+// shiftLeft and shiftRightUnsigned/shiftRightSigned shift a signed 64-bit
+// limb value; the shift count is masked to its low six bits, exactly as the
+// JVM requires. shiftRightUnsigned is logical; shiftRightSigned is
+// arithmetic (sign-extend).
+fn shiftLeft(a, n) {
+    k := ((n % 64) + 64) % 64
+    if k = 0 {true -> a, _ -> {
+        r := _shlN(u32(a.hi), u32(a.lo), 0, k)
+        long(s32(r.(0)), r.(1))
+    }}
+}
+fn shiftRightUnsigned(a, n) {
+    k := ((n % 64) + 64) % 64
+    if k = 0 {true -> a, _ -> {
+        r := _shrUN(u32(a.hi), u32(a.lo), 0, k)
+        long(s32(r.(0)), r.(1))
+    }}
+}
+fn shiftRightSigned(a, n) {
+    k := ((n % 64) + 64) % 64
+    if k = 0 {true -> a, _ -> {
+        r := _shrSN(a.hi, u32(a.lo), 0, k)
+        long(s32(r.(0)), r.(1))
+    }}
+}
+
+{
+    u32: u32
+    s32: s32
+    long?: long?
+    long: long
+    add: add
+    sub: sub
+    neg: neg
+    mul: mul
+    cmp: cmp
+    cmpUnsigned: cmpUnsigned
+    and: and
+    or: or
+    xor: xor
+    shiftLeft: shiftLeft
+    shiftRightUnsigned: shiftRightUnsigned
+    shiftRightSigned: shiftRightSigned
+    divRem: divRem
+    toText: toText
+}

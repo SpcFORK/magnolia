@@ -153,11 +153,15 @@ magnolia help                    # Show CLI help
 | `magnolia eval "<expr>"` | Evaluate a single expression |
 | `magnolia pipe` | Read and evaluate from stdin |
 | `magnolia build --entry <file> --output <file>` | Bundle/compile a program |
+| `magnolia build --entry <file.class\|file.jar\|file.java\|file.html\|file.jnlp> --output <file.oak\|file.js\|file.html\|file.java>` | Oak-first, bounded JVM adapter inside Builder; `.java` uses an optional build-time JDK **or** a limited Oak-only compiler. Self-contained Oak/JS/HTML, limited interface dispatch, original-byte recovery and verified edited Oak→new `.class`/`.jar` output; [workflow](docs/applet.md), [VM library layer](docs/jvm-vm-libraries.md) |
+| `magnolia build <inspect\|coverage\|run\|build\|transpile\|restore\|recompile>` | Inspection, all-class blocker inventory (`coverage --json`), bounded runtime, original restoration and new class/JAR reassembly for the same verified subset; [staged compatibility plan](docs/applet.md) |
 | `magnolia fmt --fix <files>` | Format source files |
 | `magnolia cat <files>` | Concatenate and print files |
 | `magnolia pack <file>` | Create a packed self-extracting binary |
 | `magnolia help` | Show help text |
 | `magnolia version` | Print version info |
+
+The [historical JVM core matrix](test/historical/README.md) executes selected **original** Macromedia Flash Java and Fliplay `.class` methods with JDK parity across bounded Oak/Builder targets; third-party class binaries are not committed. During development, an all-frame Fliplay oracle verified the uploaded Moon Clouds FLC: original `load_header → read_loop → load_frame → extract_frame` and chunk decoders ran in native Magnolia on **all 60 frames plus the 16-byte ring header**, with every indexed frame/palette byte matching JDK 11 `-Xverify:all` and every RGB frame matching an independent Pillow FLC decoder (author-reported; the oracle tool has been ablated from this tree). Current static inventories (not runnable-player counts) are Fliplay **18/35 decoded bodies, 26 blockers** and Flash Java **221/277, 91 blockers**. Fliplay's original URL opener, AWT image host, animation thread/controls and full Applet entry remain blocked, as do the Java Flash Applet, Flash-5 SWF and native projector. The uploaded Rapper Rhythm ZIP is an FLA authoring project without an exported SWF/EXE; the separate uploaded Flash-5 SWF has unconfirmed provenance. [Scope and reproduction](docs/applet.md).
 
 **Execution mode flags:**
 
@@ -533,19 +537,36 @@ Lossless compression codecs and compact binary serialization.
 
 ```js
 compression := import('compression')
-compressed := compression.huffmanCompress('hello world hello world')
-original := compression.huffmanDecompress(compressed)
+compressed := compression.compress('hello world hello world', :ans)
+original := compression.decompress(compressed, :ans)
 
 msgpack := import('msgpack')
 packed := msgpack.serializeSafe({ name: 'alice', scores: [98, 87, 95] })
 ```
 
+- **ANS**: context-adaptive Asymmetric Numeral Systems — the entropy coder
+  behind zstd and JPEG XL. Beats LZW by 70–85% on natural text because it
+  prices each byte *by the context it appears in* ([docs](docs/compression-ans.md))
 - **RLE**: run-length encoding for simple repeated patterns
 - **Huffman**: frequency-optimized variable-length bit packing
 - **LZW**: dictionary-based compression for repeated phrases
 - **MessagePack**: compact binary serialization (smaller/faster than JSON)
 
-See [docs/compression.md](docs/compression.md) and [docs/msgpack.md](docs/msgpack.md).
+Measured on the repository's own benchmark corpus
+(`samples/compression-ans-demo.oak`):
+
+| corpus | bytes | huffman | lzw | ans | vs lzw |
+|---|---|---|---|---|---|
+| US Constitution | 327 | 3721 | 745 | **222** | −70% |
+| prose ×20 | 2200 | 11395 | 1704 | **309** | −81% |
+| Oak source ×6 | 492 | 4145 | 687 | **131** | −80% |
+| JSON ×4 | 380 | 3583 | 614 | **151** | −75% |
+| long runs ×4 | 128 | 249 | 111 | 115 | +4% (use RLE) |
+
+Model constants are swept and held-out validated, not hand-picked — see
+[docs/compression-ans.md](docs/compression-ans.md#tuning-measured-not-guessed).
+
+See [docs/compression.md](docs/compression.md), [docs/compression-ans.md](docs/compression-ans.md) and [docs/msgpack.md](docs/msgpack.md).
 
 ---
 
@@ -909,6 +930,8 @@ Both sets run entirely in "userland" without invoking the interpreter separately
 
 ## Documentation Index
 
+The [Java applet guide](docs/applet.md) documents Builder's Magnolia-native `.class`/`.java`/`.jar`/local HTML/JNLP adapter, the [Oak VM-library transition layer](docs/jvm-vm-libraries.md), self-contained Oak-first output, bounded interface dispatch, original-byte restoration **and verified edited Oak→new class/JAR reassembly**, a limited AWT painter, and honest compatibility limits. The [mediated JVM compatibility plan](docs/applet.md) maps Transpile/Eval/Build/Compile routes, whole-class audit results and staged gates toward fuller `.class` support. [Runnable examples](samples/applet/README.md) include a five-class interface JAR through Oak/JS/HTML/Java and a JDK-verified edited JAR, plus self-contained reference-identity (`if_acmpeq`/`if_acmpne`) and bounded AWT `Point` geometry examples across those targets. The Java Edition (`Flash.class`, Flash 2-only) is separately preserved but does not yet execute in Magnolia. The linked Rapper Rhythm game EXE ZIP was **not obtained**; its contents remain unknown.
+
 Comprehensive docs for every module live in [docs/](docs/). The [docs/spec/](docs/spec/) directory contains **184 detailed specification files** (generated via `--doc`) mirroring the stdlib — one per module — covering every function signature, data structure, and usage pattern. It also contains **189 Mermaid dependency graphs** (`.mmd` files) showing the full transitive import tree for each module, generated via `--graph`.
 
 <details>
@@ -1003,16 +1026,16 @@ The [docs/spec/](docs/spec/) directory provides per-module API specifications or
 </details>
 
 <details>
-<summary><strong>Core Language & Misc</strong> (23 docs)</summary>
+<summary><strong>Core Language & Misc</strong> (27 docs)</summary>
 
-[spec.md](docs/spec.md) · [cs.md](docs/cs.md) · [std.md](docs/std.md) · [str.md](docs/str.md) · [fmt.md](docs/fmt.md) · [fs.md](docs/fs.md) · [path.md](docs/path.md) · [cli.md](docs/cli.md) · [shell.md](docs/shell.md) · [shell-simple.md](docs/shell-simple.md) · [debug.md](docs/debug.md) · [error-display.md](docs/error-display.md) · [bitwise.md](docs/bitwise.md) · [transpile.md](docs/transpile.md) · [virtual-fs.md](docs/virtual-fs.md) · [pack.md](docs/pack.md) · [pack-utils.md](docs/pack-utils.md) · [ai.md](docs/ai.md) · [codecols.md](docs/codecols.md) · [random.md](docs/random.md) · [sort.md](docs/sort.md) · [test.md](docs/test.md) · [writes.md](docs/writes.md)
+[spec.md](docs/spec.md) · [cs.md](docs/cs.md) · [std.md](docs/std.md) · [str.md](docs/str.md) · [fmt.md](docs/fmt.md) · [fs.md](docs/fs.md) · [path.md](docs/path.md) · [cli.md](docs/cli.md) · [shell.md](docs/shell.md) · [shell-simple.md](docs/shell-simple.md) · [debug.md](docs/debug.md) · [error-display.md](docs/error-display.md) · [bitwise.md](docs/bitwise.md) · [int64.md](docs/int64.md) · [ieee754.md](docs/ieee754.md) · [bytes.md](docs/bytes.md) · [sample.md](docs/sample.md) · [beam-vm.md](docs/beam-vm.md) · [unicode-units.md](docs/unicode-units.md) · [hex.md](docs/hex.md) · [transpile.md](docs/transpile.md) · [virtual-fs.md](docs/virtual-fs.md) · [pack.md](docs/pack.md) · [pack-utils.md](docs/pack-utils.md) · [ai.md](docs/ai.md) · [codecols.md](docs/codecols.md) · [random.md](docs/random.md) · [sort.md](docs/sort.md) · [test.md](docs/test.md) · [writes.md](docs/writes.md)
 
 </details>
 
 <details>
 <summary><strong>Dependency Graphs</strong> (189 <code>.mmd</code> files)</summary>
 
-The [docs/spec/](docs/spec/) directory also contains Mermaid dependency graphs for every stdlib module, generated with `magnolia build --graph`. Each `.mmd` file shows the full transitive import tree with modules grouped into family subgraphs. GitHub renders these natively.
+The [docs/spec/](docs/spec/) directory also contains Mermaid dependency graphs for every stdlib module generated at the last regeneration (`magnolia build --graph`). Each `.mmd` file shows the full transitive import tree with modules grouped into family subgraphs. GitHub renders these natively. The small 2026-11-16 support modules (`int64`, `ieee754`, `unicode-units`, `hex`), the 2026-11-17 byte-order primitive module (`bytes`), the audio sample-converter primitive (`sample`), and the 2026-11-18 BEAM register-machine VM (`beam-vm`) predate the next regeneration and have hand-written pages ([int64.md](docs/int64.md) · [ieee754.md](docs/ieee754.md) · [bytes.md](docs/bytes.md) · [sample.md](docs/sample.md) · [beam-vm.md](docs/beam-vm.md) · [unicode-units.md](docs/unicode-units.md) · [hex.md](docs/hex.md)) instead of generated spec/graph files.
 
 - **Syntax & AST** — [syntax.mmd](docs/spec/syntax.mmd) · [syntax-tokenize.mmd](docs/spec/syntax-tokenize.mmd) · [syntax-parse.mmd](docs/spec/syntax-parse.mmd) · [syntax-print.mmd](docs/spec/syntax-print.mmd) · [syntax-macros.mmd](docs/spec/syntax-macros.mmd) · [syntaxfmt.mmd](docs/spec/syntaxfmt.mmd) · [ast-analyze.mmd](docs/spec/ast-analyze.mmd) · [ast-transform.mmd](docs/spec/ast-transform.mmd) · [ast-java.mmd](docs/spec/ast-java.mmd) · [ast-js.mmd](docs/spec/ast-js.mmd) · [ast-lua.mmd](docs/spec/ast-lua.mmd) · [ast-ts.mmd](docs/spec/ast-ts.mmd)
 - **Build & Bundling** — [build.mmd](docs/spec/build.mmd) · [build-analyze.mmd](docs/spec/build-analyze.mmd) · [build-ast.mmd](docs/spec/build-ast.mmd) · [build-config.mmd](docs/spec/build-config.mmd) · [build-ident.mmd](docs/spec/build-ident.mmd) · [build-imports.mmd](docs/spec/build-imports.mmd) · [build-includes.mmd](docs/spec/build-includes.mmd) · [build-render.mmd](docs/spec/build-render.mmd) · [build-render-node.mmd](docs/spec/build-render-node.mmd) · [bundle-ast.mmd](docs/spec/bundle-ast.mmd) · [bundle-utils.mmd](docs/spec/bundle-utils.mmd)

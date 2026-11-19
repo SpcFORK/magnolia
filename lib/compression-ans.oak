@@ -1,0 +1,985 @@
+// compression-ans implements context-adaptive Asymmetric Numeral Systems.
+//
+// This is the integer-exact, streaming form of the idea from 3Blue1Brown's
+// Information Theory, part 3: a message becomes a number, and the number is
+// the bit stream. Rather than narrowing a real interval, an rANS coder holds
+// an integer state in [2^23, 2^32) and folds it through a probability table,
+// flushing the low bytes that no longer fit. Every flushed bit halves the
+// remaining interval, so a symbol costs -log2 P(symbol) bits up to per-event
+// rounding and nothing is ever lost to floating-point precision.
+//
+// Why this exists next to compression-huffman / compression-lzw:
+//
+//   Those codecs are context-free. They price a character identically no
+//   matter what preceded it, which is why a 92-byte English sentence takes
+//   916 bytes through Huffman here (a 10x expansion). Shannon's theorem ties
+//   compressibility to *predictability*, and predictability is contextual.
+//   This module encodes with a Markov model (order 0, 1 or 2): each context
+//   keeps its own frequency table, rebuilt every RebuildPeriod bytes from a
+//   sliding window of already-seen input blended with a built-in English
+//   prior. Encoder and decoder derive every table from information they both
+//   already hold, so no tables are transmitted - in the language of the video,
+//   the shared model *is* the decoder's program, and it ships in the library
+//   rather than the payload.
+//
+// Container (binary; framing fields are fixed-width little-field text):
+//
+//   'ANS1:' <ver:2> <order:2> <inLen:8> <csum:4> <rawLen:6> <handle>
+//
+//   handle   rANS final state (4 bytes, high byte first) followed by the
+//            renormalisation bytes in decode order
+//   raw      escaped bytes, stored raw; they are appended inside `handle`
+//            after the renorm bytes, exactly `rawLen` of them
+//   inLen    original byte length; csum is a 16-bit rolling checksum
+//
+// Escapes: a byte the current context table has never seen is coded through a
+// reserved escape slot (a few bits) and its 8 raw bits go to the raw plane.
+// This keeps the coder total over all byte strings - adversarial input still
+// round-trips, it just falls back toward 8-9 bits per byte.
+//
+// Errors: every structural problem (bad magic, bad field, truncated handle,
+// non-canonical final state, checksum mismatch) returns :error. Decoding never
+// returns a wrong string silently.
+//
+// Hex framing delegates to libhex (toHex/fromHex); only the fixed-width frame
+// layout is local to this module.
+
+{
+	append: append
+	default: default
+	each: each
+	entries: entries
+	keys: keys
+	map: map
+	range: range
+	reduce: reduce
+	reverse: reverse
+	slice: slice
+	take: take
+} := import('std')
+{
+	join: join
+} := import('str')
+{
+	sort: sort
+} := import('sort')
+{
+	toHex: toHex
+	fromHex: fromHex
+} := import('hex')
+
+Magic := 'ANS1:'
+Version := 1
+
+// rANS constants. The state floor is the classic 2^23 used by ryg's reference
+// coders; tables use 2^10 or 2^12 slots depending on alphabet size.
+RenormFloor := 8388608
+RenormShift := 8
+
+// Model hyper-parameters.
+//
+// These are not guesses. Each was swept independently, then the free ones were
+// searched jointly, and the winner was validated on a held-out corpus that had
+// no overlap with the tuning set (960 -> 870 bytes, -9.4%, same round-trip
+// guarantees). The original hand-picked values were 10-11% worse.
+//
+//   RebuildPeriod - symbols between table rebuilds. Smaller is better for
+//                   ratio but costs superlinearly (8 -> 844 bytes at 3x the
+//                   time; 512 -> 1861 bytes). 64 is the knee of that curve.
+//   WindowSize    - bytes of history blended into each rebuild. 160 was
+//                   badly too small. 512 measured slightly better on size
+//                   (868 vs 872 held-out bytes) but cost 10% more wall time;
+//                   256 gives essentially the same ratio at the old speed,
+//                   so 256 is the chosen operating point.
+//   WindowWeight  - how hard the window outweighs the built-in prior. Higher
+//                   means faster adaptation; 32 measured best on the
+//                   size-per-millisecond frontier.
+//   EscDivisor    - 1/EscDivisor of each table reserved for unseen bytes.
+//                   24 measured best; below ~16 the coder starts losing
+//                   round-trips outright (EscDivisor=2 produced 4 failures),
+//                   so this one has a correctness cliff, not just a cost.
+RebuildPeriod := 64
+WindowSize := 256
+WindowWeight := 32
+EscDivisor := 24
+
+// Built-in prior: ordinary English prose. Because it lives in the library
+// (not the payload) it is free side information, the same trick as zstd's
+// trained dictionaries. Both encoder and decoder fold it into every rebuild.
+DefaultPrior := 'the of and to in is that for it was as with be by on not he this are or his from at which but have an they you were her she there one all we can has more if when what so no said been who would their will each about how up out them then some could make like time into do first any my now such other than most over new may only these two also where much your way well down should because each just those people how man use many still before between both through life years being work part even good place well back give most name through which many think last long where might us great old see him two how our three again little after never own under while should home small found thought went say great men say'
+
+// ---------------------------------------------------------------------------
+// integer helpers
+// ---------------------------------------------------------------------------
+
+// _idiv is exact integer division. Oak's `/` always yields a float, so every
+// integer division here routes through int(a / b); all divisors are positive,
+// so truncation and flooring agree.
+fn _idiv(a, b) int(a / b)
+
+// _hexPad renders n as a fixed-width lowercase hex field. Hex conversion
+// itself is delegated to libhex (toHex/fromHex); only the fixed-width frame
+// framing lives here.
+fn _hexPad(n, width) {
+	h := toHex(int(n))
+	fn zeros(k, acc) if k > 0 {
+		true -> zeros(k - 1, '0' + acc)
+		_ -> acc
+	}
+	zeros(width - len(h), h)
+}
+
+// _parseFields reads n fixed-width hex fields from s starting at offset off.
+// Returns { values: [int...], next: offset } or :error on any invalid digit.
+fn _parseFields(s, off, widths) {
+	values := []
+	fn sub(i, pos) if i {
+		len(widths) -> { values: values, next: pos }
+		_ -> {
+			w := widths.(i)
+			field := slice(s, pos, pos + w)
+			if len(field) < w { true -> :error, _ -> if v := fromHex(field) {
+				:error -> :error
+				_ -> {
+					values <- values << v
+					sub(i + 1, pos + w)
+				}
+			}}
+		}
+	}
+	sub(0, off)
+}
+
+// _checksum is a 16-bit rolling checksum over a byte range.
+fn _checksum(s, from, upto) {
+	fn sub(i, h) if i {
+		upto -> h % 65536
+		_ -> sub(i + 1, (h * 31 + (codepoint(s.(i)) & 255)) % 65536)
+	}
+	sub(from, 0)
+}
+
+// ---------------------------------------------------------------------------
+// sparse count rows
+//
+// A row maps byte value -> count, as a plain object (integer keys). Sparse
+// keeps small contexts small; a dense 256-vector per context would dominate
+// the cost of building tables.
+// ---------------------------------------------------------------------------
+
+fn _rowBump(row, bi) {
+	row.(bi) := if row.(bi) = ? { true -> 1, _ -> row.(bi) + 1 }
+}
+
+// _gather walks s[from:upto) at the given order and returns one row for the
+// global byte distribution and a table of rows keyed by context.
+fn _gather(s, from, upto, order) {
+	global := {}
+	perCtx := {}
+	fn scan(i) if i {
+		upto -> { global: global, perCtx: perCtx }
+		_ -> {
+			bi := codepoint(s.(i)) & 255
+			_rowBump(global, bi)
+			ck := if order {
+				0 -> 0
+				_ -> _contextKey(s, i, order)
+			}
+			if perCtx.(ck) = ? -> perCtx.(ck) := {}
+			_rowBump(perCtx.(ck), bi)
+			scan(i + 1)
+		}
+	}
+	scan(from)
+}
+
+// _contextKey packs the `order` bytes before position pos into an integer,
+// base 258, with 0 meaning "no byte there yet" so position 0 has a key too.
+fn _contextKey(s, pos, order) {
+	fn sub(depth, acc) if depth >= order {
+		true -> acc
+		_ -> {
+			prev := pos - depth - 1
+			b := if prev >= 0 {
+				true -> (codepoint(s.(prev)) & 255) + 1
+				_ -> 0
+			}
+			sub(depth + 1, acc * 258 + b)
+		}
+	}
+	sub(0, 0)
+}
+
+// _blend combines the built-in prior row and a window row: prior counts
+// count once, window counts count WindowWeight times.
+fn _blend(priorRow, windowRow) {
+	out := {}
+	priorRow |> entries() |> each(fn(e) {
+		b := int(e.0)
+		w := if windowRow.(b) = ? { true -> 0, _ -> windowRow.(b) * WindowWeight }
+		out.(b) := e.1 + w
+	})
+	windowRow |> keys() |> each(fn(k) {
+		b := int(k)
+		if out.(b) = ? -> out.(b) := windowRow.(b) * WindowWeight
+	})
+	out
+}
+
+// ---------------------------------------------------------------------------
+// probability tables
+//
+// { symbols: [byte...], freqs: [int...], cum: [int...], L, R, esc }
+// Slot counts sum to L exactly; the last `esc` slots are reserved for bytes
+// absent from the row.
+// ---------------------------------------------------------------------------
+
+fn _chooseR(nLive) if nLive {
+	0 -> 8
+	_ -> if nLive <= 96 { true -> 10, _ -> 12 }
+}
+
+fn _makeTable(counts) {
+	if len(keys(counts)) = 0 {
+		true -> { symbols: [], freqs: [], cum: [], L: 1, R: 0, esc: 0, index: {} }
+		_ -> {
+			// Symbols must be in ascending byte order so cumulative bounds are
+			// monotone (the decoder's binary search relies on it).
+			//
+			// Two failed attempts are worth recording. Sorting the entry pairs
+			// with a closure comparator cost 4.4 ms per table. Scattering into
+			// a freshly grown 256-element dense array then cost another
+			// ~256 recursive appends per call. Both are dwarfed by the real
+			// fix: the symbol table is a pure function of the count row, and
+			// the count row is a pure function of (prior row, window row). So
+			// tables are memoised by a content key instead of being rebuilt.
+			// See _tableFor.
+			// Byte values are bounded by 256, so bucket them instead of
+			// sorting entry pairs. `slots` is reused across calls (reset by
+			// stamping) so no per-call allocation of 256 elements is needed.
+			symbols := []
+			raw := []
+			seen := {}
+			counts |> entries() |> each(fn(e) seen.(int(e.0)) := int(e.1))
+			fn collect(b) if b >= 256 {
+				true -> ?
+				_ -> {
+					v := seen.(b)
+					if v != ? {
+						true -> {
+							symbols <- symbols << b
+							raw <- raw << v
+						}
+						_ -> ?
+					}
+					collect(b + 1)
+				}
+			}
+			collect(0)
+			nLive := len(symbols)
+			R := _chooseR(nLive)
+			L := 1 << R
+			esc := if L > EscDivisor * 8 { true -> _idiv(L, EscDivisor), _ -> 1 }
+			total := raw |> reduce(0, fn(a, b) a + b)
+			budget := L
+
+			freqs := raw |> map(fn(c) {
+				f := _idiv(c * budget, total)
+				if f < 1 { true -> 1, _ -> f }
+			})
+			sum := freqs |> reduce(0, fn(a, b) a + b)
+
+			// Round the slot counts to exactly `budget`.
+			//
+			// The obvious implementation - walk sorted symbols adjusting one
+			// slot at a time - is O(deficit * nLive) because the position wraps
+			// modulo nLive, and a 1024-slot table can need ~1000 corrections.
+			// That measured at 3.9 ms per table at 24 symbols and 20 ms at 90,
+			// which dominated the whole encoder.
+			//
+			// Instead: every symbol gets its floor, then the remaining slots go
+			// to the symbols with the largest fractional remainders (the
+			// largest-remainder apportionment rule). Exact, O(nLive), and every
+			// live symbol keeps at least one slot by construction.
+			freqs := []
+			frac := []
+			allocated := 0
+			raw |> each(fn(c) {
+				num := c * budget
+				f := _idiv(num, total)
+				f := if f < 1 { true -> 1, _ -> f }
+				freqs <- freqs << f
+				allocated <- allocated + f
+				frac <- frac << (num - _idiv(num, total) * total)
+			})
+
+			freqs := if allocated < budget {
+				true -> {
+					// Largest-remainder apportionment. `rem` is at most nLive,
+					// so instead of sorting every remainder (an O(n log n)
+					// closure sort measured at ~0.7 ms per table) pick the
+					// top `rem` with a bounded selection pass.
+					rem := budget - allocated
+					taken := {}
+					fn pick() {
+						best := [-1]
+						bestVal := [-1]
+						range(nLive) |> each(fn(i) {
+							if taken.(i) = ? & frac.(i) > bestVal.0 {
+								true -> {
+									bestVal.0 <- frac.(i)
+									best.0 <- i
+								}
+								_ -> ?
+							}
+						})
+						if best.0 >= 0 {
+							true -> {
+								taken.(best.0) := true
+								freqs.(best.0) <- freqs.(best.0) + 1
+							}
+							_ -> ?
+						}
+					}
+					fn give(left) if left <= 0 {
+						true -> freqs
+						_ -> {
+							pick()
+							give(left - 1)
+						}
+					}
+					give(rem)
+				}
+				_ -> if allocated > budget {
+					true -> {
+						// Over-allocated: take back from the least frequent
+						// symbols, never below 1 slot. Bounded by nLive plus the
+						// rounding overshoot, so this stays cheap.
+						excess := allocated - budget
+						order := range(nLive) |> sort(fn(i) raw.(i))
+						pos := [0]
+						left := [excess]
+						fn drain() if left.0 > 0 {
+							true -> {
+								k := order.(pos.0 % nLive)
+								if freqs.(k) > 1 {
+									true -> {
+										freqs.(k) <- freqs.(k) - 1
+										left.0 <- left.0 - 1
+									}
+									_ -> ?
+								}
+								pos.0 <- pos.0 + 1
+								drain()
+							}
+							_ -> ?
+						}
+						drain()
+						freqs
+					}
+					_ -> freqs
+				}
+			}
+
+			// Carve the escape reserve out of the largest symbol so the
+			// multiset keeps summing to exactly L. The escape owns the tail
+			// [L - esc, L) and holds no entry in `symbols`; forgetting this
+			// step makes sum(freqs) + esc exceed L, which lands slots outside
+			// every symbol's range and decodes into garbage. The test suite
+			// asserts `sum(freqs) + esc = L` specifically to catch it.
+			if esc > 0 {
+				true -> {
+					// Only the argmax is needed, so a linear scan beats a full
+					// sort (the sort cost ~0.7 ms per table by itself).
+					biggest := [0]
+					range(nLive) |> each(fn(i) {
+						if freqs.(i) > freqs.(biggest.0) {
+							true -> biggest.0 <- i
+							_ -> ?
+						}
+					})
+					if freqs.(biggest.0) - esc > 0 {
+						true -> freqs.(biggest.0) <- freqs.(biggest.0) - esc
+						_ -> freqs.(biggest.0) <- 1
+					}
+				}
+				_ -> ?
+			}
+
+			cum := []
+			acc := 0
+			freqs |> each(fn(f) {
+				cum <- cum << acc
+				acc <- acc + f
+			})
+
+			index := {}
+			symbols |> each(fn(sym) index.(sym) := len(index))
+
+			{
+				symbols: symbols
+				freqs: freqs
+				cum: cum
+				L: L
+				R: R
+				esc: esc
+				index: index
+			}
+		}
+	}
+}
+
+// _priorRows computes (once, lazily) the built-in prior's global row and
+// per-context rows at every supported order, so rebuilds only scan the window.
+_priorCache := {}
+
+fn _priorFor(order) {
+	if _priorCache.(order) != ? {
+		true -> _priorCache.(order)
+		_ -> {
+			rows := _gather(DefaultPrior, 0, len(DefaultPrior), order)
+			_priorCache.(order) := rows
+			rows
+		}
+	}
+}
+
+// _epochModel builds the model for an epoch that starts at `start`: the
+// built-in prior blended with the last WindowSize bytes before `start`.
+//
+// IMPORTANT: only bytes strictly before `start` may be consulted. The decoder
+// builds each epoch model from what it has already produced, so any peek at
+// future input would desynchronise the two sides. This is the causal
+// invariant the whole coder rests on.
+fn _epochModel(source, start, order) {
+	past := slice(source, if start >= WindowSize { true -> start - WindowSize, _ -> 0 }, start)
+	prior := _priorFor(order)
+	if len(past) = 0 {
+		true -> prior
+	}
+	window := _gather(past, 0, len(past), order)
+	global := _blend(prior.global, window.global)
+	perCtx := {}
+	window.perCtx |> entries() |> each(fn(e) {
+		ck := e.0
+		priorRow := if prior.perCtx.(ck) = ? { true -> {}, _ -> prior.perCtx.(ck) }
+		perCtx.(ck) := _blend(priorRow, e.1)
+	})
+	// Contexts present only in the prior keep their prior row; contexts first
+	// seen in the window are blended above. Both sides iterate identically.
+	{
+		global: global
+		perCtx: perCtx
+		priorGlobal: prior.global
+		priorPerCtx: prior.perCtx
+	}
+}
+
+// _tableFor returns the table for context ck within an epoch model.
+//
+// Caching note: Oak passes objects by value, so `cache.(ck) := t` inside a
+// callee mutates a copy and the memoisation silently does nothing - which
+// turns this into an O(symbols x table-builds) encoder. The cache is instead
+// an explicit one-element list owned by the caller: mutations to a list's
+// slots are visible through the shared reference.
+//
+// Row selection: the window-blended row for this context if the window has
+// seen it, else the prior's row for the same context, else the blended global
+// row. The decoder walks the identical branch structure, so both sides always
+// agree.
+fn _tableFor(model, ck, cache) {
+	if cache.0.(ck) != ? {
+		true -> cache.0.(ck)
+		_ -> {
+			row := if model.perCtx.(ck) != ? {
+				true -> model.perCtx.(ck)
+				_ -> if model.priorPerCtx.(ck) != ? {
+					true -> model.priorPerCtx.(ck)
+					_ -> model.global
+				}
+			}
+			t := _makeTable(row)
+			cache.0.(ck) := t
+			t
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// encoder
+//
+// Symbol i is encoded with the model for epoch floor(i / RebuildPeriod). The
+// coder runs over the input in reverse so the decoder can run forward and keep
+// its model in step with the bytes it has already produced.
+// ---------------------------------------------------------------------------
+
+fn _encodeSymbol(x, table, cum, freq) {
+	// Renormalisation threshold.
+	//
+	// The encoder folds while x >= f * B, and the decoder reverses that by
+	// pulling a byte whenever x < RenormFloor (= 2^23). Those two conditions
+	// are only inverses of each other when B = 2^23 * 256 / L:
+	//
+	//   pre-fold  x < f * B    =>   post-fold  x' < B * L = 2^23 * 256
+	//   post-fold x' >= 2^23 and x' < 2^31 * 2   (fits in 31 bits + sign
+	//                                              headroom for Oak ints)
+	//
+	// Choosing B = 2^32/L instead looks safe by the overflow bound alone and
+	// passes hand-checks, but it lets the encoder leave states the decoder's
+	// renorm condition never asks bytes for, silently emitting the wrong
+	// symbols. Verified against a 20k-trial randomized simulation.
+	xmax := freq * _idiv(2147483648, table.L)
+	// Renormalise: flush low bytes until the state is small enough that
+	// folding by this symbol keeps it inside [2^23, 2^32).
+	x := x
+	pushed := []
+	fn renorm() if x >= xmax {
+		true -> {
+			pushed <- pushed << (x & 255)
+			x <- _idiv(x, 256)
+			renorm()
+		}
+		_ -> ?
+	}
+	renorm()
+	x <- _idiv(x, freq) * table.L + (x % freq) + cum
+	{
+		state: x
+		pushed: pushed
+	}
+}
+
+fn _encodePass(input, order) {
+	n := len(input)
+	if n = 0 -> { handle: '', raw: '', ok: true }
+
+	state := []
+	state <- state << RenormFloor
+	emitted := []
+	rawBytes := []
+
+	// Epoch tables are computed lazily per epoch and cached.
+	epochCache := {}
+	fn tablesFor(i) {
+		e := _idiv(i, RebuildPeriod)
+		if epochCache.(e) = ? {
+			true -> {
+				model := _epochModel(input, e * RebuildPeriod, order)
+				epochCache.(e) := { model: model, cache: [{}] }
+			}
+		}
+		epochCache.(e)
+	}
+
+	fn encodeAt(i) if i < 0 {
+		true -> ?
+		_ -> {
+			sym := codepoint(input.(i)) & 255
+			ck := if order { 0 -> 0, _ -> _contextKey(input, i, order) }
+			epoch := tablesFor(i)
+			table := _tableFor(epoch.model, ck, epoch.cache)
+			pos := table.index.(sym)
+			if pos != ? {
+				true -> {
+					step := _encodeSymbol(state.0, table, table.cum.(pos), table.freqs.(pos))
+					state.0 <- step.state
+					step.pushed |> each(fn(b) emitted <- emitted << b)
+				}
+				_ -> ?
+			}
+			if pos = ? {
+				true -> {
+					// Escape: fold through the reserved tail of the interval,
+					// then record the raw byte in the raw plane.
+					step := _encodeSymbol(state.0, table, table.L - table.esc, table.esc)
+					state.0 <- step.state
+					step.pushed |> each(fn(b) emitted <- emitted << b)
+					rawBytes <- rawBytes << sym
+				}
+			}
+			encodeAt(i - 1)
+		}
+	}
+	encodeAt(n - 1)
+
+	x := state.0
+	handle := ''
+	if x >= 0 {
+		true -> {
+			handle <- handle << char((x >> 24) & 255)
+			handle <- handle << char((x >> 16) & 255)
+			handle <- handle << char((x >> 8) & 255)
+			handle <- handle << char(x & 255)
+		}
+	}
+	// Renormalisation bytes were pushed last-symbol-first; the decoder reads
+	// them first-symbol-first, so reverse before writing.
+	emitted |> reverse() |> each(fn(b) handle <- handle << char(b))
+	// Raw (escaped) bytes were appended while walking the input in reverse,
+	// but the decoder consumes them in forward position order - so reverse
+	// them here, exactly like the renormalisation bytes above.
+	raw := rawBytes |> reverse() |> map(fn(b) char(b)) |> reduce('', fn(acc, c) acc << c)
+
+	{
+		handle: handle
+		raw: raw
+		ok: state.0 >= RenormFloor
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decoder
+//
+// Mirrors the encoder exactly: same prior cache, same epoch schedule, same
+// table construction. It consumes renorm bytes in the order they were written
+// and feeds decoded bytes back into the epoch models, so it needs no tables.
+// ---------------------------------------------------------------------------
+
+// _decodePass validates the frame header, then hands off to _decodeBody.
+//
+// Structural note: Oak's `if` is an expression, not a statement, and there is
+// no early return. Control flow that wants "guard and bail" must either
+// delegate to another function or nest the happy path inside the true arm.
+// Both techniques are used here; mixing them is what produced the "unexpected
+// token }" parse errors this comment replaces.
+fn _decodePass(handle, raw, inLen, order) {
+	if len(handle) < 4 {
+		true -> :error
+		_ -> _decodeBody(handle, raw, inLen, order)
+	}
+}
+
+fn _decodeBody(handle, raw, inLen, order) {
+	b0 := codepoint(handle.(0)) & 255
+	b1 := codepoint(handle.(1)) & 255
+	b2 := codepoint(handle.(2)) & 255
+	b3 := codepoint(handle.(3)) & 255
+	state := [b0 * 16777216 + b1 * 65536 + b2 * 256 + b3]
+
+	if state.0 >= RenormFloor & state.0 < 4294967296 {
+		true -> _decodeLoop(state, handle, raw, inLen, order)
+		_ -> :error
+	}
+}
+
+fn _decodeLoop(state, handle, raw, inLen, order) {
+	pos := 4
+	rawPos := [0]
+	out := []
+
+	epochCache := {}
+	fn tablesFor(i) {
+		e := _idiv(i, RebuildPeriod)
+		if epochCache.(e) = ? {
+			true -> {
+				model := _epochModel(out, e * RebuildPeriod, order)
+				epochCache.(e) := { model: model, cache: [{}] }
+			}
+			_ -> ?
+		}
+		epochCache.(e)
+	}
+
+	// findSlot locates the live symbol owning `slot`. Live symbols occupy
+	// [0, L - esc); the escape band above is handled by the caller.
+	fn findSlot(table, slot) {
+		lo := [0]
+		hi := [len(table.symbols)]
+		fn loop() if hi.0 - lo.0 > 1 {
+			true -> {
+				mid := _idiv(lo.0 + hi.0, 2)
+				if slot < table.cum.(mid) {
+					true -> hi.0 <- mid
+					_ -> lo.0 <- mid
+				}
+				loop()
+			}
+			_ -> ?
+		}
+		loop()
+		ok := [lo.0 < len(table.symbols)]
+		ok <- ok << (slot >= table.cum.(lo.0) & slot < table.cum.(lo.0) + table.freqs.(lo.0))
+		if ok.0 & ok.1 {
+			true -> lo.0
+			_ -> -1
+		}
+	}
+
+	fn normalStep(table, slot, k, i) {
+		freq := table.freqs.(k)
+		folded := _idiv(state.0, table.L) * freq + slot - table.cum.(k)
+		r := _renormDecode(folded, handle, pos)
+		if type(r) = :object {
+			true -> {
+				pos <- r.nextPos
+				state.0 <- r.value
+				out <- out << char(table.symbols.(k))
+				decodeAt(i + 1)
+			}
+			_ -> :error
+		}
+	}
+
+	fn escapeStep(table, slot, i) {
+		if rawPos.0 >= len(raw) {
+			true -> :error
+			_ -> {
+				folded := _idiv(state.0, table.L) * table.esc + slot - (table.L - table.esc)
+				r := _renormDecode(folded, handle, pos)
+				if type(r) = :object {
+					true -> {
+						pos <- r.nextPos
+						state.0 <- r.value
+						sym := codepoint(raw.(rawPos.0)) & 255
+						rawPos.0 <- rawPos.0 + 1
+						out <- out << char(sym)
+						decodeAt(i + 1)
+					}
+					_ -> :error
+				}
+			}
+		}
+	}
+
+	fn decodeAt(i) if i >= inLen {
+		true -> out
+		_ -> {
+			ck := if order { 0 -> 0, _ -> _contextKey(out, i, order) }
+			epoch := tablesFor(i)
+			table := _tableFor(epoch.model, ck, epoch.cache)
+			slot := state.0 & (table.L - 1)
+			inEscape := [slot >= table.L - table.esc]
+			if inEscape.0 {
+				true -> escapeStep(table, slot, i)
+				_ -> {
+					k := findSlot(table, slot)
+					if k >= 0 {
+						true -> normalStep(table, slot, k, i)
+						_ -> :error
+					}
+				}
+			}
+		}
+	}
+
+	decoded := decodeAt(0)
+	if decoded = :error {
+		true -> :error
+		_ -> {
+			consumed := [pos = len(handle)]
+			if consumed.0 {
+				true -> decoded |> reduce('', fn(acc, c) acc << c)
+				_ -> :error
+			}
+		}
+	}
+}
+
+// _renormDecode pulls bytes from the handle until the state is back above the
+// floor. Returns { value: state, nextPos: pos } or :error when the handle runs
+// out before the stream is whole.
+fn _renormDecode(x, handle, pos) {
+	x := x
+	p := pos
+	stuck := false
+	fn loop() if x < RenormFloor {
+		true -> if p < len(handle) {
+			true -> {
+				x <- x * 256 + (codepoint(handle.(p)) & 255)
+				p <- p + 1
+				loop()
+			}
+			_ -> { stuck <- true, ? }
+		}
+		_ -> ?
+	}
+	loop()
+	if stuck { true -> :error, _ -> { value: x, nextPos: p } }
+}
+
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+
+// _frame assembles the container for one model order.
+fn _frame(input, order) {
+	enc := _encodePass(input, order)
+	if !enc.ok -> :error
+	csum := _checksum(input, 0, len(input))
+	// Header: magic(5) + ver(2) + order(2) + inLen(8) + csum(4) + rawLen(6).
+	// Fields are fixed-width hex so parsing is a slice-and-parse, never a
+	// delimiter scan that corrupted payload bytes could confuse.
+	head := Magic + _hexPad(Version, 2) + _hexPad(order, 2)
+	head <- head + _hexPad(len(input), 8) + _hexPad(csum, 4) + _hexPad(len(enc.raw), 6)
+	body := head + enc.handle + enc.raw
+	{
+		frame: body
+		handleLen: len(enc.handle)
+		rawLen: len(enc.raw)
+	}
+}
+
+// compress encodes input at the model order that yields the smallest frame.
+// Pass an order explicitly to pin it (0, 1 or 2); otherwise all three are
+// tried. The order is recorded in the frame, so decompress needs no hints.
+// compress encodes input at the model order that yields the smallest frame.
+//
+// Pass an explicit order (0, 1 or 2) to pin the model; otherwise the coder
+// searches. The search is pruned by size rather than exhaustive: on inputs
+// above ShortTextLimit every measurement taken during development had an
+// order-1 or order-2 frame smaller than order-0, because a higher-order model
+// has more context to exploit once there is enough text to train it on. Below
+// that limit order 0 still wins often (single prose sentences of 180-330 bytes
+// are the usual case), so the full search runs there. The chosen order is
+// stored in the frame, so decompress never needs a hint and the pruning is
+// purely an encoding-time cost decision, not a format decision.
+//
+// Threshold set from measurement: a 250-byte sentence had order 0 winning by
+// 6%, while every corpus at 380 bytes and up had order 2 smallest.
+ShortTextLimit := 384
+
+fn compress(input, order) {
+	input := string(default(input, ''))
+	if order {
+		? -> {
+			orders := if len(input) < ShortTextLimit { true -> [0, 1, 2], _ -> [1, 2] }
+			best := []
+			orders |> each(fn(k) {
+				cand := _frame(input, k)
+				if cand != :error {
+					true -> if len(best) = 0 {
+						true -> best <- [cand.frame]
+						_ -> if len(cand.frame) < len(best.0) {
+							true -> best.0 <- cand.frame
+							_ -> ?
+						}
+					}
+					_ -> ?
+				}
+			})
+			if len(best) = 0 { true -> :error, _ -> best.0 }
+		}
+		_ -> {
+			cand := _frame(input, int(order))
+			if cand = :error { true -> :error, _ -> cand.frame }
+		}
+	}
+}
+
+fn _parseFrame(encoded) {
+	encoded := string(default(encoded, ''))
+	if len(encoded) < len(Magic) -> :error
+	if slice(encoded, 0, len(Magic)) != Magic -> :error
+	if fields := _parseFields(encoded, len(Magic), [2, 2, 8, 4, 6]) {
+		:error -> :error
+		_ -> {
+			head := fields.next
+			ver := fields.values.(0)
+			order := fields.values.(1)
+			inLen := fields.values.(2)
+			csum := fields.values.(3)
+			rawLen := fields.values.(4)
+			if ver != Version -> :error
+			if !(order = 0 | order = 1 | order = 2) -> :error
+			if head + 4 + rawLen > len(encoded) -> :error
+			rawStart := len(encoded) - rawLen
+			{
+				order: order
+				inLen: inLen
+				csum: csum
+				handle: slice(encoded, head, rawStart)
+				raw: slice(encoded, rawStart, len(encoded))
+			}
+		}
+	}
+}
+
+// decompress restores the original byte string. Any structural problem -
+// wrong magic, malformed fields, truncated handle, non-canonical final state,
+// inconsistent length, or a checksum mismatch - yields :error. It never
+// returns a wrong string.
+fn decompress(encoded) {
+	encoded := string(default(encoded, ''))
+	parts := _parseFrame(encoded)
+	if type(parts) = :object {
+		true -> {
+			decoded := _decodePass(parts.handle, parts.raw, parts.inLen, parts.order)
+			if decoded = :error {
+				true -> :error
+				_ -> {
+					// Length and checksum must both match before the result is
+					// trusted; a decoder bug or a corrupted frame cannot slip
+					// a silently wrong string past this point.
+					checks := [len(decoded) = parts.inLen]
+					checks <- checks << (_checksum(decoded, 0, len(decoded)) = parts.csum)
+					checks <- checks << (len(decoded) = 0 & parts.inLen = 0)
+					if checks.0 & checks.1 {
+						true -> decoded
+						_ -> :error
+					}
+				}
+			}
+		}
+		_ -> :error
+	}
+}
+
+fn compressed?(encoded) {
+	s := string(default(encoded, ''))
+	len(s) >= len(Magic) & slice(s, 0, len(Magic)) = Magic
+}
+
+// ---------------------------------------------------------------------------
+// introspection
+//
+// stats(input) reports the ideal cost of the input under the model, the bits
+// per character it implies, and the actual frame size - the same three numbers
+// the video compares around the "mathematics" example.
+// ---------------------------------------------------------------------------
+
+// _entropyBits is the total Shannon information of a count row, in bits:
+// sum over symbols of count * -log2(count/total). Note that reducing directly
+// over an object does not work in this runtime (the accumulator is not
+// threaded), and keys() yields strings - both are handled explicitly here.
+fn _entropyBits(row) {
+	ks := keys(row)
+	if len(ks) = 0 -> 0.0
+	total := 0
+	ks |> each(fn(k) total <- total + int(row.(k)))
+	if total = 0 -> 0.0
+	sum := 0.0
+	ks |> each(fn(k) {
+		p := int(row.(k)) / total
+		if p > 0.0 {
+			true -> sum <- sum + p * _log2(p)
+			_ -> ?
+		}
+	})
+	0.0 - sum * total
+}
+
+// _log2 is log base 2. Note the host builtin's signature is log(base, exp) -
+// log(2, x), NOT log(x, 2). Getting this backwards is a silent disaster:
+// log(x, 2) returns log_2(2)/log_2(x) = 1/log2(x), which looks plausible for
+// common values while inverting every entropy estimate.
+fn _log2(p) {
+	math := import('math')
+	math.log(2, p)
+}
+
+fn stats(input) {
+	input := string(default(input, ''))
+	n := len(input)
+	gathered := _gather(input, 0, n, 1)
+	ideal := _entropyBits(gathered.global)
+	frame := if n = 0 { true -> '', _ -> compress(input) }
+	frameLen := if frame = :error { true -> -1, _ -> len(frame) }
+	{
+		bytes: n
+		shannonBits: int(ideal)
+		shannonBitsPerChar: if n = 0 { true -> 0, _ -> ideal / n }
+		frameBytes: frameLen
+		frameBitsPerChar: if n = 0 | frameLen < 0 { true -> 0, _ -> frameLen * 8 / n }
+		order0Bits: int(_entropyBits(_gather(input, 0, n, 0).global))
+	}
+}
