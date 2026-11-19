@@ -1,0 +1,70 @@
+// libhex — minimal hexadecimal helpers shared by the low-level encoders.
+// Depends on libstd only.
+//
+// Lowercase output is used throughout. `hexDecodeNibble` accepts either
+// case, so decoding is input-tolerant. `hexToBytes` requires an even
+// length and returns ? on any invalid digit.
+
+std := import('std')
+range := std.range
+each := std.each
+
+// _digits is the ordered lowercase hex alphabet.
+_digits := '0123456789abcdef'
+
+_hexToNibble := {
+    0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9
+    a: 10, A: 10, b: 11, B: 11, c: 12, C: 12, d: 13, D: 13, e: 14, E: 14, f: 15, F: 15
+}
+
+fn hexEncodeNibble(n) _digits.(n)
+fn hexDecodeNibble(c) _hexToNibble.(c)
+
+// hexDecodePair reads two characters starting at index i and returns one
+// byte (0–255), or ? when either nibble is invalid.
+fn hexDecodePair(s, i) {
+    hi := hexDecodeNibble(s.(i))
+    lo := hexDecodeNibble(s.(i + 1))
+    if hi = ? | lo = ? {true -> ?, _ -> hi * 16 + lo}
+}
+
+// hexEncodeByte returns the two-character lowercase encoding of b (0–255).
+fn hexEncodeByte(b) _digits.((b >> 4) & 15) + _digits.(b & 15)
+
+// hexToBytes decodes an even-length hex string (either case) into a list of
+// integer byte values. Returns ? on odd length or an invalid digit.
+fn hexToBytes(s) if len(s) % 2 = 0 {
+    true -> {
+        out := []
+        ok := true
+        range(len(s) / 2) |> with each() fn(i) if ok {
+            true -> {
+                b := hexDecodePair(s, i * 2)
+                if b = ? {
+                    true -> ok <- false
+                    _ -> out << b
+                }
+            }
+            _ -> ?
+        }
+        if !ok {true -> ?, _ -> out}
+    }
+    _ -> ?
+}
+
+// bytesToHex encodes a list of integer byte values (0–255) as a lowercase
+// hex string.
+fn bytesToHex(bytes) {
+    acc := ''
+    bytes |> with each() fn(b) acc << hexEncodeByte(b)
+    acc
+}
+
+{
+    hexEncodeNibble: hexEncodeNibble
+    hexDecodeNibble: hexDecodeNibble
+    hexDecodePair: hexDecodePair
+    hexToBytes: hexToBytes
+    hexEncodeByte: hexEncodeByte
+    bytesToHex: bytesToHex
+}

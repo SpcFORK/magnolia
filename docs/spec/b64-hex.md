@@ -6,13 +6,7 @@ _Auto-generated from Magnolia source._
 
 ## Module: `lib\b64-hex.oak`
 
-- `_hexNibble` · `{16 entries}`
-### `getByte(hex, i)`
-
-### `hexToBytes(hex)`
-
-- `_hexDigits` · `'0123456789abcdef'`
-### `bytesToHex(bytes)`
+Re-exports `hexToBytes` and `bytesToHex` from the shared `hex` module (the hex primitives were abstracted there). No `getByte` or tables remain here. (This file is auto-generated from source; regenerate with `magnolia build --graph` once the Magnolia toolchain is available.)
 
 ## Module: `std`
 

@@ -171,7 +171,7 @@ fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, c
 					tok: node.tok
 					val: '__oak_assgn_tgt'
 				}
-				'((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign({{2}},__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?({{1}}=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete {{1}}:{{1}}=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string({{0}}),{{3}})' |> format(
+				'((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign({{2}},__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?({{1}}=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete {{1}}:{{1}}=__oak_assgn_val,__oak_assgn_val))(__as_oak_string({{0}}),{{3}})' |> format(
 					renderNode(node.left.left)
 					renderAssignTarget(tmpDfn)
 					renderNode(node.left.right)
@@ -225,18 +225,21 @@ fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, c
 				_ -> formatIdent(node.name) << '=function ' << formatIdent(node.name) << args << '{' << decls << 'return ' << renderNode(node.body) << '}'
 			}
 		}
-		:fnCall -> '{{0}}({{1}})' |> format(
-			if {
-				node.function.type = :function -> '(' << renderNode(node.function) << ')'
-				node.function.type = :propertyAccess & node.function.right.type = :identifier ->
-					'({{0}}.{{1}})' |> format(renderNode(node.function.left), renderNode(node.function.right))
-				_ -> renderNode(node.function)
-			}
-			if node.restArg {
+		:fnCall -> {
+			args := if node.restArg {
 				? -> node.args |> map(renderNode) |> join(',')
 				_ -> node.args |> map(renderNode) |> append(['...' << renderNode(node.restArg)]) |> join(',')
 			}
-		)
+			if {
+				node.function.type = :function -> '({{0}})({{1}})' |> format(renderNode(node.function), args)
+				node.function.type = :propertyAccess & node.function.right.type = :identifier ->
+					// JS sloppy-mode receiver binding: `obj.m(args)` calls `m`
+					// with this = obj. Oak has no receiver concept, so save and
+					// restore __oak_js_this around the call.
+					'((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.{{1}})({{2}}))))({{0}},__oak_js_this)' |> format(renderNode(node.function.left), renderNode(node.function.right), args)
+				_ -> '{{0}}({{1}})' |> format(renderNode(node.function), args)
+			}
+		}
 		:class -> {
 			fmtName := formatIdent(node.name)
 			args := '(' << if node.restArg {

@@ -1,0 +1,150 @@
+// Execute original, hash-checked Fliplay frame loader/decoder bytecode on the
+// exact uploaded FLC, split into bounded in-memory streams by the Python oracle.
+// Output: indexed pixels and three 256-byte palette planes per frame. This is
+// NOT the original Applet's URL/file opener, AWT renderer, thread or controls.
+// A Java 8 fixture only anchors method reachability and allocates VM arrays.
+// Run via tools/fliplay-all-frames-oracle.py, which verifies JDK/Pillow parity.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+fmt := import('fmt')
+crypto := import('crypto')
+cli := import('cli').parse()
+app := import('../lib/applet.oak')
+vm := import('../lib/applet-runtime.oak')
+
+fn fatal(why) {
+    fmt.printf('[fliplay-all-frames] FAIL ' + why)
+    exit(1)
+}
+opts := cli.opts
+if opts.frames = ? | opts.out = ? | opts.fliplay = ? |
+    opts.flickframe = ? | opts.link = ? ->
+    fatal('need --frames DIR --out DIR --fliplay FILE --flickframe FILE --link FILE')
+limit := if opts.limit = ? {true -> 61, _ -> int(opts.limit)}
+if limit < 1 | limit > 61 -> fatal('--limit must be 1..61 (61 includes the ring frame)')
+
+sources := [
+    {path: opts.link, name: 'link', sha256: '3fce7191fa4d0d657b33d017647bdc96e160f77cba061a7c90e60e88e7138fa5'}
+    {path: opts.fliplay, name: 'fliplay', sha256: 'bc315872dafebbf3c634e64c0fc251b38031ed49b7c4698d39c94990de9fe20b'}
+    {path: opts.flickframe, name: 'flickframe', sha256: '12feb5321cd8c9aeb0bf285f055596d981e3d45ccfb8c62d029f2f6d95ccdf9f'}
+]
+classes := sources |> std.map(fn(source) {
+    raw := fs.readFile(source.path)
+    if raw = ? | len(raw) > 100000 -> fatal('missing/oversized ' + source.name)
+    if crypto.sha256(raw) != source.sha256 -> fatal(source.name + ' SHA-256 mismatch')
+    raw
+})
+compiled := app.compile(classes, {
+    entry: 'FliplayFrameLink', method: 'link', desc: '([B)V'
+})
+if compiled.type = :error -> fatal('original bytecode preflight: ' + compiled.message)
+program := compiled.value
+if len(keys(program.classes.fliplay.methods)) != 13 ->
+    fatal('unexpected number of original reachable Fliplay methods')
+
+statics := {}
+keys(program.classes) |> std.each(fn(name) {
+    statics.(name) <- std.clone(program.classes.(name).static)
+})
+state := {
+    error: ?, thrown: ?, steps: 0, depth: 0, maxSteps: 10000000,
+    maxDepth: 64, maxArray: 81920, arrayCells: 0, nextRefId: 1,
+    interned: {}, colors: {}, systemOut: ?, params: {}, statics: statics,
+    initialized: {}, draw: [], output: ''
+}
+fn check(where) if state.error != ? | state.thrown != ? -> fatal(
+    where + ' error=' + string(state.error) + ' thrown=' +
+    string(state.thrown) + ' steps=' + string(state.steps))
+
+// Caller-supplied in-memory byte[] values are counted against the cumulative
+// 1,048,576-cell JVM cap even though they are not allocated by NEWARRAY.
+fn inputBytes(raw) {
+    if raw = ? | len(raw) > state.maxArray -> fatal('invalid external byte array')
+    if state.arrayCells + len(raw) > 1048576 -> fatal('external byte array cell budget exceeded')
+    state.arrayCells <- state.arrayCells + len(raw)
+    vm._tagRef(state, {
+        className: '[B', tag: 8,
+        values: std.range(len(raw)) |> std.map(fn(i) codepoint(raw.(i)) & 255)
+    })
+}
+fn helper(name, desc, args) {
+    value := vm.execute(program, 'FliplayFrameLink', name, desc, args, ?, state)
+    check('helper ' + name)
+    value
+}
+fn byteStream(raw) helper('stream', '([B)Ljava/io/DataInputStream;', [inputBytes(raw)])
+fn number(i) if i < 10 {
+    true -> '00' + string(i)
+    _ -> if i < 100 {true -> '0' + string(i), _ -> string(i)}
+}
+fn writeFrame(id, player) {
+    pixels := player.fields.('fliplay.pixels:[B').values
+    if len(pixels) != 76800 -> fatal('invalid original pixel-array size')
+    indexed := pixels |> std.map(fn(v) char(v & 255)) |> str.join('')
+    if fs.writeFile(opts.out + '/' + id + '.idx', indexed) = ? ->
+        fatal('could not write indexed frame ' + id)
+    palette := []
+    ['red', 'green', 'blue'] |> std.each(fn(channel) {
+        player.fields.('fliplay.' + channel + ':[B').values |>
+            std.each(fn(v) palette << char(v & 255))
+    })
+    if len(palette) != 768 | fs.writeFile(opts.out + '/' + id + '.palette',
+        str.join(palette)) = ? -> fatal('could not write palette ' + id)
+}
+
+player := helper('player', '()Lfliplay;', [])
+header := fs.readFile(opts.frames + '/header.bin')
+if header = ? | len(header) != 128 -> fatal('missing/invalid bounded FLC header')
+headerStream := byteStream(header)
+vm.execute(program, 'fliplay', 'load_header',
+    '(Ljava/io/DataInputStream;)V', [headerStream], player, state)
+check('original load_header')
+if headerStream.streamSource.streamPos != 128 |
+    player.fields.('fliplay.fli_magic:I') != 44818 |
+    player.fields.('fliplay.fli_frames:I') != 60 |
+    player.fields.('fliplay.image_width:I') != 320 |
+    player.fields.('fliplay.image_height:I') != 240 |
+    state.output != 'File Size:  366503\nMagic:      44818\nFrames:     60\n320x240\n' ->
+    fatal('original header parser/diagnostics disagree with pinned movie')
+
+// Byte and int arrays, including the 61 reference slots, are allocated and
+// charged by bytecode executed inside the VM. flickframe.<init>(I)V requires
+// AWT Image[], which the selected original decoder does not read: supply
+// ordinary zero-initialized flickframe objects; load_frame sets each chunks.
+player.fields.('fliplay.pixels:[B') <- helper('pixelArray', '(I)[B', [76800])
+['red', 'green', 'blue'] |> std.each(fn(channel) {
+    player.fields.('fliplay.' + channel + ':[B') <- helper('pixelArray', '(I)[B', [256])
+})
+player.fields.('fliplay.row_start:[I') <- helper('rowArray', '(I)[I', [240])
+player.fields.('fliplay.row_end:[I') <- helper('rowArray', '(I)[I', [240])
+frames := helper('frames', '(I)[Lflickframe;', [61])
+std.range(61) |> std.each(fn(i) frames.values.(i) <-
+    vm.newObject(program, 'flickframe', state))
+check('frame scaffolding')
+player.fields.('fliplay.frame:[Lflickframe;') <- frames
+fmt.printf('[fliplay-all-frames] original methods: load_header, read_loop, load_frame, extract_frame, palette, BRUN, DELTA_FLC; ' + string(len(keys(program.classes.fliplay.methods))) + ' original bodies linked')
+std.range(limit) |> std.each(fn(i) {
+    id := number(i)
+    raw := fs.readFile(opts.frames + '/' + id + '.bin')
+    if raw = ? | len(raw) < 16 | len(raw) > 20000 ->
+        fatal('missing/invalid bounded frame ' + id)
+    stream := byteStream(raw)
+    vm.execute(program, 'fliplay', 'load_frame',
+        '(Ljava/io/DataInputStream;I)V', [stream, i], player, state)
+    check('original load_frame ' + id)
+    if stream.streamSource.streamPos != len(raw) ->
+        fatal('original load_frame did not consume frame ' + id)
+    vm.execute(program, 'fliplay', 'extract_frame', '(I)V', [i], player, state)
+    check('original extract_frame ' + id)
+    writeFrame(id, player)
+    fmt.printf('[fliplay-all-frames] FRAME ' + id +
+        ' bytes=' + string(len(raw)) +
+        ' chunks=' + string(frames.values.(i).fields.('flickframe.chunks:I')) +
+        ' read=' + string(stream.streamSource.streamPos) +
+        ' steps=' + string(state.steps) + ' cells=' + string(state.arrayCells))
+})
+fmt.printf('[fliplay-all-frames] COMPLETE ' + string(limit) +
+    ' loaded/extracted frames; steps=' + string(state.steps) +
+    ' cells=' + string(state.arrayCells) + ' (this is not original AWT playback)')

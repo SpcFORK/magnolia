@@ -1,0 +1,354 @@
+// Magnolia Builder's JVM-input adapter. Compilation/rendering stays in lib/build;
+// this module supplies verified applet IR, Oak/Java backends, and metadata.
+// Class/JAR input never uses Java. The optional .java frontend may invoke
+// javac in an isolated build directory; all emitted Oak/JS/HTML is JVM-free.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+path := import('path')
+app := import('./applet.oak')
+bridge := import('./jvm-bridge.oak')
+java := import('./applet-java.oak')
+classfile := import('./applet-class.oak')
+jsHost := import('./applet-js-host.oak')
+manifest := import('./applet-manifest.oak')
+
+fn _error(message) {type: :error, message: message}
+fn input?(entry) {
+    name := if type(entry) = :string {true -> str.lower(entry), _ -> ''}
+    str.endsWith?(name, '.class') | str.endsWith?(name, '.jar') |
+    str.endsWith?(name, '.zip') | str.endsWith?(name, '.java') |
+    str.endsWith?(name, '.applet.json') |
+    str.endsWith?(name, '.applet') | str.endsWith?(name, '.html') |
+    str.endsWith?(name, '.htm') | str.endsWith?(name, '.jnlp')
+}
+
+// Select an executable class regardless of helper-class ordering. An
+// explicit entryClass always wins; classes without Applet/main remain
+// inspectable/archiveable but are not silently treated as executable.
+fn chooseEntry(classes) {
+    parsed := []
+    names := {}
+    problem := ?
+    classes |> std.each(fn(bytes) if problem = ? {
+        true -> {
+            cls := app.inspect(bytes)
+            if cls.type = :error {
+                true -> problem <- cls.message
+                _ -> {
+                    parsed << cls.value
+                    names.(cls.value.name) <- cls.value
+                }
+            }
+        }
+    })
+    fn isApplet?(owner, depth) if depth >= 64 {
+        true -> false
+        _ -> if owner = 'java/applet/Applet' | owner = 'javax/swing/JApplet' {
+            true -> true
+            _ -> if names.(owner) = ? {true -> false, _ -> isApplet?(names.(owner).super, depth + 1)}
+        }
+    }
+    appletEntry := ?
+    mainEntry := ?
+    parsed |> std.each(fn(cls) {
+        if appletEntry = ? & isApplet?(cls.name, 0) -> appletEntry <- cls.name
+        main := classfile.method(cls, 'main', '([Ljava/lang/String;)V')
+        if mainEntry = ? & main != ? & (main.flags & 9) = 9 -> mainEntry <- cls.name
+    })
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {type: :ok, value: if appletEntry != ? {true -> appletEntry, _ -> mainEntry}}
+    }
+}
+
+fn _load(config, opts) {
+    supplied := opts.classes
+    if supplied != ? {
+        true -> if type(supplied) = :list & len(supplied) > 0 {
+            true -> {type: :ok, classes: supplied, entry: opts.entryClass,
+                jar: opts.originalJar, backend: 'supplied'}
+            _ -> _error('applet.classes must be a nonempty list of class bytes')
+        }
+        _ -> {
+            suffix := str.lower(config.entry)
+            if str.endsWith?(suffix, '.class') | str.endsWith?(suffix, '.jar') |
+                str.endsWith?(suffix, '.zip') | str.endsWith?(suffix, '.java') {
+                true -> bridge.load(config, opts)
+                _ -> {
+                    bytes := fs.readFile(config.entry)
+                    if bytes = ? {
+                        true -> _error('cannot read JVM launch descriptor: ' + string(config.entry))
+                        _ -> if str.endsWith?(suffix, '.html') |
+                            str.endsWith?(suffix, '.htm') |
+                            str.endsWith?(suffix, '.jnlp') {
+                            true -> manifest.load(config.entry, bytes)
+                            _ -> if str.endsWith?(suffix, '.applet.json') |
+                                str.endsWith?(suffix, '.applet') {
+                                true -> {
+                                    extracted := app.unbundle(bytes)
+                                    if extracted.type = :error {
+                                        true -> extracted
+                                        _ -> {type: :ok, classes: extracted.value,
+                                            entry: extracted.entry, backend: 'archive',
+                                            jar: if opts.preserveJar? = false {
+                                                true -> ?, _ -> extracted.jar}}
+                                    }
+                                }
+                                _ -> _error('unsupported JVM input type: ' + config.entry)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A single programmatic build entrypoint for .class, .jar, .java and launch files.
+// config.applet: {entryClass, classes?, originalJar?, preserveJar?, params?,
+//                 options?: {args,method,desc,paint?,width,height,maxSteps},
+//                 optimize?}. config.inMemory? returns source without writing.
+// compileOak is lib/build.run's normal in-memory Oak -> JS renderer.
+fn run(config, compileOak) {
+    opts := config.applet |> std.default({})
+    if type(opts) != :object -> opts <- {}
+    destination := config.output |> std.default('')
+    target := if str.endsWith?(destination, '.java') {
+        true -> 'java'
+        _ -> if str.endsWith?(destination, '.html') {
+            true -> 'html'
+            _ -> if str.endsWith?(destination, '.js') {
+                true -> 'js'
+                _ -> if str.endsWith?(destination, '.oak') {true -> 'oak', _ -> ?}
+            }
+        }
+    }
+    problem := ?
+    output := ?
+    entry := ?
+    kind := ?
+    stats := ?
+    if destination = '' | target = ? ->
+        problem <- 'applet output must be .oak, .js, .html, or .java'
+    if config.inMemory? != true & type(config.entry) = :string & destination != '' &
+        path.resolve(config.entry) = path.resolve(destination) ->
+        problem <- 'refusing to overwrite the input applet descriptor'
+    if config.web? = true & !(target = 'js' | target = 'html') ->
+        problem <- '--web requires a .js or .html applet output'
+    if config.java? = true & target != 'java' ->
+        problem <- '--java requires a .java applet output'
+    if config.wasm? = true | config.ts? = true | config.lua? = true |
+       config.go? = true | config.native? = true | config.ast? = true |
+       config.bin? = true | config.doc? = true | config.graph? = true ->
+        problem <- 'requested Magnolia Builder target has no verified JVM adapter'
+    if problem = ? {
+        true -> {
+            loaded := _load(config, opts)
+            if loaded.type = :error {
+                true -> problem <- loaded.message
+                _ -> {
+                    if opts.preserveJar? = false -> loaded.jar <- ?
+                    extra := opts.classFiles |> std.default([])
+                    if type(extra) != :list {
+                        true -> problem <- 'applet.classFiles must be a list'
+                        _ -> extra |> std.each(fn(file) if problem = ? {
+                            true -> {
+                                bytes := fs.readFile(file)
+                                if bytes = ? {
+                                    true -> problem <- 'cannot read helper class ' + string(file)
+                                    _ -> loaded.classes << bytes
+                                }
+                            }
+                        })
+                    }
+                    if problem = ? {
+                        true -> {
+                            entry <- opts.entryClass |> std.default(loaded.entry)
+                            if entry = ? {
+                                true -> {
+                                    chosen := chooseEntry(loaded.classes)
+                                    if chosen.type = :error {
+                                        true -> problem <- chosen.message
+                                        _ -> entry <- chosen.value
+                                    }
+                                    if entry = ? & len(loaded.classes) = 1 & opts.options.method != ? ->
+                                        entry <- app.inspect(loaded.classes.(0)).value.name
+                                }
+                            }
+                            if entry = ? & problem = ? ->
+                                problem <- 'no Applet or static main entry found; set applet.entryClass'
+                        }
+                    }
+                    if problem = ? {
+                        true -> {
+                            options := opts.options |> std.default({})
+                            parameters := loaded.params |> std.default({})
+                            suppliedParams := opts.params |> std.default({})
+                            if type(options) != :object | type(parameters) != :object |
+                                type(suppliedParams) != :object ->
+                                problem <- 'applet.options and applet.params must be objects'
+                            if problem = ? {
+                                true -> {
+                                    std.keys(suppliedParams) |> std.each(fn(key) {
+                                        parameters.(key) <- suppliedParams.(key)
+                                    })
+                                    std.keys(parameters) |> std.each(fn(key) {
+                                        val := parameters.(key)
+                                        if val != ? {
+                                            true -> if type(val) = :string | type(val) = :int |
+                                                type(val) = :float | type(val) = :bool {
+                                                true -> parameters.(key) <- string(val)
+                                                _ -> problem <- 'applet parameter must be a scalar: ' + key
+                                            }
+                                        }
+                                    })
+                                }
+                            }
+                            if problem = ? {
+                                true -> {
+                                    if options.paint? = true & options.method != ? ->
+                                        problem <- 'paint and explicit method are mutually exclusive'
+                                    if options.paint? = true & (target = 'html' | target = 'js') ->
+                                        options.emitDraw? <- true
+                                    options.width <- options.width |> std.default(
+                                        loaded.width |> std.default(320))
+                                    options.height <- options.height |> std.default(
+                                        loaded.height |> std.default(200))
+                                    options.args <- options.args |> std.default(loaded.args |> std.default([]))
+                                    options.maxSteps <- options.maxSteps |> std.default(100000)
+                                    if type(options.width) != :int | type(options.height) != :int |
+                                       options.width < 1 | options.height < 1 | options.width > 4096 |
+                                       options.height > 4096 ->
+                                        problem <- 'applet canvas dimensions must be integers 1..4096'
+                                    if type(options.maxSteps) != :int |
+                                        options.maxSteps < 1 | options.maxSteps > 10000000 ->
+                                        problem <- 'applet maxSteps must be an integer 1..10000000'
+                                }
+                            }
+                            if problem = ? {
+                                true -> {
+                                    compiled := bridge.link(loaded, {
+                                        entry: entry
+                                        method: options.method
+                                        desc: options.desc |> std.default('()V')
+                                        paint?: options.paint? = true
+                                        optimize?: opts.optimize? != false
+                                    })
+                                    if compiled.type = :error {
+                                        true -> problem <- compiled.message
+                                        _ -> {
+                                            program := compiled.value
+                                            kind <- program.kind
+                                            stats <- compiled.stats
+                                            if program.kind = 'application' & (type(options.args) != :list |
+                                                (options.args |> std.some(fn(item) type(item) != :string))) ->
+                                                problem <- 'application main arguments must be JSON strings'
+                                            if type(options.args) != :list ->
+                                                problem <- 'applet.options.args must be a list'
+                                            runtimePath := opts.runtimePath |> std.default(
+                                                path.resolve('applet-runtime.oak',
+                                                    path.dir(opts.adapterPath |> std.default(
+                                                        path.resolve('lib/build-applet.oak')))))
+                                            if target != 'java' & fs.statFile(runtimePath) = ? ->
+                                                problem <- 'applet runtime unavailable: ' + runtimePath
+                                            if problem = ? {
+                                                true -> if target = 'oak' {
+                                                    true -> {
+                                                        archive := if loaded.jar != ? {
+                                                            true -> app.bundleJar(loaded.classes, entry, loaded.jar)
+                                                            _ -> app.bundle(loaded.classes, entry)
+                                                        }
+                                                        if archive.type = :error {
+                                                            true -> problem <- archive.message
+                                                            _ -> {
+                                                                made := app.standaloneSource(program, parameters,
+                                                                    options, runtimePath, archive.value)
+                                                                if made.type = :error {
+                                                                    true -> problem <- made.message
+                                                                    _ -> output <- made.value
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    _ -> if target = 'java' {
+                                                        true -> {
+                                                            name := path.base(destination)
+                                                            if !str.endsWith?(name, '.java') {
+                                                                true -> problem <- 'Java output must end in .java'
+                                                                _ -> {
+                                                                    name <- std.slice(name, 0, len(name) - 5)
+                                                                    made := java.source(program, parameters, options, name)
+                                                                    if made.type = :error {
+                                                                        true -> problem <- made.message
+                                                                        _ -> output <- made.value
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        _ -> {
+                                                            // Builder owns Oak AST parsing, import resolution,
+                                                            // JS rendering and the bundled runtime. No staging.
+                                                            virtual := path.resolve('.magnolia-applet-entry.oak',
+                                                                path.dir(path.resolve(config.entry)))
+                                                            generated := app.source(program, parameters,
+                                                                options, runtimePath)
+                                                            built := compileOak({
+                                                                entry: virtual
+                                                                source: generated
+                                                                output: destination
+                                                                web?: true
+                                                                inMemory?: true
+                                                                optimize?: config.optimize?
+                                                                log: config.log
+                                                                abort: config.abort
+                                                            })
+                                                            if built.type = :error {
+                                                                true -> problem <- built.message
+                                                                _ -> {
+                                                                    original := ?
+                                                                    if opts.embedOriginal? != false {
+                                                                        true -> {
+                                                                            packed := if loaded.jar != ? {
+                                                                                true -> app.bundleJar(loaded.classes, entry, loaded.jar)
+                                                                                _ -> app.bundle(loaded.classes, entry)
+                                                                            }
+                                                                            if packed.type = :error {
+                                                                                true -> problem <- packed.message
+                                                                                _ -> original <- packed.value
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    if problem = ? {
+                                                                        true -> {
+                                                                            script := built.value + jsHost.source(original)
+                                                                            output <- if target = 'html' {
+                                                                                true -> app.html(script, entry)
+                                                                                _ -> script
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if problem = ? & config.inMemory? != true ->
+        if fs.writeFile(destination, output) = ? -> problem <- 'could not write ' + destination
+    if problem = ? {
+        true -> {type: :ok, value: output, target: target, entry: entry, stats: stats, kind: kind}
+        _ -> _error(problem)
+    }
+}

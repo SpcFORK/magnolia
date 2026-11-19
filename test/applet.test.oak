@@ -1,0 +1,1658 @@
+// Applet class-file pipeline tests. Java tooling is NOT needed to run these.
+std := import('std')
+str := import('str')
+printf := import('fmt').printf
+fs := import('fs')
+json := import('json')
+app := import('../lib/applet.oak')
+classfile := import('../lib/applet-class.oak')
+lower := import('../lib/applet-bytecode.oak')
+java := import('../lib/applet-java.oak')
+zip := import('../lib/applet-zip.oak')
+manifest := import('../lib/applet-manifest.oak')
+jarManifest := import('../lib/jvm-jar-manifest.oak')
+bridge := import('../lib/jvm-bridge.oak')
+vmLib := import('../lib/jvm-vm-libs.oak')
+jarWriter := import('../lib/jvm-jar-write.oak')
+
+fn run(t) {
+    printf('[applet-progress] core class, ZIP and AWT fixture checks')
+    fixture := fs.readFile('test/fixtures/CounterApplet.class')
+    'fixture present' |> t.assert(fixture != ?)
+    info := app.inspect(fixture)
+    'read JVM class' |> t.eq(info.type, :ok)
+    'class name' |> t.eq(info.value.name, 'CounterApplet')
+    'superclass' |> t.eq(info.value.super, 'java/applet/Applet')
+    'fixture is Java 8 bytecode' |> t.eq(info.value.major, 52)
+    'three methods' |> t.eq(len(info.value.methods), 3)
+    'integer literal matches constant pool' |> t.eq(classfile.literal(info.value.pool, 0), ?)
+
+    'invalid magic' |> t.eq(app.inspect('not-a-class').type, :error)
+    [0, 1, 2, 3, 7, 9, 10, 24, 100, len(fixture) - 1] |> std.each(fn(n) {
+        ('truncated class ' + string(n)) |> t.eq(app.inspect(std.slice(fixture, 0, n)).type, :error)
+    })
+    badPool := std.slice(fixture, 0, 10) + char(255) + std.slice(fixture, 11)
+    'unknown constant-pool tag rejected' |> t.eq(app.inspect(badPool).type, :error)
+
+    archive := app.bundle([fixture], 'CounterApplet')
+    'bundle succeeds without javac' |> t.eq(archive.type, :ok)
+    unpacked := app.unbundle(archive.value)
+    'unbundle verifies content' |> t.eq(unpacked.type, :ok)
+    'unbundle is byte exact' |> t.eq(unpacked.value.(0), fixture)
+    'invalid archive rejected' |> t.eq(app.unbundle('not json').type, :error)
+    'wrong archive version rejected' |> t.eq(app.unbundle(str.replace(archive.value, '"version":1', '"version":2')).type, :error)
+    'tampered digest rejected' |> t.eq(app.unbundle(str.replace(archive.value, '"sha256":"', '"sha256":"BAD')).type, :error)
+
+    compiled := app.compile([fixture], {})
+    'compile verified subset' |> t.eq(compiled.type, :ok)
+    'compiled 3 reachable methods' |> t.eq(compiled.stats.methods, 3)
+    'predecoded instruction count' |> t.eq(compiled.stats.before, 45)
+    result := app.run(compiled.value, {name: 'Ada'}, {})
+    'run succeeds without a JVM' |> t.eq(result.type, :ok)
+    'lifecycle output' |> t.eq(result.output, 'Hello from Magnolia\n8\n14\nAda\n')
+    'instance field after loop' |> t.eq(result.object.fields.('CounterApplet.count:I'), 8)
+    'bytecode work counted' |> t.assert(result.steps > 40)
+    'missing parameter stays null' |> t.eq(app.run(compiled.value, {}, {}).output, 'Hello from Magnolia\n8\n14\n')
+    'instruction budget prevents runaway code' |> t.eq(app.run(compiled.value, {}, {maxSteps: 10}).type, :error)
+    methodResult := app.run(app.compile([fixture], {method: 'twice', desc: '(I)I'}).value, {}, {method: 'twice', desc: '(I)I', args: [9]})
+    'explicit method call' |> t.eq(methodResult.value, 18)
+
+    'duplicate class rejected' |> t.eq(app.compile([fixture, fixture], {}).type, :error)
+    'duplicate bundle rejected' |> t.eq(app.bundle([fixture, fixture], 'CounterApplet').type, :error)
+    'missing selected method rejected' |> t.eq(app.compile([fixture], {method: 'missing', desc: '()V'}).type, :error)
+
+    valuesFixture := fs.readFile('test/fixtures/ValuesApplet.class')
+    valuesProgram := app.compile([valuesFixture], {})
+    'second fixture compiles' |> t.eq(valuesProgram.type, :ok)
+    'boolean, null, int and String host calls match JVM output' |> t.eq(
+        app.run(valuesProgram.value, {n: '1234'}, {}).output, 'true\nfalse\nnull\n1234\n-42\nok\n')
+    'invalid parseInt produces bounded error' |> t.eq(app.run(valuesProgram.value, {n: 'bad'}, {}).type, :error)
+    'int32 parseInt overflow rejected' |> t.eq(app.run(valuesProgram.value, {n: '2147483648'}, {}).type, :error)
+    bufferProgram := app.compile([fs.readFile('test/fixtures/BufferApplet.class')], {})
+    'legacy StringBuffer verifies' |> t.eq(bufferProgram.type, :ok)
+    'legacy StringBuffer appends and prints' |> t.eq(app.run(bufferProgram.value, {}, {}).output, 'Ready: 7\n')
+
+    jarBytes := fs.readFile('test/fixtures/Applets.jar')
+    jar := zip.entries(jarBytes)
+    'JAR with DEFLATE-dynamic classes parsed in Magnolia' |> t.eq(jar.type, :ok)
+    'two classes extracted from compressed JAR' |> t.eq([jar.count, jar.entry], [2, 'CounterApplet'])
+    'first JAR class byte-exact' |> t.eq(jar.classes.(0), fixture)
+    'second JAR class byte-exact' |> t.eq(jar.classes.(1), valuesFixture)
+    'JAR classes compile and run' |> t.eq(app.run(app.compile(jar.classes, {}).value,
+        {name: 'Ada'}, {}).output, 'Hello from Magnolia\n8\n14\nAda\n')
+    selectedJar := zip.selectClass(jarBytes, 'CounterApplet')
+    'selective ZIP reader validates one original class and archive index' |> t.eq(
+        [selectedJar.type, selectedJar.name, selectedJar.major,
+            selectedJar.archiveEntries, selectedJar.value],
+        [:ok, 'CounterApplet', 52, 2, fixture])
+    'selective reader accepts explicit class suffix' |> t.eq(
+        zip.selectClass(jarBytes, 'ValuesApplet.class').value, valuesFixture)
+    'selective reader refuses missing or unsafe names' |> t.eq([
+        zip.selectClass(jarBytes, 'Absent').type,
+        zip.selectClass(jarBytes, '../CounterApplet').type], [:error, :error])
+    'selective reader refuses truncated ZIP' |> t.eq(
+        zip.selectClass(std.slice(jarBytes, 0, 42), 'CounterApplet').type, :error)
+    selectedLoaded := bridge.load({entry: 'test/fixtures/Applets.jar'},
+        {selectClass: 'CounterApplet'})
+    'VM bridge selects one class without embedding original JAR' |> t.eq(
+        [selectedLoaded.type, selectedLoaded.backend,
+            len(selectedLoaded.classes), selectedLoaded.jar,
+            selectedLoaded.entry], [:ok, 'jar-selected', 1, ?, 'CounterApplet'])
+    'selective JAR rejects conflicting entry class' |> t.eq(bridge.load(
+        {entry: 'test/fixtures/Applets.jar'},
+        {selectClass: 'CounterApplet', entryClass: 'ValuesApplet'}).type, :error)
+    'selective JAR option rejects non-archive input' |> t.eq(bridge.load(
+        {entry: 'test/fixtures/CounterApplet.class'},
+        {selectClass: 'CounterApplet'}).type, :error)
+    jarArchive := app.bundleJar(jar.classes, jar.entry, jarBytes)
+    'JAR bundle retains original container' |> t.eq(jarArchive.type, :ok)
+    'JAR archive restoration is byte-exact' |> t.eq(app.unbundle(jarArchive.value).jar, jarBytes)
+    'JAR metadata must match classes' |> t.eq(app.bundleJar([fixture], jar.entry, jarBytes).type, :error)
+    tamperedJar := json.parse(jarArchive.value)
+    tamperedJar.jar.sha256 <- 'BAD' + tamperedJar.jar.sha256
+    'tampered JAR SHA-256 rejected' |> t.eq(app.unbundle(json.serialize(tamperedJar)).type, :error)
+    'class-only archive carries no original JAR' |> t.eq(unpacked.jar, ?)
+    'CRC32 reference vector' |> t.eq(zip.crc32('123456789'), 3421780262)
+    fixedBytes := [243,72,205,201,201,87,72,203,172,72,77,81,240,40,77,75,203,77,204,83,244,160,64,12,0] |>
+        std.map(char) |> str.join('')
+    'DEFLATE fixed Huffman block' |> t.eq(zip.inflate(fixedBytes, 80, 100).value,
+        'Hello fixed Huffman!Hello fixed Huffman!Hello fixed Huffman!Hello fixed Huffman!')
+    storedBytes := [1,3,0,252,255,65,66,67] |> std.map(char) |> str.join('')
+    'DEFLATE stored block' |> t.eq(zip.inflate(storedBytes, 3, 100).value, 'ABC')
+    'DEFLATE output-size guard' |> t.eq(zip.inflate(storedBytes, 3, 2).type, :error)
+    'truncated JAR rejected' |> t.eq(zip.entries(std.slice(jarBytes, 0, 42)).type, :error)
+    graphicsFixture := fs.readFile('test/fixtures/GraphicsApplet.class')
+    graphicsProgram := app.compile([graphicsFixture], {paint?: true})
+    'real AWT paint method compiled' |> t.eq(graphicsProgram.type, :ok)
+    rendered := app.run(graphicsProgram.value, {}, {paint?: true})
+    'AWT painting calls executed' |> t.eq([rendered.type, len(rendered.draw)], [:ok, 3])
+    'AWT fillRect color and geometry' |> t.eq([rendered.draw.(0).type, rendered.draw.(0).color,
+        rendered.draw.(0).x, rendered.draw.(0).width], [:rect, 'rgb(255,0,0)', 4, 30])
+    'AWT Color constructor feeds drawString' |> t.eq([rendered.draw.(1).type, rendered.draw.(1).color,
+        rendered.draw.(1).text], [:text, 'rgb(0,128,255)', 'Oak canvas'])
+    'native SVG renders bytecode drawing' |> t.assert(str.contains?(app.svg(rendered.draw, 100, 60),
+        '<rect x="4" y="5" width="30" height="12" fill="rgb(255,0,0)"/>'))
+    'SVG text is XML-escaped' |> t.assert(str.contains?(app.svg([
+        {type: :text, x: 0, y: 10, color: 'rgb(0,0,0)', text: 'a&<b'}], 20, 20), 'a&amp;&lt;b'))
+    'paint preflight refuses unimplemented paint method' |> t.assert(str.contains?(
+        app.compile([fixture], {paint?: true}).message, 'paint(Graphics) is not implemented'))
+    jsGraphics := app.source(graphicsProgram.value, {}, {paint?: true, emitDraw?: true, width: 100, height: 60},
+        '/home/user/magnolia/lib/applet-runtime.oak')
+    'JS painting bundle declares translated Oak question-mark keys' |> t.assert(str.contains?(jsGraphics, 'paint?: true'))
+    'JS painting bundle emits actual draw commands' |> t.assert(str.contains?(jsGraphics, '__MAGNOLIA_DRAW_V1__:'))
+    javaGraphics := import('../lib/applet-java.oak').source(graphicsProgram.value, {},
+        {paint?: true, width: 100, height: 60}, 'GraphicsConverted')
+    'Java painter uses real AWT BufferedImage' |> t.assert(str.contains?(javaGraphics.value, 'new BufferedImage(WIDTH, HEIGHT'))
+    // Original JVM class-file identifiers are modified-UTF-8 bytes, not one
+    // Unicode character per byte. A Java-source emitter must preserve the
+    // names of obfuscated methods and never let Unicode escapes inject code.
+    // Assemble UTF-8 *bytes*: native Oak indexes byte strings, whereas a
+    // bundled JS literal such as 'ŷ' is one JS character. Class files supply
+    // byte strings on both routes, so model the actual input representation.
+    utf8Text := 'caf' + char(195) + char(169) + ' ' +
+        char(233) + char(155) + char(168) + ' ' +
+        char(240) + char(159) + char(166) + char(137) + ' \\u000a'
+    unicodeProgram := {entry: 'Accent', kind: 'application', classes: {
+        'Accent': {super: 'java/lang/Object', interfaces: [], fields: {}, static: {}, methods: {
+            'main([Ljava/lang/String;)V': {locals: 1, stack: 2, static?: true,
+                code: [[18, utf8Text, ?]]}
+        }}
+    }}
+    unicodeProgram.classes.Accent.methods.(char(197) + char(183) + '()V') <-
+        {locals: 0, stack: 0, static?: true, code: [[177, ?, ?]]}
+    unicodeJava := java.source(unicodeProgram, {}, {}, 'AccentConverted')
+    'Java emitter decodes UTF-8 and modified UTF-8 to UTF-16 escapes' |> t.assert(
+        unicodeJava.type = :ok &
+        str.contains?(unicodeJava.value, '\\u0177()V') &
+        str.contains?(unicodeJava.value, '\\u00e9 \\u96e8 \\ud83e\\udd89'))
+    'Java source escapes literal backslash-u rather than creating a newline' |> t.assert(
+        str.contains?(unicodeJava.value, '\\\\u000a'))
+    'Java emitter rejects malformed UTF-8 rather than replacing method names' |> t.eq(
+        java.source(unicodeProgram, {bad: char(195)}, {}, 'AccentConverted').type, :error)
+    damaged := std.slice(jarBytes, 0, 100) + char(codepoint(jarBytes.(100)) ^ 1) + std.slice(jarBytes, 101)
+    'corrupted JAR entry rejected' |> t.eq(zip.entries(damaged).type, :error)
+    'selective reader also rejects corrupt selected DEFLATE/CRC' |> t.eq(
+        zip.selectClass(damaged, 'CounterApplet').type, :error)
+
+    // A local peephole is only safe if the merged instructions are not branch targets.
+    synthetic := {name: 'Fold', pool: [?]}
+    arithmetic := {name: 'sum', desc: '()I', code: char(5) + char(6) + char(96) + char(172), catches: 0, flags: 0, locals: 1, stack: 2}
+    fast := lower.lowerMethod(synthetic, arithmetic, {}, true)
+    plain := lower.lowerMethod(synthetic, arithmetic, {}, false)
+    'folded arithmetic' |> t.eq([fast.type, fast.before, fast.after, fast.folds], [:ok, 4, 2, 1])
+    'unoptimized arithmetic' |> t.eq([plain.type, plain.before, plain.after, plain.folds], [:ok, 4, 4, 0])
+    'fold preserves JVM integer result' |> t.eq(fast.code.(0).(1), 5)
+    framedArithmetic := {name: 'sum', desc: '()I',
+        code: arithmetic.code, catches: 0, flags: 0,
+        locals: 1, stack: 2, framePcs: [1], newPcs: []}
+    guarded := lower.lowerMethod(synthetic, framedArithmetic, {}, true)
+    'explicit frame at second instruction protects it from peephole folding' |>
+        t.eq([guarded.type, guarded.before, guarded.after, guarded.folds],
+            [:ok, 4, 4, 0])
+    fn compute(code) {
+        program := {entry: 'Fold', classes: {
+            'Fold': {super: ?, fields: {}, static: {}, methods: {
+                'sum()I': {code: code, locals: 1, stack: 2, static?: false}
+            }}
+        }}
+        app.run(program, {}, {method: 'sum', desc: '()I'}).value
+    }
+    'ablation output is equivalent' |> t.eq(compute(fast.code), compute(plain.code))
+    staticProgram := {entry: 'Fold', classes: {
+        'Fold': {super: ?, fields: {}, static: {'Fold.value:I': 0}, methods: {
+            'add()I': {locals: 1, stack: 2, static?: false, code: [
+                [178, ?, ['Fold', 'value', 'I']], [4, ?, ?], [96, ?, ?],
+                [89, ?, ?], [179, ?, ['Fold', 'value', 'I']], [172, ?, ?]
+            ]}
+        }}
+    }}
+    first := app.run(staticProgram, {}, {method: 'add', desc: '()I'})
+    second := app.run(staticProgram, {}, {method: 'add', desc: '()I'})
+    'static state isolated between runs' |> t.eq([first.value, second.value, staticProgram.classes.Fold.static.('Fold.value:I')], [1, 1, 0])
+
+    awtPool := [?,
+        {tag: 1, text: 'java/awt/Color'}, {tag: 7, a: 1},
+        {tag: 1, text: 'white'}, {tag: 1, text: 'Ljava/awt/Color;'},
+        {tag: 12, a: 3, b: 4}, {tag: 9, a: 2, b: 5}]
+    awtMethod := {name: 'init', desc: '()V', code: char(178)+char(0)+char(6)+char(177), catches: 0, flags: 0, locals: 1, stack: 1}
+    'known AWT Color field is verified' |> t.eq(
+        lower.lowerMethod({name: 'Example', pool: awtPool}, awtMethod, {}, true).type, :ok)
+    awtPool.(3).text <- 'chartreuse'
+    'unknown AWT Color is rejected, not silently stubbed' |> t.assert(str.contains?(
+        lower.lowerMethod({name: 'Example', pool: awtPool}, awtMethod, {}, true).message,
+        'unsupported field java/awt/Color.chartreuse'))
+    jumping := {name: 'jump', desc: '()I', code: char(4)+char(167)+char(0)+char(4)+char(5)+char(6)+char(96)+char(172), catches: 0, flags: 0, locals: 1, stack: 2}
+    notFolded := lower.lowerMethod(synthetic, jumping, {}, true)
+    'branch target blocks folding' |> t.eq([notFolded.before, notFolded.after, notFolded.code.(1).(1)], [6, 6, 3])
+    jumping.code <- char(167)+char(0)+char(2)+char(5)+char(172)
+    'bad branch target rejected' |> t.eq(lower.lowerMethod(synthetic, jumping, {}, true).type, :error)
+    arithmetic.code <- char(186)
+    'unknown instruction rejected' |> t.assert(str.contains?(lower.lowerMethod(synthetic, arithmetic, {}, true).message, '0xba'))
+
+    source := app.standaloneSource(compiled.value, {name: 'Ada'}, {}, 'lib/applet-runtime.oak', archive.value)
+    'Oak self-contained source generated' |> t.eq(source.type, :ok)
+    'runtime inlined' |> t.assert(str.contains?(source.value,
+        'runtime := {run: run, valueText: valueText}'))
+    'Oak methods named for applet logic' |> t.assert(str.contains?(source.value, 'fn applet_method_'))
+    'Oak source annotates branch targets' |> t.assert(str.contains?(source.value, '-> instruction'))
+    'Oak contains recoverable archive marker' |> t.assert(str.contains?(source.value, '// @magnolia-applet-archive-v1:'))
+    'lossless class-to-Oak-to-class restoration' |> t.eq(app.fromOak(source.value).value.(0), fixture)
+    'bad Oak recovery record rejected' |> t.eq(app.fromOak(str.replace(source.value,
+        '// @magnolia-applet-archive-v1:', '// @magnolia-applet-archive-v1:AAAA')).type, :error)
+    'Oak without recovery record rejected' |> t.eq(app.fromOak('println(1)').type, :error)
+    'source has no raw JVM bytes' |> t.assert(!str.contains?(source.value, 'CAFEBABE'))
+    'quoteOak escapes strings' |> t.assert(str.contains?(app.quoteOak('a\n' + char(39)), '\\n'))
+
+    javaResult := java.source(compiled.value, {name: 'Ada'}, {maxSteps: 100000}, 'CounterAppletConverted')
+    'standalone Java source generated in Magnolia' |> t.eq(javaResult.type, :ok)
+    'Java output uses no Java plugin' |> t.assert(str.contains?(javaResult.value, 'public final class CounterAppletConverted'))
+    'invalid Java output filename rejected' |> t.eq(java.source(compiled.value, {}, {}, 'no-name.java').type, :error)
+
+    // A plain Java application is executable without an Applet superclass.
+    printf('[applet-progress] app entry, reference identity and VM libraries')
+    mainBytes := fs.readFile('test/fixtures/HelloMain.class')
+    mainProgram := app.compile([mainBytes], {})
+    'static main class verifies' |> t.eq([mainProgram.type, mainProgram.value.kind], [:ok, 'application'])
+    'main receives a Java String array' |> t.eq(app.run(mainProgram.value, {},
+        {args: ['Ada']}).output, '1\nAda\n14\n')
+    'main rejects non-string arguments' |> t.eq(app.run(mainProgram.value, {},
+        {args: [3]}).type, :error)
+
+    // JVM if_acmp* compares reference identity, never equal object structure
+    // or String characters. Distinct main arguments and new Strings remain
+    // distinct; literal/constants and host singleton fields retain aliases.
+    identityBytes := fs.readFile('test/fixtures/ReferenceIdentityMain.class')
+    identityProgram := app.compile([identityBytes], {})
+    'reference identity fixture links' |> t.eq(identityProgram.type, :ok)
+    identityCode := identityProgram.value.classes.ReferenceIdentityMain.methods.
+        ('main([Ljava/lang/String;)V').code
+    'both reference branch opcodes decode' |> t.assert(
+        (identityCode |> std.some(fn(inst) inst.(0) = 165)) &
+        (identityCode |> std.some(fn(inst) inst.(0) = 166)))
+    identityOutput := 'true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n' +
+        'false\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\nfalse\n' +
+        'true\ntrue\ntrue\nfalse\nfalse\ntrue\n'
+    'aliases, nulls, arrays, interned and distinct text, host singleton identity' |>
+        t.eq(app.run(identityProgram.value, {}, {args: ['same', 'same']}).output,
+            identityOutput)
+    identityCoverage := bridge.coverage({type: :ok, classes: [identityBytes]})
+    'whole fixture preflight decodes every identity method' |> t.eq(
+        [identityCoverage.decodedBodies, len(identityCoverage.blockers)], [3, 0])
+    identityArchive := app.bundle([identityBytes], 'ReferenceIdentityMain')
+    identityOak := app.standaloneSource(identityProgram.value, {},
+        {args: ['same', 'same']}, 'lib/applet-runtime.oak', identityArchive.value)
+    'named Oak identity branches and exact original restoration' |> t.assert(
+        identityOak.type = :ok &
+        str.contains?(identityOak.value, 'if_acmpeq (reference identity)') &
+        app.fromOak(identityOak.value).value.(0) = identityBytes)
+    identityJava := java.source(identityProgram.value, {},
+        {args: ['same', 'same']}, 'ReferenceIdentityConverted')
+    'Java output compares refs and keeps external argument references distinct' |>
+        t.assert(identityJava.type = :ok &
+            str.contains?(identityJava.value, 'case 165: case 166:') &
+            str.contains?(identityJava.value, 'new String("same"), new String("same")'))
+    'Color field uppercase is admitted as a lower-case singleton alias' |> t.eq(
+        vmLib.jvmColorName('WHITE'), 'white')
+    subsetIdentity := bridge.load({entry: 'NoIdentity.java', source:
+        'public class NoIdentity { public static void main(String[] args) {' +
+        ' String left = args[0]; String right = args[1];' +
+        ' if (left == right) { System.out.println(1); } } }'},
+        {javaBackend: 'oak'})
+    'Oak-only Java frontend refuses reference comparisons it cannot compile' |>
+        t.assert(subsetIdentity.type = :error &
+            str.contains?(subsetIdentity.message,
+                'comparison requires operands of the same int/boolean type'))
+
+    comparison := {name: 'Identity', pool: [?]}
+    comparisonMethod := {name: 'check', desc: '()I',
+        code: char(42)+char(42)+char(165)+char(0)+char(5)+char(3)+char(172)+char(4)+char(172),
+        catches: 0, flags: 0, locals: 1, stack: 2}
+    'reference branch target resolves to an instruction index' |> t.eq(
+        lower.lowerMethod(comparison, comparisonMethod, {}, false).code.(2), [165, 5, ?])
+    comparisonMethod.code <- char(42)+char(42)+char(165)+char(0)
+    'truncated reference branch operand rejected' |> t.assert(str.contains?(
+        lower.lowerMethod(comparison, comparisonMethod, {}, false).message,
+        'truncated bytecode operand'))
+    comparisonMethod.code <- char(42)+char(42)+char(166)+char(0)+char(2)+char(177)
+    'reference branch into its own operand rejected' |> t.assert(str.contains?(
+        lower.lowerMethod(comparison, comparisonMethod, {}, false).message,
+        'not an instruction boundary'))
+    comparisonMethod.code <- char(42)+char(42)+char(166)+char(255)+char(254)+char(177)
+    comparisonMethod.desc <- '()V'
+    'signed backward reference branch resolves to instruction zero' |> t.eq(
+        lower.lowerMethod(comparison, comparisonMethod, {}, false).code.(2), [166, 0, ?])
+    invalidRefs := {entry: 'Identity', kind: 'applet', classes: {
+        'Identity': {super: 'java/lang/Object', fields: {}, static: {}, methods: {
+            'compare()I': {locals: 1, stack: 2, static?: false, code: [
+                [4, 0, ?], [4, 0, ?], [165, 5, ?], [3, 0, ?],
+                [172, 0, ?], [4, 0, ?], [172, 0, ?]
+            ]}
+        }}
+    }}
+    'hand-constructed IR cannot compare integers as object references' |> t.assert(
+        str.contains?(app.run(invalidRefs, {}, {method: 'compare', desc: '()I'}).message,
+            'reference comparison requires JVM references'))
+
+    // AWT Point is a narrow, mutable geometry library contract. Its x/y
+    // fields are real JVM fields, with independent object identities and
+    // checked host access even for a hand-constructed instruction image.
+    pointBytes := fs.readFile('test/fixtures/PointGeometryMain.class')
+    pointProgram := app.compile([pointBytes], {})
+    'Point geometry class links to shared VM library' |> t.eq(pointProgram.type, :ok)
+    pointOutput := '0\n0\n7\n-9\nfalse\ntrue\ntrue\n-2147483648\n' +
+        '2147483647\n7\n-9\nfalse\n13\n-14\n-33\n44\nfalse\n' +
+        'true\nfalse\n44\n55\ntrue\ntrue\ntrue\ntrue\n-33\n'
+    'Point constructor, mutable coordinates, copies, equals and supertypes' |>
+        t.eq(app.run(pointProgram.value, {}, {}).output, pointOutput)
+    pointCoverage := bridge.coverage({type: :ok, classes: [pointBytes]})
+    'whole Point fixture decodes both methods without blockers' |> t.eq(
+        [pointCoverage.decodedBodies, len(pointCoverage.blockers)], [2, 0])
+    'Point x/y fields admitted only as int instance fields' |> t.eq([
+        vmLib.jvmField('java/awt/Point', 'x', 'I', 180).op,
+        vmLib.jvmField('java/awt/Point', 'y', 'I', 181).op,
+        vmLib.jvmField('java/awt/Point', 'x', 'I', 178),
+        vmLib.jvmField('java/awt/Point', 'z', 'I', 180),
+        vmLib.jvmField('java/awt/Point', 'y', 'J', 181)],
+        ['point-coordinate', 'point-coordinate', ?, ?, ?])
+    'Point constructor and method allowlist is exact' |> t.eq([
+        vmLib.jvmNew('java/awt/Point'),
+        vmLib.jvmMethod('java/awt/Point', '<init>', '(II)V', 183).op,
+        vmLib.jvmMethod('java/awt/Point', 'getLocation',
+            '()Ljava/awt/Point;', 182).op,
+        vmLib.jvmMethod('java/awt/Point', 'translate', '(II)V', 182),
+        vmLib.jvmMethod('java/awt/Point', 'getX', '()D', 182),
+        vmLib.jvmMethod('java/awt/Point', '<init>', '(II)V', 182)],
+        ['awt-point', 'point-init-xy', 'point-copy', ?, ?, ?])
+    pointArchive := app.bundle([pointBytes], 'PointGeometryMain')
+    pointOak := app.standaloneSource(pointProgram.value, {}, {},
+        'lib/applet-runtime.oak', pointArchive.value)
+    'Point Oak emits named host calls and restores original class exactly' |> t.assert(
+        pointOak.type = :ok &
+        str.contains?(pointOak.value, 'java/awt/Point.x') &
+        app.fromOak(pointOak.value).value.(0) = pointBytes)
+    pointJava := java.source(pointProgram.value, {}, {}, 'PointGeometryConverted')
+    'generated Java contains the bounded Point field and method host' |> t.assert(
+        pointJava.type = :ok &
+        str.contains?(pointJava.value, 'static int pointCoordinate(') &
+        str.contains?(pointJava.value, 'case 181:'))
+    brokenPoint := app.compile([pointBytes], {}).value
+    brokenCode := brokenPoint.classes.PointGeometryMain.methods.
+        ('main([Ljava/lang/String;)V').code
+    fieldIndex := std.find(brokenCode, fn(inst) inst.(0) = 180 &
+        inst.(2) != ? & inst.(2).(0) = 'java/awt/Point')
+    'Point fixture contains a host getfield instruction' |> t.assert(fieldIndex >= 0)
+    brokenCode.(fieldIndex).(2).(1) <- 'z'
+    'altered IR cannot read an unregistered AWT Point field' |> t.assert(
+        str.contains?(app.run(brokenPoint, {}, {}).message,
+            'invalid AWT Point field read'))
+    probe := {entry: 'PointProbe', kind: 'application', classes: {
+        'PointProbe': {super: 'java/lang/Object', fields: {}, static: {}, methods: {
+            'main([Ljava/lang/String;)V': {locals: 1, stack: 3, static?: true, code: [
+                [18, 'literal', ?], [180, 0, ['java/awt/Point', 'x', 'I']],
+                [87, 0, ?], [177, 0, ?]
+            ]}
+        }}
+    }}
+    'Point host field refuses a String receiver' |> t.assert(
+        str.contains?(app.run(probe, {}, {}).message,
+            'invalid AWT Point field read'))
+    probe.classes.PointProbe.methods.('main([Ljava/lang/String;)V').code <- [
+        [187, 'java/awt/Point', ?], [89, 0, ?], [1, 0, ?],
+        [183, 1, ['java/awt/Point', '<init>', '(Ljava/awt/Point;)V']],
+        [87, 0, ?], [177, 0, ?]
+    ]
+    'Point copy constructor refuses null instead of fabricating a value' |>
+        t.assert(str.contains?(app.run(probe, {}, {}).message,
+            'AWT Point copy requires a Point'))
+
+    // JVM System.arraycopy handles overlap, primitive kinds and covariant
+    // reference stores on tagged VM arrays. It cannot bypass the host work
+    // budget, and invalid array operations are never treated as successes.
+    copyBytes := fs.readFile('test/fixtures/ArrayCopyMain.class')
+    copyProgram := app.compile([copyBytes], {})
+    'arraycopy fixture links through shared VM library' |> t.eq(copyProgram.type, :ok)
+    copyOutput := '1\n1\n2\n3\n4\n1\n4\n4\n-128\n127\n65\n255\n' +
+        '-32768\n32767\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n'
+    'arraycopy overlap, five primitive kinds, reference aliasing/covariance' |>
+        t.eq(app.run(copyProgram.value, {}, {}).output, copyOutput)
+    copyCoverage := bridge.coverage({type: :ok, classes: [copyBytes]})
+    'whole arraycopy fixture decodes both bodies with no blockers' |> t.eq(
+        [copyCoverage.decodedBodies, len(copyCoverage.blockers)], [2, 0])
+    'System.arraycopy admission requires exact owner, descriptor and opcode' |>
+        t.eq([
+            vmLib.jvmMethod('java/lang/System', 'arraycopy',
+                '(Ljava/lang/Object;ILjava/lang/Object;II)V', 184).op,
+            vmLib.jvmMethod('java/lang/System', 'arraycopy',
+                '(Ljava/lang/Object;ILjava/lang/Object;II)V', 182),
+            vmLib.jvmMethod('java/lang/System', 'arraycopy', '(II)V', 184),
+            vmLib.jvmMethod('java/lang/System', 'getProperty',
+                '(Ljava/lang/String;)Ljava/lang/String;', 184)],
+            ['arraycopy', ?, ?, ?])
+    copyArchive := app.bundle([copyBytes], 'ArrayCopyMain')
+    copyOak := app.standaloneSource(copyProgram.value, {}, {},
+        'lib/applet-runtime.oak', copyArchive.value)
+    'arraycopy standalone Oak embeds VM library and restores exact class' |>
+        t.assert(copyOak.type = :ok &
+            str.contains?(copyOak.value, 'java/lang/System.arraycopy') &
+            app.fromOak(copyOak.value).value.(0) = copyBytes)
+    copyJava := java.source(copyProgram.value, {}, {}, 'ArrayCopyConverted')
+    'Java output mirrors bounded and typed arraycopy host' |> t.assert(
+        copyJava.type = :ok &
+        str.contains?(copyJava.value, 'static void arraycopy(') &
+        str.contains?(copyJava.value, 'array store type mismatch'))
+    ['range', 'negative'] |> std.each(fn(cause) {
+        ('arraycopy ' + cause + ' is a bounded range failure') |> t.assert(
+            str.contains?(app.run(copyProgram.value, {}, {args: [cause]}).message,
+                'System.arraycopy range out of bounds'))
+    })
+    'arraycopy null operand is rejected even for zero elements' |> t.assert(
+        str.contains?(app.run(copyProgram.value, {}, {args: ['null']}).message,
+            'null System.arraycopy array'))
+    'arraycopy different primitive types rejected even for zero elements' |>
+        t.assert(str.contains?(app.run(copyProgram.value, {}, {args: ['type']}).message,
+            'primitive array type mismatch'))
+    'arraycopy rejects incompatible covariant element' |> t.assert(
+        str.contains?(app.run(copyProgram.value, {}, {args: ['store']}).message,
+            'array store type mismatch'))
+    alteredCopy := app.compile([copyBytes], {}).value
+    alteredCode := alteredCopy.classes.ArrayCopyMain.methods.
+        ('main([Ljava/lang/String;)V').code
+    copyIndex := std.find(alteredCode, fn(inst) inst.(0) = 184 &
+        inst.(2) != ? & inst.(2).(0) = 'java/lang/System' &
+        inst.(2).(1) = 'arraycopy')
+    'arraycopy fixture contains host invokestatic' |> t.assert(copyIndex >= 0)
+    alteredCode.(copyIndex).(2).(2) <- '(II)V'
+    'altered IR cannot bypass arraycopy descriptor allowlist' |> t.assert(
+        str.contains?(app.run(alteredCopy, {}, {}).message,
+            'unsupported JVM library call'))
+    budgetProbe := {entry: 'ArrayCopyProbe', kind: 'application', classes: {
+        'ArrayCopyProbe': {super: 'java/lang/Object', fields: {}, static: {}, methods: {
+            'main([Ljava/lang/String;)V': {locals: 2, stack: 6, static?: true, code: [
+                [16, 8, ?], [188, 10, ?], [58, 1, ?], [25, 1, ?],
+                [3, 0, ?], [25, 1, ?], [3, 0, ?], [16, 8, ?],
+                [184, 5, ['java/lang/System', 'arraycopy',
+                    '(Ljava/lang/Object;ILjava/lang/Object;II)V']],
+                [177, 0, ?]
+            ]}
+        }}
+    }}
+    'arraycopy charges its eight elements to the instruction budget' |>
+        t.assert(str.contains?(app.run(budgetProbe, {}, {maxSteps: 15}).message,
+            'System.arraycopy instruction budget exceeded'))
+    'arraycopy succeeds under a sufficient instruction budget' |>
+        t.eq(app.run(budgetProbe, {}, {maxSteps: 20}).type, :ok)
+
+    // Category-one stack heights are verified over actual CFG edges before
+    // runnable output is emitted; this is not yet a full typed JVM verifier.
+    shapeBytes := fs.readFile('test/fixtures/StackHeightMain.class')
+    shapeProgram := app.compile([shapeBytes], {})
+    'valid JDK ternary passes CFG stack-height gate' |> t.eq(shapeProgram.type, :ok)
+    'both JDK control-flow branches execute with matching output' |> t.eq([
+        app.run(shapeProgram.value, {}, {}).output,
+        app.run(shapeProgram.value, {}, {args: ['chosen']}).output],
+        ['4\n', '7\n'])
+    shapeInfo := classfile.parseClass(shapeBytes).value
+    shapeMethod := shapeInfo.methods.(std.find(shapeInfo.methods,
+        fn(m) m.name = 'main'))
+    shapeAt := shapeMethod.codeOffset
+    fn alteredShape(pc, bytes, width) std.slice(shapeBytes, 0, shapeAt + pc) +
+        bytes + std.slice(shapeBytes, shapeAt + pc + width)
+    shortStack := alteredShape(0, char(87), 1) // pop on empty stack
+    'empty-stack pop rejected before any execution' |> t.assert(
+        str.contains?(app.compile([shortStack], {}).message,
+            'operand stack underflow at preflight'))
+    noStack := std.slice(shapeBytes, 0, shapeAt - 8) + char(0) + char(0) +
+        std.slice(shapeBytes, shapeAt - 6)
+    'max_stack smaller than reachable height is rejected' |> t.assert(
+        str.contains?(app.compile([noStack], {}).message,
+            'operand stack exceeds max_stack'))
+    // Replace one bipush by two nops; the branch target remains an instruction
+    // boundary, but its stack height differs from the other incoming path.
+    badMerge := alteredShape(9, char(0) + char(0), 2)
+    'unequal stack heights at a merge are rejected' |> t.assert(
+        str.contains?(app.compile([badMerge], {}).message,
+            'inconsistent operand stack height at merge'))
+    invalidLocal := alteredShape(11, char(62), 1) // istore_3, max_locals=2
+    'implicit local index beyond max_locals is rejected' |> t.assert(
+        str.contains?(app.compile([invalidLocal], {}).message,
+            'local variable index exceeds max_locals'))
+    fallingOff := alteredShape(19, char(0), 1) // nop instead of return
+    'fall-through at method end is rejected' |> t.assert(
+        str.contains?(app.compile([fallingOff], {}).message,
+            'control flow leaves the method'))
+    // Height alone formerly admitted these malformed Java 8 methods. The
+    // I/A/J gate must reject BEFORE a class initializer or stdout can run.
+    badArrayReceiver := alteredShape(0, char(3), 1) // iconst_0; arraylength
+    'arraylength requires reference, not an equally wide integer' |> t.assert(
+        str.contains?(app.compile([badArrayReceiver], {}).message,
+            'expected A, found I'))
+    badTypeMerge := alteredShape(5, char(1), 1) // aconst_null vs iconst_4
+    'stack merge refuses reference/int mismatch at equal height' |> t.assert(
+        str.contains?(app.compile([badTypeMerge], {}).message,
+            'inconsistent value categories at merge'))
+
+    // Exact high/low limbs survive parsing, all value slots, calls, fields,
+    // comparison, checked dup2/pop2 and decimal PrintStream formatting.
+    printf('[applet-progress] exact longs and array/exception fixtures')
+    longBytes := fs.readFile('test/fixtures/LongWidthMain.class')
+    longClass := classfile.parseClass(longBytes).value
+    longConstant := longClass.fields.(std.find(longClass.fields,
+        fn(f) f.name = 'CONSTANT')).constant
+    'ConstantValue long retains bits beyond JavaScript safe integers' |>
+        t.eq([longConstant.hi, longConstant.lo], [2097152, 1])
+    longProgram := app.compile([longBytes], {})
+    'long-reachable methods pass category-two frame gate' |>
+        t.eq(longProgram.type, :ok)
+    'J is one value but occupies two argument/local slots' |>
+        t.eq(longProgram.value.classes.LongWidthMain.methods.('bump(J)J').argWidths, [2])
+    'exact 64-bit long oracle including MIN_VALUE and 2^53+1' |> t.eq(
+        app.run(longProgram.value, {}, {}).output,
+        '9007199254740993\n9007199254740995\n1\n1\n-1\n1\n' +
+        '-9223372036854775808\n1\n0\n9007199254740993\n' +
+        '9007199254740993\n0\n9007199254740993\n')
+    mainLong := longClass.methods.(std.find(longClass.methods,
+        fn(m) m.name = 'main'))
+    bumpLong := longClass.methods.(std.find(longClass.methods,
+        fn(m) m.name = 'bump'))
+    fn alteredLong(offset, value) std.slice(longBytes, 0, offset) +
+        char(value) + std.slice(longBytes, offset + 1)
+    'pop must not split a category-two long' |> t.assert(str.contains?(
+        app.compile([alteredLong(mainLong.codeOffset + 164, 87)], {}).message,
+        'wrong value category in long frame analysis'))
+    'long local cannot be read from an uninitialized adjacent slot' |>
+        t.assert(str.contains?(app.compile([alteredLong(mainLong.codeOffset + 3,
+            65)], {}).message, 'invalid or uninitialized long frame local'))
+    'ldc2_w cannot name a non-long/non-double pool entry' |> t.assert(str.contains?(
+        app.compile([alteredLong(mainLong.codeOffset + 2, 5)], {}).message,
+        'ldc2_w requires a long constant'))
+    'ireturn cannot replace lreturn on (J)J' |> t.assert(str.contains?(
+        app.compile([alteredLong(bumpLong.codeOffset + 3, 172)], {}).message,
+        'ireturn does not match method descriptor'))
+    'long stack usage honors max_stack in actual JVM slots' |> t.assert(
+        str.contains?(app.compile([alteredLong(mainLong.codeOffset - 7,
+            1)], {}).message, 'operand stack exceeds max_stack'))
+
+    // JDK-verified long[] defaults, two-slot loads/stores, overlapping and
+    // cross-array copies, nested long[][] references and exact-limb calls.
+    longArrayBytes := fs.readFile('test/fixtures/LongArrayMain.class')
+    longArrayClass := classfile.parseClass(longArrayBytes).value
+    longArrayProgram := app.compile([longArrayBytes], {entry: 'LongArrayMain'})
+    'long arrays and nested long[][] references link through I/A/J preflight' |>
+        t.eq(longArrayProgram.type, :ok)
+    longArrayCoverage := bridge.coverage({type: :ok, classes: [longArrayBytes]})
+    'every method in the long-array fixture is decoded without blockers' |>
+        t.eq([longArrayCoverage.decodedBodies, len(longArrayCoverage.blockers)],
+            [4, 0])
+    longArrayMainCode := longArrayProgram.value.classes.LongArrayMain.methods.
+        ('main([Ljava/lang/String;)V').code
+    'long-array fixture really reaches laload, lastore, long newarray and nested anewarray' |>
+        t.assert(std.some(longArrayMainCode, fn(inst) inst.(0) = 47) &
+            std.some(longArrayMainCode, fn(inst) inst.(0) = 80) &
+            std.some(longArrayMainCode, fn(inst) inst.(0) = 188 & inst.(1) = 11) &
+            std.some(longArrayMainCode, fn(inst) inst.(0) = 189 & inst.(1) = '[J'))
+    'long-array JDK oracle preserves default zero, 2^53+1, MIN and overlap' |>
+        t.eq(app.run(longArrayProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/LongArrayMain.expected'))
+    'long[][] is a one-slot argument while laload returns two slots' |>
+        t.eq(longArrayProgram.value.classes.LongArrayMain.methods.
+            ('select([[JII)J').argWidths, [1, 1, 1])
+    'long array bounds, primitive copy mismatch and null fail explicitly' |>
+        t.assert(str.contains?(app.run(longArrayProgram.value, {},
+                {args: ['bounds']}).message, 'array index out of bounds') &
+            str.contains?(app.run(longArrayProgram.value, {},
+                {args: ['type', 'mismatch']}).message,
+                'System.arraycopy primitive array type mismatch') &
+            str.contains?(app.run(longArrayProgram.value, {},
+                {args: ['null', 'array', 'read']}).message,
+                'null array reference'))
+    longArrayArchive := app.bundle([longArrayBytes], 'LongArrayMain')
+    longArrayOak := app.standaloneSource(longArrayProgram.value, {}, {},
+        'lib/applet-runtime.oak', longArrayArchive.value)
+    'long array standalone Oak is readable and restores exact original bytes' |>
+        t.assert(longArrayOak.type = :ok &
+            str.contains?(longArrayOak.value, 'laload (two-slot long)') &
+            app.fromOak(longArrayOak.value).value.(0) = longArrayBytes)
+    longArrayJava := java.source(longArrayProgram.value, {}, {},
+        'LongArrayConverted')
+    'generated Java mirrors two-slot long array storage and primitive kind' |>
+        t.assert(longArrayJava.type = :ok &
+            str.contains?(longArrayJava.value, 'case 47: case 80:') &
+            str.contains?(longArrayJava.value, 'WideLong.of(0L)'))
+    combineArray := classfile.method(longArrayClass, 'combine', '([J)J')
+    mainArray := classfile.method(longArrayClass, 'main', '([Ljava/lang/String;)V')
+    fn changedArray(at, opcode) std.slice(longArrayBytes, 0, at) +
+        char(opcode) + std.slice(longArrayBytes, at + 1)
+    'laload rejects a reference index before any fixture output' |> t.assert(
+        str.contains?(app.compile([changedArray(combineArray.codeOffset + 1,
+            1)], {}).message, 'expected I, found A'))
+    'lastore cannot become an equally sized iastore without frame rejection' |>
+        t.assert(str.contains?(app.compile([changedArray(
+            mainArray.codeOffset + 18, 79)], {}).message,
+            'operand stack exceeds max_stack'))
+    firstNewLong := ?
+    std.range(len(mainArray.code) - 1) |> std.each(fn(i) if firstNewLong = ? &
+        codepoint(mainArray.code.(i)) = 188 &
+        codepoint(mainArray.code.(i + 1)) = 11 -> firstNewLong <- i)
+    'fixture contains a long[] allocation before any output' |>
+        t.assert(firstNewLong != ?)
+    'long[] known from newarray cannot be read with a mismatched array opcode' |>
+        t.assert(str.contains?(app.compile([changedArray(mainArray.codeOffset +
+            firstNewLong + 1, 10)], {}).message,
+            'array opcode incompatible with verifier-known component type'))
+
+    multiBytes := fs.readFile('test/fixtures/MultiArrayMain.class')
+    multiClass := classfile.parseClass(multiBytes).value
+    multiProgram := app.compile([multiBytes], {entry: 'MultiArrayMain'})
+    'bounded multianewarray class verifies and links in the same Oak VM' |>
+        t.eq(multiProgram.type, :ok)
+    'multidimensional fixture executes exact long, int and reference values' |>
+        t.eq(app.run(multiProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/MultiArrayMain.expected'))
+    multiCoverage := bridge.coverage({type: :ok, classes: [multiBytes]})
+    'all four multianewarray fixture methods decode without blockers' |>
+        t.eq([multiCoverage.methods, multiCoverage.decodedBodies,
+            len(multiCoverage.blockers)], [4, 4, 0])
+    multiCode := multiProgram.value.classes.MultiArrayMain.methods.
+        ('main([Ljava/lang/String;)V').code
+    'multianewarray retains exact descriptor and dimension count' |>
+        t.assert(std.some(multiCode, fn(inst) inst.(0) = 197 &
+                inst.(1) = '[[J' & inst.(2) = 2) &
+            std.some(multiCode, fn(inst) inst.(0) = 197 &
+                inst.(1) = '[[[J' & inst.(2) = 2) &
+            std.some(multiCode, fn(inst) inst.(0) = 197 &
+                inst.(1) = '[[Ljava/lang/String;' & inst.(2) = 2))
+    'negative inner dimensions fail even after an outer zero dimension' |>
+        t.assert(str.contains?(app.run(multiProgram.value, {},
+                {args: ['negative']}).message, 'invalid multianewarray descriptor') &
+            str.contains?(app.run(multiProgram.value, {},
+                {args: ['outer', 'zero']}).message,
+                'invalid multianewarray descriptor'))
+    'multi-array total allocation is bounded before recursive construction' |>
+        t.assert(str.contains?(app.run(multiProgram.value, {},
+                {args: ['large', 'large', 'large']}).message,
+                'multianewarray allocation budget exceeded'))
+    multiArchive := app.bundle([multiBytes], 'MultiArrayMain')
+    multiOak := app.standaloneSource(multiProgram.value, {}, {},
+        'lib/applet-runtime.oak', multiArchive.value)
+    'readable multi-array Oak retains exact original class archive' |>
+        t.assert(multiOak.type = :ok &
+            str.contains?(multiOak.value, 'multianewarray (descriptor, dimensions)') &
+            app.fromOak(multiOak.value).value.(0) = multiBytes)
+    'Java target has metered recursive multianewarray, not JVM bridging' |>
+        t.assert(str.contains?(java.source(multiProgram.value, {}, {},
+            'MultiArrayConverted').value, 'static Arr multi('))
+    multiStatic := classfile.method(multiClass, '<clinit>', '()V')
+    multiAt := ?
+    std.range(len(multiStatic.code)) |> std.each(fn(i) if multiAt = ? &
+        codepoint(multiStatic.code.(i)) = 197 -> multiAt <- i)
+    'static multi-array initializer has a multianewarray instruction' |>
+        t.assert(multiAt != ?)
+    fn multiChanged(after) {
+        offset := multiStatic.codeOffset + multiAt + 3
+        std.slice(multiBytes, 0, offset) + char(after) +
+            std.slice(multiBytes, offset + 1)
+    }
+    'zero and over-rank dimension operands are rejected before execution' |>
+        t.assert(str.contains?(app.compile([multiChanged(0)], {}).message,
+                'invalid or unsupported multianewarray descriptor/dimensions') &
+            str.contains?(app.compile([multiChanged(3)], {}).message,
+                'invalid or unsupported multianewarray descriptor/dimensions'))
+    mainJar := zip.entries(fs.readFile('test/fixtures/HelloMain.jar'))
+    'JAR with only static main selects entry' |> t.eq(mainJar.entry, 'HelloMain')
+    helperFirst := zip.entries(fs.readFile('test/fixtures/HelperFirst.jar'))
+    'helper-first JAR selects Applet entry, not arbitrary first class' |>
+        t.eq([helperFirst.count, helperFirst.entry], [2, 'CounterApplet'])
+    inherited := app.compile([fs.readFile('test/fixtures/InheritedApplet.class'),
+        fs.readFile('test/fixtures/BaseApplet.class')], {entry: 'InheritedApplet', paint?: true})
+    'inherited Applet lifecycle and paint compile' |> t.eq(inherited.type, :ok)
+    'JAR superclass before subclass selects runnable leaf' |> t.eq(
+        zip.entries(fs.readFile('test/fixtures/InheritedApplet.jar')).entry, 'InheritedApplet')
+    inheritedRun := app.run(inherited.value, {}, {paint?: true})
+    'inherited init executes before child start' |> t.eq(inheritedRun.output,
+        'inherited init\nchild start\n')
+    'inherited paint draws actual green rectangle' |> t.eq([
+        inheritedRun.draw.(0).color, inheritedRun.draw.(0).x,
+        inheritedRun.draw.(0).width], ['rgb(0,255,0)', 1, 8])
+    publicInherited := app.compile([
+        fs.readFile('test/fixtures/InheritedPublicApplet.class'),
+        fs.readFile('test/fixtures/PublicBaseApplet.class')],
+        {entry: 'InheritedPublicApplet', paint?: true})
+    'subclass without overrides compiles inherited lifecycle' |>
+        t.eq(publicInherited.type, :ok)
+    publicRun := app.run(publicInherited.value, {}, {paint?: true})
+    'subclass without overrides actually calls inherited init/paint' |>
+        t.eq([publicRun.output, publicRun.draw.(0).color],
+            ['public base init\npublic child start\n', 'rgb(255,0,0)'])
+    'main JAR runs without JVM' |> t.eq(app.run(app.compile(mainJar.classes,
+        {entry: mainJar.entry}).value, {}, {args: ['Bob']}).output, '1\nBob\n14\n')
+    mainJava := java.source(mainProgram.value, {}, {args: ['Ada']}, 'HelloMainTranslated')
+    'Java emitter includes real main invocation' |> t.assert(str.contains?(mainJava.value,
+        'execute(ENTRY, "main", "([Ljava/lang/String;)V"'))
+    mainArchive := app.bundle([mainBytes], 'HelloMain')
+    mainOak := app.standaloneSource(mainProgram.value, {}, {args: ['Ada']},
+        'lib/applet-runtime.oak', mainArchive.value)
+    'standalone main Oak carries selected invocation kind' |> t.assert(
+        str.contains?(mainOak.value, 'kind: \'application\''))
+    'main Oak restores original class bytes' |> t.eq(app.fromOak(mainOak.value).value.(0), mainBytes)
+
+    // Match a reference JVM: class preparation constants, parent-first
+    // <clinit>, exactly-once active use, inherited static fields and lazy
+    // rejection of an unrelated class with unsupported AWT instructions.
+    initClasses := ['InitMain', 'InitBase', 'InitHelper', 'UnreachableInit'] |>
+        std.map(fn(name) fs.readFile('test/fixtures/' + name + '.class'))
+    initInfo := app.inspect(initClasses.(0)).value
+    magic := initInfo.fields |> std.find(fn(f) f.name = 'MAGIC')
+    label := initInfo.fields |> std.find(fn(f) f.name = 'LABEL')
+    'ConstantValue int and String parsed' |> t.eq([
+        initInfo.fields.(magic).constant, initInfo.fields.(label).constant],
+        [42, 'prepared'])
+    initProgram := app.compile(initClasses, {entry: 'InitMain'})
+    'reachable static initializer preflight succeeds' |> t.eq(initProgram.type, :ok)
+    'five reachable methods including three initializers' |> t.eq(initProgram.stats.methods, 5)
+    'unreferenced initializer is not faked or compiled' |> t.eq(
+        len(keys(initProgram.value.classes.UnreachableInit.methods)), 0)
+    initCoverage := bridge.coverage({type: :ok, classes: initClasses})
+    incompleteCoverage := bridge.coverage({type: :ok, classes: [initClasses.(0)]})
+    'whole-input inventory reports omitted superclass as a dependency' |> t.assert(
+        incompleteCoverage.blockers |> std.some(fn(item) {
+            str.contains?(item.message, 'missing or unmodeled superclass InitBase')
+        }))
+    'whole-input inventory rejects invalid supplied bytes without crashing' |> t.eq(
+        bridge.coverage({type: :ok, classes: [?]}).type, :error)
+    'whole-input inventory identifies the unreachable AWT blocker' |> t.assert(
+        initCoverage.type = :ok & initCoverage.allBodiesPreflighted? = false &
+        (initCoverage.blockers |> std.some(fn(item) item.member =
+            'UnreachableInit.<clinit>()V' & str.contains?(item.message, 'java/awt/Font'))))
+    'whole-input inventory does not suppress default-interface bodies' |> t.assert(
+        bridge.coverage({type: :ok, classes: [
+            fs.readFile('test/fixtures/DefaultSpeaker.class')]}).blockers.(0).message =
+            'interface default/instance method bodies are not linked')
+    'static field resolves to declaring parent' |> t.eq(
+        initProgram.value.classes.InitMain.methods.('<clinit>()V').code.(3).(2).(0), 'InitBase')
+    'static final ConstantValue prepared before initializer' |> t.eq([
+        initProgram.value.classes.InitMain.static.('InitMain.MAGIC:I'),
+        initProgram.value.classes.InitMain.static.('InitMain.LABEL:Ljava/lang/String;')],
+        [42, 'prepared'])
+    reference := 'base\nentry\n42\nprepared\n7\nhelper\n2\n2\n7\n'
+    'class initialization matches reference JVM order and exactly once' |> t.eq(
+        app.run(initProgram.value, {}, {}).output, reference)
+    'static state isolated on rerun with initializer' |> t.eq(
+        app.run(initProgram.value, {}, {}).output, reference)
+    'class initializers consume bounded step budget' |> t.eq(
+        app.run(initProgram.value, {}, {maxSteps: 3}).type, :error)
+    initJava := java.source(initProgram.value, {}, {}, 'InitMainConverted')
+    'Java output has matching class initialization logic' |> t.assert(
+        initJava.type = :ok & str.contains?(initJava.value, 'INITIALIZED.add(owner)'))
+
+    dispatchClasses := ['DispatchMain', 'DispatchBase', 'DispatchChild'] |>
+        std.map(fn(name) fs.readFile('test/fixtures/' + name + '.class'))
+    dispatch := app.compile(dispatchClasses, {entry: 'DispatchMain'})
+    'reachable JVM invokevirtual and inherited invokestatic preflight' |>
+        t.eq(dispatch.type, :ok)
+    'receiver override is verified, not the unused base implementation' |> t.assert(
+        dispatch.value.classes.DispatchChild.methods.('value()I') != ? &
+        dispatch.value.classes.DispatchBase.methods.('value()I') = ?)
+    'inherited static method resolves to declaring class' |> t.eq(
+        dispatch.value.classes.DispatchMain.methods.('main([Ljava/lang/String;)V').code.(9).(2).(0),
+        'DispatchBase')
+    'virtual receiver dispatch and inherited static call match JVM' |> t.eq(
+        app.run(dispatch.value, {}, {}).output, '2\n7\n')
+    dispatchJava := java.source(dispatch.value, {}, {}, 'DispatchMainConverted')
+    'Java target also dispatches by actual receiver class' |> t.assert(
+        dispatchJava.type = :ok & str.contains?(dispatchJava.value,
+            'String dispatchOwner = (op == 182 || op == 185)'))
+
+    htmlDesc := manifest.load('test/fixtures/CounterApplet.html',
+        fs.readFile('test/fixtures/CounterApplet.html'))
+    'local HTML applet descriptor selects bytecode and parameter' |> t.eq(
+        [htmlDesc.type, htmlDesc.entry, htmlDesc.params.name], [:ok, 'CounterApplet', 'Ada'])
+    jnlpDesc := manifest.load('test/fixtures/HelloMain.jnlp',
+        fs.readFile('test/fixtures/HelloMain.jnlp'))
+    'local JNLP application supplies JAR and arguments' |> t.eq(
+        [jnlpDesc.type, jnlpDesc.entry, jnlpDesc.args], [:ok, 'HelloMain', ['Ada']])
+    'remote JNLP codebase rejected' |> t.eq(manifest.load('test/fixtures/HelloMain.jnlp',
+        '<jnlp codebase="https://example.com/"><application-desc main-class="HelloMain"/></jnlp>').type,
+        :error)
+    'JNLP external entity markup rejected' |> t.eq(manifest.load('test/fixtures/HelloMain.jnlp',
+        '<!DOCTYPE jnlp><jnlp/>').type, :error)
+    page := app.html('console.log("</ScRiPt>")', 'test')
+    'HTML script closing tag escaped' |> t.assert(str.contains?(page, '<\\/ScRiPt>'))
+
+    // Oak JVM bridge: three frontends, one verifier/image and a portable,
+    // deliberately narrow VM-library descriptor table.
+    math := bridge.load({entry: 'test/fixtures/MathMain.class'}, {})
+    checkedMath := bridge.link(math, {entry: 'MathMain'})
+    'Oak JVM bridge accepts a class-file frontend' |> t.eq([
+        math.type, math.backend, checkedMath.type], [:ok, 'class', :ok])
+    mathReference := '13\n-2147483648\n9\n6\n'
+    'pure java.lang.Math calls use portable Oak VM-library intrinsics' |> t.eq(
+        bridge.execute(checkedMath.value, {}, {}).output, mathReference)
+    narrowInput := bridge.load({entry: 'test/fixtures/NarrowIntMain.class'}, {})
+    narrowImage := bridge.link(narrowInput, {entry: 'NarrowIntMain'})
+    'JVM i2b/i2c/i2s narrow to signed byte/unsigned char/signed short' |> t.eq(
+        bridge.execute(narrowImage.value, {}, {}).output, '-1\n65535\n-1\n')
+    narrowCode := narrowImage.value.classes.NarrowIntMain.methods.('main([Ljava/lang/String;)V').code
+    'narrowing conversion instructions are preserved in the shared image' |> t.assert(
+        (narrowCode |> std.some(fn(inst) inst.(0) = 145)) &
+        (narrowCode |> std.some(fn(inst) inst.(0) = 146)) &
+        (narrowCode |> std.some(fn(inst) inst.(0) = 147)))
+    printf('[applet-progress] bridge, stack and JAR compiler fixtures')
+    wideRaw := fs.readFile('test/fixtures/WideLocalMain.class')
+    wideImage := app.compile([wideRaw], {entry: 'WideLocalMain'})
+    widePlain := app.compile([wideRaw], {entry: 'WideLocalMain', optimize?: false})
+    'JVM wide indexed int/ref locals and signed wide iinc match the reference JVM' |> t.eq([
+        app.run(wideImage.value, {}, {}).output,
+        app.run(widePlain.value, {}, {}).output], ['wide\n698\n', 'wide\n698\n'])
+    wideInstructions := widePlain.value.classes.WideLocalMain.methods.('calculate()I').code
+    fn hasWide(index, action, increment) {
+        wideInstructions |> std.some(fn(inst) {
+            inst.(0) = 196 & inst.(1) = index & inst.(2).(0) = action &
+                inst.(2).(1) = increment
+        })
+    }
+    'wide prefix remains one IR instruction with 16-bit index and increment' |> t.assert(
+        hasWide(256, 54, 0) & hasWide(261, 58, 0) & hasWide(261, 25, 0) &
+        hasWide(0, 132, -300) & hasWide(260, 132, 200))
+    'whole-input coverage checks every method with wide locals' |> t.eq([
+        bridge.coverage({type: :ok, classes: [wideRaw]}).methods,
+        bridge.coverage({type: :ok, classes: [wideRaw]}).decodedBodies], [3, 3])
+    'generated Java carries the same wide integer operation' |> t.assert(
+        str.contains?(java.source(wideImage.value, {}, {}, 'WideLocalMainConverted').value,
+            'case 196:'))
+    wideCls := classfile.parseClass(wideRaw).value
+    wideMethod := classfile.method(wideCls, 'calculate', '()I')
+    wideAt := str.indexOf(wideMethod.code, char(196) + char(54) + char(1) + char(0))
+    'wide fixture stores index 256 in a four-byte instruction' |> t.assert(wideAt > 0)
+    wideWrongOp := std.clone(wideMethod)
+    wideWrongOp.code <- std.slice(wideMethod.code, 0, wideAt + 1) + char(169) +
+        std.slice(wideMethod.code, wideAt + 2)
+    'unsupported wide ret fails before execution' |> t.assert(str.contains?(
+        lower.lowerMethod(wideCls, wideWrongOp, {}, false).message,
+        'unsupported wide local opcode 0xa9'))
+    wideOutside := std.clone(wideMethod)
+    wideOutside.code <- std.slice(wideMethod.code, 0, wideAt + 2) + char(255) +
+        char(255) + std.slice(wideMethod.code, wideAt + 4)
+    'wide local index beyond max_locals is rejected' |> t.assert(str.contains?(
+        lower.lowerMethod(wideCls, wideOutside, {}, false).message,
+        'wide local index exceeds max_locals'))
+    wideTruncated := std.clone(wideMethod)
+    wideTruncated.code <- std.slice(wideMethod.code, 0, wideAt + 3)
+    'truncated wide local operand is rejected' |> t.assert(str.contains?(
+        lower.lowerMethod(wideCls, wideTruncated, {}, false).message,
+        'truncated bytecode operand'))
+    jumpIntoWide := {name: 'BadWide', pool: [?]}
+    jumpMethod := {name: 'calculate', desc: '()I', catches: 0, flags: 8,
+        locals: 1, stack: 1, code: char(3) + char(167) + char(0) + char(4) +
+            char(196) + char(21) + char(0) + char(0) + char(172)}
+    'branch into the middle of a wide instruction is rejected' |> t.assert(str.contains?(
+        lower.lowerMethod(jumpIntoWide, jumpMethod, {}, false).message,
+        'branch target is not an instruction boundary'))
+    shuffleRaw := fs.readFile('test/fixtures/StackShuffleMain.class')
+    shuffleImage := app.compile([shuffleRaw], {entry: 'StackShuffleMain'})
+    'JVM field/array increments preserve stack order through dup_x1/dup_x2/dup2' |> t.eq(
+        app.run(shuffleImage.value, {}, {}).output, '5\n7\n10\n12\n19\n')
+    shuffleCode := shuffleImage.value.classes.StackShuffleMain.methods.('exercise()I').code
+    'all three one-slot stack shuffles survive bytecode lowering' |> t.assert(
+        (shuffleCode |> std.some(fn(inst) inst.(0) = 90)) &
+        (shuffleCode |> std.some(fn(inst) inst.(0) = 91)) &
+        (shuffleCode |> std.some(fn(inst) inst.(0) = 92)))
+    'whole-input inventory checks both stack-shuffle constructor and methods' |> t.assert(
+        bridge.coverage({type: :ok, classes: [shuffleRaw]}).allBodiesPreflighted?)
+    primitiveRaw := fs.readFile('test/fixtures/PrimitiveArrayMain.class')
+    primitiveImage := app.compile([primitiveRaw], {entry: 'PrimitiveArrayMain'})
+    'JVM short/char array reads and stores match signed/unsigned reference behavior' |> t.eq(
+        app.run(primitiveImage.value, {}, {}).output,
+        '65535\n0\n-32768\n32767\n2\n2\n')
+    primitiveCode := primitiveImage.value.classes.PrimitiveArrayMain.methods.(
+        'main([Ljava/lang/String;)V').code
+    'array decoder admits castore/caload/sastore/saload only as distinct opcodes' |> t.assert(
+        (primitiveCode |> std.some(fn(inst) inst.(0) = 52)) &
+        (primitiveCode |> std.some(fn(inst) inst.(0) = 53)) &
+        (primitiveCode |> std.some(fn(inst) inst.(0) = 85)) &
+        (primitiveCode |> std.some(fn(inst) inst.(0) = 86)))
+    'Java emitter models primitive array kinds and narrow storage' |> t.assert(
+        str.contains?(java.source(primitiveImage.value, {}, {},
+            'PrimitiveArrayMainConverted').value, 'case 52: case 85: valid ='))
+    switchRaw := fs.readFile('test/fixtures/SwitchMain.class')
+    switchImage := app.compile([switchRaw], {entry: 'SwitchMain'})
+    switchPlain := app.compile([switchRaw], {entry: 'SwitchMain', optimize?: false})
+    switchExpected := '31\n11\n-7\n0\n17\n20\n31\n5\n7\n9\n13\n17\n'
+    'dense and sparse signed JVM switches match the reference JVM' |> t.eq(
+        [app.run(switchImage.value, {}, {}).output,
+            app.run(switchPlain.value, {}, {}).output], [switchExpected, switchExpected])
+    denseSwitch := switchPlain.value.classes.SwitchMain.methods.('dense(I)I').code.(1)
+    lookupSwitch := switchPlain.value.classes.SwitchMain.methods.('sparse(I)I').code.(1)
+    'tableswitch retains low key and default/case instruction targets' |> t.eq(
+        denseSwitch, [170, 12, [-2, 2, 4, 6, 8, 10]])
+    'lookupswitch retains sorted signed keys and default/case targets' |> t.eq(
+        lookupSwitch, [171, 10, [-2147483648, 2, -100, 4, 37, 6, 1000000, 8]])
+    switchCls := classfile.parseClass(switchRaw).value
+    denseMethod := classfile.method(switchCls, 'dense', '(I)I')
+    sparseMethod := classfile.method(switchCls, 'sparse', '(I)I')
+    malformedPad := std.clone(denseMethod)
+    malformedPad.code <- std.slice(denseMethod.code, 0, 2) + char(1) +
+        std.slice(denseMethod.code, 3)
+    'nonzero tableswitch padding rejected before execution' |> t.assert(str.contains?(
+        lower.lowerMethod(switchCls, malformedPad, {}, false).message, 'nonzero switch padding'))
+    malformedKey := std.clone(sparseMethod)
+    // The second lookup key starts at byte 20; make it duplicate the first.
+    malformedKey.code <- std.slice(sparseMethod.code, 0, 20) +
+        char(128) + char(0) + char(0) + char(0) + std.slice(sparseMethod.code, 24)
+    'duplicate lookupswitch keys rejected before execution' |> t.assert(str.contains?(
+        lower.lowerMethod(switchCls, malformedKey, {}, false).message,
+        'lookupswitch keys are not strictly increasing'))
+    oversizedTable := std.clone(denseMethod)
+    // high lives at byte 12: a huge count must fail before allocation.
+    oversizedTable.code <- std.slice(denseMethod.code, 0, 12) +
+        char(127) + char(255) + char(255) + char(255) +
+        std.slice(denseMethod.code, 16)
+    'oversized tableswitch count is bounded before its table is read' |> t.assert(str.contains?(
+        lower.lowerMethod(switchCls, oversizedTable, {}, false).message,
+        'invalid or truncated switch table'))
+    malformedTarget := std.clone(denseMethod)
+    malformedTarget.code <- std.slice(denseMethod.code, 0, 4) +
+        char(0) + char(0) + char(0) + char(1) + std.slice(denseMethod.code, 8)
+    'switch branch into padding rejected at decode boundary' |> t.assert(str.contains?(
+        lower.lowerMethod(switchCls, malformedTarget, {}, false).message,
+        'branch target is not an instruction boundary'))
+    completeCoverage := bridge.coverage({type: :ok, classes: [switchRaw]})
+    'whole-class coverage reports all switch bodies, not only reachable main' |> t.eq(
+        [completeCoverage.type, completeCoverage.methods, completeCoverage.decodedBodies,
+            completeCoverage.allBodiesPreflighted?, len(completeCoverage.blockers)],
+        [:ok, 4, 4, true, 0])
+    'Math.abs(INT_MIN) preserves Java signed int32 semantics' |> t.eq(
+        vmLib.jvmInvoke(vmLib.jvmMethod('java/lang/Math', 'abs', '(I)I', 184),
+            [-2147483648]).value, -2147483648)
+    'VM library rejects incorrect invoke opcode and unsupported descriptor' |> t.eq([
+        vmLib.jvmMethod('java/lang/Math', 'abs', '(I)I', 182),
+        vmLib.jvmMethod('java/lang/Math', 'sin', '(D)D', 184)], [?, ?])
+    mathJava := java.source(checkedMath.value, {}, {}, 'MathMainConverted')
+    'Java emitter mirrors VM Math adapter' |> t.assert(mathJava.type = :ok &
+        str.contains?(mathJava.value, 'Math.abs(num(args[0]))'))
+    'VM library admits only exact field descriptors and allowed host types' |> t.eq([
+        vmLib.jvmField('java/lang/System', 'out', 'Ljava/io/PrintStream;', 179),
+        vmLib.jvmField('java/lang/System', 'out', 'Ljava/lang/String;', 178),
+        vmLib.jvmNew('java/lang/Thread'),
+        vmLib.jvmNew('java/lang/StringBuffer')], [?, ?, ?, 'text-builder'])
+    'VM library validates String and Integer invocation opcode' |> t.eq([
+        vmLib.jvmMethod('java/lang/String', 'concat',
+            '(Ljava/lang/String;)Ljava/lang/String;', 184),
+        vmLib.jvmMethod('java/lang/Integer', 'sum', '(II)I', 182),
+        vmLib.jvmMethod('java/lang/Integer', 'sum', '(II)I', 184).op],
+        [?, ?, 'isum'])
+    'Integer.sum overflows and compare uses signed int32' |> t.eq([
+        vmLib.jvmInvoke(vmLib.jvmMethod('java/lang/Integer', 'sum', '(II)I', 184),
+            [2147483647, 1]).value,
+        vmLib.jvmInvoke(vmLib.jvmMethod('java/lang/Integer', 'compare', '(II)I', 184),
+            [-2147483648, 0]).value], [-2147483648, -1])
+    'Integer.parseInt validates full signed range and rejects overflow' |> t.eq([
+        vmLib.jvmInvoke(vmLib.jvmMethod('java/lang/Integer', 'parseInt',
+            '(Ljava/lang/String;)I', 184), ['-2147483648']).value,
+        vmLib.jvmInvoke(vmLib.jvmMethod('java/lang/Integer', 'parseInt',
+            '(Ljava/lang/String;)I', 184), ['2147483648']).type],
+        [-2147483648, :error])
+    'non-ASCII JVM String operation fails explicitly, not with a byte count' |> t.eq(
+        vmLib.jvmString(vmLib.jvmMethod('java/lang/String', 'length', '()I', 182),
+            'café', []).type, :error)
+    'ASCII String equalsIgnoreCase matches Java, null compares false' |> t.eq([
+        vmLib.jvmString(vmLib.jvmMethod('java/lang/String', 'equalsIgnoreCase',
+            '(Ljava/lang/String;)Z', 182), 'LoW', ['lOw']).value,
+        vmLib.jvmString(vmLib.jvmMethod('java/lang/String', 'equalsIgnoreCase',
+            '(Ljava/lang/String;)Z', 182), 'LoW', [?]).value], [1, 0])
+    'String.indexOf accepts ASCII code points, rejects unsupported Unicode' |> t.eq([
+        vmLib.jvmString(vmLib.jvmMethod('java/lang/String', 'indexOf', '(I)I', 182),
+            'Hello', [108]).value,
+        vmLib.jvmString(vmLib.jvmMethod('java/lang/String', 'indexOf', '(I)I', 182),
+            'Hello', [256]).type], [2, :error])
+    'String.valueOf(int) admits only static matching descriptor' |> t.eq([
+        vmLib.jvmMethod('java/lang/String', 'valueOf', '(I)Ljava/lang/String;', 182),
+        vmLib.jvmInvoke(vmLib.jvmMethod('java/lang/String', 'valueOf',
+            '(I)Ljava/lang/String;', 184), [-13]).value], [?, '-13'])
+    stringCase := bridge.load({entry: 'test/fixtures/StringCaseMain.class'}, {})
+    'actual javac String methods use the same Oak VM library' |> t.eq(
+        bridge.run(stringCase, {entry: 'StringCaseMain'}, {},
+            {args: ['high']}).output, 'true\ntrue\n2\n-1\n-13\n')
+    hostTypes := bridge.load({entry: 'test/fixtures/HostSubtypeMain.class'}, {})
+    hostReference := (std.range(12) |> std.map(fn(_) 'true\n') |> str.join('')) +
+        'false\ntrue\n'
+    'host object and primitive/reference array subtyping matches Java' |> t.eq(
+        bridge.run(hostTypes, {entry: 'HostSubtypeMain'}, {}, {}).output,
+        hostReference)
+    badTarget := str.replace(fs.readFile('test/fixtures/HostSubtypeMain.class'),
+        'java/lang/Cloneable', 'java/lang/UnknownXX')
+    'unmodeled JDK instanceof target fails preflight, not always false' |> t.assert(
+        app.inspect(badTarget).type = :ok &
+        str.contains?(app.compile([badTarget], {}).message,
+            'unsupported or missing JVM reference type java/lang/UnknownXX'))
+    'VM reference allowlist distinguishes modeled JDK arrays from unknown APIs' |>
+        t.eq([vmLib.jvmReference('java/lang/Cloneable'),
+            vmLib.jvmReference('java/lang/UnknownXX')], [true, ?])
+    'JDK Applet ancestry is Panel/Container/Component, not arbitrary Point' |>
+        t.eq(['java/awt/Panel', 'java/awt/Container',
+              'java/awt/Component', 'java/awt/Point'] |>
+            std.map(fn(parent) vmLib.jvmReferenceSubtype?(
+                'java/applet/Applet', parent)),
+            [true, true, true, false])
+    printf('[applet-progress] allocation-site and constructor verifier slice')
+    constructorRaw := fs.readFile('test/fixtures/ConstructorFrameMain.class')
+    constructorClass := classfile.parseClass(constructorRaw).value
+    constructorEmpty := classfile.method(constructorClass, '<init>', '()V')
+    constructorFresh := classfile.method(constructorClass, 'fresh',
+        '()Ljava/lang/Object;')
+    constructorTwo := classfile.method(constructorClass, 'two',
+        '()Ljava/lang/Object;')
+    constructorMain := classfile.method(constructorClass, 'main',
+        '([Ljava/lang/String;)V')
+    fn mutateConstructorAt(method, at, original, replacement) {
+        pos := method.codeOffset + at
+        std.slice(constructorRaw, 0, pos) + replacement +
+            std.slice(constructorRaw, pos + len(original))
+    }
+    fn mutateConstructor(method, original, replacement) {
+        at := std.find(std.range(len(method.code) - len(original) + 1),
+            fn(i) std.slice(method.code, i, i + len(original)) = original)
+        mutateConstructorAt(method, at, original, replacement)
+    }
+    initCall := std.slice(constructorEmpty.code, 1, 4)
+    freshCall := std.slice(constructorFresh.code, 4, 7)
+    'fixture actually calls the superclass and initializes a fresh object' |>
+        t.eq([codepoint(initCall.(0)), codepoint(freshCall.(0))],
+            [183, 183])
+    constructorProgram := app.compile([constructorRaw], {})
+    'valid this()/super() delegation and allocation-site aliases preflight' |>
+        t.eq(constructorProgram.type, :ok)
+    'constructor, two fresh objects and initialized aliases match JDK output' |>
+        t.eq(app.run(constructorProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/ConstructorFrameMain.expected'))
+    skipInit := char(87) + char(0) + char(0)
+    missingSuper := mutateConstructor(constructorEmpty, initCall, skipInit)
+    missingFresh := mutateConstructor(constructorFresh, freshCall, skipInit)
+    'class parser accepts same-layout negative constructor mutations' |> t.eq([
+        app.inspect(missingSuper).type, app.inspect(missingFresh).type],
+        [:ok, :ok])
+    'reachable no-arg constructor cannot return without super()' |> t.assert(
+        str.contains?(app.compile([missingSuper], {}).message,
+            'constructor returns before this()/super() initialization'))
+    discardedThis := mutateConstructorAt(constructorEmpty, 0,
+        std.slice(constructorEmpty.code, 0, 4),
+        char(1) + char(75) + char(0) + char(0))
+    'overwriting local zero cannot bypass the constructor-readiness check' |>
+        t.assert(str.contains?(app.compile([discardedThis], {}).message,
+            'constructor returns before this()/super() initialization'))
+    'a later fresh() cannot return its uninitialized local alias' |> t.assert(
+        str.contains?(app.compile([missingFresh], {}).message,
+            'uninitialized reference used before constructor invocation'))
+    secondNewAt := std.find(std.range(len(constructorTwo.code) - 2),
+        fn(i) i > 0 & codepoint(constructorTwo.code.(i)) = 187)
+    'two() has a second independent new allocation site' |>
+        t.assert(secondNewAt > 0)
+    firstInitAt := std.find(std.range(len(constructorTwo.code) - 2),
+        fn(i) codepoint(constructorTwo.code.(i)) = 183)
+    'two() initializes its first site before allocating the second' |>
+        t.assert(firstInitAt > 0 & firstInitAt < secondNewAt)
+    onlySecondInitialized := mutateConstructorAt(constructorTwo,
+        firstInitAt, std.slice(constructorTwo.code, firstInitAt,
+            firstInitAt + 3), skipInit)
+    'initializing site two never initializes an alias from site one' |>
+        t.assert(str.contains?(app.compile([onlySecondInitialized], {}).message,
+            'uninitialized reference used before constructor invocation'))
+    secondNew := std.slice(constructorTwo.code,
+        secondNewAt, secondNewAt + 3)
+    repeatInit := mutateConstructorAt(constructorTwo, secondNewAt,
+        secondNew, char(42) + char(0) + char(0))
+    'an initialized object cannot receive a second <init> invocation' |>
+        t.assert(str.contains?(app.compile([repeatInit], {}).message,
+            'constructor requires its uninitialized receiver'))
+    compareNewAt := std.find(std.range(len(constructorMain.code) - 7),
+        fn(i) codepoint(constructorMain.code.(i)) = 187 &
+            codepoint(constructorMain.code.(i + 3)) = 89 &
+            codepoint(constructorMain.code.(i + 4)) = 183 &
+            codepoint(constructorMain.code.(i + 7)) = 165)
+    'fixture has a new; dup; invokespecial; if_acmpeq site' |>
+        t.assert(compareNewAt >= 0)
+    compareCall := std.slice(constructorMain.code,
+        compareNewAt + 4, compareNewAt + 7)
+    compareUninitialized := mutateConstructor(constructorMain,
+        compareCall, skipInit)
+    comparisonProgram := app.compile([compareUninitialized], {})
+    'JDK-valid reference identity comparison may consume an uninitialized value' |>
+        t.eq(comparisonProgram.type, :ok)
+    'uninitialized identity comparison has JDK-matched output' |>
+        t.eq(app.run(comparisonProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/ConstructorFrameMain.expected'))
+
+    printf('[applet-progress] bounded pre-super own-field verifier rule')
+    valueCtor := classfile.method(constructorClass, '<init>', '(I)V')
+    valuePrefix := std.slice(valueCtor.code, 0, 9)
+    'real constructor calls this() and then writes its own field' |> t.eq([
+        codepoint(valuePrefix.(0)), codepoint(valuePrefix.(1)),
+        codepoint(valuePrefix.(4)), codepoint(valuePrefix.(5)),
+        codepoint(valuePrefix.(6))], [42, 183, 42, 27, 181])
+    ownBeforeThis := mutateConstructorAt(valueCtor, 0, valuePrefix,
+        std.slice(valuePrefix, 4, 9) + std.slice(valuePrefix, 0, 4))
+    ownBeforeProgram := app.compile([ownBeforeThis], {})
+    'JDK-valid direct own putfield before this() passes bounded preflight' |>
+        t.eq(ownBeforeProgram.type, :ok)
+    'own-field initialization before this() preserves JDK fixture output' |>
+        t.eq(app.run(ownBeforeProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/ConstructorFrameMain.expected'))
+    getBeforeThis := mutateConstructorAt(valueCtor, 0, valuePrefix,
+        char(42) + char(180) + std.slice(valuePrefix, 7, 9) +
+            char(87) + std.slice(valuePrefix, 0, 4))
+    'getfield on uninitialized this still fails before execution' |>
+        t.assert(str.contains?(app.compile([getBeforeThis], {}).message,
+            'uninitialized reference used before constructor invocation'))
+    newFieldBeforeInit := mutateConstructorAt(constructorMain, 6,
+        std.slice(constructorMain.code, 6, 9),
+        std.slice(valuePrefix, 6, 9))
+    'putfield on a new allocation site is not the this exception' |>
+        t.assert(str.contains?(app.compile([newFieldBeforeInit], {}).message,
+            'uninitialized reference used before constructor invocation'))
+    preSuperRaw := fs.readFile('test/fixtures/PreSuperFieldMain.class')
+    preSuperBase := fs.readFile('test/fixtures/PreSuperFieldBase.class')
+    preSuperClass := classfile.parseClass(preSuperRaw).value
+    preSuperCtor := classfile.method(preSuperClass, '<init>', '(I)V')
+    preSuperPrefix := std.slice(preSuperCtor.code, 0, 9)
+    fn mutatePreSuper(prefix) std.slice(preSuperRaw, 0, preSuperCtor.codeOffset) +
+        prefix + std.slice(preSuperRaw, preSuperCtor.codeOffset + 9)
+    linkedFieldImage := app.compile([preSuperRaw, preSuperBase],
+        {entry: 'PreSuperFieldMain'})
+    'base and subclass original constructors link in one image' |>
+        t.eq(linkedFieldImage.type, :ok)
+    'JDK original base and own-field output matches Oak' |>
+        t.eq(app.run(linkedFieldImage.value, {}, {}).output,
+            fs.readFile('test/fixtures/PreSuperFieldMain.expected'))
+    ownBeforeSuper := mutatePreSuper(
+        std.slice(preSuperPrefix, 4, 9) + std.slice(preSuperPrefix, 0, 4))
+    ownBeforeSuperImage := app.compile([ownBeforeSuper, preSuperBase],
+        {entry: 'PreSuperFieldMain'})
+    'JDK-valid subclass own-field store before super() passes preflight' |>
+        t.eq(ownBeforeSuperImage.type, :ok)
+    'JDK-valid subclass own-field store preserves output' |>
+        t.eq(app.run(ownBeforeSuperImage.value, {}, {}).output,
+            fs.readFile('test/fixtures/PreSuperFieldMain.expected'))
+    inheritedStoreAt := std.find(std.range(len(preSuperCtor.code) - 2),
+        fn(i) i > 6 & codepoint(preSuperCtor.code.(i)) = 181)
+    'fixture references a second, inherited field declared only in base' |>
+        t.assert(inheritedStoreAt > 6)
+    inheritedBeforeSuper := mutatePreSuper(char(42) + char(27) +
+        std.slice(preSuperCtor.code, inheritedStoreAt,
+            inheritedStoreAt + 3) + std.slice(preSuperPrefix, 0, 4))
+    'symbolic subclass owner does not make inherited field an own field' |>
+        t.assert(str.contains?(app.compile([
+            inheritedBeforeSuper, preSuperBase],
+            {entry: 'PreSuperFieldMain'}).message,
+            'uninitialized reference used before constructor invocation'))
+
+    printf('[applet-progress] versioned StackMapTable structure and boundaries')
+    frameRaw := fs.readFile('test/fixtures/StackMapFrameMain.class')
+    frameCtor := fs.readFile('test/fixtures/FrameCtor.class')
+    frameClass := classfile.parseClass(frameRaw).value
+    frameMake := classfile.method(frameClass, 'make', '(I)I')
+    'Java 8 full frames retain decoded PCs and four new-site references' |>
+        t.eq([frameMake.framePcs, frameMake.newPcs], [[13, 15], [0, 0, 0, 0]])
+    frameProgram := app.compile([frameRaw, frameCtor],
+        {entry: 'StackMapFrameMain'})
+    'valid modern full frames and uninitialized sites pass preflight' |>
+        t.eq(frameProgram.type, :ok)
+    'bounded StackMapTable fixture produces pinned JDK output' |>
+        t.eq(app.run(frameProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/StackMapFrameMain.expected'))
+    extendedRaw := fs.readFile('test/fixtures/StackMapExtendedMain.class')
+    extendedClass := classfile.parseClass(extendedRaw).value
+    'extended same-locals-one-stack frame 247 reaches byte 88' |>
+        t.eq(classfile.method(extendedClass, 'read', '(I)I').framePcs,
+            [88])
+    extendedProgram := app.compile([extendedRaw],
+        {entry: 'StackMapExtendedMain'})
+    'extended frame fixture passes bounded preflight' |>
+        t.eq(extendedProgram.type, :ok)
+    'extended exception-target frame and native output match JDK' |>
+        t.eq(app.run(extendedProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/StackMapExtendedMain.expected'))
+    frameHeader := char(0) + char(2) + char(255) + char(0) +
+        char(13) + char(0) + char(1)
+    frameAt := std.find(std.range(len(frameRaw) - len(frameHeader) + 1),
+        fn(i) std.slice(frameRaw, i, i + len(frameHeader)) = frameHeader)
+    'named make() full-frame bytes occur in the pinned fixture' |>
+        t.assert(frameAt > frameMake.codeOffset)
+    fn editFrame(relative, replacement) {
+        pos := frameAt + relative
+        std.slice(frameRaw, 0, pos) + replacement +
+            std.slice(frameRaw, pos + len(replacement))
+    }
+    reservedFrame := editFrame(2, char(200))
+    'reserved modern frame tag fails in the class reader' |> t.assert(
+        str.contains?(classfile.parseClass(reservedFrame).message,
+            'reserved StackMapTable frame type'))
+    invalidTypeFrame := editFrame(10, char(9))
+    'invalid verification-type tag fails in the class reader' |> t.assert(
+        str.contains?(classfile.parseClass(invalidTypeFrame).message,
+            'invalid StackMapTable verification type'))
+    invalidNewFrame := editFrame(12, char(1))
+    'ITEM_Uninitialized must point to a new opcode' |> t.assert(
+        str.contains?(classfile.parseClass(invalidNewFrame).message,
+            'invalid StackMapTable uninitialized new offset'))
+    frameInOperand := editFrame(4, char(12))
+    'structurally valid frame at operand PC parses for selected-entry check' |>
+        t.eq(classfile.parseClass(frameInOperand).type, :ok)
+    'reachable later method rejects a frame at a bytecode operand boundary' |>
+        t.assert(str.contains?(app.compile([frameInOperand, frameCtor],
+            {entry: 'StackMapFrameMain'}).message,
+            'StackMapTable frame is not on an instruction boundary'))
+    // The following synthetic methods isolate the selected-entry, versioned
+    // *required-target* rule; the JDK oracle below edits real Code attributes.
+    printf('[applet-progress] required frames at modern control-flow targets')
+    requiredClass := {name: 'FrameTarget', major: 52, pool: [?]}
+    requiredBranch := {name: 'choose', desc: '()I', flags: 8,
+        locals: 0, stack: 1, catches: 0, handlers: [], framePcs: [],
+        code: char(4) + char(153) + char(0) + char(5) +
+            char(5) + char(172) + char(6) + char(172)}
+    'version 52 implicit empty table cannot cover a reachable ifeq target' |>
+        t.assert(str.contains?(lower.lowerMethod(requiredClass,
+            requiredBranch, {}, true).message,
+            'at byte 6: missing StackMapTable frame at reachable control-flow target'))
+    requiredBranch.framePcs <- [6]
+    'explicit version 52 frame at branch target permits selected lowering' |>
+        t.eq(lower.lowerMethod(requiredClass, requiredBranch, {}, true).type,
+            :ok)
+    requiredBranch.framePcs <- []
+    requiredClass.major <- 51
+    'version 51 also requires a declared branch target frame' |>
+        t.assert(str.contains?(lower.lowerMethod(requiredClass,
+            requiredBranch, {}, true).message,
+            'missing StackMapTable frame at reachable control-flow target'))
+    requiredClass.major <- 50
+    'JDK 11 version 50 inference fallback must remain admitted' |>
+        t.eq(lower.lowerMethod(requiredClass, requiredBranch, {}, true).type,
+            :ok)
+    requiredClass.major <- 49
+    'legacy version 49 uses inference rather than a required table' |>
+        t.eq(lower.lowerMethod(requiredClass, requiredBranch, {}, true).type,
+            :ok)
+    requiredClass.major <- 52
+    entryLoopClass := classfile.parseClass(fs.readFile(
+        'test/fixtures/StackMapEntryLoopMain.class')).value
+    entryLoopMethod := classfile.method(entryLoopClass, 'spin', '()V')
+    'javac writes an explicit frame at a backward goto to byte zero' |>
+        t.eq(entryLoopMethod.framePcs, [0])
+    'valid version 52 back-edge frame at byte zero passes selected lowering' |>
+        t.eq(lower.lowerMethod(entryLoopClass, entryLoopMethod, {}, true).type,
+            :ok)
+    entryLoopMethod.framePcs <- []
+    'implicit initial frame does not replace required back-edge frame zero' |>
+        t.assert(str.contains?(lower.lowerMethod(entryLoopClass,
+            entryLoopMethod, {}, true).message,
+            'at byte 0: missing StackMapTable frame at reachable control-flow target'))
+    extendedRead := classfile.method(extendedClass, 'read', '(I)I')
+    extendedRead.framePcs <- []
+    'reachable exception handler also needs a declared frame at byte 88' |>
+        t.assert(str.contains?(lower.lowerMethod(extendedClass,
+            extendedRead, {}, true).message,
+            'at byte 88: missing StackMapTable frame at reachable control-flow target'))
+    // Well-formed but wrong declared locals still fail on JDK yet currently
+    // run in Magnolia; this does not implement frame type assignability.
+
+    printf('[applet-progress] reference-frame verifier and JDK runtime distinctions')
+    refClasses := ['RefSubtypeMain', 'RefParent', 'RefChild',
+        'RefSibling', 'RefOther', 'RefScore'] |>
+        std.map(fn(name) fs.readFile('test/fixtures/' + name + '.class'))
+    refProgram := app.compile(refClasses, {entry: 'RefSubtypeMain'})
+    'known class/interface/array parents and branch joins link in one VM image' |>
+        t.eq(refProgram.type, :ok)
+    '13 JDK lines for known reference parameters, fields, returns and merges' |>
+        t.eq(app.run(refProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/RefSubtypeMain.expected'))
+    'multi-class reference fixture survives exact original archive restoration' |>
+        t.eq(app.unbundle(app.bundle(refClasses, 'RefSubtypeMain').value).value,
+            refClasses)
+    refMain := classfile.method(app.inspect(refClasses.(0)).value,
+        'main', '([Ljava/lang/String;)V')
+    siblingAt := std.find(std.range(len(refMain.code) - 4),
+        fn(i) codepoint(refMain.code.(i)) = 43 &
+            codepoint(refMain.code.(i + 1)) = 184)
+    'fixture has one parent-typed direct call from an aload_1 reference' |>
+        t.assert(siblingAt >= 0)
+    badSibling := std.slice(refClasses.(0), 0,
+        refMain.codeOffset + siblingAt) + char(45) +
+        std.slice(refClasses.(0), refMain.codeOffset + siblingAt + 1)
+    badRefClasses := std.append([badSibling], std.slice(refClasses, 1))
+    'JDK-rejected sibling reference fails preflight, before prior output' |>
+        t.assert(str.contains?(app.compile(badRefClasses,
+            {entry: 'RefSubtypeMain'}).message,
+            'expected A:RefParent, found A:RefOther'))
+    storeAt := std.find(std.range(len(refMain.code) - 5),
+        fn(i) codepoint(refMain.code.(i)) = 25 &
+            codepoint(refMain.code.(i + 1)) = 5 &
+            codepoint(refMain.code.(i + 2)) = 3 &
+            codepoint(refMain.code.(i + 3)) = 44 &
+            codepoint(refMain.code.(i + 4)) = 83)
+    'fixture has a real reference-array store' |> t.assert(storeAt >= 0)
+    runtimeStore := std.slice(refClasses.(0), 0,
+        refMain.codeOffset + storeAt + 3) + char(45) +
+        std.slice(refClasses.(0), refMain.codeOffset + storeAt + 4)
+    runtimeImage := app.compile(std.append([runtimeStore],
+        std.slice(refClasses, 1)),
+        {entry: 'RefSubtypeMain'})
+    'JDK-valid aastore of a sibling reference is admitted at preflight' |>
+        t.eq(runtimeImage.type, :ok)
+    runtimeFault := app.run(runtimeImage.value, {}, {})
+    'JDK-valid incompatible aastore fails dynamically after five output lines' |>
+        t.eq([runtimeFault.type, runtimeFault.output,
+            runtimeFault.thrown.className],
+            [:error, '4\n9\n-1\n-7\n9\n', 'java/lang/ArrayStoreException'])
+    validArrays := app.compile([fs.readFile('test/fixtures/ValidArraysMain.class')], {})
+    'limited boolean/byte/int/reference arrays match the reference JVM' |>
+        t.eq(app.run(validArrays.value, {}, {}).output,
+            '-56\ntrue\n2\n7\nok\ntrue\n')
+    invalidStore := app.run(app.compile([
+        fs.readFile('test/fixtures/ArrayStoreMain.class')], {}).value, {}, {})
+    'array covariance raises a catchable ArrayStoreException after prior output' |>
+        t.eq([invalidStore.type, invalidStore.output,
+            invalidStore.thrown.className, invalidStore.thrown.message],
+            [:error, 'true\n', 'java/lang/ArrayStoreException',
+                'array store type mismatch'])
+    arrayMethod := validArrays.value.classes.ValidArraysMain.methods.('main([Ljava/lang/String;)V')
+    wrongArrayOp := arrayMethod.code |> std.find(fn(inst) inst.(0) = 46)
+    arrayMethod.code.(wrongArrayOp).(0) <- 50
+    'an invalid hand-edited array opcode fails instead of returning an int as a reference' |>
+        t.eq(app.run(validArrays.value, {}, {}).message,
+            'array opcode incompatible with component type')
+    printedObject := app.compile([
+        fs.readFile('test/fixtures/ObjectPrintMain.class'),
+        fs.readFile('test/fixtures/ObjectPrintMain$Label.class')],
+        {entry: 'ObjectPrintMain'})
+    printed := app.run(printedObject.value, {}, {})
+    'PrintStream(Object) handles null, String and modeled text builders' |>
+        t.eq(printed.output, 'word\nnull\nbuffer\n')
+    'unmodeled user toString fails explicitly instead of printing Oak objects' |>
+        t.eq([printed.type, printed.message],
+            [:error, 'PrintStream.print(Object) cannot model this toString'])
+    library := bridge.load({entry: 'test/fixtures/LibraryMain.class'}, {})
+    libraryImage := bridge.link(library, {entry: 'LibraryMain'})
+    libraryReference := '-2147483648\n-1\n6\n-4\n5\ntrue\n-2147483648\n-13\n'
+    'compiled Integer/String host methods run in the same class VM image' |> t.eq([
+        library.type, libraryImage.type,
+        bridge.execute(libraryImage.value, {}, {args: ['Oak']}).output],
+        [:ok, :ok, libraryReference])
+    'a manifest JAR calls those identical host methods without a JVM' |> t.eq(
+        bridge.run(bridge.load({entry: 'test/fixtures/LibraryMain.jar'}, {}), {},
+            {}, {args: ['Oak']}).output, libraryReference)
+    'hand-edited IR cannot call a host method with a forged descriptor' |> t.eq({
+        libraryImage.value.classes.LibraryMain.methods.('main([Ljava/lang/String;)V').code |>
+            std.each(fn(inst) if inst.(0) = 184 & inst.(2).(1) = 'sum' ->
+                inst.(2).(2) <- '(Ljava/lang/String;)I')
+        bridge.execute(libraryImage.value, {}, {args: ['Oak']}).type
+    }, :error)
+
+    // Real Java interface bytecode: invokeinterface has a five-byte layout,
+    // links through a superinterface and dispatches to concrete overrides.
+    interfaceJar := zip.entries(fs.readFile('test/fixtures/InterfaceMain.jar'))
+    'manifest JAR contains all five linked interface/class images' |> t.eq([
+        interfaceJar.type, interfaceJar.entry, interfaceJar.count],
+        [:ok, 'InterfaceMain', 5])
+    named := interfaceJar.classes |> std.find(fn(bytes) classfile.parseClass(bytes).value.name = 'Named')
+    'interface metadata is parsed instead of discarded' |> t.assert(
+        named != -1 & (classfile.parseClass(interfaceJar.classes.(named)).value.flags & 512) != 0)
+    interfaceImage := bridge.link(bridge.load({entry: 'test/fixtures/InterfaceMain.jar'}, {}),
+        {entry: 'InterfaceMain'})
+    interfaceReference := '3\n8\n7\ntrue\ntrue\n7\n'
+    'invokeinterface resolves transitive interfaces and receiver overrides' |> t.eq([
+        interfaceImage.type, bridge.execute(interfaceImage.value, {}, {}).output],
+        [:ok, interfaceReference])
+    'interface instance/cast and five-byte call are present in lowered IR' |> t.assert(
+        interfaceImage.value.classes.InterfaceMain.methods.('score(LNamed;)I').code |>
+            std.some(fn(inst) inst.(0) = 185 & inst.(2).(0) = 'Named'))
+    mainRaw := fs.readFile('test/fixtures/InterfaceMain.class')
+    scoreMethod := classfile.method(classfile.parseClass(mainRaw).value,
+        'score', '(LNamed;)I')
+    badCountAt := scoreMethod.codeOffset + 4
+    badCountRaw := std.slice(mainRaw, 0, badCountAt) + char(2) +
+        std.slice(mainRaw, badCountAt + 1)
+    'invokeinterface operand count mismatch fails preflight' |> t.eq(
+        app.compile([badCountRaw] |> std.append(std.slice(interfaceJar.classes, 1)),
+            {entry: 'InterfaceMain'}).type, :error)
+    badReservedAt := scoreMethod.codeOffset + 5
+    badReservedRaw := std.slice(mainRaw, 0, badReservedAt) + char(1) +
+        std.slice(mainRaw, badReservedAt + 1)
+    'invokeinterface nonzero reserved operand fails preflight' |> t.eq(
+        app.compile([badReservedRaw] |> std.append(std.slice(interfaceJar.classes, 1)),
+            {entry: 'InterfaceMain'}).type, :error)
+    'missing interface bytecode is reported rather than guessed' |> t.eq(
+        app.compile([mainRaw] |> std.append(std.slice(interfaceJar.classes, 1, 3)),
+            {entry: 'InterfaceMain'}).type, :error)
+    defaultInterface := app.compile([
+        fs.readFile('test/fixtures/DefaultInterfaceMain.class'),
+        fs.readFile('test/fixtures/DefaultSpeaker.class')],
+        {entry: 'DefaultInterfaceMain'})
+    'unimplemented default interface method fails explicitly at link time' |> t.assert(
+        defaultInterface.type = :error &
+        str.contains?(defaultInterface.message, 'interface default methods are not supported'))
+
+    manifestJar := zip.entries(fs.readFile('test/fixtures/ManifestMain.jar'))
+    'folded JAR Main-Class overrides earlier Applet entry' |> t.eq([
+        manifestJar.type, manifestJar.entry, manifestJar.count], [:ok, 'HelloMain', 2])
+    'JAR Main-Class drives shared Oak VM image' |> t.eq(
+        bridge.run(bridge.load({entry: 'test/fixtures/ManifestMain.jar'}, {}), {},
+            {}, {args: ['Ada']}).output, '1\nAda\n14\n')
+    'JAR manifest rejects duplicate Main-Class' |> t.eq(
+        jarManifest.parse('Main-Class: HelloMain\nMain-Class: CounterApplet\n').type, :error)
+    'JAR manifest rejects unsafe Main-Class path' |> t.eq(
+        jarManifest.parse('Main-Class: ../Outside\n').type, :error)
+    'JAR nonclass resource is kept only in the original bytes' |> t.eq(
+        app.unbundle(app.bundleJar(manifestJar.classes, manifestJar.entry,
+            fs.readFile('test/fixtures/ManifestMain.jar')).value).jar,
+        fs.readFile('test/fixtures/ManifestMain.jar'))
+    editableJar := fs.readFile('test/fixtures/EditableMain.jar')
+    editableContents := zip.entries(editableJar)
+    rebuiltJar := jarWriter.repack(editableJar, editableContents.classes)
+    'Oak ZIP writer preserves verified JAR class set and Main-Class' |> t.eq([
+        rebuiltJar.type, zip.entries(rebuiltJar.value).entry,
+        zip.entries(rebuiltJar.value).count], [:ok, 'HelloMain', 2])
+    'Oak ZIP writer preserves nonclass resource content' |> t.assert(
+        str.contains?(rebuiltJar.value, 'A resource that survives Oak JAR recompilation.'))
+    signedJar := fs.readFile('test/fixtures/SignedLike.jar')
+    'edited signed JAR fails rather than emitting stale signature' |> t.eq(
+        jarWriter.repack(signedJar, zip.entries(signedJar).classes).type, :error)
+    corruptResource := str.replace(editableJar, 'A resource that survives',
+        'B resource that survives')
+    'unused JAR resources are CRC-verified during repackaging' |> t.eq([
+        zip.entries(corruptResource).type,
+        jarWriter.repack(corruptResource, editableContents.classes).type], [:ok, :error])
+
+    // Raw IEEE payloads must survive class parsing, both target emitters,
+    // double-width calls/fields/arrays and Java-style exceptional arithmetic.
+    printf('[applet-progress] IEEE arrays and exception fixtures')
+    floatingBytes := fs.readFile('test/fixtures/FloatingMain.class')
+    floatingClass := classfile.parseClass(floatingBytes).value
+    floatingProgram := app.compile([floatingBytes], {})
+    'IEEE fixture passes all reachable I/F/A/J/D frames' |>
+        t.eq(floatingProgram.type, :ok)
+    'JDK float/double oracle: slots, arrays, specials and conversions' |>
+        t.eq(app.run(floatingProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/FloatingMain.expected'))
+    'double occupies two argument slots, float occupies one' |> t.eq([
+        floatingProgram.value.classes.FloatingMain.methods.('apply(D)D').argWidths,
+        floatingProgram.value.classes.FloatingMain.methods.('smaller(F)F').argWidths],
+        [[2], [1]])
+    fpPool := floatingClass.pool
+    fpIndex := std.find(fpPool, fn(v) v != ? & v.tag = 4)
+    dpIndex := std.find(fpPool, fn(v) v != ? & v.tag = 6)
+    'class-file float and double literals keep their raw bits' |> t.assert(
+        fpIndex > 0 & dpIndex > 0 &
+        classfile.literal(fpPool, fpIndex).jvmFloat = true &
+        classfile.literal(fpPool, dpIndex).jvmDouble = true)
+    fpModel := import('../lib/ieee754.oak')
+    'IEEE negative zero is not a positive numeric zero' |> t.eq([
+        fpModel.sign(fpModel.f64(2147483648, 0)),
+        fpModel.kind(fpModel.f64(2147483648, 0)),
+        fpModel.text(fpModel.f64(2147483648, 0))],
+        [1, :zero, '-0.0'])
+    'IEEE minimal subnormal survives a host float roundtrip' |> t.eq([
+        fpModel.fromNumber(fpModel.numeric(fpModel.f64(0, 1)), true, false).lo,
+        fpModel.fromNumber(fpModel.numeric(fpModel.f32(1)), false, false).bits],
+        [1, 1])
+    'IEEE NaN comparison follows fcmpl/fcmpg and dcmpl/dcmpg' |> t.eq([
+        fpModel.compare(fpModel.nan(false), fpModel.f32(0), -1),
+        fpModel.compare(fpModel.nan(false), fpModel.f32(0), 1),
+        fpModel.compare(fpModel.nan(true), fpModel.f64(0, 0), -1),
+        fpModel.compare(fpModel.nan(true), fpModel.f64(0, 0), 1)],
+        [-1, 1, -1, 1])
+    'IEEE signed division by zero is modeled, not host-divided' |>
+        t.eq(fpModel.text(fpModel.binary(111, fpModel.f64(1072693248, 0),
+            fpModel.f64(2147483648, 0))), '-Infinity')
+    'decimal formatting outside the modeled subset refuses explicitly' |>
+        t.eq(fpModel.text(fpModel.f64(0, 1)), ?)
+    floatingCoverage := bridge.coverage({type: :ok, classes: [floatingBytes]})
+    'all four floating fixture methods preflight, no exception masking' |>
+        t.eq([floatingCoverage.methods, floatingCoverage.decodedBodies,
+            len(floatingCoverage.blockers)], [4, 4, 0])
+    floatingOak := app.standaloneSource(floatingProgram.value, {}, {},
+        'lib/applet-runtime.oak', app.bundle([floatingBytes], 'FloatingMain').value)
+    'standalone IEEE Oak has raw limbs and byte-exact original archive' |>
+        t.assert(floatingOak.type = :ok &
+            str.contains?(floatingOak.value, 'dconst_') &
+            app.fromOak(floatingOak.value).value.(0) = floatingBytes)
+    'Java emitter uses raw IEEE bits and explicit F/D verifier values' |>
+        t.assert(str.contains?(java.source(floatingProgram.value, {}, {},
+            'FloatingConverted').value, 'Double.longBitsToDouble'))
+    applyMethod := classfile.method(floatingClass, 'apply', '(D)D')
+    floatingCode := applyMethod.code
+    dloadAt := std.find(std.range(len(floatingCode)),
+        fn(i) codepoint(floatingCode.(i)) = 39)
+    'floating method contains the expected dload_1' |> t.assert(dloadAt >= 0)
+    if dloadAt >= 0 { true -> {
+        badFloatLocal := std.slice(floatingBytes, 0, applyMethod.codeOffset + dloadAt) +
+            char(31) + std.slice(floatingBytes, applyMethod.codeOffset + dloadAt + 1)
+        'double argument cannot be read with lload_1' |>
+            t.assert(str.contains?(app.compile([badFloatLocal], {}).message,
+                'invalid or uninitialized long frame local'))
+    }}
+    rawIntrinsic := vmLib.jvmMethod('java/lang/Double',
+        'doubleToRawLongBits', '(D)J', 184)
+    'raw IEEE intrinsic requires its exact descriptor and static opcode' |>
+        t.eq([rawIntrinsic.op,
+            vmLib.jvmMethod('java/lang/Double', 'doubleToRawLongBits', '(D)J', 182),
+            vmLib.jvmMethod('java/lang/Double', 'doubleToRawLongBits', '(F)J', 184)],
+            ['double-raw-bits', ?, ?])
+    floatArrayBytes := fs.readFile('test/fixtures/FloatArrayMain.class')
+    floatArrayProgram := app.compile([floatArrayBytes], {})
+    'F/D primitive and nested arrays, field storage, conversions, and arraycopy preflight' |>
+        t.eq(floatArrayProgram.type, :ok)
+    '24 independently verified float/double array and conversion bit results' |>
+        t.eq(app.run(floatArrayProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/FloatArrayMain.expected'))
+    'float/double arrays produce same standalone archive and generated Java IR' |>
+        t.assert(app.fromOak(app.standaloneSource(floatArrayProgram.value,
+            {}, {}, 'lib/applet-runtime.oak',
+            app.bundle([floatArrayBytes], 'FloatArrayMain').value).value).value.(0) =
+            floatArrayBytes & str.contains?(java.source(floatArrayProgram.value,
+                {}, {}, 'FloatArrayConverted').value, 'new WideDouble('))
+
+    exceptionBytes := fs.readFile('test/fixtures/ExceptionMain.class')
+    exceptionClass := classfile.parseClass(exceptionBytes).value
+    exceptionMain := classfile.method(exceptionClass, 'main', '([Ljava/lang/String;)V')
+    exceptionProgram := app.compile([exceptionBytes], {})
+    'JVM Code exception table retains ordered typed and catch-all handlers' |>
+        t.assert(exceptionMain.catches > 5 &
+            exceptionMain.catches = len(exceptionMain.handlers) &
+            (exceptionMain.handlers |> std.some(fn(h) h.catch = 'java/lang/NumberFormatException')) &
+            len(exceptionProgram.value.classes.ExceptionMain.methods.
+                ('main([Ljava/lang/String;)V').handlers) = exceptionMain.catches)
+    '13-line independent JDK oracle: throws, catches, finally, partial copy' |>
+        t.eq(app.run(exceptionProgram.value, {}, {}).output,
+            fs.readFile('test/fixtures/ExceptionMain.expected'))
+    'exception fixture generated Java has executable ordered handler contract' |>
+        t.assert(str.contains?(java.source(exceptionProgram.value, {}, {},
+            'ExceptionConverted').value, 'new Handler('))
+    exceptionOak := app.standaloneSource(exceptionProgram.value, {}, {},
+        'lib/applet-runtime.oak', app.bundle([exceptionBytes], 'ExceptionMain').value)
+    'exception-aware standalone Oak restores original class exactly' |>
+        t.assert(exceptionOak.type = :ok &
+            app.fromOak(exceptionOak.value).value.(0) = exceptionBytes)
+    uncaught := app.compile([exceptionBytes], {method: 'divide', desc: '(II)I'})
+    uncaughtResult := app.run(uncaught.value, {}, {method: 'divide',
+        desc: '(II)I', args: [3, 0]})
+    'uncaught arithmetic error propagates; not swallowed as valid output' |>
+        t.assert(uncaughtResult.type = :error & uncaughtResult.output = '' &
+            str.contains?(uncaughtResult.message, 'java/lang/ArithmeticException'))
+    'instruction limit remains a fatal VM failure, not a catchable Throwable' |>
+        t.assert(str.contains?(app.run(exceptionProgram.value, {},
+            {maxSteps: 1}).message, 'instruction budget'))
+    tableAt := exceptionMain.codeOffset + len(exceptionMain.code) + 2
+    badRange := std.slice(exceptionBytes, 0, tableAt) +
+        std.slice(exceptionBytes, tableAt + 2, tableAt + 4) +
+        std.slice(exceptionBytes, tableAt + 2)
+    'invalid exception table interval fails at class parsing' |>
+        t.assert(str.contains?(classfile.parseClass(badRange).message,
+            'invalid exception table range'))
+    nullThrowAt := std.find(std.range(len(exceptionMain.code) - 1),
+        fn(i) codepoint(exceptionMain.code.(i)) = 1 &
+            codepoint(exceptionMain.code.(i + 1)) = 191)
+    'fixture has real aconst_null; athrow pair' |> t.assert(nullThrowAt >= 0)
+    if nullThrowAt >= 0 { true -> {
+        badThrow := std.slice(exceptionBytes, 0,
+            exceptionMain.codeOffset + nullThrowAt) + char(3) +
+            std.slice(exceptionBytes, exceptionMain.codeOffset + nullThrowAt + 1)
+        'athrow cannot consume a JVM int category in preflight' |>
+            t.assert(str.contains?(app.compile([badThrow], {}).message,
+                'expected A, found I'))
+    }}
+    initBytes := [fs.readFile('test/fixtures/ExceptionInitMain.class'),
+        fs.readFile('test/fixtures/ExceptionInitMain$BrokenInit.class'),
+        fs.readFile('test/fixtures/ExceptionInitMain$BrokenError.class')]
+    initImage := app.compile(initBytes, {entry: 'ExceptionInitMain'})
+    'class initialization verifies all three linked Throwable/initializer classes' |>
+        t.eq(initImage.type, :ok)
+    'JDK oracle: initial failure wraps non-Error once, Error propagates; repeats fail' |>
+        t.eq(app.run(initImage.value, {}, {}).output,
+            fs.readFile('test/fixtures/ExceptionInitMain.expected'))
+    'Throwable hierarchy admits NCDFE but not arbitrary JDK types' |>
+        t.eq([vmLib.jvmThrowableParent('java/lang/NoClassDefFoundError'),
+            vmLib.jvmThrowableParent('java/lang/UnknownException')],
+            ['java/lang/LinkageError', ?])
+
+    printf('[applet-progress] Java frontend and final test report')
+    source := fs.readFile('test/fixtures/HelloMain.java')
+    compiledOak := bridge.load({entry: 'HelloMain.java', source: source},
+        {javaBackend: 'oak', javacPath: '/nonexistent/javac'})
+    'Oak-only Java frontend emits a real class without javac' |> t.eq([
+        compiledOak.type, compiledOak.backend,
+        app.inspect(compiledOak.classes.(0)).value.major], [:ok, 'oak', 49])
+    oakImage := bridge.link(compiledOak, {entry: 'HelloMain'})
+    'Oak-only Java frontend reuses bytecode verifier and VM' |> t.eq([
+        oakImage.type, bridge.execute(oakImage.value, {}, {args: ['Ada']}).output],
+        [:ok, '1\nAda\n14\n'])
+    loopOak := bridge.load({entry: 'LoopMain.java',
+        source: fs.readFile('test/fixtures/LoopMain.java')}, {javaBackend: 'oak'})
+    'Oak-only Java compiler emits branch targets and integer locals' |> t.eq(
+        bridge.run(loopOak, {entry: 'LoopMain'}, {}, {}).output, 'sum=10\n')
+    appletOak := bridge.load({entry: 'Mini.java', source:
+        'public class Mini extends java.applet.Applet {' +
+        ' public void init() { System.out.println("started"); }' +
+        ' public void start() { System.out.println(4 + 3); } }'},
+        {javaBackend: 'oak'})
+    'Oak-only Java applet lifecycle traverses same VM bridge' |> t.eq(
+        bridge.run(appletOak, {entry: 'Mini'}, {}, {}).output, 'started\n7\n')
+    'Oak-only compiler rejects unsupported Java primitives explicitly' |> t.eq(
+        bridge.load({entry: 'Bad.java', source:
+            'public class Bad { public static void main(String[] a) { long x = 1; } }'},
+            {javaBackend: 'oak'}).type, :error)
+    minOak := bridge.load({entry: 'test/fixtures/MinIntMain.java'},
+        {javaBackend: 'oak'})
+    'Oak-only Java compiler emits the legal minimum int and boolean branch' |>
+        t.eq(bridge.run(minOak, {}, {}, {}).output, '-2147483648\n1\n')
+    fn rejectStatement(statement) bridge.load({entry: 'Bad.java', source:
+        'public class Bad { public static void main(String[] args) { ' +
+            statement + ' } }'}, {javaBackend: 'oak'}).type
+    'Oak-only frontend does not mistake Java octal for decimal' |>
+        t.eq(rejectStatement('System.out.println(010);'), :error)
+    'Oak-only frontend refuses invalid integer truthiness' |>
+        t.eq(rejectStatement('if (1) { System.out.println(1); }'), :error)
+    'Oak-only frontend refuses mixed boolean/integer comparison' |>
+        t.eq(rejectStatement('if (1 == true) { System.out.println(1); }'), :error)
+    'Oak-only frontend refuses ordering booleans' |>
+        t.eq(rejectStatement('if (true < false) { System.out.println(1); }'), :error)
+    'bridge rejects malformed path before touching filesystem' |> t.eq(
+        bridge.load({entry: ?}, {}).type, :error)
+}

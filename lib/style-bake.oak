@@ -44,18 +44,9 @@ fn _parseColor(token) if token {
 	'amber-500' -> surface.rgb(245, 158, 11)
 	_ -> if startsWith?(token, '#') & len(token) = 7 {
 		true -> {
-			// parse hex #rrggbb manually
-			hex := '0123456789abcdef'
+			// parse hex #rrggbb via codepoint ranges
 			fn dig(c) {
 				ch := string(c)
-				fn loop(i) if i < 16 {
-					true -> if hex.(i) = ch | hex.(i) = string(char(codepoint(ch) - 32)) {
-						true -> i
-						_ -> loop(i + 1)
-					}
-					_ -> 0
-				}
-				// simpler: use int from known hex via codepoint ranges
 				cp := codepoint(ch)
 				if cp >= 48 & cp <= 57 {
 					true -> cp - 48
@@ -393,18 +384,22 @@ fn ensureClass(table, classStr) {
 	existing := table.byClass.(key)
 	if existing != ? {
 		// already compiled, return existing id
-		existing
+		true -> existing
+		_ -> {
+			// compile new class
+			compiled := compileClassString(key)
+			if compiled.ok? {
+				true -> {
+					id := table.nextId
+					table.styles := table.styles << compiled.props
+					table.byClass.(key) := id
+					table.nextId := id + 1
+					id
+				}
+				_ -> -1
+			}
+		}
 	}
-	// compile new class
-	compiled := compileClassString(key)
-	if compiled.ok? {
-		id := table.nextId
-		table.styles := table.styles << compiled.props
-		table.byClass.(key) := id
-		table.nextId := id + 1
-		id
-	}
-	-1
 }
 
 // ensureProps inserts a raw prop map (for style={{...}} paths).
@@ -423,22 +418,13 @@ fn getStyle(table, styleId) if styleId < 0 | styleId >= len(table.styles) {
 
 // --- binary encode/decode ---------------------------------------------------
 
-fn _u8(n) char(n % 256)
-fn _u16le(n) char(n % 256) + char(int(n / 256) % 256)
-fn _u32le(n) {
-	char(n % 256) +
-		char(int(n / 256) % 256) +
-		char(int(n / 65536) % 256) +
-		char(int(n / 16777216) % 256)
-}
-fn _i32le(n) {
-	// two's complement for negative
-	v := if n < 0 {
-		true -> 4294967296 + n
-		_ -> n
-	}
-	_u32le(v)
-}
+// Byte-order primitives are abstracted into lib/bytes.oak. This lib's
+// encoders return char strings, so each stub joins the shared byte list.
+_bytes := import('bytes')
+fn _u8(n) char(_bytes._u8(n).(0))
+fn _u16le(n) _bytes._u16LE(n) |> std.map(char) |> str.join('')
+fn _u32le(n) _bytes._u32LE(n) |> std.map(char) |> str.join('')
+fn _i32le(n) _bytes._i32LE(n) |> std.map(char) |> str.join('')
 
 fn _propId(name) {
 	id := surface.PROP.(name)
@@ -481,21 +467,10 @@ fn encodeTable(table) {
 	header + body
 }
 
-fn _readU8(s, o) codepoint(s.(o))
-fn _readU16le(s, o) codepoint(s.(o)) + codepoint(s.(o + 1)) * 256
-fn _readU32le(s, o) {
-	codepoint(s.(o)) +
-		codepoint(s.(o + 1)) * 256 +
-		codepoint(s.(o + 2)) * 65536 +
-		codepoint(s.(o + 3)) * 16777216
-}
-fn _readI32le(s, o) {
-	u := _readU32le(s, o)
-	if u >= 2147483648 {
-		true -> u - 4294967296
-		_ -> u
-	}
-}
+fn _readU8(s, o) _bytes._readU8(s, o)
+fn _readU16le(s, o) _bytes._readU16LE(s, o)
+fn _readU32le(s, o) _bytes._readU32LE(s, o)
+fn _readI32le(s, o) _bytes._readI32LE(s, o)
 
 // decodeTable parses MGST bytes into a StyleTable (byClass empty).
 fn decodeTable(bytes) {

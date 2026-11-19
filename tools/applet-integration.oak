@@ -1,0 +1,622 @@
+// Native-only integration smoke test for Magnolia Builder + Applet API.
+// Run from repository root: magnolia tools/applet-integration.oak
+// The focused test/applet.test.oak also runs in bundled JS; Builder itself
+// runs here in native Magnolia so no dynamic file imports are faked in JS.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+app := import('../lib/applet.oak')
+api := import('../lib/applet-api.oak')
+builder := import('build')
+host := import('../lib/applet-host.oak')
+zip := import('../lib/applet-zip.oak')
+json := import('json')
+
+checks := 0
+failures := 0
+fn check(name, yes) {
+    checks <- checks + 1
+    if !yes {
+        true -> {
+            failures <- failures + 1
+            std.println('FAIL: ' + name)
+        }
+    }
+}
+fn build(entry, output, options) builder.run({
+    entry: entry, output: output, inMemory?: true,
+    applet: options, log: fn(s) ?
+})
+
+normal := builder.run({entry: 'test/fixtures/virtual-source.oak',
+    source: 'std := import(\'std\')\nstd.println(5)\n',
+    output: 'test/fixtures/virtual-source.js', web?: true,
+    inMemory?: true, log: fn(s) ?})
+check('ordinary virtual Oak build remains available', normal.type = :ok &
+    str.contains?(normal.value, 'std'))
+check('ordinary virtual Oak entry not staged',
+    fs.statFile('test/fixtures/virtual-source.oak') = ?)
+
+counter := build('test/fixtures/CounterApplet.html',
+    'test/fixtures/virtual-converted.oak', {})
+check('Builder accepts local HTML applet launch descriptor', counter.type = :ok &
+    str.contains?(counter.value, 'fn applet_method_'))
+check('Builder keeps output in memory',
+    fs.statFile('test/fixtures/virtual-converted.oak') = ?)
+comparison := api.compare('test/fixtures/CounterApplet.html', counter.value, {})
+check('class -> Oak -> class bytes and behavior', comparison.type = :ok &
+    comparison.equal? & comparison.bytesIdentical?)
+check('programmatic archive refuses overwrite',
+    api.restoreTo(counter.value, 'test/fixtures/CounterApplet.class').type = :error)
+
+jar := build('test/fixtures/HelperFirst.jar',
+    'test/fixtures/virtual-helper.oak', {params: {name: 'Ada'}})
+restoredJar := api.restoreOak(jar.value)
+check('helper-first JAR selects Applet class', jar.entry = 'CounterApplet')
+check('Builder Oak restores exact original JAR',
+    restoredJar.jar = fs.readFile('test/fixtures/HelperFirst.jar'))
+
+jnlp := build('test/fixtures/HelloMain.jnlp',
+    'test/fixtures/virtual-main.oak', {})
+check('Builder JNLP static main entry', jnlp.type = :ok &
+    jnlp.entry = 'HelloMain' & jnlp.kind = 'application')
+check('JNLP argument passed to main programmatically',
+    api.run('test/fixtures/HelloMain.jnlp', {}).output = '1\nAda\n14\n')
+
+js := build('test/fixtures/HelloMain.jnlp',
+    'test/fixtures/virtual-main.js', {})
+check('JS built by Magnolia Builder without staging', js.type = :ok &
+    str.contains?(js.value, '__oak_module_import') &
+    str.contains?(js.value, 'globalThis.MagnoliaApplet'))
+check('embedded browser/Node host can return original archive',
+    str.contains?(js.value, 'restoreArchive: () => archive'))
+archiveLiteral := str.cut(str.cut(js.value, 'const archive = ').(1), ';').(0)
+embedded := api.restoreArchive(json.parse(archiveLiteral))
+check('browser-host archive verifies original JNLP JAR in Magnolia',
+    embedded.type = :ok & embedded.jar = fs.readFile('test/fixtures/HelloMain.jar'))
+check('JS output not written for in-memory build',
+    fs.statFile('test/fixtures/virtual-main.js') = ?)
+
+page := build('test/fixtures/GraphicsApplet.class',
+    'test/fixtures/virtual-paint.html', {options: {paint?: true, width: 100, height: 60}})
+check('HTML Builder sets paint stream and Canvas host', page.type = :ok &
+    str.contains?(page.value, '__MAGNOLIA_DRAW_V1__') &
+    str.contains?(page.value, 'getContext("2d")'))
+
+native := api.session('test/fixtures/GraphicsApplet.class', {})
+seen := []
+created := api.command(native, {type: 'attachWeb', width: 100,
+    height: 60, bridge: fn(op) seen << op})
+painted := api.command(native, {type: 'paint'})
+check('Magnolia Web host creates window state', created.type = :ok)
+check('Web host relays actual draw calls', painted.type = :ok &
+    len(seen) >= 5 & native.window.messages.(1).type = :rect &
+    native.window.messages.(1).x = 4 & native.window.messages.(1).width = 30)
+check('unsupported AWT input never faked', api.command(native,
+    {type: 'event', name: 'keydown'}).type = :error)
+check('bad AWT draw colors rejected atomically', host.replayWeb(native.window,
+    [{type: :rect, color: 'not-a-color', x: 1, y: 2, width: 4, height: 5}]).type = :error)
+
+// The reverse route is a real class-file edit, not original-byte recovery.
+// Builder accepts in-memory edited standalone Oak and emits .class bytes.
+editableMain := build('test/fixtures/HelloMain.class',
+    'test/fixtures/virtual-editable.oak', {options: {args: ['Ada']}})
+check('Builder provides an Oak method listing for editing', editableMain.type = :ok &
+    str.contains?(editableMain.value, '[16, 7, ?],'))
+editedMain := str.replace(editableMain.value, '[16, 7, ?],', '[16, 11, ?],')
+compiledMain := builder.run({entry: 'test/fixtures/virtual-edited.oak',
+    source: editedMain, output: 'test/fixtures/virtual-edited.class',
+    inMemory?: true, log: fn(s) ?})
+check('Builder recompiles edited Oak to a new JVM class in memory',
+    compiledMain.type = :ok & compiledMain.changedInstructions = 1 &
+    compiledMain.value != fs.readFile('test/fixtures/HelloMain.class'))
+check('reverse Builder route never stages the virtual Oak or class output',
+    fs.statFile('test/fixtures/virtual-edited.oak') = ? &
+    fs.statFile('test/fixtures/virtual-edited.class') = ?)
+recompiledProgram := app.compile([compiledMain.value], {entry: 'HelloMain'})
+check('edited class executes new behavior on Magnolia JVM subset',
+    app.run(recompiledProgram.value, {}, {args: ['Ada']}).output = '1\nAda\n22\n')
+check('new class is not confused with original archive restoration',
+    api.restoreOak(editedMain).value.(0) = fs.readFile('test/fixtures/HelloMain.class') &
+    api.recompileOak(editedMain).value.(0) = compiledMain.value)
+check('recompiler refuses to overwrite original class',
+    api.recompileTo(editedMain, 'test/fixtures/HelloMain.class').type = :error)
+check('unsafe operand range rejected instead of truncation',
+    api.recompileOak(str.replace(editedMain, '[16, 11, ?],', '[16, 300, ?],')).type = :error)
+check('non-literal Oak call is rejected without being executed',
+    api.recompileOak(str.replace(editedMain, '[16, 11, ?],', 'print(123),')).type = :error)
+check('changes to the inlined interpreter cannot silently become JVM output',
+    api.recompileOak(str.replace(editedMain, 'maximum Java call depth exceeded',
+        'changed inlined runtime')).type = :error)
+check('changes to inlined JVM VM-library implementations are also rejected',
+    api.recompileOak(str.replace(editedMain, 'JVM integer library expects int32 arguments',
+        'changed VM library')).type = :error)
+// A rejected source must not be returned as an unchanged "successful" class.
+// These previously passed even though standalone Oak behavior or its visible
+// method table could differ from the emitted bytecode.
+twiceEntry := '            \'twice(I)I\': {locals: 1, stack: 2, argWidths: [1], static?: true, code: applet_method_1_HelloMain_twice_I_I()},\n'
+check('reverse fixture includes the second reachable method',
+    str.contains?(editedMain, twiceEntry))
+check('removing a reachable Oak method cannot silently return original bytes',
+    api.recompileOak(str.replace(editedMain, twiceEntry, '')).type = :error)
+check('unused generated method function is rejected',
+    api.recompileOak(str.replace(editedMain, 'program := {entry: \'HelloMain\'',
+        'fn applet_method_extra() []\nprogram := {entry: \'HelloMain\'')).type = :error)
+check('duplicate generated function references are rejected',
+    api.recompileOak(str.replace(editedMain,
+        'code: applet_method_1_HelloMain_twice_I_I()',
+        'code: applet_method_0_HelloMain_main__Ljava_lang_String__V()')).type = :error)
+check('forged Oak execution kind is not treated as a zero edit',
+    api.recompileOak(str.replace(editedMain, 'kind: \'application\'',
+        'kind: \'method\'')).type = :error)
+check('extra program metadata cannot be ignored by reverse compilation',
+    api.recompileOak(str.replace(editedMain, 'kind: \'application\', classes:',
+        'kind: \'application\', ignored: true, classes:')).type = :error)
+check('extra class metadata cannot be ignored by reverse compilation',
+    api.recompileOak(str.replace(editedMain, 'interfaces: []\n        fields:',
+        'interfaces: [], ignored: true\n        fields:')).type = :error)
+check('modified standalone invocation arguments are rejected',
+    api.recompileOak(str.replace(editedMain, '\'args\': [\'Ada\']',
+        '\'args\': [\'Bob\']')).type = :error)
+check('modified standalone output logic is rejected',
+    api.recompileOak(editedMain + 'println(999)\n').type = :error)
+check('injected Oak header statements cannot be silently ignored',
+    api.recompileOak('print(123)\n' + editedMain).type = :error)
+check('older sources without invocation integrity marker require retranspilation',
+    api.recompileOak(str.replace(editedMain,
+        '// @magnolia-applet-invocation-sha256-v1:',
+        '// legacy-invocation-marker:')).type = :error)
+
+initOak := build('test/fixtures/InitMain.class',
+    'test/fixtures/virtual-init.oak', {classFiles: [
+        'test/fixtures/InitBase.class', 'test/fixtures/InitHelper.class',
+        'test/fixtures/UnreachableInit.class']})
+check('Builder translates reachable class initializers', initOak.type = :ok &
+    str.contains?(initOak.value, 'fn applet_method_'))
+initEdited := str.replace(initOak.value, '[18, \'prepared\', ?],',
+    '[18, \'retuned\', ?],')
+initClasses := api.recompileOak(initEdited)
+check('new string literal appends to class constant pool without changing code width',
+    initClasses.type = :ok & initClasses.changedInstructions = 1 &
+    len(initClasses.value) = 4 &
+    len(initClasses.value.(0)) > len(fs.readFile('test/fixtures/InitMain.class')))
+initProgram := app.compile(initClasses.value, {entry: 'InitMain'})
+check('new class constant executes with correct static initializer order',
+    app.run(initProgram.value, {}, {}).output =
+        'base\nentry\n42\nretuned\n7\nhelper\n2\n2\n7\n')
+check('multiple edited classes require output directory, not one .class file',
+    api.recompileTo(initEdited, 'test/fixtures/virtual-init.class').type = :error)
+
+dispatchOak := build('test/fixtures/DispatchMain.class',
+    'test/fixtures/virtual-dispatch.oak', {classFiles: [
+        'test/fixtures/DispatchBase.class', 'test/fixtures/DispatchChild.class']})
+dispatchEdited := str.replace(dispatchOak.value,
+    '    // 0: iconst_2\n    [5, 0, ?],',
+    '    // 0: iconst_2\n    [6, 0, ?],')
+dispatchClasses := api.recompileOak(dispatchEdited)
+check('overriding method edited in Oak becomes new verified class bytes',
+    dispatchClasses.type = :ok & dispatchClasses.changedInstructions = 1 &
+    len(dispatchClasses.value) = 3)
+check('new class still dispatches dynamically and resolves inherited static',
+    app.run(app.compile(dispatchClasses.value, {entry: 'DispatchMain'}).value,
+        {}, {}).output = '3\n7\n')
+check('upper-case historical ZIP extension dispatched as Java package',
+    import('../lib/build-applet.oak').input?('FlashApi.ZIP'))
+
+// Java source is another frontend of the Oak JVM bridge, not a separate
+// interpreter. The Oak-only route emits verifiable class bytes without javac.
+sourceText := fs.readFile('test/fixtures/HelloMain.java')
+javaOak := builder.run({entry: 'test/fixtures/HelloMain.java',
+    output: 'test/fixtures/virtual-from-java.oak', inMemory?: true,
+    applet: {javaBackend: 'oak', options: {args: ['Ada']}}, log: fn(s) ?})
+check('Builder .java Oak-only frontend emits standalone Oak', javaOak.type = :ok &
+    str.contains?(javaOak.value, 'fn applet_method_'))
+check('Builder .java result stays in memory',
+    fs.statFile('test/fixtures/virtual-from-java.oak') = ?)
+javaOriginal := api.restoreOak(javaOak.value)
+check('Oak-only Java source produces a real JVM 49.0 class',
+    javaOriginal.type = :ok & app.inspect(javaOriginal.value.(0)).value.major = 49)
+javaEdited := str.replace(javaOak.value, '[16, 7, ?],', '[16, 11, ?],')
+javaRecompiled := api.recompileOak(javaEdited)
+check('Java -> Oak edits reassemble into new .class without javac',
+    javaRecompiled.type = :ok & javaRecompiled.changedInstructions = 1 &
+    javaRecompiled.value.(0) != javaOriginal.value.(0))
+check('new Java-subset class runs edited behavior', app.run(app.compile(
+    javaRecompiled.value, {entry: 'HelloMain'}).value, {},
+    {args: ['Ada']}).output = '1\nAda\n22\n')
+
+virtualSource := 'public class VirtualMain {' +
+    ' public static void main(String[] args) {' +
+    ' System.out.println(args.length); } }'
+virtualJava := builder.run({entry: 'test/fixtures/VirtualMain.java',
+    source: virtualSource, output: 'test/fixtures/virtual-from-source.oak',
+    inMemory?: true, applet: {javaBackend: 'oak', options: {args: ['Ada']}}, log: fn(s) ?})
+check('Builder virtual .java source needs no staged input',
+    virtualJava.type = :ok & fs.statFile('test/fixtures/VirtualMain.java') = ?)
+check('Oak VM API accepts virtual Java source',
+    api.run('test/fixtures/VirtualMain.java', {source: virtualSource,
+        javaBackend: 'oak', options: {args: ['Ada']}}).output = '1\n')
+minInt := build('test/fixtures/MinIntMain.java',
+    'test/fixtures/virtual-min-int.oak', {javaBackend: 'oak'})
+check('Builder Oak-only Java frontend handles legal MIN_VALUE and boolean branch',
+    minInt.type = :ok &
+    app.run(app.compile(api.restoreOak(minInt.value).value,
+        {entry: 'MinIntMain'}).value, {}, {}).output = '-2147483648\n1\n')
+
+manifestJar := build('test/fixtures/ManifestMain.jar',
+    'test/fixtures/virtual-manifest.oak', {options: {args: ['Ada']}})
+check('Builder honors folded JAR Main-Class instead of earlier Applet',
+    manifestJar.type = :ok & manifestJar.entry = 'HelloMain')
+check('Builder restores exact original JAR with nonclass resources',
+    api.restoreOak(manifestJar.value).jar =
+        fs.readFile('test/fixtures/ManifestMain.jar'))
+
+editableJar := build('test/fixtures/EditableMain.jar',
+    'test/fixtures/virtual-editable-jar.oak', {options: {args: ['Ada']}})
+changedJarOak := str.replace(editableJar.value, '[16, 7, ?],', '[16, 11, ?],')
+repackedJar := api.recompileJar(changedJarOak)
+check('edited Oak/JAR produces new bytecode and a new JAR container',
+    repackedJar.type = :ok & repackedJar.changedInstructions = 1 &
+    repackedJar.value != fs.readFile('test/fixtures/EditableMain.jar'))
+check('edited JAR keeps manifest-selected Main-Class',
+    zip.entries(repackedJar.value).entry = 'HelloMain')
+check('edited JAR carries new compiled behavior',
+    app.run(app.compile(zip.entries(repackedJar.value).classes,
+        {entry: 'HelloMain'}).value, {}, {args: ['Ada']}).output = '1\nAda\n22\n')
+check('JAR recompilation keeps nonclass resource bytes',
+    str.contains?(repackedJar.value, 'A resource that survives Oak JAR recompilation.'))
+check('original JAR restoration remains byte-exact after edits',
+    api.restoreOak(changedJarOak).jar = fs.readFile('test/fixtures/EditableMain.jar'))
+builderJar := builder.run({entry: 'test/fixtures/virtual-editable-jar.oak',
+    source: changedJarOak, output: 'test/fixtures/virtual-new.jar',
+    inMemory?: true, log: fn(s) ?})
+check('Builder reverse JAR route returns bytes without staging',
+    builderJar.type = :ok & builderJar.target = 'jar' &
+    builderJar.value = repackedJar.value &
+    fs.statFile('test/fixtures/virtual-new.jar') = ?)
+check('reverse JAR route refuses to overwrite original archive',
+    api.recompileTo(changedJarOak, 'test/fixtures/EditableMain.jar').type = :error)
+check('JAR output needs an embedded original JAR',
+    api.recompileJar(editedMain).type = :error)
+
+// The VM library's contracts are shared by class, manifest JAR, build-time
+// javac and Builder's standalone backends, not only the Math fixture.
+libraryReference := '-2147483648\n-1\n6\n-4\n5\ntrue\n-2147483648\n-13\n'
+libraryOak := build('test/fixtures/LibraryMain.class',
+    'test/fixtures/virtual-library.oak', {options: {args: ['Oak']}})
+check('Builder class route embeds reusable VM-library method contracts',
+    libraryOak.type = :ok & str.contains?(libraryOak.value, 'fn jvmMethod(') &
+    str.contains?(libraryOak.value, 'fn jvmString('))
+check('class VM-library output matches the reference Java program',
+    api.run('test/fixtures/LibraryMain.class',
+        {options: {args: ['Oak']}}).output = libraryReference)
+largeOutput := 'x'
+std.range(22) |> std.each(fn(_) largeOutput <- largeOutput + largeOutput)
+overBudget := api.run('test/fixtures/HelloMain.class',
+    {options: {args: [largeOutput]}})
+check('JVM PrintStream output exceeding 4 MiB fails without appending the argument',
+    overBudget.type = :error & overBudget.message = 'JVM output exceeds 4 MiB limit' &
+    overBudget.output = '1\n')
+grow := api.run('test/fixtures/GrowText.class',
+    {options: {args: [largeOutput]}})
+check('JVM text builder stops before creating a result larger than 4 MiB',
+    grow.type = :error & grow.message = 'JVM text builder exceeds 4 MiB limit' &
+    grow.output = '')
+libraryJarOak := build('test/fixtures/LibraryMain.jar',
+    'test/fixtures/virtual-library-jar.oak', {options: {args: ['Oak']}})
+check('JAR manifest selects same class and preserves original bytes',
+    libraryJarOak.type = :ok & libraryJarOak.entry = 'LibraryMain' &
+    api.restoreOak(libraryJarOak.value).jar = fs.readFile('test/fixtures/LibraryMain.jar'))
+libraryJS := build('test/fixtures/LibraryMain.class',
+    'test/fixtures/virtual-library.js', {options: {args: ['Oak']}})
+check('Builder JS bundle carries the guarded portable library',
+    libraryJS.type = :ok & str.contains?(libraryJS.value, 'Integer.parseInt expects a bounded'))
+libraryJava := build('test/fixtures/LibraryMain.class',
+    'test/fixtures/LibraryMainConverted.java', {options: {args: ['Oak']}})
+check('Builder optional Java-source emitter mirrors new integer intrinsics',
+    libraryJava.type = :ok & str.contains?(libraryJava.value, 'Integer.sum(num(args[0])'))
+caseOak := build('test/fixtures/StringCaseMain.class',
+    'test/fixtures/virtual-string-case.oak', {options: {args: ['high']}})
+check('Builder embeds Flash-era ASCII String.equalsIgnoreCase/indexOf contracts',
+    caseOak.type = :ok &
+    str.contains?(caseOak.value, 'equalsIgnoreCase(Ljava/lang/String;)Z') &
+    str.contains?(caseOak.value, 'indexOf(I)I'))
+check('ASCII String host calls behave as in Java 11',
+    api.run('test/fixtures/StringCaseMain.class',
+        {options: {args: ['high']}}).output =
+        'true\ntrue\n2\n-1\n-13\n')
+hostReference := (std.range(12) |> std.map(fn(_) 'true\n') |> str.join('')) +
+    'false\ntrue\n'
+hostOak := build('test/fixtures/HostSubtypeMain.class',
+    'test/fixtures/virtual-host-subtypes.oak', {})
+check('standalone Oak inlines the checked host reference/array type contracts',
+    hostOak.type = :ok & str.contains?(hostOak.value, 'jvmReference: jvmReference'))
+check('Builder host object/array instanceof matches the reference JVM',
+    api.run('test/fixtures/HostSubtypeMain.class', {}).output = hostReference)
+objectPrint := api.run('test/fixtures/ObjectPrintMain.class', {classFiles: [
+    'test/fixtures/ObjectPrintMain$Label.class']})
+check('user Object.toString is not faked; earlier exact Object prints survive',
+    objectPrint.type = :error & objectPrint.output = 'word\nnull\nbuffer\n' &
+    objectPrint.message = 'PrintStream.print(Object) cannot model this toString')
+check('Builder VM arrays match Java byte/boolean/int/reference semantics',
+    api.run('test/fixtures/ValidArraysMain.class', {}).output =
+        '-56\ntrue\n2\n7\nok\ntrue\n')
+badArrayStore := api.run('test/fixtures/ArrayStoreMain.class', {})
+check('bounded VM rejects incompatible reference array stores',
+    badArrayStore.type = :error & badArrayStore.output = 'true\n' &
+    badArrayStore.message = 'array store type mismatch')
+copyOutput := '1\n1\n2\n3\n4\n1\n4\n4\n-128\n127\n65\n255\n' +
+    '-32768\n32767\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n'
+copyOak := build('test/fixtures/ArrayCopyMain.class',
+    'test/fixtures/virtual-arraycopy.oak', {optimize?: false})
+check('Builder .class emits standalone Oak with bounded System.arraycopy host',
+    copyOak.type = :ok &
+    str.contains?(copyOak.value, 'java/lang/System.arraycopy'))
+check('Builder class/Oak round trip preserves arraycopy behavior and bytes',
+    api.compare('test/fixtures/ArrayCopyMain.class', copyOak.value, {}).equal? &
+    api.restoreOak(copyOak.value).value.(0) =
+        fs.readFile('test/fixtures/ArrayCopyMain.class'))
+check('API evaluates covariant/overlapping copy with JDK fixture output',
+    api.run('test/fixtures/ArrayCopyMain.class', {}).output = copyOutput)
+invalidCopy := api.run('test/fixtures/ArrayCopyMain.class',
+    {options: {args: ['store']}})
+check('API reports incompatible System.arraycopy element as an error',
+    invalidCopy.type = :error &
+    invalidCopy.message = 'System.arraycopy array store type mismatch')
+copyJava := build('test/fixtures/ArrayCopyMain.class',
+    'test/fixtures/ArrayCopyMainConverted.java', {})
+check('Builder Java-source output mirrors typed arraycopy work budget',
+    copyJava.type = :ok &
+    str.contains?(copyJava.value, 'static void arraycopy(') &
+    str.contains?(copyJava.value, 'System.arraycopy instruction budget exceeded'))
+narrowOak := build('test/fixtures/NarrowIntMain.class',
+    'test/fixtures/virtual-narrow.oak', {optimize?: false})
+narrowRound := api.recompileOak(narrowOak.value)
+check('Builder executes JVM narrowing operations in readable standalone Oak',
+    narrowOak.type = :ok & str.contains?(narrowOak.value, '// 7: i2b') &
+    api.run('test/fixtures/NarrowIntMain.class', {}).output = '-1\n65535\n-1\n')
+check('zero-edit narrowing class recompilation preserves original bytes',
+    narrowRound.type = :ok & narrowRound.changedInstructions = 0 &
+    narrowRound.value.(0) = fs.readFile('test/fixtures/NarrowIntMain.class'))
+primitiveOak := build('test/fixtures/PrimitiveArrayMain.class',
+    'test/fixtures/virtual-primitive.oak', {optimize?: false})
+check('Builder runs signed short and unsigned char array opcodes',
+    primitiveOak.type = :ok &
+    api.run('test/fixtures/PrimitiveArrayMain.class', {}).output =
+        '65535\n0\n-32768\n32767\n2\n2\n')
+check('char/short array class restores unchanged through Oak reverse compiler',
+    api.recompileOak(primitiveOak.value).value.(0) =
+        fs.readFile('test/fixtures/PrimitiveArrayMain.class'))
+shuffleOak := build('test/fixtures/StackShuffleMain.class',
+    'test/fixtures/virtual-shuffle.oak', {optimize?: false})
+check('Builder correctly runs javac field/array increment stack shuffles',
+    shuffleOak.type = :ok & str.contains?(shuffleOak.value, 'dup_x1') &
+    str.contains?(shuffleOak.value, 'dup_x2') &
+    api.run('test/fixtures/StackShuffleMain.class', {}).output = '5\n7\n10\n12\n19\n')
+check('reverse compiler preserves class with category-one stack shuffles',
+    api.recompileOak(shuffleOak.value).value.(0) =
+        fs.readFile('test/fixtures/StackShuffleMain.class'))
+wideOak := build('test/fixtures/WideLocalMain.class',
+    'test/fixtures/virtual-wide.oak', {optimize?: false})
+wideRound := api.recompileOak(wideOak.value)
+check('Builder reads wide int/ref locals and signed iinc as readable Oak',
+    wideOak.type = :ok &
+    str.contains?(wideOak.value, 'wide iinc local 260 by -300') &
+    api.run('test/fixtures/WideLocalMain.class', {}).output = 'wide\n698\n')
+check('zero-edit wide-prefixed class restores original bytecode exactly',
+    wideRound.type = :ok & wideRound.changedInstructions = 0 &
+    wideRound.value.(0) = fs.readFile('test/fixtures/WideLocalMain.class'))
+wideEdited := str.replace(wideOak.value,
+    '[196, 260, [132, 200]],', '[196, 260, [132, 201]],')
+wideNew := api.recompileOak(wideEdited)
+check('same-layout wide iinc change recompiles to different executable class',
+    wideNew.type = :ok & wideNew.changedInstructions = 1 &
+    wideNew.value.(0) != fs.readFile('test/fixtures/WideLocalMain.class') &
+    app.run(app.compile(wideNew.value, {entry: 'WideLocalMain'}).value, {}, {}).output =
+        'wide\n699\n')
+check('reverse compiler rejects altered wide local index or overflow',
+    api.recompileOak(str.replace(wideOak.value,
+        '[196, 260, [132, 200]],', '[196, 261, [132, 200]],')).type = :error &
+    api.recompileOak(str.replace(wideOak.value,
+        '[196, 260, [132, 200]],', '[196, 260, [132, 32768]],')).type = :error)
+switchCoverage := api.coverage('test/fixtures/SwitchMain.class', {})
+check('public coverage API inventories every switch method body',
+    switchCoverage.type = :ok & switchCoverage.methods = 4 &
+    switchCoverage.decodedBodies = 4 & switchCoverage.allBodiesPreflighted?)
+initCoverage := api.coverage('test/fixtures/InitMain.class', {classFiles: [
+    'test/fixtures/InitBase.class', 'test/fixtures/InitHelper.class',
+    'test/fixtures/UnreachableInit.class']})
+check('whole-input diagnostic does not claim an unreachable Font constructor is supported',
+    initCoverage.type = :ok & initCoverage.allBodiesPreflighted? = false &
+    initCoverage.blockers.(0).member = 'UnreachableInit.<clinit>()V')
+switchOak := build('test/fixtures/SwitchMain.class',
+    'test/fixtures/virtual-switch.oak', {optimize?: false})
+switchRound := api.recompileOak(switchOak.value)
+switchExpected := '31\n11\n-7\n0\n17\n20\n31\n5\n7\n9\n13\n17\n'
+check('Builder readable Oak exposes both signed switch tables',
+    switchOak.type = :ok & str.contains?(switchOak.value, '// 1: tableswitch') &
+    str.contains?(switchOak.value, '// 1: lookupswitch') &
+    api.run('test/fixtures/SwitchMain.class', {}).output = switchExpected)
+check('zero-edit switch class recompilation preserves variable-width bytecode',
+    switchRound.type = :ok & switchRound.changedInstructions = 0 &
+    switchRound.value.(0) = fs.readFile('test/fixtures/SwitchMain.class'))
+switchEdited := str.replace(switchOak.value, '[16, 20, ?],', '[16, 21, ?],')
+switchNew := api.recompileOak(switchEdited)
+check('safe same-width edit in a method with tableswitch recompiles',
+    switchNew.type = :ok & switchNew.changedInstructions = 1 &
+    app.run(app.compile(switchNew.value, {entry: 'SwitchMain'}).value, {}, {}).output =
+        str.replace(switchExpected, '17\n20\n31\n', '17\n21\n31\n'))
+check('reverse compiler rejects switch table edits rather than discarding them',
+    api.recompileOak(str.replace(switchOak.value,
+        '[170, 12, [-2, 2, 4, 6, 8, 10]],',
+        '[170, 12, [-2, 2, 4, 6, 8, 12]],')).type = :error)
+switchJS := build('test/fixtures/SwitchMain.class',
+    'test/fixtures/virtual-switch.js', {})
+switchJava := build('test/fixtures/SwitchMain.class',
+    'test/fixtures/SwitchMainConverted.java', {})
+check('Builder JS/Java targets share switch IR without JVM fallback',
+    switchJS.type = :ok & str.contains?(switchJS.value, '__oak_module_import') &
+    switchJava.type = :ok & str.contains?(switchJava.value, 'new int[]{-2147483648'))
+mathOak := build('test/fixtures/MathMain.class',
+    'test/fixtures/virtual-math-round.oak', {optimize?: false})
+mathExact := api.recompileOak(mathOak.value)
+check('zero-edit Math class recompilation is byte-exact',
+    mathExact.type = :ok & mathExact.changedInstructions = 0 &
+    mathExact.value.(0) = fs.readFile('test/fixtures/MathMain.class'))
+mathOptimized := build('test/fixtures/MathMain.class',
+    'test/fixtures/virtual-math-opt.oak', {})
+check('optimized zero-edit Math class is also byte-exact',
+    api.recompileOak(mathOptimized.value).value.(0) =
+        fs.readFile('test/fixtures/MathMain.class'))
+
+// Interface method resolution and five-byte invokeinterface layout survive
+// class/JAR -> Oak -> edited JAR; no abstract method is executed as code.
+interfaceReference := '3\n8\n7\ntrue\ntrue\n7\n'
+interfaceOak := build('test/fixtures/InterfaceMain.jar',
+    'test/fixtures/virtual-interface.oak', {})
+check('Builder embeds interface table and exact invokeinterface call',
+    interfaceOak.type = :ok & interfaceOak.entry = 'InterfaceMain' &
+    str.contains?(interfaceOak.value, 'interfaces:') &
+    str.contains?(interfaceOak.value, '// 1: invokeinterface Named.value.()I'))
+check('manifest JAR executes inherited interface and subclass dispatch',
+    api.run('test/fixtures/InterfaceMain.jar', {}).output = interfaceReference)
+interfaceCoverage := api.coverage('test/fixtures/InterfaceMain.jar', {})
+check('whole-input JAR audit includes abstract interface declarations',
+    interfaceCoverage.type = :ok & interfaceCoverage.classes = 5 &
+    interfaceCoverage.methods = 8 & interfaceCoverage.decodedBodies = 7 &
+    interfaceCoverage.abstractDeclarations = 1 &
+    interfaceCoverage.allBodiesPreflighted?)
+check('class plus explicit interface/helper classes links the same receiver calls',
+    api.run('test/fixtures/InterfaceMain.class', {classFiles: [
+        'test/fixtures/Named.class', 'test/fixtures/Tuned.class',
+        'test/fixtures/BaseValue.class', 'test/fixtures/ChangedValue.class']}).output =
+        interfaceReference)
+check('zero-edit interface JAR returns exact original bytes',
+    api.recompileJar(interfaceOak.value).value = fs.readFile('test/fixtures/InterfaceMain.jar'))
+check('reverse compiler refuses edits to class/interface declarations',
+    api.recompileOak(str.replace(interfaceOak.value,
+        'interfaces: [\'Tuned\']', 'interfaces: [\'Named\']')).type = :error)
+interfaceEdit := str.replace(interfaceOak.value,
+    '    // 2: iconst_1\n    [4, 0, ?],',
+    '    // 2: iconst_1\n    [5, 0, ?],')
+interfaceNew := api.recompileJar(interfaceEdit)
+interfaceNewContents := zip.entries(interfaceNew.value)
+check('edited method after invokeinterface recompiles with correct five-byte offset',
+    interfaceNew.type = :ok & interfaceNew.changedInstructions = 1 &
+    app.run(app.compile(interfaceNewContents.classes,
+        {entry: 'InterfaceMain'}).value, {}, {}).output =
+        '4\n9\n7\ntrue\ntrue\n7\n')
+check('edited interface JAR preserves manifest, resources and original recovery',
+    interfaceNewContents.entry = 'InterfaceMain' &
+    str.contains?(interfaceNew.value, 'Interface dispatch and subtype fixture.') &
+    api.restoreOak(interfaceEdit).jar = fs.readFile('test/fixtures/InterfaceMain.jar'))
+check('Oak-only Java subset does not miscompile interface source',
+    api.load('test/fixtures/InterfaceMain.java', {javaBackend: 'oak'}).type = :error)
+oakJavaCoverage := api.coverage('test/fixtures/MinIntMain.java',
+    {javaBackend: 'oak'})
+check('Oak-only Java input feeds the shared all-method inventory',
+    oakJavaCoverage.type = :ok & oakJavaCoverage.classes = 1 &
+    oakJavaCoverage.decodedBodies = 2 & oakJavaCoverage.allBodiesPreflighted?)
+signedOak := build('test/fixtures/SignedLike.jar',
+    'test/fixtures/virtual-signed.oak', {})
+signedEdit := str.replace(signedOak.value, '[16, 7, ?],', '[16, 11, ?],')
+check('signed JAR edit rejected instead of outputting invalid signatures',
+    api.recompileJar(signedEdit).type = :error)
+
+javacProbe := exec('javac', ['-version'], '')
+if javacProbe.type != :error & javacProbe.status = 0 {
+    true -> {
+        javacCoverage := api.coverage('test/fixtures/MinIntMain.java',
+            {javaBackend: 'javac'})
+        check('isolated javac and Oak-only Java source share coverage gate',
+            javacCoverage.type = :ok & javacCoverage.decodedBodies = 2 &
+            javacCoverage.allBodiesPreflighted? &
+            len(javacCoverage.blockers) = len(oakJavaCoverage.blockers))
+        javaJavac := build('test/fixtures/InitMain.java',
+            'test/fixtures/virtual-javac.oak', {javaBackend: 'javac'})
+        check('build-time javac frontend handles multiple classes from Java source',
+            javaJavac.type = :ok & javaJavac.entry = 'InitMain' &
+            len(api.restoreOak(javaJavac.value).value) = 4)
+        check('javac-produced class image runs parent-first initialization',
+            api.run('test/fixtures/InitMain.java', {javaBackend: 'javac'}).output =
+                'base\nentry\n42\nprepared\n7\nhelper\n2\n2\n7\n')
+        libraryFromJava := build('test/fixtures/LibraryMain.java',
+            'test/fixtures/virtual-library-from-java.oak',
+            {javaBackend: 'javac', options: {args: ['Oak']}})
+        check('javac frontend feeds the same VM library image as class/JAR input',
+            libraryFromJava.type = :ok &
+            app.run(app.compile(api.restoreOak(libraryFromJava.value).value,
+                {entry: 'LibraryMain'}).value, {}, {args: ['Oak']}).output =
+                libraryReference)
+        interfaceJava := build('test/fixtures/InterfaceMain.java',
+            'test/fixtures/virtual-interface-java.oak', {javaBackend: 'javac'})
+        check('build-time javac interface classes link through the same Oak VM',
+            interfaceJava.type = :ok &
+            app.run(app.compile(api.restoreOak(interfaceJava.value).value,
+                {entry: 'InterfaceMain'}).value, {}, {}).output = interfaceReference)
+        caseJava := build('test/fixtures/StringCaseMain.java',
+            'test/fixtures/virtual-string-case-java.oak',
+            {javaBackend: 'javac', options: {args: ['high']}})
+        check('javac frontend passes ASCII String calls through portable VM layer',
+            caseJava.type = :ok &
+            app.run(app.compile(api.restoreOak(caseJava.value).value,
+                {entry: 'StringCaseMain'}).value, {}, {args: ['high']}).output =
+                'true\ntrue\n2\n-1\n-13\n')
+        check('isolated javac arraycopy source feeds the same Oak VM library',
+            api.run('test/fixtures/ArrayCopyMain.java',
+                {javaBackend: 'javac'}).output = copyOutput)
+        hostJavaInput := build('test/fixtures/HostSubtypeMain.java',
+            'test/fixtures/virtual-host-from-java.oak', {javaBackend: 'javac'})
+        check('javac host arrays enter the same modeled Oak VM subtype image',
+            hostJavaInput.type = :ok &
+            app.run(app.compile(api.restoreOak(hostJavaInput.value).value,
+                {entry: 'HostSubtypeMain'}).value, {}, {}).output = hostReference)
+        javacMath := build('test/fixtures/MathMain.java',
+            'test/fixtures/virtual-javac-math.oak', {javaBackend: 'javac'})
+        javacMathOriginal := api.restoreOak(javacMath.value).value.(0)
+        javacMathRound := api.recompileOak(javacMath.value)
+        check('javac source round-trip matches its own embedded class, not a different debug build',
+            javacMathRound.type = :ok & javacMathRound.changedInstructions = 0 &
+            javacMathRound.value.(0) = javacMathOriginal &
+            javacMathOriginal != fs.readFile('test/fixtures/MathMain.class'))
+        helper := api.run('test/fixtures/UsesHelper.java', {javaBackend: 'javac',
+            classFiles: ['test/fixtures/Helper.class']})
+        check('javac sees only explicitly staged helper bytecode',
+            helper.type = :ok & helper.output = '42\n')
+        isolated := api.run('test/fixtures/UsesHelper.java', {javaBackend: 'javac'})
+        check('javac does not implicitly discover ambient Java helpers',
+            isolated.type = :error & str.contains?(isolated.message, 'cannot find symbol'))
+        multiSource := build('test/fixtures/SourceMain.java',
+            'test/fixtures/virtual-two-sources.oak', {javaBackend: 'javac',
+                javaFiles: ['test/fixtures/SourceUtil.java']})
+        check('Builder javac accepts only explicitly supplied additional Java sources',
+            multiSource.type = :ok & len(api.restoreOak(multiSource.value).value) = 2 &
+            app.run(app.compile(api.restoreOak(multiSource.value).value,
+                {entry: 'SourceMain'}).value, {}, {}).output = '42\n')
+        packagedSources := build('test/fixtures/MultiPackageMain.java',
+            'test/fixtures/virtual-multi-package.oak', {javaBackend: 'javac',
+                javaFiles: ['test/fixtures/multi/a/Peer.java',
+                    'test/fixtures/multi/b/Peer.java']})
+        check('isolated javac stages two equal basenames from distinct packages',
+            packagedSources.type = :ok &
+            len(api.restoreOak(packagedSources.value).value) = 3 &
+            app.run(app.compile(api.restoreOak(packagedSources.value).value,
+                {entry: 'MultiPackageMain'}).value, {}, {}).output = '42\n')
+        missingSource := api.run('test/fixtures/SourceMain.java',
+            {javaBackend: 'javac'})
+        check('isolated javac cannot implicitly compile adjacent Java source',
+            missingSource.type = :error &
+            str.contains?(missingSource.message, 'cannot find symbol'))
+        check('Oak-only Java subset refuses multi-source rather than invoking javac',
+            api.run('test/fixtures/SourceMain.java', {javaBackend: 'oak',
+                javaFiles: ['test/fixtures/SourceUtil.java']}).type = :error)
+        check('JDK-required frontend does not claim support when javac missing',
+            api.load('test/fixtures/HelloMain.java', {javaBackend: 'javac',
+                javacPath: '/nonexistent/magnolia-javac'}).type = :error)
+    }
+}
+
+std.println(string(checks - failures) + '/' + string(checks) +
+    ' Magnolia Builder/applet integration checks passed')
+if failures > 0 -> exit(1)
