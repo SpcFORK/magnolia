@@ -1,0 +1,142 @@
+#!/usr/bin/env oak
+// a3-diff -- A/B AST comparison for the M4 ablation.
+//
+// Parses the same JavaScript source through both front-ends and reports
+// every node difference:
+//
+//   * Acorn bridge:  node tools/acorn-dump.js file.js  (ESTree JSON)
+//                      -- lib/estree.oak ingest --> js* AST
+//   * Oak-native:    lib/js-parse.oak parse(text)  --> js* AST
+//
+// Both trees use the lib/ast-js.oak constructors; we compare them
+// structurally (type, fields, list lengths, values) ignoring `tok`
+// metadata, which is deliberately zeroed there.
+//
+// Usage:
+//   magnolia tools/a3-diff.oak file.js dump.json
+//
+// Exits 0 when the trees are identical (or differ only in ignored
+// metadata), 1 with a mismatch report otherwise.
+
+std := import('std')
+fs := import('fs')
+estree := import('estree')
+jsparse := import('js-parse')
+
+if len(args()) < 3 {
+	true -> {
+		print('usage: magnolia tools/a3-diff.oak file.js dump.json')
+		exit(2)
+	}
+}
+srcPath := args().(len(args()) - 2)
+jsonPath := args().(len(args()) - 1)
+
+srcText := fs.readFileSync(srcPath)
+jsonText := fs.readFileSync(jsonPath)
+
+// -- front-ends -----------------------------------------------------------
+
+native := jsparse.parse(srcText)
+
+if native.ok {
+	true -> ?
+	_ -> {
+		print('NATIVE PARSE FAILED for ' << srcPath)
+		native.errors |> std.each(fn(e) print('  err: ' << string(e)))
+		exit(1)
+	}
+}
+nativeWarns := native.warnings
+
+acornAst := estree.estreeToOak(jsonText)
+estDiags := estree.takeDiagnostics()
+
+if acornAst {
+	? -> {
+		print('ESTREE INGEST FAILED for ' << jsonPath)
+		estDiags |> std.each(fn(d) print('  diag: ' << string(d)))
+		exit(1)
+	}
+	_ -> ?
+}
+
+// -- generic structural differ ----------------------------------------------
+
+mismatches := []
+
+fn record(path, msg) {
+	mismatches <- mismatches << { path: path, msg: msg }
+	?
+}
+
+fn typeName(v) string(type(v))
+
+fn diffLists(a, b, path) {
+	if len(a) != len(b) -> record(path, 'list length ' << string(len(a)) << ' vs ' << string(len(b)))
+	n := if len(a) > len(b) {
+		true -> len(b)
+		_ -> len(a)
+	}
+	i := 0
+	fn loop() if i < n & len(mismatches) < 200 {
+		true -> {
+			diffNode(a.(i), b.(i), path << '.' << string(i))
+			i <- i + 1
+			loop()
+		}
+	}
+	loop()
+}
+
+fn diffObjects(a, b, path) {
+	ak := keys(a) |> std.filter(fn(k) k != 'tok')
+	bk := keys(b) |> std.filter(fn(k) k != 'tok')
+	ak |> std.each(fn(k) {
+		if !(bk |> std.contains?(k)) -> record(path, 'key missing on acorn side: ' << k)
+	})
+	bk |> std.each(fn(k) {
+		if !(ak |> std.contains?(k)) -> record(path, 'key missing on native side: ' << k)
+	})
+	ak |> std.each(fn(k) {
+		if bk |> std.contains?(k) -> diffNode(a.(k), b.(k), path << '.' << k)
+	})
+}
+
+fn diffNode(a, b, path) {
+	if len(mismatches) >= 200 -> ?
+	ta := type(a)
+	tb := type(b)
+	if ta != tb {
+		true -> record(path, 'node type ' << typeName(a) << ' vs ' << typeName(b))
+		_ -> if ta {
+			:list -> diffLists(a, b, path)
+			:object -> diffObjects(a, b, path)
+			:atom -> {
+				if a != b -> record(path, 'atom ' << string(a) << ' vs ' << string(b))
+			}
+			_ -> {
+				if a != b -> record(path, 'value ' << string(a) << ' vs ' << string(b))
+			}
+		}
+	}
+}
+
+diffNode(native.ast, acornAst, '$')
+
+// -- report -----------------------------------------------------------------
+
+n := len(mismatches)
+if n = 0 {
+	true -> print('IDENTICAL: ' << srcPath)
+	_ -> {
+		print('MISMATCHES (' << string(n) << (if n >= 200 { true -> '+', _ -> '' }) << ') in ' << srcPath)
+		mismatches |> std.each(fn(m) print('  ' << m.path << ': ' << m.msg))
+	}
+}
+print('native warnings: ' << string(len(nativeWarns)))
+print('estree diagnostics: ' << string(len(estDiags)))
+if n = 0 {
+	true -> exit(0)
+	_ -> exit(1)
+}

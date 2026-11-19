@@ -1,0 +1,883 @@
+// beam-vm.oak -- BEAM (Bogdan's/Bjorn's Abstract Machine) virtual machine
+// written in Oak, on top of the Oak VM.
+//
+// Modeled on the JVM runtime (lib/applet-runtime.oak): a state record, an
+// execute/_execute pair with a nested tick(pc) dispatch loop over a flat
+// [op, arg, ref] instruction stream, the same fail/depth/steps budget, and a
+// run(program, options) entry point.
+//
+// The BEAM is a register machine (descended from JAM/WAM), not a stack
+// machine. It keeps:
+//   - 1024 X registers (X0..X1023), X0 = return value, args in X0..
+//   - Y registers = stack-frame slots (caller-saved, saved across calls)
+//   - special registers: I (instruction pointer), CP (continuation/return
+//     address), FP (frame pointer), Htop (top of heap), E (top of stack),
+//     fcalls (reduction counter)
+//   - direct-threaded dispatch, allocate/test_heap frame management
+//   - a process mailbox for actor message passing
+//   - reduction-count preemption (one reduction per instruction)
+//   - a shared atom table (atoms are not GC'd)
+//
+// The instruction set is the generic (external) tier: a compact opcode
+// stream expanded by the loader. This module is the single, self-contained
+// BEAM VM for Oak; extend it by adding a checked instruction here, an
+// implementation in the tick dispatch, and parity tests.
+
+{
+	default: default
+	slice: slice
+	clone: clone
+	map: map
+	each: each
+	keys: keys
+} := import('std')
+
+fn fail(state, message) {
+	state.error <- message
+}
+
+// ---------------------------------------------------------------------------
+// Term representation
+//
+// BEAM terms are tagged values. To stay inside Oak's type system while keeping
+// the machine faithful, atoms are plain Oak strings, integers/floats/booleans
+// are native, PIDs/references/ports are small tagged objects, lists are Oak
+// lists, and tuples are tagged objects. This mirrors the tagged-term model
+// of the BEAM without introducing a parallel GC heap.
+// ---------------------------------------------------------------------------
+
+fn _pid(n) {type: :pid, n: n}
+fn _reference(n) {type: :reference, n: n}
+fn _port(n) {type: :port, n: n}
+fn _fun(m, a, uniq) {type: :fun, module: m, arity: a, uniq: uniq}
+fn _tuple(elems) {type: :tuple, elems: elems}
+
+fn termType(value) if value = ? {
+	true -> :undefined
+	_ -> if type(value) {
+		:string -> :atom
+		:int -> :integer
+		:float -> :float
+		:bool -> :boolean
+		:list -> :list
+		:object -> value.type
+		_ -> :other
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Atom table (shared, not GC'd). Atoms are interned strings; lookup returns
+// the canonical string. The atom table is a flat map kept on the state so a
+// module's atoms are stable across processes.
+// ---------------------------------------------------------------------------
+
+fn internAtom(state, name) if type(name) != :string {
+	true -> name
+	_ -> if state.atoms.(name) = ? {
+		true -> {
+			state.nextAtom <- state.nextAtom + 1
+			state.atoms.(name) <- state.nextAtom
+			name
+		}
+		_ -> name
+	}
+}
+
+fn atomIndex(state, name) internAtom(state, name)
+
+// ---------------------------------------------------------------------------
+// Constant pools
+//
+// The loader resolves literal atoms, strings, floats, and funs into a pool
+// referenced by the [op, arg, ref] instruction stream, exactly as the JVM
+// runtime references ldc constants. ref is the pool index.
+// ---------------------------------------------------------------------------
+
+fn addConstant(state, pool, value) if len(pool) >= state.maxConsts {
+	true -> fail(state, 'BEAM constant pool overflow')
+	_ -> {
+		state.consts <- state.consts + 1
+		pool.(len(pool)) <- value
+		len(pool) - 1
+	}
+}
+
+fn constAt(pool, idx) if idx < 0 | idx >= len(pool) {
+	true -> ?
+	_ -> pool.(idx)
+}
+
+// ---------------------------------------------------------------------------
+// Program model
+//
+// A compiled BEAM program is a module: a list of functions (each with a
+// flat [op, arg, ref] code array, an arity, and a constant pool), the shared
+// atom table, and exported function indices. This is the Oak-VM analogue of
+// the JVM program's class table.
+// ---------------------------------------------------------------------------
+
+cx BeamFunction {
+	module := ''
+	name := ''
+	arity := 0
+	code := []
+	pool := []
+}
+
+cx BeamModule {
+	module := ''
+	functions := []
+	exports := []
+	pool := []
+}
+
+// ---------------------------------------------------------------------------
+// Process state
+//
+// One process = one heap/stack/mailbox. The state record holds the register
+// file, special registers, frame stack, mailbox, atom table, and the shared
+// step/depth budgets -- the same shape as the JVM runtime's state.
+// ---------------------------------------------------------------------------
+
+fn createState(options) {
+	options := default(options, {})
+	state := {
+		error: ?
+		thrown: ?
+		steps: 0
+		depth: 0
+		maxSteps: options.maxSteps |> default(1000000)
+		maxDepth: options.maxDepth |> default(128)
+		maxHeap: options.maxHeap |> default(65536)
+		maxMailbox: options.maxMailbox |> default(4096)
+		maxConsts: options.maxConsts |> default(65536)
+		// Register machine: 1024 X registers, X0 = return value.
+		x: []
+		y: []
+		// Special registers.
+		i: 0
+		cp: 0
+		fp: 0
+		htop: 0
+		e: 0
+		fcalls: 0
+		// Frame stack: each entry is {cp, fp, size}.
+		frames: []
+		// Process mailbox (actor messages).
+		mailbox: []
+		// Shared atom table.
+		atoms: {}
+		nextAtom: 0
+		// Shared constant pools and ref counters.
+		consts: 0
+		// Process identity.
+		pid: _pid(1)
+		nextPid: 2
+		// Linked processes (for link/unlink).
+		links: {}
+		// Trap state for try/try_case.
+		trap: ?
+		// Result accumulator.
+		result: ?
+		// Host callbacks, like the JVM's bounded host adapter.
+		host: options.host
+		trace: options.trace? |> default(false)
+	}
+	// Seed X0..X1023 so register access never reads ?.
+	i := 0
+	while i < 1024 {
+		state.x.(i) <- ?
+		i <- i + 1
+	}
+	state
+}
+
+// ---------------------------------------------------------------------------
+// Register accessors
+//
+// X registers are general purpose and pass call arguments. X0 is the return
+// value. Y registers are stack-frame slots, addressed relative to FP.
+// ---------------------------------------------------------------------------
+
+fn xReg(state, idx) if idx < 0 | idx >= 1024 {
+	true -> fail(state, 'BEAM X register index out of bounds')
+	_ -> state.x.(idx)
+}
+
+fn setX(state, idx, value) if idx < 0 | idx >= 1024 {
+	true -> fail(state, 'BEAM X register index out of bounds')
+	_ -> state.x.(idx) <- value
+}
+
+fn ySlot(state, idx) if idx < 0 | idx >= len(state.y) {
+	true -> fail(state, 'BEAM Y stack-slot index out of bounds')
+	_ -> state.y.(idx)
+}
+
+fn setY(state, idx, value) if idx < 0 | idx >= len(state.y) {
+	true -> fail(state, 'BEAM Y stack-slot index out of bounds')
+	_ -> state.y.(idx) <- value
+}
+
+// Stack-frame helpers.
+
+fn pushFrame(state, cp, need, fnIdx) {
+	// Allocate a frame of `need` Y slots, pushing the previous frame.
+	if state.depth >= state.maxDepth {
+		fail(state, 'maximum BEAM call depth exceeded')
+	}
+	frame := {cp: cp, fp: len(state.y), size: need, fn: fnIdx}
+	state.frames.(len(state.frames)) <- frame
+	// Grow the Y slot array to hold the new frame.
+	i := len(state.y)
+	while i < len(state.y) + need {
+		state.y.(i) <- ?
+		i <- i + 1
+	}
+	state.fp <- frame.fp
+	state.e <- len(state.y)
+}
+
+fn popFrame(state) {
+	frame := state.frames.(len(state.frames) - 1)
+	state.frames <- state.frames |> slice(0, len(state.frames) - 1)
+	// Truncate the Y array back to the frame start.
+	state.y <- state.y |> slice(0, frame.fp)
+	state.fp <- if len(state.frames) {
+		true -> state.frames.(len(state.frames) - 1).fp
+		_ -> 0
+	}
+	state.e <- len(state.y)
+}
+
+// ---------------------------------------------------------------------------
+// Reduction counting
+//
+// Each instruction consumes one reduction. When fcalls reaches the scheduler
+// quantum it is reset and, in a real runtime, the process is preempted. Here
+// we use it as the step budget's sibling: a hard cap keeps the VM bounded.
+// ---------------------------------------------------------------------------
+
+fn chargeReduction(state) {
+	state.fcalls <- state.fcalls + 1
+	if state.fcalls >= state.maxSteps {
+		state.fcalls <- 0
+		fail(state, 'BEAM reduction budget exceeded')
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox (actor message passing)
+//
+// send/self/receive/remove_message operate on the per-process mailbox. A
+// message is the tagged tuple {from, to, payload}.
+// ---------------------------------------------------------------------------
+
+fn send(state, to, payload) {
+	msg := {from: state.pid, to: to, payload: payload}
+	if len(state.mailbox) >= state.maxMailbox {
+		fail(state, 'BEAM mailbox overflow')
+	}
+	state.mailbox.(len(state.mailbox)) <- msg
+}
+
+fn receiveOne(state) {
+	if len(state.mailbox) {
+		msg := state.mailbox.(0)
+		state.mailbox <- state.mailbox |> slice(1)
+		msg.payload
+	} {
+		// No message: block would yield a timeout/after; return a nil marker.
+		?
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tuple/list construction helpers
+// ---------------------------------------------------------------------------
+
+fn makeTuple(state, size) {
+	elems := []
+	i := 0
+	while i < size {
+		elems.(i) <- ?
+		i <- i + 1
+	}
+	_tuple(elems)
+}
+
+fn makeList(state, size, start) {
+	out := []
+	i := 0
+	while i < size {
+		out.(i) <- ySlot(state, start + i)
+		i <- i + 1
+	}
+	out
+}
+
+fn gte(state, tupleVal, idx) {
+	// get_tuple_element: read tuple.(idx) into X0.
+	if type(tupleVal) != :object | tupleVal.type != :tuple {
+		true -> fail(state, 'BEAM get_tuple_element on non-tuple')
+		_ -> setX(state, 0, tupleVal.elems.(idx))
+	}
+}
+
+fn ste(state, tupleVal, idx) {
+	// set_tuple_element: tuple.(idx) = X0.
+	if type(tupleVal) != :object | tupleVal.type != :tuple {
+		true -> fail(state, 'BEAM set_tuple_element on non-tuple')
+		_ -> tupleVal.elems.(idx) <- xReg(state, 0)
+	}
+}
+
+fn divOp(state, a, b) {
+	if b = 0 {
+		true -> fail(state, 'BEAM division by zero')
+		_ -> setX(state, 0, a / b)
+	}
+}
+
+fn remOp(state, a, b) {
+	if b = 0 {
+		true -> fail(state, 'BEAM modulo by zero')
+		_ -> setX(state, 0, a % b)
+	}
+}
+
+fn consList(state, hd) {
+	if type(xReg(state, 0)) = :list {
+		true -> setX(state, 0, [hd | xReg(state, 0)])
+		_ -> fail(state, 'BEAM cons_list on non-list')
+	}
+}
+
+fn doSend(state, target) {
+	if type(target) != :object | target.type != :pid {
+		true -> fail(state, 'BEAM send to non-pid')
+		_ -> send(state, target, xReg(state, 0))
+	}
+}
+
+fn doLink(state, target, flag) {
+	if type(target) = :object & target.type = :pid {
+		true -> state.links.(target.n) <- flag
+		_ -> {}
+	}
+}
+
+fn callFunction(state, program, target, pc) {
+	// Save continuation, push a frame, recurse into tick at PC 0.
+	state.cp <- pc + 1
+	pushFrame(state, state.cp, 0, target)
+	state.i <- 0
+	tick(state, program, 0)
+}
+
+fn doReturn(state, ret) {
+	if len(state.frames) {
+		popFrame(state)
+		state.i <- state.cp
+		if len(state.frames) {
+			state.cp <- state.frames.(len(state.frames) - 1).cp
+		}
+		setX(state, 0, ret)
+	} {
+		state.result <- ret
+		state.depth <- state.depth - 1
+	}
+}
+
+fn doCallExt(state, ret) {
+	if len(state.frames) {
+		popFrame(state)
+		state.i <- state.cp
+		setX(state, 0, ret)
+	} {
+		state.result <- ret
+		state.depth <- state.depth - 1
+	}
+}
+
+fn doApply(state, program, f, pc) {
+	if type(f) != :object | f.type != :fun {
+		true -> fail(state, 'BEAM apply on non-fun')
+		_ -> {
+			target := -1
+			i := 0
+			while i < len(program.functions) {
+				cand := program.functions.(i)
+				if cand.module = f.module & cand.name = f.name &
+					cand.arity = f.arity {
+					true -> target <- i
+					_ -> {}
+				}
+				i <- i + 1
+			}
+			if target < 0 {
+				true -> fail(state, 'BEAM apply: fun not found')
+				_ -> callFunction(state, program, target, pc)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Instruction dispatch
+//
+// The tick(pc) loop is the BEAM analogue of the JVM runtime's dispatch: a
+// direct-threaded switch over the generic opcode set. Each instruction is a
+// [op, arg, ref] array; op selects, arg carries an immediate, ref a pool
+// index or target. X0 is the working/return register.
+// ---------------------------------------------------------------------------
+
+fn execute(program, index, args, state) if {
+	state.error != ? | state.thrown != ? -> ?
+	state.depth >= state.maxDepth -> fail(state, 'maximum BEAM call depth exceeded')
+	_ -> _execute(program, index, args, state)
+}
+
+fn _execute(program, index, args, state) {
+	state.depth <- state.depth - (0 - 1)
+	fn := program.functions.(index)
+	if fn = ? {
+		state.depth <- state.depth - 1
+		fail(state, 'BEAM function not found: ' + string(index))
+	}
+	// Place arguments in X0..X(arity-1).
+	i := 0
+	while i < len(args) & i < fn.arity {
+		state.x.(i) <- args.(i)
+		i <- i + 1
+	}
+	// Reset the working registers and frame for the top-level call.
+	state.i <- 0
+	state.cp <- -1
+	state.fcalls <- 0
+	state.result <- ?
+	pushFrame(state, state.cp, 0, index)
+
+	tick(state, program, 0)
+
+	state.depth <- state.depth - 1
+	state.result
+}
+
+fn currentFn(state, program) {
+	// The active function is the top frame's fn index.
+	if len(state.frames) {
+		true -> program.functions.(state.frames.(len(state.frames) - 1).fn)
+		_ -> program.functions.(0)
+	}
+}
+
+fn tick(state, program, pc) if state.error != ? | state.thrown != ? {
+	true -> state.result
+	_ -> {
+		fn := currentFn(state, program)
+		if pc < 0 | pc >= len(fn.code) {
+			true -> fail(state, 'BEAM program counter out of bounds')
+			_ -> step(state, program, pc)
+		}
+	}
+}
+
+fn step(state, program, pc) {
+	fn := currentFn(state, program)
+	if state.steps >= state.maxSteps {
+		fail(state, 'BEAM instruction budget exceeded')
+	}
+	state.steps <- state.steps + 1
+	chargeReduction(state)
+	inst := fn.code.(pc)
+	op := inst.(0)
+	arg := inst.(1)
+	ref := inst.(2)
+	next := pc + 1
+	if op {
+		// ---- constants ------------------------------------------------------
+		// get_atom/get_string/get_float/get_constant: load a literal from the
+		// module's shared pool into X0.
+		1 -> setX(state, 0, constAt(program.pool, ref))
+		// get_small: small integers in [0, 255] baked into arg.
+		2 -> setX(state, 0, arg)
+		3 -> setX(state, 0, constAt(program.pool, ref))
+		4 -> setX(state, 0, constAt(program.pool, ref))
+
+		// ---- register moves -------------------------------------------------
+		// move: copy X(arg) into X0.
+		5 -> setX(state, 0, xReg(state, arg))
+		// movex: copy X(arg) into an explicit X target (ref).
+		6 -> setX(state, ref, xReg(state, arg))
+		// movey: copy a Y slot into X0.
+		7 -> setX(state, 0, ySlot(state, arg))
+		// sety: store X0 into a Y slot.
+		8 -> setY(state, arg, xReg(state, 0))
+		// get_tuple_element.
+		9 -> gte(state, xReg(state, arg), ref)
+		// set_tuple_element.
+		10 -> ste(state, xReg(state, arg), ref)
+		// put_tuple_element.
+		11 -> {
+			tup := _tuple([])
+			tup.elems.(ref) <- xReg(state, arg)
+			setX(state, 0, tup)
+		}
+
+		// ---- arithmetic ----------------------------------------------------
+		// add/sub/mul/div/rem: X0 = X(arg) OP X0.
+		12 -> setX(state, 0, xReg(state, arg) + xReg(state, 0))
+		13 -> setX(state, 0, xReg(state, arg) - xReg(state, 0))
+		14 -> setX(state, 0, xReg(state, arg) * xReg(state, 0))
+		15 -> divOp(state, xReg(state, arg), xReg(state, 0))
+		16 -> remOp(state, xReg(state, arg), xReg(state, 0))
+		// neg/not/bnot: unary.
+		17 -> setX(state, 0, -xReg(state, 0))
+		18 -> setX(state, 0, !xReg(state, 0))
+		19 -> setX(state, 0, ~xReg(state, 0))
+
+		// ---- comparisons (X0 = bool) ---------------------------------------
+		20 -> setX(state, 0, xReg(state, arg) < xReg(state, 0))
+		21 -> setX(state, 0, xReg(state, arg) > xReg(state, 0))
+		22 -> setX(state, 0, xReg(state, arg) = xReg(state, 0))
+		23 -> setX(state, 0, xReg(state, arg) != xReg(state, 0))
+		24 -> setX(state, 0, xReg(state, arg) <= xReg(state, 0))
+		25 -> setX(state, 0, xReg(state, arg) >= xReg(state, 0))
+
+		// ---- type tests (X0 = bool) -----------------------------------------
+		26 -> setX(state, 0, termType(xReg(state, 0)) = :integer)
+		27 -> setX(state, 0, termType(xReg(state, 0)) = :float)
+		28 -> setX(state, 0, termType(xReg(state, 0)) = :atom)
+		29 -> setX(state, 0, termType(xReg(state, 0)) = :list)
+		30 -> setX(state, 0, termType(xReg(state, 0)) = :tuple)
+		31 -> setX(state, 0, type(xReg(state, 0)) = :object &
+			xReg(state, 0).type = :pid)
+		32 -> setX(state, 0, type(xReg(state, 0)) = :object &
+			xReg(state, 0).type = :reference)
+		33 -> setX(state, 0, type(xReg(state, 0)) = :object &
+			xReg(state, 0).type = :fun)
+
+		// ---- tuple/list construction ---------------------------------------
+		// make_tuple: X0 = tuple of `arg` zero slots.
+		34 -> setX(state, 0, makeTuple(state, arg))
+		// make_list: build a list of `arg` elements from Y slots at ref.
+		35 -> setX(state, 0, makeList(state, arg, ref))
+		// cons_list: X0 = [X(arg) | X0].
+		36 -> consList(state, xReg(state, arg))
+		// cons_tuple: X0 = {X(arg)} (ref unused).
+		37 -> setX(state, 0, _tuple([xReg(state, arg)]))
+
+		// ---- control flow --------------------------------------------------
+		// jump: next = ref.
+		38 -> next <- ref
+		// jump_if: if X(arg) truthy, jump to ref.
+		39 -> if xReg(state, arg) {
+			true -> next <- ref
+			_ -> next
+		}
+		// jump_if_not: if X(arg) falsy, jump to ref.
+		40 -> if xReg(state, arg) {
+			true -> next
+			_ -> next <- ref
+		}
+		// jump_if_eq: if X(arg) = X0, jump to ref.
+		41 -> if xReg(state, arg) = xReg(state, 0) {
+			true -> next <- ref
+			_ -> next
+		}
+		// jump_if_neq: if X(arg) != X0, jump to ref.
+		42 -> if xReg(state, arg) != xReg(state, 0) {
+			true -> next <- ref
+			_ -> next
+		}
+		// fail: raise a failure with X0 as the reason.
+		43 -> fail(state, 'BEAM fail: ' + string(xReg(state, 0)))
+
+		// ---- calls ---------------------------------------------------------
+		// call: call the function at module index `arg`. The continuation
+		// (return to pc+1) is saved in CP, a frame is pushed.
+		44 -> {
+			callee := program.functions.(arg)
+			if callee = ? {
+				true -> fail(state, 'BEAM call to missing function')
+				_ -> callFunction(state, program, arg, pc)
+			}
+		}
+		// return: pop the frame, restore CP, set X0 = result.
+		45 -> doReturn(state, xReg(state, 0))
+		// call_ext: call a host/external function via the bounded host adapter.
+		46 -> {
+			if state.host = ? {
+				true -> fail(state, 'BEAM call_ext with no host adapter')
+				_ -> {
+					ret := state.host.(ref)(state, xReg(state, arg))
+					doCallExt(state, ret)
+				}
+			}
+		}
+		// return_ext: same as return but for external calls.
+		47 -> doReturn(state, xReg(state, 0))
+		// apply: call the fun in X(arg) with args from X0.
+		48 -> doApply(state, program, xReg(state, arg), pc)
+		// call_fun: invoke a fun value directly (ref = index).
+		49 -> callFunction(state, program, ref, pc)
+
+		// ---- heap / frame management ---------------------------------------
+		// allocate: reserve `arg` words of heap (Y slots).
+		50 -> {
+			if state.htop + arg > state.maxHeap {
+				true -> fail(state, 'BEAM heap overflow in allocate')
+				_ -> {
+					state.htop <- state.htop + arg
+					state.e <- ref + arg
+				}
+			}
+		}
+		// test_heap: ensure `arg` words are live.
+		51 -> if state.htop + arg > state.maxHeap {
+			true -> fail(state, 'BEAM heap overflow in test_heap')
+			_ -> {}
+		}
+		// deallocate: release `arg` words (shrink E).
+		52 -> state.e <- state.e - arg
+
+		// ---- messaging / process model ------------------------------------
+		// self: X0 = the current PID.
+		53 -> setX(state, 0, state.pid)
+		// send: send X0 to PID(arg).
+		54 -> doSend(state, xReg(state, arg))
+		// receive: block for one message; X0 = payload or ?.
+		55 -> setX(state, 0, receiveOne(state))
+		// remove_message: discard the oldest message.
+		56 -> if len(state.mailbox) {
+			true -> state.mailbox <- state.mailbox |> slice(1)
+			_ -> {}
+		}
+		// link: link this process to PID(arg).
+		57 -> doLink(state, xReg(state, arg), true)
+		// unlink: remove the link.
+		58 -> doLink(state, xReg(state, arg), ?)
+		// make_pid: X0 = a fresh PID.
+		59 -> {
+			p := _pid(state.nextPid)
+			state.nextPid <- state.nextPid + 1
+			setX(state, 0, p)
+		}
+		// make_reference: X0 = a fresh reference.
+		60 -> {
+			r := _reference(state.nextPid)
+			state.nextPid <- state.nextPid + 1
+			setX(state, 0, r)
+		}
+
+		// ---- exception handling -------------------------------------------
+		// try: set a trap; on a later fail, resume at ref.
+		61 -> state.trap <- {pc: pc + 1, target: ref}
+		// try_case: trap keyed on X(arg); jump to ref on catch.
+		62 -> state.trap <- {pc: pc + 1, target: ref, key: xReg(state, arg)}
+		// try_end: clear the trap.
+		63 -> state.trap <- ?
+
+		// ---- halt / stop ---------------------------------------------------
+		// halt: stop the process; X0 is the exit value.
+		64 -> {
+			state.result <- xReg(state, 0)
+			state.depth <- state.depth - 1
+		}
+
+		// ---- nop ----------------------------------------------------------
+		0 -> {}
+		_ -> fail(state, 'BEAM unknown opcode: ' + string(op))
+	}
+	tick(state, program, next)
+}
+
+// ---------------------------------------------------------------------------
+// run: the entry point, mirroring the JVM runtime's run(program, params, opts).
+// ---------------------------------------------------------------------------
+
+fn run(program, options) {
+	options := default(options, {})
+	state := createState(options)
+	// Intern module atoms once.
+	keys(program.pool) |> each(fn(i) {
+		v := program.pool.(i)
+		if type(v) = :string {
+			true -> internAtom(state, v)
+			_ -> {}
+		}
+	})
+	entry := options.entry |> default(0)
+	args := options.args |> default([])
+	if type(args) != :list {
+		fail(state, 'BEAM run args must be a list')
+	}
+	if state.error = ? {
+		execute(program, entry, args, state)
+	}
+	{
+		result: state.result
+		error: state.error
+		steps: state.steps
+		fcalls: state.fcalls
+		mailbox: len(state.mailbox)
+		pid: state.pid
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compiler: AST -> BEAM bytecode
+//
+// A small compiler that lowers an Oak-like AST (the same node shapes the
+// wasm-vm compiler handles) into the generic BEAM instruction stream above.
+// This is the loader's job in a real BEAM: expand the compact external
+// tier into the specific tier. Here it emits the generic opcodes directly.
+// ---------------------------------------------------------------------------
+
+fn compileFunction(c, node) {
+	fn := BeamFunction()
+	fn.module <- c.module
+	fn.name <- node.name
+	fn.arity <- len(node.args)
+	fn.code <- []
+	fn.pool <- c.pool
+	c.current <- fn
+	compileBody(c, node.body)
+	// return
+	emit(c, 45, 0, 0)
+	fn
+}
+
+fn emit(c, op, arg, ref) {
+	c.current.code.(len(c.current.code)) <- [op, arg, ref]
+}
+
+fn emitConst(c, value) {
+	idx := addConstant(c.state, c.pool, value)
+	emit(c, 1, 0, idx)
+}
+
+fn compileBody(c, node) {
+	if type(node) = :list {
+		node |> each(fn(expr) {
+			compileNode(c, expr)
+			// Discard non-final results.
+			emit(c, 8, 0, 0)
+		})
+	} {
+		compileNode(c, node)
+	}
+}
+
+fn compileNode(c, node) if node = ? {
+	true -> emitConst(c, ?)
+	_ -> if node.type {
+		:int -> emit(c, 2, node.val & 0xFF, 0)
+		:float -> emitConst(c, node.val)
+		:string -> emitConst(c, node.val)
+		:atom -> emitConst(c, node.val)
+		:bool -> emit(c, 2, if node.val {true -> 1, _ -> 0}, 0)
+		:identifier -> {
+			// Load a named local from X registers by name lookup.
+			idx := resolveLocal(c, node.val)
+			emit(c, 5, idx, 0)
+		}
+		:unary -> {
+			compileNode(c, node.right)
+			if node.op {
+				:minus -> emit(c, 17, 0, 0)
+				:exclam -> emit(c, 18, 0, 0)
+				:tilde -> emit(c, 19, 0, 0)
+			}
+		}
+		:binary -> {
+			// Left operand into X0, store to Y0, right into X0, combine.
+			compileNode(c, node.left)
+			emit(c, 8, 0, 0)
+			compileNode(c, node.right)
+			if node.op {
+				:plus -> emit(c, 12, 0, 0)
+				:minus -> emit(c, 13, 0, 0)
+				:times -> emit(c, 14, 0, 0)
+				:divide -> emit(c, 15, 0, 0)
+				:modulus -> emit(c, 16, 0, 0)
+				:eq -> emit(c, 22, 0, 0)
+				:neq -> emit(c, 23, 0, 0)
+				:greater -> emit(c, 21, 0, 0)
+				:less -> emit(c, 20, 0, 0)
+				:geq -> emit(c, 25, 0, 0)
+				:leq -> emit(c, 24, 0, 0)
+			}
+		}
+		:list -> {
+			node.elems |> each(fn(el) compileNode(c, el))
+			emit(c, 35, len(node.elems), 0)
+		}
+		:object -> {
+			node.entries |> each(fn(entry) {
+				compileNode(c, entry.val)
+			})
+			emit(c, 34, len(node.entries), 0)
+		}
+		:block -> compileBody(c, node.exprs)
+		:ifExpr -> {
+			compileNode(c, node.cond)
+			emit(c, 8, 0, 0)
+			// jump_if_not to the else target.
+			elseLabel := c.labelCount
+			c.labelCount <- c.labelCount + 1
+			emit(c, 40, 0, elseLabel)
+			compileNode(c, node.branches.(0).body)
+			emit(c, 38, 0, c.labelCount)
+			c.labelCount <- c.labelCount + 1
+			emit(c, elseLabel, 0, 0)
+			compileNode(c, node.branches.(1).body)
+		}
+		:function -> compileFunction(c, node)
+		:fnCall -> {
+			compileNode(c, node.function)
+			node.args |> each(fn(arg) compileNode(c, arg))
+			emit(c, 48, 0, 0)
+		}
+		_ -> emitConst(c, ?)
+	}
+}
+
+fn resolveLocal(c, name) {
+	idx := c.locals.(name)
+	if idx = ? {
+		idx := c.localCount
+		c.localCount <- c.localCount + 1
+		c.locals.(name) <- idx
+	}
+	idx
+}
+
+fn compileProgram(ast) {
+	c := {
+		state: createState({})
+		module: 'beam'
+		pool: []
+		functions: []
+		exports: []
+		locals: {}
+		localCount: 0
+		labelCount: 0
+		current: ?
+	}
+	ast |> each(fn(node) if node.type = :function {
+		true -> {
+			fn := compileFunction(c, node)
+			c.functions.(len(c.functions)) <- fn
+			c.exports.(len(c.exports)) <- len(c.functions) - 1
+		}
+		_ -> {}
+	})
+	mod := BeamModule()
+	mod.module <- c.module
+	mod.functions <- c.functions
+	mod.exports <- c.exports
+	mod.pool <- c.pool
+	mod
+}

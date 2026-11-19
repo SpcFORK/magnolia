@@ -1,0 +1,342 @@
+// libieee754 — IEEE-754 binary32/binary64 values implemented in Oak, so
+// native and bundled JS share one bit-preserving representation. The host may
+// reject division by zero, so all exceptional IEEE operations are handled
+// here before any host arithmetic. Both pool payloads and computed results
+// retain exact unsigned bit limbs; neither negative zero nor NaN is
+// represented by an untagged Oak number.
+//
+// This module was abstracted from the JVM execution layer (where it models
+// the JVM's `float`/`double` pool payloads, two-slot locals and category-two
+// operations) so any Oak program can rely on bit-exact IEEE semantics. Values
+// are plain Oak objects tagged {jvmFloat: true, bits} / {jvmDouble: true,
+// hi, lo}; this is the same interchange shape used by the bounded JVM layer
+// and its generated Java (`WideFloat`/`WideDouble`). It depends on `str`
+// only (plus the built-in `pow`/`log`/`int`/`float` used below).
+
+str := import('str')
+
+fn f32(bits) {jvmFloat: true, bits: bits}
+fn f64(hi, lo) {jvmDouble: true, hi: hi, lo: lo}
+fn float?(v) type(v) = :object & v.jvmFloat = true &
+    type(v.bits) = :int & v.bits >= 0 & v.bits <= 4294967295
+fn double?(v) type(v) = :object & v.jvmDouble = true &
+    type(v.hi) = :int & type(v.lo) = :int &
+    v.hi >= 0 & v.hi <= 4294967295 &
+    v.lo >= 0 & v.lo <= 4294967295
+fn wide?(v) double?(v)
+fn sign(v) if double?(v) {
+    true -> if v.hi >= 2147483648 {true -> 1, _ -> 0}
+    _ -> if v.bits >= 2147483648 {true -> 1, _ -> 0}
+}
+fn exponent(v) if double?(v) {
+    true -> int(v.hi / 1048576) % 2048
+    _ -> int(v.bits / 8388608) % 256
+}
+fn fraction(v) if double?(v) {
+    true -> (v.hi % 1048576) * 4294967296 + v.lo
+    _ -> v.bits % 8388608
+}
+fn kind(v) {
+    e := exponent(v)
+    f := fraction(v)
+    if e = if double?(v) {true -> 2047, _ -> 255} {
+        true -> if f = 0 {true -> :infinity, _ -> :nan}
+        _ -> if e = 0 & f = 0 {true -> :zero, _ -> :finite}
+    }
+}
+fn infinity(double, negative?) if double {
+    true -> f64(if negative? {true -> 4293918720, _ -> 2146435072}, 0)
+    _ -> f32(if negative? {true -> 4286578688, _ -> 2139095040})
+}
+fn nan(double) if double {
+    true -> f64(2146959360, 0)
+    _ -> f32(2143289344)
+}
+fn zero(double, negative?) if double {
+    true -> f64(if negative? {true -> 2147483648, _ -> 0}, 0)
+    _ -> f32(if negative? {true -> 2147483648, _ -> 0})
+}
+fn negative(v) if double?(v) {
+    true -> f64(if sign(v) = 1 {true -> v.hi - 2147483648,
+        _ -> v.hi + 2147483648}, v.lo)
+    _ -> f32(if sign(v) = 1 {true -> v.bits - 2147483648,
+        _ -> v.bits + 2147483648})
+}
+// Decode only finite values into the host's binary64. For a subnormal,
+// multiplying the exact integer significand by 2^-1074 is exact; the native
+// interpreter and JS use IEEE binary64 for their underlying Oak floats.
+fn numeric(v) if kind(v) = :finite {
+    true -> {
+        e := exponent(v)
+        frac := fraction(v)
+        magnitude := if double?(v) {
+            true -> if e = 0 {
+                true -> float(frac) * pow(2.0, -1074)
+                _ -> (1.0 + float(frac) / 4503599627370496.0) *
+                    pow(2.0, e - 1023)
+            }
+            _ -> if e = 0 {
+                true -> float(frac) * pow(2.0, -149)
+                _ -> (1.0 + float(frac) / 8388608.0) *
+                    pow(2.0, e - 127)
+            }
+        }
+        if sign(v) = 1 {true -> 0.0 - magnitude, _ -> magnitude}
+    }
+    _ -> if kind(v) = :zero {true -> 0.0, _ -> ?}
+}
+fn _roundEven(value) {
+    floor := int(value)
+    residual := value - float(floor)
+    if residual > 0.5 | (residual = 0.5 & floor % 2 = 1) {
+        true -> floor + 1, _ -> floor
+    }
+}
+// An exact host binary64 can be decomposed without lossy decimal conversion.
+// log2 provides an exponent estimate; the two adjustments correct any
+// adjacent representable-value rounding at powers of two. All integer
+// intermediates fit within 2^53, including the 52-bit double fraction.
+fn _normalized(x) {
+    e := int(log(2.0, x))
+    if e > 1023 -> e <- 1023
+    if e < -1074 -> e <- -1074
+    m := x / pow(2.0, e)
+    if m < 1.0 -> {m <- m * 2.0, e <- e - 1}
+    if m >= 2.0 -> {m <- m / 2.0, e <- e + 1}
+    [e, m]
+}
+MAX_FINITE := pow(2.0, 1023) * (2.0 - pow(2.0, -52))
+fn fromNumber(value, double, negativeZero?) {
+    // Exceptional results of nonzero arithmetic are produced by the host as
+    // real IEEE NaN/Inf; never call log/int on either.
+    if value != value {
+        true -> nan(double)
+        _ -> if value > MAX_FINITE | value < 0.0 - MAX_FINITE {
+            true -> infinity(double, value < 0)
+            _ -> if value = 0 {
+                true -> zero(double, negativeZero?)
+                _ -> {
+                    negative? := value < 0
+                    x := if negative? {true -> 0.0 - value, _ -> float(value)}
+                    shape := _normalized(x)
+                    e := shape.(0)
+                    m := shape.(1)
+                    if double {
+                        true -> {
+                            biased := if e < -1022 {true -> 0, _ -> e + 1023}
+                            frac := if biased = 0 {
+                                true -> int(x / pow(2.0, -1074))
+                                _ -> int((m - 1.0) * 4503599627370496.0)
+                            }
+                            f64((if negative? {true -> 2147483648, _ -> 0}) +
+                                biased * 1048576 + int(frac / 4294967296),
+                                frac % 4294967296)
+                        }
+                        _ -> {
+                            biased := if e < -126 {true -> 0, _ -> e + 127}
+                            frac := if biased = 0 {
+                                true -> _roundEven(x / pow(2.0, -149))
+                                _ -> _roundEven((m - 1.0) * 8388608.0)
+                            }
+                            if frac >= 8388608 {
+                                true -> {frac <- 0, biased <- biased + 1}
+                            }
+                            if biased >= 255 {
+                                true -> infinity(false, negative?)
+                                _ -> if biased = 0 & frac = 0 {
+                                    true -> zero(false, negative?)
+                                    _ -> f32((if negative? {true -> 2147483648,
+                                        _ -> 0}) + biased * 8388608 + frac)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+// Convert a signed JVM long directly to a binary32 significand. Passing the
+// 64-bit value through a host binary64 first double-rounds values just above
+// a binary32 midpoint (e.g. 2^55 + 2^31 + 1). Every intermediate here has
+// at most 40 significant bits; native Oak and JS therefore agree exactly.
+fn _highestBit(v, n) if v < 2 {
+    true -> n
+    _ -> _highestBit(int(v / 2), n + 1)
+}
+fn fromLong(hi, lo) {
+    negative? := hi < 0
+    high := if negative? {true -> if lo = 0 {true -> 0 - hi, _ -> 0 - hi - 1},
+        _ -> hi}
+    low := if negative? {true -> if lo = 0 {true -> 0, _ -> 4294967296 - lo},
+        _ -> lo}
+    if high = 0 & low = 0 {
+        true -> zero(false, false)
+        _ -> {
+            highest := _highestBit(if high > 0 {true -> high, _ -> low},
+                if high > 0 {true -> 32, _ -> 0})
+            significand := 0
+            if highest <= 23 {
+                true -> significand <- low * int(pow(2.0, 23 - highest))
+                _ -> {
+                    shift := highest - 23
+                    remainder := 0
+                    if shift <= 32 {
+                        true -> {
+                            unit := int(pow(2.0, shift))
+                            significand <- high * int(pow(2.0, 32 - shift)) +
+                                int(low / unit)
+                            remainder <- low % unit
+                        }
+                        _ -> {
+                            unit := int(pow(2.0, shift - 32))
+                            significand <- int(high / unit)
+                            remainder <- (high % unit) * 4294967296 + low
+                        }
+                    }
+                    half := int(pow(2.0, shift - 1))
+                    if remainder > half |
+                        (remainder = half & significand % 2 = 1) ->
+                        significand <- significand + 1
+                    if significand = 16777216 -> {
+                        significand <- 8388608
+                        highest <- highest + 1
+                    }
+                }
+            }
+            f32((if negative? {true -> 2147483648, _ -> 0}) +
+                (highest + 127) * 8388608 + significand - 8388608)
+        }
+    }
+}
+
+// Java's sign rules for zero/inf/NaN and division/remainder are handled
+// explicitly. Only finite, nonzero operands reach host division/modulo.
+fn binary(op, a, b) {
+    double := double?(a)
+    ak := kind(a)
+    bk := kind(b)
+    as := sign(a) = 1
+    bs := sign(b) = 1
+    subtract := op = 102 | op = 103
+    add? := op = 98 | op = 99 | subtract
+    multiply? := op = 106 | op = 107
+    divide? := op = 110 | op = 111
+    remainder? := op = 114 | op = 115
+    xorSign := as != bs
+    if ak = :nan | bk = :nan {
+        true -> nan(double)
+        _ -> if add? {
+            true -> {
+                effectiveSign := if subtract {true -> !bs, _ -> bs}
+                if ak = :infinity & bk = :infinity & as != effectiveSign {
+                    true -> nan(double)
+                    _ -> if ak = :infinity {
+                        true -> infinity(double, as)
+                        _ -> if bk = :infinity {
+                            true -> infinity(double, effectiveSign)
+                            _ -> fromNumber(if subtract {
+                                true -> numeric(a) - numeric(b)
+                                _ -> numeric(a) + numeric(b)
+                            }, double, ak = :zero & bk = :zero & as & effectiveSign)
+                        }
+                    }
+                }
+            }
+            _ -> if multiply? {
+                true -> if (ak = :infinity & bk = :zero) |
+                    (bk = :infinity & ak = :zero) {
+                    true -> nan(double)
+                    _ -> if ak = :infinity | bk = :infinity {
+                        true -> infinity(double, xorSign)
+                        _ -> if ak = :zero | bk = :zero {
+                            true -> zero(double, xorSign)
+                            _ -> fromNumber(numeric(a) * numeric(b), double, xorSign)
+                        }
+                    }
+                }
+                _ -> if divide? {
+                    true -> if (ak = :infinity & bk = :infinity) |
+                        (ak = :zero & bk = :zero) {
+                        true -> nan(double)
+                        _ -> if ak = :infinity | bk = :zero {
+                            true -> infinity(double, xorSign)
+                            _ -> if ak = :zero | bk = :infinity {
+                                true -> zero(double, xorSign)
+                                _ -> fromNumber(numeric(a) / numeric(b), double, xorSign)
+                            }
+                        }
+                    }
+                    _ -> if remainder? {
+                        true -> if ak = :infinity | bk = :zero {
+                            true -> nan(double)
+                            _ -> if ak = :zero | bk = :infinity {
+                                true -> a
+                                _ -> fromNumber(numeric(a) % numeric(b), double, as)
+                            }
+                        }
+                        _ -> ?
+                    }
+                }
+            }
+        }
+    }
+}
+fn compare(a, b, nanResult) if kind(a) = :nan | kind(b) = :nan {
+    true -> nanResult
+    _ -> if kind(a) = :infinity {
+        true -> if kind(b) = :infinity {
+            true -> if sign(a) = sign(b) {true -> 0,
+                _ -> if sign(a) = 1 {true -> -1, _ -> 1}}
+            _ -> if sign(a) = 1 {true -> -1, _ -> 1}
+        }
+        _ -> if kind(b) = :infinity {
+            true -> if sign(b) = 1 {true -> 1, _ -> -1}
+            _ -> if numeric(a) < numeric(b) {true -> -1,
+                _ -> if numeric(a) > numeric(b) {true -> 1, _ -> 0}}
+        }
+    }
+}
+fn toInt(v) if kind(v) = :nan {
+    true -> 0
+    _ -> if kind(v) = :infinity {
+        true -> if sign(v) = 1 {true -> -2147483648, _ -> 2147483647}
+        _ -> {
+            n := numeric(v)
+            if n >= 2147483647.0 {true -> 2147483647,
+                _ -> if n <= -2147483648.0 {true -> -2147483648,
+                    _ -> if n < 0 {true -> 0 - int(0.0 - n), _ -> int(n)}}}
+        }
+    }
+}
+// Java's Double.toString/Float.toString are distinct shortest-decimal
+// algorithms. Only plain, unambiguous finite forms are emitted by this
+// bounded VM; other decimals fail explicitly rather than silently printing
+// a non-Java value (e.g. the least subnormal or 0.1f).
+fn text(v) if kind(v) {
+    :nan -> 'NaN'
+    :infinity -> if sign(v) = 1 {true -> '-Infinity', _ -> 'Infinity'}
+    :zero -> if sign(v) = 1 {true -> '-0.0', _ -> '0.0'}
+    _ -> {
+        n := numeric(v)
+        mag := if n < 0 {true -> 0.0 - n, _ -> n}
+        if mag < 0.001 | mag >= 10000000.0 |
+            (float?(v) & n * 1000000.0 != float(int(n * 1000000.0))) {
+            true -> ?
+            _ -> {
+                result := string(n)
+                if str.contains?(result, 'e') | str.contains?(result, 'E') {
+                    true -> ?
+                    _ -> if str.contains?(result, '.') {
+                        true -> result, _ -> result + '.0'
+                    }
+                }
+            }
+        }
+    }
+}
+
+{f32: f32, f64: f64, float?: float?, double?: double?, wide?: wide?,
+    sign: sign, kind: kind, numeric: numeric, fromNumber: fromNumber,
+    fromLong: fromLong, negative: negative, zero: zero, infinity: infinity, nan: nan,
+    binary: binary, compare: compare, toInt: toInt, text: text}

@@ -1,0 +1,936 @@
+// js-tokenize — JavaScript (ES3/ES5) token stream for the Oak-native
+// front-end. lib/js-parse consumes the tokens produced here; together they
+// replace the Node/Acorn bridge for JS -> Oak transpilation (see
+// docs/js-tooling.md, milestone M4).
+//
+// Design notes:
+//   · ASCII-oriented. Identifier codepoints are [A-Za-z_$0-9]; Unicode
+//     escapes in identifiers and non-ASCII string bytes pass through as the
+//     raw UTF-8 bytes Oak strings carry. Line separators U+2028/U+2029 are
+//     NOT recognized as newlines (Oak indexes strings by byte).
+//   · Regex vs. divide disambiguation uses the standard "previous significant
+//     token" heuristic (the same approach Acorn uses): a '/' begins a regex
+//     literal unless the previous significant token is an identifier, number,
+//     string, regex, '}', ']', ')' , '++' or '--', or a keyword that does not
+//     expect an operand.
+//   · Token shape: { type, value?, pattern?, flags?, pos, line, col } where
+//     type is one of :ident :keyword :number :string :regex :template :punct
+//     :eof. `value` holds the decoded literal payload for :keyword
+//     (the keyword text), :ident, :number (int or float), :string (decoded)
+//     and :punct (the operator text). `pos`/`line`/`col` are byte offset /
+//     1-based line / 1-based byte column.
+//   · Diagnostics are data: tokenize returns { tokens, errors, ok } with
+//     errors as a list of { line, col, error } strings. Nothing throws; even
+//     badly malformed input yields a token stream plus error entries.
+//
+// This module is embedded + visible in the stdlib map but is intentionally
+// NOT autoloaded: the JS front-end is opt-in (import('js-tokenize')).
+
+std := import('std')
+str := import('str')
+default := std.default
+slice := std.slice
+join := str.join
+_unicodeUnits := import('unicode-units')
+_utf8Bytes := _unicodeUnits.utf8Bytes
+
+// ---------------------------------------------------------------------------
+// Keyword set (ES3/ES5 + ES2015 surface syntax we recognize so the parser can
+// emit a precise diagnostic instead of dropping the token on the floor).
+// ---------------------------------------------------------------------------
+
+KEYWORDS := {
+	var: true
+	let: true
+	const: true
+	function: true
+	return: true
+	:if: true
+	else: true
+	while: true
+	do: true
+	for: true
+	in: true
+	new: true
+	typeof: true
+	instanceof: true
+	delete: true
+	void: true
+	throw: true
+	try: true
+	catch: true
+	finally: true
+	switch: true
+	case: true
+	default: true
+	break: true
+	continue: true
+	this: true
+	:true: true
+	:false: true
+	null: true
+	debugger: true
+	:with: true
+	class: true
+	extends: true
+	super: true
+	import: true
+	export: true
+	await: true
+	static: true
+}
+
+// keywords after which a '/' starts a regex (they expect an operand)
+REGEX_KW := {
+	return: true
+	typeof: true
+	case: true
+	in: true
+	of: true
+	new: true
+	delete: true
+	void: true
+	instanceof: true
+	throw: true
+	do: true
+	else: true
+	:if: true
+	while: true
+	for: true
+	:with: true
+}
+
+PUNCTS_4 := ['>>>=']
+PUNCTS_3 := ['===', '!==', '>>>', '<<=', '>>=', '...']
+PUNCTS_2 := ['==', '!=', '<=', '>=', '&&', '||', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '=>', '**', '<<', '>>']
+PUNCTS_1 := ['(', ')', '[', ']', '{', '}', ';', ',', '.', ':', '?', '<', '>', '+', '-', '*', '/', '%', '&', '|', '^', '!', '~', '=']
+
+// ---------------------------------------------------------------------------
+// Cursor helpers. The cursor object is shared; Oak closures mutate its
+// fields directly, so no explicit threading is needed.
+// ---------------------------------------------------------------------------
+
+fn _cursor(text) {
+	{
+		text: text
+		i: 0
+		line: 1
+		col: 1
+		startI: 0
+		startLine: 1
+		startCol: 1
+		tokens: []
+		errors: []
+	}
+}
+
+fn _cc(cur, offset) {
+	// codepoint at cur.i + offset, or -1 at EOF
+	idx := cur.i + offset
+	if idx >= len(cur.text) {
+		true -> -1
+		_ -> codepoint(cur.text.(idx))
+	}
+}
+
+fn _adv1(cur) {
+	c := _cc(cur, 0)
+	if c = 10 {
+		true -> {
+			cur.i := cur.i + 1
+			cur.line := cur.line + 1
+			cur.col := 1
+		}
+		_ -> {
+			cur.i := cur.i + 1
+			cur.col := cur.col + 1
+		}
+	}
+}
+
+fn _emit(cur, type, value) {
+	cur.tokens := cur.tokens << {
+		type: type
+		value: value
+		pos: cur.startI
+		line: cur.startLine
+		col: cur.startCol
+	}
+}
+
+fn _emitRegex(cur, pattern, flags) {
+	cur.tokens := cur.tokens << {
+		type: :regex
+		pattern: pattern
+		flags: flags
+		pos: cur.startI
+		line: cur.startLine
+		col: cur.startCol
+	}
+}
+
+fn _err(cur, msg) {
+	cur.errors := cur.errors << { line: cur.line, col: cur.col, error: msg }
+}
+
+fn _peekStr(cur, n) {
+	// the n characters from cur.i as a string (unchanged cursor)
+	end := cur.i + n
+	if end > len(cur.text) {
+		true -> slice(cur.text, cur.i, len(cur.text))
+		_ -> slice(cur.text, cur.i, end)
+	}
+}
+
+// previous significant token (comments never reach the stream)
+fn _prevSig(cur) {
+	n := len(cur.tokens)
+	if n > 0 {
+		true -> n - 1
+		_ -> ?
+	}
+}
+
+fn _prevSigToken(cur) {
+	idx := _prevSig(cur)
+	if idx {
+		? -> ?
+		_ -> cur.tokens.(idx)
+	}
+}
+
+// regexAllowed reports whether a '/' at the cursor starts a regex literal.
+fn _regexAllowed(cur) {
+	prev := _prevSigToken(cur)
+	if prev {
+		? -> true
+		_ -> if prev.type {
+			:ident, :number, :string, :regex -> false
+			:template -> false
+			:keyword -> REGEX_KW.(prev.value) = true
+			:punct -> {
+				v := prev.value
+				!(
+					v = ')' | v = ']' | v = '}' |
+					v = '++' | v = '--'
+				)
+			}
+			_ -> true
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Whitespace, comments, shebang
+// ---------------------------------------------------------------------------
+
+fn _skipSpaceAndComments(cur) {
+	fn loop() {
+		c := _cc(cur, 0)
+		if c = -1 {
+			true -> ?
+			_ -> if c = 32 | c = 9 | c = 13 | c = 10 | c = 11 | c = 12 {
+				true -> {
+					_adv1(cur)
+					loop()
+				}
+				_ -> if c = 47 & _cc(cur, 1) = 47 {
+					// line comment
+					true -> {
+						fn cLoop() if _cc(cur, 0) != -1 & _cc(cur, 0) != 10 {
+							true -> {
+								_adv1(cur)
+								cLoop()
+							}
+						}
+						cLoop()
+						loop()
+					}
+					_ -> if c = 47 & _cc(cur, 1) = 42 {
+						// block comment
+						true -> {
+							startLine := cur.line
+							startCol := cur.col
+							_adv1(cur)
+							_adv1(cur)
+							fn bLoop() {
+								c2 := _cc(cur, 0)
+								if c2 = -1 {
+									true -> _err(cur, 'unterminated block comment starting line ' << string(startLine))
+									_ -> if c2 = 42 & _cc(cur, 1) = 47 {
+										true -> {
+											_adv1(cur)
+											_adv1(cur)
+										}
+										_ -> {
+											_adv1(cur)
+											bLoop()
+										}
+									}
+								}
+							}
+							bLoop()
+							loop()
+						}
+					}
+				}
+			}
+		}
+	}
+	loop()
+}
+
+// ---------------------------------------------------------------------------
+// Numbers
+// ---------------------------------------------------------------------------
+
+fn _hexVal(c) if c >= 48 & c <= 57 {
+	true -> c - 48
+	_ -> if c >= 97 & c <= 102 {
+		true -> c - 87 // a-f
+		_ -> if c >= 65 & c <= 70 {
+			true -> c - 55 // A-F
+			_ -> -1
+		}
+	}
+}
+
+// shared exponent tail: consumes [eE][+-]?digits and returns the suffix
+// ('e+5' style), or '' when no exponent follows. Emits a diagnostic when the
+// exponent marker is present without digits.
+fn _scanExponentSuffix(cur) {
+	if _cc(cur, 0) != 101 & _cc(cur, 0) != 69 {
+		true -> ''
+		_ -> {
+			_adv1(cur) // consume e/E
+			negative := false
+			if _cc(cur, 0) = 43 -> _adv1(cur) // plus sign
+			if _cc(cur, 0) = 45 {
+				true -> {
+					negative <- true
+					_adv1(cur)
+				}
+			}
+			digits := ''
+			fn expLoop() {
+				c := _cc(cur, 0)
+				if c >= 48 & c <= 57 {
+					true -> {
+						digits <- digits + char(c)
+						_adv1(cur)
+						expLoop()
+					}
+				}
+			}
+			expLoop()
+			if len(digits) = 0 -> _err(cur, 'exponent with no digits')
+			if negative {
+				true -> 'e-' << digits
+				_ -> 'e+' << digits
+			}
+		}
+	}
+}
+
+// float(s), coerced to int when the value is integral and round-trips
+// through int64 exactly. Acorn's JSON dump collapses integral numbers to
+// JSON integers, which Oak decodes as int — without this, `1e3` would
+// compare as float vs estree's int.
+fn _floatOrInt(s) {
+	f := float(s)
+	i := int(f)
+	if float(i) = f {
+		true -> i
+		_ -> f
+	}
+}
+
+// leading-dot float, e.g. .5
+fn _scanLeadingDot(cur) {
+	_adv1(cur)
+	intPart := '0.'
+	fn fracLoop() {
+		c := _cc(cur, 0)
+		if c >= 48 & c <= 57 {
+			true -> {
+				intPart <- intPart + char(c)
+				_adv1(cur)
+				fracLoop()
+			}
+		}
+	}
+	fracLoop()
+	intPart <- intPart + _scanExponentSuffix(cur)
+	_floatOrInt(intPart)
+}
+
+fn _scanHex(cur) {
+	_adv1(cur) // consume 0
+	_adv1(cur) // consume x/X
+	n := 0
+	sawDigit := false
+	fn hexLoop() {
+		c := _cc(cur, 0)
+		d := _hexVal(c)
+		if d >= 0 {
+			true -> {
+				n <- n * 16 + d
+				sawDigit <- true
+				_adv1(cur)
+				hexLoop()
+			}
+		}
+	}
+	hexLoop()
+	if !sawDigit -> _err(cur, 'hex literal with no digits')
+	n
+}
+
+fn _scanDecimal(cur) {
+	isFloat := false
+	intPart := ''
+	octalValue := -1
+
+	fn intLoop() {
+		c := _cc(cur, 0)
+		if c >= 48 & c <= 57 {
+			true -> {
+				intPart <- intPart + char(c)
+				_adv1(cur)
+				intLoop()
+			}
+		}
+	}
+	intLoop()
+	if _cc(cur, 0) = 46 & _cc(cur, 1) >= 48 & _cc(cur, 1) <= 57 {
+		// fraction part
+		true -> {
+			isFloat <- true
+			intPart <- intPart + '.'
+			_adv1(cur) // consume '.'
+			fn fracLoop() {
+				c := _cc(cur, 0)
+				if c >= 48 & c <= 57 {
+					true -> {
+						intPart <- intPart + char(c)
+						_adv1(cur)
+						fracLoop()
+					}
+				}
+			}
+			fracLoop()
+		}
+	}
+	suffix := _scanExponentSuffix(cur)
+	if len(suffix) > 0 {
+		true -> {
+			isFloat <- true
+			intPart <- intPart + suffix
+		}
+	}
+	// legacy octal: leading 0, all digits 0-7, no fraction/exponent
+	if !isFloat & len(intPart) > 1 & intPart.(0) = '0' {
+		true -> {
+			allOctal := true
+			fn octLoop(i) if i < len(intPart) {
+				true -> {
+					c := codepoint(intPart.(i))
+					if c > 55 -> allOctal <- false
+					octLoop(i + 1)
+				}
+			}
+			octLoop(1)
+			if allOctal {
+				true -> {
+					n := 0
+					fn cvt(i) if i < len(intPart) {
+						true -> {
+							n <- n * 8 + (codepoint(intPart.(i)) - 48)
+							cvt(i + 1)
+						}
+					}
+					cvt(0)
+					octalValue <- n
+				}
+			}
+		}
+	}
+	if octalValue >= 0 {
+		true -> octalValue
+		_ -> if isFloat {
+			true -> _floatOrInt(intPart)
+			_ -> {
+				v := int(intPart)
+				// ints that overflow int64 fall back to float (JS f64 behavior)
+				if v = ? {
+					true -> float(intPart)
+					_ -> v
+				}
+			}
+		}
+	}
+}
+
+fn _scanNumber(cur) {
+	first := _cc(cur, 0)
+	if first = 46 {
+		true -> _scanLeadingDot(cur)
+		_ -> if first = 48 & (_cc(cur, 1) = 120 | _cc(cur, 1) = 88) {
+			true -> _scanHex(cur)
+			_ -> _scanDecimal(cur)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Strings (flat escape handling)
+// ---------------------------------------------------------------------------
+
+// read n hex digits from the cursor; returns -1 on malformed input
+fn _hexDigits(cur, n) {
+	acc := 0
+	bad := false
+	fn loop(i) if i < n {
+		true -> {
+			d := _hexVal(_cc(cur, 0))
+			if d < 0 {
+				true -> bad <- true
+				_ -> {
+					acc <- acc * 16 + d
+					_adv1(cur)
+					loop(i + 1)
+				}
+			}
+		}
+	}
+	loop(0)
+	if bad {
+		true -> -1
+		_ -> acc
+	}
+}
+
+// legacy octal: consumes up to maxDigits of [0-7]; returns the value
+fn _octDigits(cur, maxDigits) {
+	acc := 0
+	fn loop(k) if k < maxDigits {
+		true -> {
+			c := _cc(cur, 0)
+			if c >= 48 & c <= 55 {
+				true -> {
+					acc <- acc * 8 + (c - 48)
+					_adv1(cur)
+					loop(k + 1)
+				}
+			}
+		}
+	}
+	loop(0)
+	acc
+}
+
+fn _pushUtf8(cur, parts, cp) {
+	bytes := _utf8Bytes(cp)
+	bytes |> std.each(fn(b) parts << char(b))
+}
+
+_ESC_SIMPLE := {
+	b: 8
+	f: 12
+	n: 10
+	r: 13
+	t: 9
+	v: 11
+}
+
+// \xHH escape: cursor is on the 'x'
+fn _scanHexEscape(cur, parts) {
+	_adv1(cur) // consume 'x'
+	hi := _hexVal(_cc(cur, 0))
+	lo := _hexVal(_cc(cur, 1))
+	if hi < 0 | lo < 0 -> _err(cur, 'bad xHH escape (two hex digits required)')
+	if hi >= 0 & lo >= 0 -> {
+		parts << char(hi * 16 + lo)
+		_adv1(cur)
+		_adv1(cur)
+	}
+}
+
+// combine a high surrogate cp with a following \uDC00-style escape; returns the
+// astral codepoint, or -1 (cursor rewound) when no valid low surrogate follows
+fn _surrogatePair(cur, cp) {
+	if cp >= 55296 & cp <= 56319 & _cc(cur, 0) = 92 & _cc(cur, 1) = 117 {
+		true -> {
+			saveI := cur.i
+			saveLine := cur.line
+			saveCol := cur.col
+			_adv1(cur) // backslash
+			_adv1(cur) // u
+			lo := _hexDigits(cur, 4)
+			if lo >= 56320 & lo <= 57343 {
+				true -> 65536 + (cp - 55296) * 1024 + (lo - 56320)
+				_ -> {
+					// lone high surrogate: rewind and encode it as-is
+					cur.i := saveI
+					cur.line := saveLine
+					cur.col := saveCol
+					-1
+				}
+			}
+		}
+		_ -> -1
+	}
+}
+
+// \uHHHH escape: cursor is on the 'u'
+fn _scanUnicodeEscape(cur, parts) {
+	_adv1(cur) // consume 'u'
+	cp := _hexDigits(cur, 4)
+	if cp < 0 -> _err(cur, 'bad uHHHH escape (four hex digits required)')
+	if cp >= 0 -> {
+		astral := _surrogatePair(cur, cp)
+		if astral >= 0 -> _pushUtf8(cur, parts, astral)
+		if astral < 0 -> _pushUtf8(cur, parts, cp)
+	}
+}
+
+// \0 or legacy octal escape: cursor is on the first [0-7] digit
+fn _scanOctalEscape(cur, parts) {
+	n := _octDigits(cur, 3)
+	parts << char(n)
+}
+
+// escape sequence after a backslash: dispatches on the escape character
+fn _scanEscape(cur, parts) {
+	e := _cc(cur, 0)
+	simple := _ESC_SIMPLE.(char(e)) |> default(?)
+	if e = -1 -> _err(cur, 'unterminated escape sequence')
+	// line continuation (backslash-newline, incl. CR LF): emit nothing
+	if e = 10 -> _adv1(cur)
+	if e = 13 -> {
+		_adv1(cur)
+		if _cc(cur, 0) = 10 -> _adv1(cur)
+	}
+	// \b \f \n \r \t \v
+	if simple != ? -> {
+		parts << char(simple)
+		_adv1(cur)
+	}
+	// \0 or legacy octal
+	if e = 48 | (e >= 49 & e <= 55) -> _scanOctalEscape(cur, parts)
+	// \xHH
+	if e = 120 -> _scanHexEscape(cur, parts)
+	// \uHHHH
+	if e = 117 -> _scanUnicodeEscape(cur, parts)
+	// \' \" \\ and anything else: emit the character itself
+	if e != -1 & e != 10 & e != 13 & simple = ? & !(e = 48 | (e >= 49 & e <= 55)) & e != 120 & e != 117 -> {
+		parts << char(e)
+		_adv1(cur)
+	}
+}
+
+fn _scanString(cur, quote) {
+	startLine := cur.line
+	_adv1(cur) // opening quote
+	parts := []
+	done := false
+	fn loop() {
+		c := _cc(cur, 0)
+		if c = -1 | c = 10 {
+			true -> {
+				_err(cur, 'unterminated string literal starting line ' << string(startLine))
+				done <- true
+			}
+			_ -> if c = quote {
+				true -> {
+					_adv1(cur)
+					done <- true
+				}
+				_ -> if c = 92 {
+					true -> {
+						_adv1(cur) // consume backslash
+						_scanEscape(cur, parts)
+					}
+					_ -> {
+						parts << char(c)
+						_adv1(cur)
+					}
+				}
+			}
+		}
+		if !done -> loop()
+	}
+	loop()
+	_emit(cur, :string, join(parts, ''))
+}
+
+// ---------------------------------------------------------------------------
+// Regexes
+// ---------------------------------------------------------------------------
+
+fn _scanRegex(cur) {
+	startLine := cur.line
+	_adv1(cur) // consume '/'
+	parts := []
+	inClass := false
+	done := false
+	fn loop() {
+		c := _cc(cur, 0)
+		if c = -1 | c = 10 {
+			true -> {
+				_err(cur, 'unterminated regex literal starting line ' << string(startLine))
+				done <- true
+			}
+			_ -> if c = 92 {
+				true -> {
+					parts << char(92)
+					n := _cc(cur, 1)
+					if n = -1 -> {
+						_err(cur, 'unterminated regex literal (backslash at end of input)')
+						done <- true
+					}
+					if n != -1 -> {
+						parts << char(n)
+						_adv1(cur)
+						_adv1(cur)
+					}
+				}
+				_ -> if c = 91 {
+					true -> {
+						inClass <- true
+						parts << char(91)
+						_adv1(cur)
+					}
+					_ -> if c = 93 {
+						true -> {
+							inClass <- false
+							parts << char(93)
+							_adv1(cur)
+						}
+						_ -> if c = 47 & !inClass {
+							true -> {
+								_adv1(cur) // closing slash
+								flags := []
+								fn flagLoop() {
+									f := _cc(cur, 0)
+									if (f >= 97 & f <= 122) | (f >= 65 & f <= 90) {
+										true -> {
+											flags << char(f)
+											_adv1(cur)
+											flagLoop()
+										}
+									}
+								}
+								flagLoop()
+								_emitRegex(cur, join(parts, ''), join(flags, ''))
+								done <- true
+							}
+							_ -> {
+								parts << char(c)
+								_adv1(cur)
+							}
+						}
+					}
+				}
+			}
+		}
+		if !done -> loop()
+	}
+	loop()
+}
+
+// ---------------------------------------------------------------------------
+// Templates (raw passthrough; js-parse reports them as unsupported)
+// ---------------------------------------------------------------------------
+
+fn _scanTemplate(cur) {
+	startLine := cur.line
+	_adv1(cur) // backtick
+	parts := []
+	done := false
+	fn loop() {
+		c := _cc(cur, 0)
+		if c = -1 {
+			true -> {
+				_err(cur, 'unterminated template literal starting line ' << string(startLine))
+				done <- true
+			}
+			_ -> if c = 96 {
+				true -> {
+					_adv1(cur)
+					done <- true
+				}
+				_ -> if c = 92 {
+					true -> {
+						parts << char(92)
+						n := _cc(cur, 1)
+						if n != -1 {
+							true -> {
+								parts << char(n)
+								_adv1(cur)
+							}
+						}
+						_adv1(cur)
+					}
+					_ -> {
+						parts << char(c)
+						_adv1(cur)
+					}
+				}
+			}
+		}
+		if !done -> loop()
+	}
+	loop()
+	_emit(cur, :template, join(parts, ''))
+}
+
+// ---------------------------------------------------------------------------
+// Identifiers / keywords
+// ---------------------------------------------------------------------------
+
+fn _scanIdent(cur) {
+	startI := cur.i
+	fn loop() {
+		c := _cc(cur, 0)
+		if (c >= 97 & c <= 122) | (c >= 65 & c <= 90) | (c >= 48 & c <= 57) | c = 95 | c = 36 {
+			true -> {
+				_adv1(cur)
+				loop()
+			}
+		}
+	}
+	loop()
+	word := slice(cur.text, startI, cur.i)
+	if KEYWORDS.(word) {
+		true -> _emit(cur, :keyword, word)
+		_ -> _emit(cur, :ident, word)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Punctuators
+// ---------------------------------------------------------------------------
+
+fn _punctAt(cur, n) {
+	if cur.i + n > len(cur.text) {
+		true -> ''
+		_ -> slice(cur.text, cur.i, cur.i + n)
+	}
+}
+
+fn _scanPunct(cur) {
+	c4 := _punctAt(cur, 4)
+	if std.contains?(PUNCTS_4, c4) {
+		true -> {
+			_adv1(cur)
+			_adv1(cur)
+			_adv1(cur)
+			_adv1(cur)
+			_emit(cur, :punct, c4)
+		}
+		_ -> {
+			c3 := _punctAt(cur, 3)
+			if std.contains?(PUNCTS_3, c3) {
+				true -> {
+					_adv1(cur)
+					_adv1(cur)
+					_adv1(cur)
+					_emit(cur, :punct, c3)
+				}
+				_ -> {
+					c2 := _punctAt(cur, 2)
+					if std.contains?(PUNCTS_2, c2) {
+						true -> {
+							_adv1(cur)
+							_adv1(cur)
+							_emit(cur, :punct, c2)
+						}
+						_ -> {
+							c1 := _punctAt(cur, 1)
+							if std.contains?(PUNCTS_1, c1) {
+								true -> {
+									_adv1(cur)
+									_emit(cur, :punct, c1)
+								}
+								_ -> {
+									_err(cur, 'unexpected character (byte ' << string(codepoint(c1)) << ')')
+									_adv1(cur)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _emitAfterNumber(cur) {
+	v := _scanNumber(cur)
+	_emit(cur, :number, v)
+}
+
+fn _shebang(cur) {
+	// skip a leading #! line if present
+	if cur.i = 0 & _cc(cur, 0) = 35 & _cc(cur, 1) = 33 {
+		true -> {
+			fn loop() if _cc(cur, 0) != -1 & _cc(cur, 0) != 10 {
+				true -> {
+					_adv1(cur)
+					loop()
+				}
+			}
+			loop()
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+// tokenize(text) -> { tokens, errors, ok }
+fn tokenize(text) {
+	cur := _cursor(default(text, ''))
+	_shebang(cur)
+	fn loop() {
+		_skipSpaceAndComments(cur)
+		c := _cc(cur, 0)
+		cur.startI := cur.i
+		cur.startLine := cur.line
+		cur.startCol := cur.col
+		if c = -1 {
+			true -> ?
+			_ -> if c = 34 | c = 39 {
+				true -> _scanString(cur, c)
+				_ -> if c = 96 {
+					true -> _scanTemplate(cur)
+					_ -> if c = 47 & _regexAllowed(cur) {
+						true -> _scanRegex(cur)
+						_ -> if (c >= 48 & c <= 57) | (c = 46 & _cc(cur, 1) >= 48 & _cc(cur, 1) <= 57) {
+							true -> _emitAfterNumber(cur)
+							_ -> if (c >= 97 & c <= 122) | (c >= 65 & c <= 90) | c = 95 | c = 36 {
+								true -> _scanIdent(cur)
+								_ -> _scanPunct(cur)
+							}
+						}
+					}
+				}
+			}
+		}
+		if _cc(cur, 0) != -1 -> loop()
+	}
+	loop()
+	cur.tokens := cur.tokens << {
+		type: :eof
+		pos: cur.i
+		line: cur.line
+		col: cur.col
+	}
+	{
+		tokens: cur.tokens
+		errors: cur.errors
+		ok: len(cur.errors) = 0
+	}
+}

@@ -1,0 +1,516 @@
+// estree -- ingest ESTree (Acorn) JSON into the js* AST of lib/ast-js
+//
+// tools/acorn-dump.js dumps a JavaScript source file as ESTree-flavored
+// JSON (locations stripped). lib/json parses that JSON into Oak values;
+// the functions below convert those values into the js* AST vocabulary
+// consumed by lib/ast-js.transpileToOak, completing the pipeline:
+//
+//     acorn (node) --JSON--> json.parse --estree--> js* AST
+//         --ast-js.transpileToOak--> Oak AST --renderOakNode--> Oak source
+//
+// Supported: ES3/ES5 plus ES6 rest parameters, arrow functions, template
+// literals, for-of and const/let. Everything else is reported through the
+// shared ast-js diagnostics channel (ast._diagnose) and lowered to a
+// placeholder (jsNull/jsUndefined) instead of crashing, so an ablation
+// run over a corpus reports every gap by name. Call takeDiagnostics()
+// (re-exported here) to drain the list.
+
+{
+	default: default
+	map: map
+	each: each
+	filter: filter
+	flatten: flatten
+	len: len
+} := import('std')
+
+json := import('json')
+ast := import('ast-js')
+
+// re-exports so a single import is enough for the full pipeline
+takeDiagnostics := ast.takeDiagnostics
+clearDiagnostics := ast.clearDiagnostics
+setStrictTranspile := ast.setStrictTranspile
+transpileToOak := ast.transpileToOak
+
+fn _diag(msg) ast._diagnose(msg)
+
+// _unsupported records a diagnostic and yields a placeholder node
+fn _unsupported(kind) {
+	_diag('unsupported ESTree node: ' << kind)
+	ast.jsNull()
+}
+
+// -- helpers --
+
+fn _name(node) if node {
+	? -> '_'
+	_ -> default(node.name, '_')
+}
+
+fn _params(params) {
+	default(params, []) |> map(fn(p) {
+		if p {
+			? -> '_'
+			_ -> if p.type {
+				'Identifier' -> ast.jsIdentifier(_name(p))
+				'RestElement' -> if p.argument {
+					? -> '_'
+					_ -> if p.argument.type = 'Identifier' {
+						true -> ast.jsSpread(ast.jsIdentifier(_name(p.argument)))
+						_ -> {
+							_diag('non-identifier rest parameter; using placeholder _')
+							'_'
+						}
+					}
+				}
+				'AssignmentPattern', 'ObjectPattern', 'ArrayPattern' -> {
+					_diag('unsupported parameter pattern: ' << p.type)
+					'_'
+				}
+				_ -> {
+					_diag('unknown parameter type: ' << default(p.type, '<missing>'))
+					'_'
+				}
+			}
+		}
+	})
+}
+
+// statement lists may contain statements that expand to several js* nodes
+// (multi-declarator variable declarations), so _stmt1 returns a list and
+// the caller flattens.
+fn _stmts(nodes) {
+	default(nodes, []) |> map(_stmt1) |> flatten()
+}
+
+fn _block(node) if node {
+	? -> {
+		_diag('missing block node; emitting empty block')
+		ast.jsBlock([])
+	}
+	_ -> ast.jsBlock(_stmts(node.body))
+}
+
+fn _catchParam(handler) if handler {
+	? -> ?
+	_ -> if handler.param {
+		? -> ?
+		_ -> if handler.param.type {
+			'Identifier' -> ast.jsIdentifier(_name(handler.param))
+			_ -> {
+				_diag('destructured catch parameter; using placeholder _')
+				ast.jsIdentifier('_')
+			}
+		}
+	}
+}
+
+fn _forLeft(left) if left {
+	? -> {
+		_diag('for-in/of with missing target; using placeholder _')
+		ast.jsVar('var', '_', ?)
+	}
+	_ -> if left.type {
+		'VariableDeclaration' -> {
+			decls := default(left.declarations, [])
+			if len(decls) {
+				0 -> {
+					_diag('for-in/of without declarator; using placeholder _')
+					ast.jsVar('var', '_', ?)
+				}
+				_ -> {
+					d := decls.(0)
+					if len(decls) > 1 -> _diag('for-in/of with multiple declarators; only the first is bound')
+					if d.id = ? {
+						true -> {
+							_diag('for-in/of declarator without id; using placeholder _')
+							ast.jsVar(default(left.kind, 'var'), '_', ?)
+						}
+						_ -> {
+							simple := d.id.type = 'Identifier'
+							if !simple -> _diag('destructured for-in/of target; using placeholder _')
+							ast.jsVar(default(left.kind, 'var'), if simple { true -> _name(d.id), _ -> '_' }, ?)
+						}
+					}
+				}
+			}
+		}
+		'Identifier' -> ast.jsIdentifier(_name(left))
+		_ -> {
+			_diag('for-in/of target is not a variable; using placeholder _')
+			ast.jsVar('var', '_', ?)
+		}
+	}
+}
+
+fn _property(p) if p {
+	? -> ?
+	_ -> if p.type {
+		'SpreadElement' -> {
+			_diag('spread in object literal is not supported; dropping')
+			?
+		}
+		'Property' -> {
+			kind := default(p.kind, 'init')
+			if kind = 'init' {
+				true -> {
+					computed := default(p.computed, false)
+					key := if computed {
+						true -> {
+							_diag('computed property keys are not supported; using placeholder key')
+							ast.jsString('__computed__')
+						}
+						_ -> _propertyKey(p.key)
+					}
+					ast.jsObjectEntry(key, _expr(p.value))
+				}
+				_ -> {
+					_diag('object property kind not supported: ' << kind)
+					?
+				}
+			}
+		}
+		_ -> {
+			_diag('unsupported object member type: ' << default(p.type, '<missing>'))
+			?
+		}
+	}
+}
+
+fn _propertyKey(key) if key {
+	? -> ast.jsString('__missing__')
+	_ -> if key.type {
+		'Identifier' -> ast.jsIdentifier(_name(key))
+		'Literal' -> if type(key.value) {
+			:string -> ast.jsString(key.value)
+			:int, :float, :bool -> ast.jsString(string(key.value))
+			_ -> {
+				_diag('unsupported property key literal; using placeholder key')
+				ast.jsString('__key__')
+			}
+		}
+		_ -> {
+			_diag('unsupported property key type: ' << key.type)
+			ast.jsString('__key__')
+		}
+	}
+}
+
+// -- expressions --
+// NOTE: keep the mapper total (accept ? nodes) so a malformed dump can
+// never panic the whole conversion.
+
+fn _expr(node) if node {
+	? -> {
+		_diag('missing expression node; lowered to undefined')
+		ast.jsUndefined()
+	}
+	_ -> if node.type {
+		'Identifier' -> ast.jsIdentifier(_name(node))
+		'ThisExpression' -> ast.jsThis()
+		'Super' -> {
+			_diag('super is not modeled; lowered to this')
+			ast.jsThis()
+		}
+		'Literal' -> _literal(node)
+		'ArrayExpression' -> ast.jsArray(default(node.elements, []) |> map(fn(el) if el {
+			? -> ast.jsNull()
+			_ -> if el.type = 'SpreadElement' {
+				true -> {
+					_diag('spread in array literal is not supported; dropping element')
+					ast.jsUndefined()
+				}
+				_ -> _expr(el)
+			}
+		}))
+		'ObjectExpression' -> ast.jsObject(default(node.properties, []) |> map(_property) |> filter(fn(p) p != ?))
+		'FunctionExpression' -> _function(node)
+		'ArrowFunctionExpression' -> ast.jsArrowFunction(_params(node.params), _block(node.body))
+		'UnaryExpression' -> ast.jsUnary(default(node.operator, '-'), _expr(node.argument))
+		'BinaryExpression', 'LogicalExpression' -> ast.jsBinary(default(node.operator, '+'), _expr(node.left), _expr(node.right))
+		'AssignmentExpression' -> ast.jsAssignment(_expr(node.left), _expr(node.right), default(node.operator, '='))
+		'UpdateExpression' -> ast.jsUpdate(default(node.operator, '++'), _expr(node.argument), default(node.prefix, false))
+		'CallExpression' -> ast.jsCall(_expr(node.callee), _args(default(node.arguments, [])))
+		'NewExpression' -> ast.jsNew(_expr(node.callee), _args(default(node.arguments, [])))
+		'MemberExpression' -> {
+			object := _expr(node.object)
+			if default(node.computed, false) {
+				true -> ast.jsIndex(object, _expr(node.property))
+				_ -> ast.jsProperty(object, ast.jsIdentifier(_name(node.property)))
+			}
+		}
+		'ConditionalExpression' -> ast.jsTernary(_expr(node.test), _expr(node.consequent), _expr(node.alternate))
+		'SequenceExpression' -> ast.jsSequence(default(node.expressions, []) |> map(_expr))
+		'TemplateLiteral' -> _template(node)
+		'TaggedTemplateExpression' -> {
+			_diag('tagged template is not supported; lowered to the tag applied to the cooked string')
+			ast.jsCall(_expr(node.tag), [_template(node.quasi)])
+		}
+		'SpreadElement' -> if node.argument {
+			? -> {
+				_diag('spread with missing argument; lowered to ...undefined')
+				ast.jsSpread(ast.jsUndefined())
+			}
+			_ -> ast.jsSpread(_expr(node.argument))
+		}
+		'ChainExpression' -> if node.expression {
+			? -> ast.jsUndefined()
+			_ -> _expr(node.expression)
+		}
+		'YieldExpression', 'AwaitExpression' -> {
+			_diag(default(node.type, 'yield/await') << ' is not supported; lowered to undefined')
+			ast.jsUndefined()
+		}
+		'ClassExpression' -> {
+			_diag('classes are not supported; lowered to null')
+			ast.jsNull()
+		}
+		'ImportExpression' -> {
+			_diag('dynamic import is not supported; lowered to undefined')
+			ast.jsUndefined()
+		}
+		'MetaProperty' -> {
+			_diag('meta property is not supported; lowered to undefined')
+			ast.jsUndefined()
+		}
+		_ -> _unsupported('expression ' << default(node.type, '<missing type>'))
+	}
+}
+
+fn _args(args) {
+	args |> map(fn(a) if a {
+		? -> {
+			_diag('missing argument node; lowered to undefined')
+			ast.jsUndefined()
+		}
+		_ -> if a.type = 'SpreadElement' {
+			true -> ast.jsSpread(_expr(a.argument))
+			_ -> _expr(a)
+		}
+	})
+}
+
+fn _literal(node) {
+	if node.regex {
+		? -> _numericOrString(node)
+		_ -> ast.jsRegex(default(node.regex.pattern, ''), default(node.regex.flags, ''))
+	}
+}
+
+fn _numericOrString(node) {
+	v := node.value
+	if type(v) {
+		:string -> ast.jsString(v)
+		:bool -> ast.jsBool(v)
+		:int, :float -> ast.jsNumber(v)
+		_ -> if v {
+			? -> ast.jsNull()
+			_ -> {
+				_diag('unsupported literal value of type ' << string(type(v)) << '; lowered to null')
+				ast.jsNull()
+			}
+		}
+	}
+}
+
+fn _template(node) {
+	quasis := default(node.quasis, [])
+	exprs := default(node.expressions, [])
+	parts := []
+	fn walk(i) if i < len(quasis) {
+		true -> {
+			q := quasis.(i)
+			parts << ast.jsString(default(q.value.cooked, q.value.raw))
+			if i < len(exprs) -> parts << _expr(exprs.(i))
+			walk(i + 1)
+		}
+		_ -> ?
+	}
+	walk(0)
+	ast.jsTemplateLiteral(parts)
+}
+
+fn _function(node) {
+	name := if node.id {
+		? -> ''
+		_ -> _name(node.id)
+	}
+	ast.jsFunction(name, _params(node.params), _block(node.body))
+}
+
+// -- statements (each returns a list; see _stmts) --
+
+fn _stmt1(node) if node {
+	? -> {
+		_diag('missing statement node; dropped')
+		[]
+	}
+	_ -> if node.type {
+		'VariableDeclaration' -> {
+			kind := default(node.kind, 'var')
+			default(node.declarations, []) |> map(fn(d) {
+				name := if d.id {
+					? -> {
+						_diag('variable declaration without id; using placeholder _')
+						'_'
+					}
+					_ -> if d.id.type {
+						'Identifier' -> _name(d.id)
+						_ -> {
+							_diag('destructured variable declaration; using placeholder _')
+							'_'
+						}
+					}
+				}
+				ast.jsVar(kind, name, if d.init {
+					? -> ?
+					_ -> _expr(d.init)
+				})
+			})
+		}
+		'FunctionDeclaration' -> [_function(node)]
+		'BlockStatement' -> [ast.jsBlock(_stmts(node.body))]
+		'ExpressionStatement' -> [ast.jsExpressionStatement(_expr(node.expression))]
+		'IfStatement' -> [ast.jsIf(_expr(node.test), _clause(node.consequent), _clause(node.alternate))]
+		'ReturnStatement' -> [ast.jsReturn(if node.argument {
+			? -> ?
+			_ -> _expr(node.argument)
+		})]
+		'ThrowStatement' -> [ast.jsThrow(_expr(node.argument))]
+		'TryStatement' -> {
+			if node.handler {
+				? -> _tryCatch(node, ?, ?)
+				_ -> _tryCatch(node, _catchParam(node.handler), _block(node.handler.body))
+			}
+		}
+		'WhileStatement' -> [ast.jsWhile(_expr(node.test), _clause(node.body))]
+		'DoWhileStatement' -> [ast.jsDoWhile(_expr(node.test), _clause(node.body))]
+		'ForStatement' -> {
+			hoist := []
+			init := _forInit(node.init, hoist)
+			test := if node.test {
+				? -> ?
+				_ -> _expr(node.test)
+			}
+			update := if node.update {
+				? -> ?
+				_ -> _expr(node.update)
+			}
+			hoist << ast.jsFor(init, test, update, _clause(node.body))
+			hoist
+		}
+		'ForInStatement' -> [ast.jsForIn(_forLeft(node.left), _expr(node.right), _clause(node.body))]
+		'ForOfStatement' -> [ast.jsForOf(_forLeft(node.left), _expr(node.right), _clause(node.body))]
+		'BreakStatement' -> {
+			if node.label != ? -> _diag('labeled break is not supported; breaks the innermost loop/switch')
+			[ast.jsBreak()]
+		}
+		'ContinueStatement' -> {
+			if node.label != ? -> _diag('labeled continue is not supported; continues the innermost loop')
+			[ast.jsContinue()]
+		}
+		'SwitchStatement' -> [ast.jsSwitch(_expr(node.discriminant), default(node.cases, []) |> map(_switchCase))]
+		'LabeledStatement' -> {
+			_diag('labeled statement is not supported; the label is ignored')
+			_stmt1(node.body)
+		}
+		'WithStatement' -> {
+			_diag('with statement is not supported; the object environment is ignored')
+			_stmt1(node.body)
+		}
+		'DebuggerStatement' -> [ast.jsDebugger()]
+		'EmptyStatement' -> [ast.jsEmptyStatement()]
+		'Directive' -> [ast.jsEmptyStatement()]
+		'ClassDeclaration' -> {
+			_diag('classes are not supported; declaration dropped')
+			[]
+		}
+		_ -> {
+			_diag('unsupported ESTree statement: ' << default(node.type, '<missing type>'))
+			[]
+		}
+	}
+}
+
+// a clause is a statement or a block; normalize to a js* node
+fn _clause(node) if node {
+	? -> ?
+	_ -> if node.type = 'BlockStatement' {
+		true -> ast.jsBlock(_stmts(node.body))
+		_ -> _asBlock(_stmt1(node))
+	}
+}
+
+fn _asBlock(stmts) if len(stmts) {
+	1 -> stmts.(0)
+	_ -> ast.jsBlock(stmts)
+}
+
+// multi-declarator for-inits are hoisted out of the loop entirely
+// (JS var semantics: all declarators evaluate before the loop runs).
+// hoist accumulates extra jsVar statements to be emitted first.
+fn _forInit(init, hoist) if init {
+	? -> ?
+	_ -> if init.type {
+		'VariableDeclaration' -> {
+			decls := _stmt1(init)
+			if len(decls) = 1 {
+				true -> decls.(0)
+				_ -> {
+					decls |> each(fn(d) hoist << d)
+					?
+				}
+			}
+		}
+		_ -> _expr(init)
+	}
+}
+
+fn _tryCatch(node, catchParam, catchBody) {
+	guarded := _block(node.block)
+	finalizer := if node.finalizer {
+		? -> ?
+		_ -> _block(node.finalizer)
+	}
+	[ast.jsTry(guarded, catchParam, catchBody, finalizer)]
+}
+
+fn _switchCase(c) {
+	test := if c.test {
+		? -> ?
+		_ -> _expr(c.test)
+	}
+	ast.jsSwitchCase(test, _stmts(c.consequent))
+}
+
+// -- entry points --
+
+// estreeProgramToOak converts an ESTree Program object into a js* jsBlock
+fn estreeProgramToOak(program) {
+	ast.jsBlock(_stmts(program.body))
+}
+
+// estreeToOak parses ESTree JSON text and converts it to a js* AST.
+// Returns ? (and records a diagnostic) on JSON parse failure or a
+// non-Program root.
+fn estreeToOak(text) {
+	parsed := json.parse(text)
+	if parsed {
+		? -> {
+			_diag('estree: empty JSON input')
+			?
+		}
+		:error -> {
+			_diag('estree: JSON parse error')
+			?
+		}
+		_ -> if parsed.type {
+			'Program' -> estreeProgramToOak(parsed)
+			_ -> {
+				_diag('estree: expected Program root, got ' << string(parsed.type))
+				?
+			}
+		}
+	}
+}

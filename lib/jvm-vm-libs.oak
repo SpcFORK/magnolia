@@ -1,0 +1,903 @@
+// Portable Oak VM-library transition boundary for the bounded JVM image.
+// All external host members pass through descriptor + invocation-opcode
+// admission here, both at bytecode preflight and again at execution. Extend
+// the VM by adding a checked contract here, an implementation in jvmInvoke /
+// jvmString or applet-runtime's stateful host adapter, and parity tests for
+// native Oak, bundled JS, standalone Oak and the optional Java-source emitter.
+// This module deliberately does not claim a complete java.* / AWT library.
+
+std := import('std')
+str := import('str')
+
+fn _spec(operation, count) {op: operation, argc: count}
+// A caller-selected JVM property value, not the host process or a browser
+// fingerprint. Bound it before embedding into a standalone bundle.
+fn jvmVersion?(value) if type(value) != :string {
+    true -> false
+    _ -> if len(value) < 3 | len(value) > 32 {
+        true -> false
+        _ -> value.(0) != '.' & value.(len(value) - 1) != '.' &
+            str.contains?(value, '.') & !str.contains?(value, '..') &
+            (std.range(len(value)) |> std.every(fn(i) {
+                c := codepoint(value.(i))
+                (c >= 48 & c <= 57) | c = 46
+            }))
+    }
+}
+// Color's uppercase constants are aliases of their historical lowercase
+// counterparts in the JDK, not equal-valued but independent objects.
+fn jvmColorName(name) if name {
+    'white', 'WHITE' -> 'white'
+    'black', 'BLACK' -> 'black'
+    'red', 'RED' -> 'red'
+    'green', 'GREEN' -> 'green'
+    'blue', 'BLUE' -> 'blue'
+    'yellow', 'YELLOW' -> 'yellow'
+    'cyan', 'CYAN' -> 'cyan'
+    'magenta', 'MAGENTA' -> 'magenta'
+    'gray', 'GRAY' -> 'gray'
+    'lightGray', 'LIGHT_GRAY' -> 'lightGray'
+    'darkGray', 'DARK_GRAY' -> 'darkGray'
+    'orange', 'ORANGE' -> 'orange'
+    'pink', 'PINK' -> 'pink'
+    _ -> ?
+}
+fn _color?(name) jvmColorName(name) != ?
+
+// These are the only host fields and external instantiable types. User
+// classes are resolved by the class linker instead of being listed here.
+fn jvmField(owner, name, desc, opcode) if owner {
+    'java/lang/System' -> if opcode = 178 & name = 'out' &
+        desc = 'Ljava/io/PrintStream;' {
+        true -> _spec('system-out', 0), _ -> ?}
+    'java/awt/Color' -> if opcode = 178 & desc = 'Ljava/awt/Color;' &
+        _color?(name) {
+        true -> _spec('awt-color', 0), _ -> ?}
+    // Only the mutable coordinates of a real Point, not arbitrary AWT fields.
+    'java/awt/Point' -> if (opcode = 180 | opcode = 181) &
+        (name = 'x' | name = 'y') & desc = 'I' {
+        true -> _spec('point-coordinate', if opcode = 181 {true -> 1, _ -> 0})
+        _ -> ?
+    }
+    // The original SoundMixer subclasses ByteArrayInputStream and accesses
+    // these three *protected* inherited fields. The lowerer additionally
+    // requires an actual subclass; runtime validates the receiver and value.
+    'java/io/ByteArrayInputStream' -> if opcode = 180 | opcode = 181 {
+        true -> if (name = 'pos' | name = 'count') & desc = 'I' {
+            true -> _spec('byte-stream-field', if opcode = 181 {true -> 1, _ -> 0})
+            _ -> if name = 'buf' & desc = '[B' {
+                true -> _spec('byte-stream-field', if opcode = 181 {true -> 1, _ -> 0})
+                _ -> ?
+            }
+        }
+        _ -> ?
+    }
+    // Fresh, immutable-to-the-VM Rectangle snapshots from detached Canvas
+    // bounds OR the exact Rectangle(IIII) constructor. No mutation, generic
+    // Shape operations, overloads, attached layout or display peers.
+    'java/awt/Rectangle' -> if opcode = 180 &
+        (name = 'x' | name = 'y' | name = 'width' | name = 'height') & desc = 'I' {
+        true -> _spec('rectangle-coordinate', 0), _ -> ?}
+    // Host-created input events and viewport dimensions are validated data,
+    // not mutable AWT windows or general public-field reflection.
+    'java/awt/Dimension' -> if opcode = 180 &
+        (name = 'width' | name = 'height') & desc = 'I' {
+        true -> _spec('dimension-coordinate', 0), _ -> ?}
+    'java/awt/Event' -> if opcode = 180 &
+        (name = 'id' | name = 'key' | name = 'modifiers' |
+         name = 'x' | name = 'y') & desc = 'I' {
+        true -> _spec('event-coordinate', 0), _ -> ?}
+    _ -> ?
+}
+// Ordered exception handlers need a real, auditable host Throwable tree.
+// This is an explicit library profile, not a rule that every java.* name is
+// a Throwable. User subclasses are resolved through the compiled class map.
+fn jvmThrowableParent(owner) if owner {
+    'java/lang/Throwable' -> 'java/lang/Object'
+    'java/lang/Exception', 'java/lang/Error' -> 'java/lang/Throwable'
+    'java/lang/RuntimeException', 'java/io/IOException',
+    'java/lang/ClassNotFoundException',
+    'java/lang/InterruptedException' -> 'java/lang/Exception'
+    'java/lang/ArithmeticException', 'java/lang/NullPointerException',
+    'java/lang/NegativeArraySizeException',
+    'java/lang/ClassCastException', 'java/lang/ArrayStoreException',
+    'java/lang/IllegalArgumentException', 'java/lang/IllegalStateException',
+    'java/lang/IllegalMonitorStateException',
+    'java/lang/IndexOutOfBoundsException' -> 'java/lang/RuntimeException'
+    'java/lang/NumberFormatException' -> 'java/lang/IllegalArgumentException'
+    'java/lang/ArrayIndexOutOfBoundsException',
+    'java/lang/StringIndexOutOfBoundsException' -> 'java/lang/IndexOutOfBoundsException'
+    'java/lang/LinkageError' -> 'java/lang/Error'
+    'java/lang/ExceptionInInitializerError',
+    'java/lang/IncompatibleClassChangeError',
+    'java/lang/NoClassDefFoundError' -> 'java/lang/LinkageError'
+    _ -> ?
+}
+fn jvmNew(owner) if owner {
+    'java/lang/Object' -> 'object'
+    'java/lang/String' -> 'string-object'
+    'java/lang/StringBuilder', 'java/lang/StringBuffer' -> 'text-builder'
+    // In-memory only. No FileInputStream, URL, ZIP or disk/network access.
+    'java/io/ByteArrayInputStream' -> 'byte-array-stream'
+    'java/io/DataInputStream' -> 'data-input-stream'
+    'java/io/ByteArrayOutputStream' -> 'byte-array-output'
+    'java/io/DataOutputStream' -> 'data-output-stream'
+    'java/net/URL' -> 'bounded-resource-url'
+    'java/util/zip/ZipInputStream' -> 'bounded-zip-stream'
+    'java/lang/Thread' -> 'bounded-thread'
+    // CLDC/MIDP-only random island; runtime checks profile and refuses
+    // sampling an unseeded constructor instead of inventing a device clock.
+    'java/util/Random' -> 'bounded-midp-random'
+    'java/awt/Color' -> 'awt-color'
+    // A bounded logical Font value for recorded Graphics state. No platform
+    // font lookup, metrics, glyph rasterization or general AWT hierarchy.
+    'java/awt/Font' -> 'awt-font'
+    'java/awt/Point' -> 'awt-point'
+    'java/awt/Rectangle' -> 'awt-rectangle'
+    // Detached, bounded component tree for the original ArcTest lifecycle.
+    // No peer, geometry layout, input, font metrics or painting is implied.
+    'java/awt/BorderLayout' -> 'awt-border-layout'
+    'java/awt/Canvas' -> 'awt-canvas'
+    'java/awt/Panel' -> 'awt-panel'
+    'java/awt/TextField' -> 'awt-text-field'
+    'java/awt/Button' -> 'awt-button'
+    'java/awt/image/IndexColorModel' -> 'index-color-model'
+    'java/awt/image/MemoryImageSource' -> 'memory-image-source'
+    _ -> if jvmThrowableParent(owner) != ? {true -> 'throwable', _ -> ?}
+}
+// Reference types whose identity/subtyping the bounded VM can model without
+// loading a JDK class. In particular, array instanceof/checkcast may use
+// Object, Cloneable and Serializable; unknown JDK types fail at preflight.
+fn jvmReference(owner) if owner {
+    'java/lang/Object', 'java/lang/String', 'java/lang/Integer',
+    'java/lang/Number', 'java/lang/StringBuilder', 'java/lang/StringBuffer',
+    'java/applet/Applet', 'java/applet/AppletContext',
+    'java/awt/Component', 'java/awt/Container',
+    'java/awt/Panel', 'java/awt/Canvas', 'java/awt/TextComponent',
+    'java/awt/TextField', 'java/awt/Button', 'java/awt/LayoutManager',
+    'java/awt/LayoutManager2', 'java/awt/BorderLayout', 'java/awt/FlowLayout',
+    'java/awt/Color', 'java/awt/Font', 'java/awt/Graphics',
+    'java/awt/Image', 'java/awt/Point', 'java/awt/Rectangle',
+    'java/awt/geom/Point2D',
+    'java/awt/image/ColorModel', 'java/awt/image/IndexColorModel',
+    'java/awt/image/ImageProducer', 'java/awt/image/ImageObserver',
+    'java/awt/image/MemoryImageSource',
+    'java/io/PrintStream', 'java/lang/Cloneable',
+    'java/io/Serializable', 'java/io/InputStream',
+    'java/io/ByteArrayInputStream', 'java/io/DataInputStream',
+    'java/io/OutputStream', 'java/io/ByteArrayOutputStream',
+    'java/io/DataOutputStream',
+    'java/lang/Runnable', 'java/lang/Thread',
+    'java/lang/Runtime', 'java/util/Random',
+    'java/awt/Dimension', 'java/awt/Event',
+    'java/net/URL', 'java/util/zip/ZipInputStream',
+    'java/util/zip/ZipEntry',
+    // Compile-time-only bridge for the owned MIDP Image/Graphics bytecode.
+    // No new(), fields or general Java ME service follows from this identity.
+    'javax/microedition/lcdui/ImageBridge' -> true
+    _ -> if jvmThrowableParent(owner) != ? {true -> true, _ -> ?}
+}
+
+// The verifier and runtime must agree on the deliberately small built-in
+// inheritance graph. User-class and array edges belong to their class maps;
+// never infer an arbitrary java.* class from its spelling.
+fn _throwableSubtype?(current, owner, depth) if depth >= 32 |
+    type(current) != :string | type(owner) != :string {
+    true -> false
+    _ -> if current = owner {
+        true -> true
+        _ -> if parent := jvmThrowableParent(current) {
+            ? -> false
+            _ -> _throwableSubtype?(parent, owner, depth + 1)
+        }
+    }
+}
+fn jvmReferenceSubtype?(current, owner) if owner {
+    'java/lang/Object' -> jvmReference(current) != ?
+    'java/io/Serializable' -> current = 'java/lang/String' |
+        current = 'java/lang/Integer' | current = 'java/lang/Number' |
+        current = 'java/lang/StringBuilder' | current = 'java/lang/StringBuffer' |
+        current = 'java/awt/Color' | current = 'java/awt/Font' |
+        current = 'java/awt/Point' | current = 'java/awt/Rectangle' |
+        current = 'java/applet/Applet' |
+        current = 'java/awt/Component' | current = 'java/awt/Container' |
+        current = 'java/awt/Panel' | current = 'java/awt/Canvas' |
+        current = 'java/awt/TextComponent' | current = 'java/awt/TextField' |
+        current = 'java/awt/Button' | current = 'java/awt/BorderLayout' |
+        current = 'java/awt/FlowLayout' |
+        jvmThrowableParent(current) != ?
+    'java/lang/Cloneable' -> current = 'java/awt/Point' |
+        current = 'java/awt/geom/Point2D' |
+        current = 'java/awt/Rectangle'
+    'java/lang/Number' -> current = 'java/lang/Integer'
+    'java/io/InputStream' -> current = 'java/io/ByteArrayInputStream' |
+        current = 'java/io/DataInputStream' |
+        current = 'java/util/zip/ZipInputStream'
+    'java/io/OutputStream' -> current = 'java/io/ByteArrayOutputStream' |
+        current = 'java/io/DataOutputStream'
+    // Only these concrete headless types have a modeled inheritance tree;
+    // admission of a superclass method still requires an exact descriptor.
+    'java/awt/Panel' -> current = 'java/applet/Applet'
+    'java/awt/Container' -> current = 'java/applet/Applet' |
+        current = 'java/awt/Panel'
+    'java/awt/TextComponent' -> current = 'java/awt/TextField'
+    'java/awt/Component' -> current = 'java/applet/Applet' |
+        current = 'java/awt/Panel' | current = 'java/awt/Container' |
+        current = 'java/awt/Canvas' | current = 'java/awt/TextComponent' |
+        current = 'java/awt/TextField' | current = 'java/awt/Button'
+    'java/awt/LayoutManager' -> current = 'java/awt/BorderLayout' |
+        current = 'java/awt/FlowLayout'
+    'java/awt/LayoutManager2' -> current = 'java/awt/BorderLayout'
+    'java/awt/geom/Point2D' -> current = 'java/awt/Point'
+    'java/awt/image/ColorModel' -> current = 'java/awt/image/IndexColorModel'
+    'java/awt/image/ImageProducer' -> current = 'java/awt/image/MemoryImageSource'
+    // java.awt.Component implements ImageObserver; Applet inherits that
+    // interface through Panel/Container/Component, including user subclasses.
+    'java/awt/image/ImageObserver' -> current = 'java/applet/Applet' |
+        current = 'java/awt/Component' | current = 'java/awt/Container' |
+        current = 'java/awt/Panel' | current = 'java/awt/Canvas' |
+        current = 'java/awt/TextComponent' | current = 'java/awt/TextField' |
+        current = 'java/awt/Button'
+    _ -> _throwableSubtype?(current, owner, 0)
+}
+
+// No name-only shortcuts: a call with the wrong descriptor or opcode never
+// reaches the interpreter's host functions. argc counts argument VALUES,
+// excluding the receiver (a long is one value occupying two JVM slots).
+fn jvmMethod(owner, name, desc, opcode) if owner {
+    // Explicit MIDP virtual free-memory SNAPSHOT: not a live heap or collector.
+    // The caller must opt in; link-time and runtime reject Java SE Applets.
+    'java/lang/Runtime' -> if opcode = 184 & name = 'getRuntime' &
+        desc = '()Ljava/lang/Runtime;' {
+        true -> _spec('midp-runtime-get', 0)
+        _ -> if opcode = 182 {true -> if name + desc {
+            'freeMemory()J' -> _spec('midp-runtime-free', 0)
+            'gc()V' -> _spec('midp-runtime-gc', 0)
+            _ -> ?
+        }, _ -> ?}
+    }
+    // A bounded Java ME Random profile. Calls on Java SE Applets are refused
+    // during whole-entry preflight, and unseeded sampling is refused at run.
+    'java/util/Random' -> if opcode = 183 & name = '<init>' {
+        true -> if desc {
+            '()V' -> _spec('midp-random-init-unseeded', 0)
+            '(J)V' -> _spec('midp-random-init-seeded', 1)
+            _ -> ?
+        }
+        _ -> if opcode = 182 {true -> if name + desc {
+            'setSeed(J)V' -> _spec('midp-random-seed', 1)
+            'nextInt()I' -> _spec('midp-random-next', 0)
+            'nextInt(I)I' -> _spec('midp-random-bound', 1)
+            _ -> ?
+        }, _ -> ?}
+    }
+    // ONLY the javac-only bridge called by owned MIDP Image/Graphics bytecode.
+    // The native host additionally checks the MIDlet profile at invocation;
+    // wrong name, descriptor or invocation opcode must fail during preflight.
+    'javax/microedition/lcdui/ImageBridge' -> if opcode = 184 {
+        true -> if name + desc {
+            'blank(II)Ljavax/microedition/lcdui/Image;' ->
+                _spec('midp-image-blank', 2)
+            'load(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;' ->
+                _spec('midp-image-load', 1)
+            'graphics(Ljavax/microedition/lcdui/Image;)Ljavax/microedition/lcdui/Graphics;' ->
+                _spec('midp-image-graphics', 1)
+            'getRGB(Ljavax/microedition/lcdui/Image;[IIIIIII)V' ->
+                _spec('midp-image-rgb', 8)
+            'setColor(Ljavax/microedition/lcdui/Graphics;I)V' ->
+                _spec('midp-graphics-color-set', 2)
+            'getColor(Ljavax/microedition/lcdui/Graphics;)I' ->
+                _spec('midp-graphics-color-get', 1)
+            'clipWidth(Ljavax/microedition/lcdui/Graphics;)I' ->
+                _spec('midp-graphics-clip-width', 1)
+            'fillRect(Ljavax/microedition/lcdui/Graphics;IIII)V' ->
+                _spec('midp-graphics-fill', 5)
+            'drawImage(Ljavax/microedition/lcdui/Graphics;Ljavax/microedition/lcdui/Image;III)V' ->
+                _spec('midp-graphics-blit', 5)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    // Static JVM arraycopy, not a name-based shortcut for other System calls.
+    'java/lang/System' -> if opcode = 184 & name = 'arraycopy' &
+        desc = '(Ljava/lang/Object;ILjava/lang/Object;II)V' {
+        true -> _spec('arraycopy', 5)
+        _ -> if opcode = 184 & name = 'gc' & desc = '()V' {
+            true -> _spec('system-gc-request', 0)
+            // A logical time sample, ONLY with an explicit finite host epoch.
+            // Unconfigured execution still refuses; never sample the OS clock.
+            _ -> if opcode = 184 & name = 'currentTimeMillis' &
+                desc = '()J' {true -> _spec('virtual-current-millis', 0),
+                // Do not inherit ambient process properties into a movie.
+                // The only admitted key needs an explicit bounded host value.
+                _ -> if opcode = 184 & name = 'getProperty' &
+                    desc = '(Ljava/lang/String;)Ljava/lang/String;' {
+                    true -> _spec('virtual-java-version', 1), _ -> ?}}
+        }
+    }
+    // Raw-bit intrinsics expose pool payloads for independent JDK oracles;
+    // no host float conversion may canonicalize NaN or erase negative zero.
+    'java/lang/Double' -> if opcode = 184 {
+        true -> if name + desc {
+            'doubleToRawLongBits(D)J' -> _spec('double-raw-bits', 1)
+            'doubleToLongBits(D)J' -> _spec('double-bits', 1)
+            'longBitsToDouble(J)D' -> _spec('double-from-bits', 1)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    'java/lang/Float' -> if opcode = 184 {
+        true -> if name + desc {
+            'floatToRawIntBits(F)I' -> _spec('float-raw-bits', 1)
+            'floatToIntBits(F)I' -> _spec('float-bits', 1)
+            'intBitsToFloat(I)F' -> _spec('float-from-bits', 1)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    'java/lang/Math' -> if opcode = 184 {
+        true -> if name + desc {
+            'abs(I)I' -> _spec('iabs', 1)
+            'max(II)I' -> _spec('imax', 2)
+            'min(II)I' -> _spec('imin', 2)
+            // Bit-exact axes and equal-magnitude diagonals only; arbitrary
+            // angles are refused rather than delegated to varying host libm.
+            'atan2(DD)D' -> _spec('bounded-atan2', 2)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    'java/lang/Integer' -> if opcode = 184 {
+        true -> if name + desc {
+            'parseInt(Ljava/lang/String;)I' -> _spec('parse-int', 1)
+            // Original Blink.init boxes a String, then unboxes it; retaining
+            // a real reference matters for the JVM identity/cache contract.
+            'valueOf(Ljava/lang/String;)Ljava/lang/Integer;' -> _spec('boxed-int-string', 1)
+            'valueOf(Ljava/lang/String;I)Ljava/lang/Integer;' ->
+                _spec('boxed-int-radix', 2)
+            'toString(I)Ljava/lang/String;' -> _spec('int-string', 1)
+            'compare(II)I' -> _spec('icompare', 2)
+            'sum(II)I' -> _spec('isum', 2)
+            'max(II)I' -> _spec('imax', 2)
+            'min(II)I' -> _spec('imin', 2)
+            _ -> ?
+        }
+        _ -> if opcode = 182 & name = 'intValue' & desc = '()I' {
+            true -> _spec('boxed-int-value', 0), _ -> ?}
+    }
+    'java/lang/String' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/lang/String;)V' {
+        true -> _spec('string-init-copy', 1)
+        _ -> if opcode = 183 & name = '<init>' & desc = '([C)V' {
+            true -> _spec('bounded-ascii-char-array-init', 1)
+            _ -> if opcode = 182 {true -> if name + desc {
+            'length()I' -> _spec('string-length', 0)
+            // ASCII code units only until the full modified-UTF8/UTF-16
+            // String model exists. Bounds are catchable at the VM boundary.
+            'charAt(I)C' -> _spec('bounded-ascii-char-at', 1)
+            'replace(CC)Ljava/lang/String;' -> _spec('bounded-ascii-char-replace', 2)
+            'equals(Ljava/lang/Object;)Z' -> _spec('string-equals', 1)
+            'equalsIgnoreCase(Ljava/lang/String;)Z' -> _spec('string-equals-ignore-case', 1)
+            'indexOf(I)I' -> _spec('string-index-of', 1)
+            'indexOf(Ljava/lang/String;)I' -> _spec('bounded-ascii-index-of-string', 1)
+            'concat(Ljava/lang/String;)Ljava/lang/String;' -> _spec('string-concat', 1)
+            'substring(II)Ljava/lang/String;' -> _spec('bounded-ascii-substring', 2)
+            _ -> ?
+        }
+        _ -> if opcode = 184 & name = 'valueOf' {
+            true -> if desc {
+                '(I)Ljava/lang/String;' -> _spec('int-string', 1)
+                '(D)Ljava/lang/String;' -> _spec('bounded-double-string', 1)
+                // The verifier must also prove a String or null argument.
+                // Arbitrary Object.toString() remains outside this VM.
+                '(Ljava/lang/Object;)Ljava/lang/String;' ->
+                    _spec('string-object-value-of', 1)
+                _ -> ?
+            }
+            _ -> ?
+        }
+        }
+        }
+    }
+    'java/lang/Object' -> if opcode = 183 & name = '<init>' & desc = '()V' {
+        true -> _spec('object-init', 0)
+        _ -> if opcode = 182 & name = 'notifyAll' & desc = '()V' {
+            true -> _spec('bounded-notify-all', 0), _ -> ?}
+    }
+    // Sufficient for original Fliplay load_header -> read_loop. The byte
+    // buffer is a bounded JVM [B; unsupported stream APIs fail at preflight.
+    'java/io/ByteArrayInputStream' -> if opcode = 183 &
+        name = '<init>' & desc = '([B)V' {
+        true -> _spec('byte-stream-init', 1), _ -> ?}
+    'java/io/DataInputStream' -> if opcode = 183 &
+        name = '<init>' & desc = '(Ljava/io/InputStream;)V' {
+        true -> _spec('data-stream-init', 1)
+        _ -> if opcode = 182 & name = 'read' & desc = '([BII)I' {
+            true -> _spec('data-stream-read', 3), _ -> ?}
+    }
+    // Original Sound emits seven big-endian integers into a byte-array WAV
+    // header. This is strictly an in-memory pair of output streams, NOT an
+    // audio backend, arbitrary OutputStream, file/socket or general writer.
+    'java/io/ByteArrayOutputStream' -> if opcode = 183 & name = '<init>' &
+        desc = '(I)V' {
+        true -> _spec('byte-output-init', 1)
+        _ -> if opcode = 182 & name = 'toByteArray' & desc = '()[B' {
+            true -> _spec('byte-output-copy', 0), _ -> ?}
+    }
+    'java/io/DataOutputStream' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/io/OutputStream;)V' {
+        true -> _spec('data-output-init', 1)
+        _ -> if opcode = 182 & name = 'writeInt' & desc = '(I)V' {
+            true -> _spec('data-output-int', 1), _ -> ?}
+    }
+    // Explicit, pre-supplied in-memory resources ONLY; no VM disk/network.
+    'java/net/URL' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/net/URL;Ljava/lang/String;)V' {
+        true -> _spec('bounded-url-init', 2)
+        _ -> if opcode = 182 & name = 'openStream' &
+            desc = '()Ljava/io/InputStream;' {
+            true -> _spec('bounded-url-open', 0), _ -> ?}
+    }
+    'java/util/zip/ZipInputStream' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/io/InputStream;)V' {
+        true -> _spec('bounded-zip-init', 1)
+        _ -> if opcode = 182 & name = 'getNextEntry' &
+            desc = '()Ljava/util/zip/ZipEntry;' {
+            true -> _spec('bounded-zip-first', 0), _ -> ?}
+    }
+    // Exact one-array bulk read on only a supplied local resource or
+    // ByteArrayInputStream; never a network/file capability or arbitrary
+    // InputStream subclass. Runtime distinguishes their JDK EOF/zero rules.
+    'java/io/InputStream' -> if opcode = 182 {true -> if name + desc {
+        'read([B)I' -> _spec('bounded-stream-bulk-read', 1)
+        'close()V' -> _spec('bounded-stream-close', 0)
+        _ -> ?
+    }, _ -> ?}
+    // A single deterministic cooperative task executes the original Runnable
+    // under an instruction/virtual-clock cap. Contention or forced stop of a
+    // live task is refused, not mapped to uncontrolled OS threads.
+    'java/lang/Thread' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/lang/Runnable;)V' {
+        true -> _spec('bounded-thread-init', 1)
+        _ -> if opcode = 182 {true -> if name + desc {
+            'start()V' -> _spec('bounded-thread-start', 0)
+            'isAlive()Z' -> _spec('bounded-thread-alive', 0)
+            'stop()V' -> _spec('bounded-thread-stop', 0)
+            'setPriority(I)V' -> _spec('bounded-thread-priority', 1)
+            _ -> ?
+        }, _ -> if opcode = 184 {true -> if name + desc {
+            'currentThread()Ljava/lang/Thread;' -> _spec('bounded-current-thread', 0)
+            'sleep(J)V' -> _spec('bounded-thread-sleep', 1)
+            'yield()V' -> _spec('bounded-thread-yield', 0)
+            _ -> ?
+        }, _ -> ?}}
+    }
+    'java/lang/Throwable', 'java/lang/Exception', 'java/lang/RuntimeException',
+    'java/lang/Error', 'java/io/IOException',
+    'java/lang/ClassNotFoundException', 'java/lang/InterruptedException',
+    'java/lang/ArithmeticException', 'java/lang/NullPointerException',
+    'java/lang/NegativeArraySizeException', 'java/lang/ClassCastException',
+    'java/lang/ArrayStoreException', 'java/lang/IllegalArgumentException',
+    'java/lang/IllegalStateException', 'java/lang/IllegalMonitorStateException',
+    'java/lang/IndexOutOfBoundsException', 'java/lang/ArrayIndexOutOfBoundsException',
+    'java/lang/StringIndexOutOfBoundsException',
+    'java/lang/NumberFormatException', 'java/lang/LinkageError',
+    'java/lang/ExceptionInInitializerError',
+    'java/lang/NoClassDefFoundError' -> if opcode = 183 & name = '<init>' {
+        true -> if desc {
+            '()V' -> _spec('throwable-init', 0)
+            '(Ljava/lang/String;)V' -> _spec('throwable-init-message', 1)
+            _ -> ?
+        }
+        _ -> if opcode = 182 {true -> if name + desc {
+            'getMessage()Ljava/lang/String;' -> _spec('throwable-message', 0)
+            'getCause()Ljava/lang/Throwable;' -> _spec('throwable-cause', 0)
+            'toString()Ljava/lang/String;' -> _spec('throwable-string', 0)
+            _ -> ?
+        }, _ -> ?}
+    }
+    'java/applet/Applet' -> if opcode = 183 & name = '<init>' & desc = '()V' {
+        true -> _spec('applet-init', 0)
+        _ -> if opcode = 183 & name = 'handleEvent' &
+            desc = '(Ljava/awt/Event;)Z' {
+            true -> _spec('bounded-legacy-event', 1)
+            _ -> if opcode = 182 {true -> if name + desc {
+            'getParameter(Ljava/lang/String;)Ljava/lang/String;' -> _spec('applet-param', 1)
+            'getCodeBase()Ljava/net/URL;' -> _spec('applet-codebase', 0)
+            'getDocumentBase()Ljava/net/URL;' -> _spec('applet-documentbase', 0)
+            'getAppletContext()Ljava/applet/AppletContext;' ->
+                _spec('applet-context', 0)
+            'showStatus(Ljava/lang/String;)V' -> _spec('applet-status', 1)
+            _ -> ?
+        }, _ -> ?}}
+    }
+    // Host-only, record-only AppletStub context. No browser/navigation/API
+    // execution, arbitrary URLs, getApplet, image/audio or stream capabilities.
+    'java/applet/AppletContext' -> if opcode = 185 &
+        name = 'showDocument' &
+        desc = '(Ljava/net/URL;Ljava/lang/String;)V' {
+        true -> _spec('record-local-document', 2), _ -> ?}
+    'java/io/PrintStream' -> if opcode = 182 &
+        (name = 'print' | name = 'println') &
+        (desc = '()V' | desc = '(I)V' | desc = '(J)V' | desc = '(F)V' |
+        desc = '(D)V' | desc = '(Z)V' | desc = '(Ljava/lang/String;)V' |
+        desc = '(Ljava/lang/Object;)V') {
+        true -> _spec(name, if desc = '()V' {true -> 0, _ -> 1})
+        _ -> ?
+    }
+    'java/lang/StringBuilder', 'java/lang/StringBuffer' -> if opcode = 183 &
+        name = '<init>' & (desc = '()V' | desc = '(Ljava/lang/String;)V') {
+        true -> _spec('text-init', if desc = '()V' {true -> 0, _ -> 1})
+        _ -> if opcode = 182 {
+            true -> if {
+                name = 'toString' & desc = '()Ljava/lang/String;' ->
+                    _spec('text-string', 0)
+                name = 'append' & (desc = '(I)L' + owner + ';' |
+                    desc = '(Ljava/lang/String;)L' + owner + ';') ->
+                    _spec('text-append', 1)
+                _ -> ?
+            }
+            _ -> ?
+        }
+    }
+    // ArcTest's old AWT construction path: an in-memory tree only. Instance
+    // accessors expose that tree, never a native/window-system peer.
+    'java/awt/BorderLayout' -> if opcode = 183 & name = '<init>' &
+        desc = '()V' {
+        true -> _spec('border-layout-init', 0)
+        _ -> if opcode = 182 & name = 'getConstraints' &
+            desc = '(Ljava/awt/Component;)Ljava/lang/Object;' {
+            true -> _spec('border-constraints', 1), _ -> ?}
+    }
+    'java/awt/Canvas' -> if opcode = 183 & name = '<init>' & desc = '()V' {
+        true -> _spec('component-init', 0), _ -> ?}
+    'java/awt/Panel' -> if opcode = 183 & name = '<init>' & desc = '()V' {
+        true -> _spec('panel-init', 0), _ -> ?}
+    'java/awt/TextField' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/lang/String;I)V' {
+        true -> _spec('text-field-init', 2)
+        _ -> if opcode = 182 {true -> if name + desc {
+            'getColumns()I' -> _spec('text-columns', 0)
+            // javac may reference the receiver's TextField for an inherited
+            // TextComponent.getText; both symbolic owners have this contract.
+            'getText()Ljava/lang/String;' -> _spec('text-get', 0)
+            _ -> ?
+        }, _ -> ?}
+    }
+    'java/awt/TextComponent' -> if opcode = 182 & name = 'getText' &
+        desc = '()Ljava/lang/String;' {
+        true -> _spec('text-get', 0), _ -> ?}
+    'java/awt/Button' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/lang/String;)V' {
+        true -> _spec('button-init', 1)
+        _ -> if opcode = 182 & name = 'getLabel' &
+            desc = '()Ljava/lang/String;' {
+            true -> _spec('button-label', 0), _ -> ?}
+    }
+    'java/awt/Container' -> if opcode = 182 {true -> if name + desc {
+        'setLayout(Ljava/awt/LayoutManager;)V' -> _spec('tree-layout-set', 1)
+        'getLayout()Ljava/awt/LayoutManager;' -> _spec('tree-layout-get', 0)
+        'add(Ljava/lang/String;Ljava/awt/Component;)Ljava/awt/Component;' ->
+            _spec('tree-add-region', 2)
+        'add(Ljava/awt/Component;)Ljava/awt/Component;' ->
+            _spec('tree-add', 1)
+        'getComponents()[Ljava/awt/Component;' -> _spec('tree-children', 0)
+        _ -> ?
+    }, _ -> ?}
+    'java/awt/Color' -> if opcode = 183 & name = '<init>' {
+        true -> if desc {
+            '(III)V' -> _spec('color-init', 3)
+            '(I)V' -> _spec('opaque-packed-color-init', 1)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    'java/awt/Font' -> if opcode = 183 & name = '<init>' &
+        desc = '(Ljava/lang/String;II)V' {
+        true -> _spec('font-init', 3)
+        _ -> if opcode = 182 {true -> if name + desc {
+            'getName()Ljava/lang/String;' -> _spec('font-name', 0)
+            'getStyle()I' -> _spec('font-style', 0)
+            'getSize()I' -> _spec('font-size', 0)
+            _ -> ?
+        }, _ -> ?}
+    }
+    'java/awt/Rectangle' -> if opcode = 183 & name = '<init>' &
+        desc = '(IIII)V' {
+        true -> _spec('bounded-rectangle-init', 4), _ -> ?}
+    'java/awt/Point' -> if opcode = 183 & name = '<init>' {
+        true -> if desc {
+            '()V' -> _spec('point-init', 0)
+            '(II)V' -> _spec('point-init-xy', 2)
+            '(Ljava/awt/Point;)V' -> _spec('point-init-copy', 1)
+            _ -> ?
+        }
+        _ -> if opcode = 182 {true -> if name + desc {
+            'move(II)V', 'setLocation(II)V' -> _spec('point-move', 2)
+            'getLocation()Ljava/awt/Point;' -> _spec('point-copy', 0)
+            'equals(Ljava/lang/Object;)Z' -> _spec('point-equals', 1)
+            _ -> ?
+        }, _ -> ?}
+    }
+    // Two separately JDK-oracled headless image profiles: 8-bit indexed
+    // Fliplay bytes and the default 32-bit ARGB model/int[] source. No
+    // system display ColorModel, arbitrary subclass or asynchronous image.
+    'java/awt/image/ColorModel' -> if opcode = 184 &
+        name = 'getRGBdefault' & desc = '()Ljava/awt/image/ColorModel;' {
+        true -> _spec('rgb-default-model', 0)
+        _ -> if opcode = 182 & name = 'getRGB' & desc = '(I)I' {
+            true -> _spec('rgb-default-pixel', 1), _ -> ?}
+    }
+    'java/awt/image/IndexColorModel' -> if opcode = 183 & name = '<init>' &
+        desc = '(II[B[B[B)V' {
+        true -> _spec('indexed-palette-init', 5)
+        _ -> if opcode = 182 {true -> if name + desc {
+            'getMapSize()I' -> _spec('indexed-map-size', 0)
+            'getReds([B)V' -> _spec('indexed-channel-red', 1)
+            'getGreens([B)V' -> _spec('indexed-channel-green', 1)
+            'getBlues([B)V' -> _spec('indexed-channel-blue', 1)
+            _ -> ?
+        }, _ -> ?}
+    }
+    'java/awt/image/MemoryImageSource' -> if opcode = 183 & name = '<init>' {
+        true -> if desc {
+            '(IILjava/awt/image/ColorModel;[BII)V' -> _spec('memory-image-init', 6)
+            '(IILjava/awt/image/ColorModel;[III)V' -> _spec('memory-rgb-init', 6)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    // invokespecial must start at Component's implementation, even when
+    // the receiver overrides handleEvent. That JDK method then dispatches
+    // the legacy key/mouse callbacks virtually on the original receiver.
+    'java/awt/Component' -> if opcode = 183 &
+        name = 'handleEvent' & desc = '(Ljava/awt/Event;)Z' {
+        true -> _spec('bounded-legacy-event', 1)
+        _ -> if opcode = 182 {true -> if name + desc {
+        'createImage(II)Ljava/awt/Image;' -> _spec('raster-image-new', 2)
+        'createImage(Ljava/awt/image/ImageProducer;)Ljava/awt/Image;' ->
+            _spec('raster-image-source', 1)
+        // In the detached/headless JDK oracle this is the RGB default;
+        // on a real display its peer may instead supply a 24-bit model.
+        'getColorModel()Ljava/awt/image/ColorModel;' ->
+            _spec('component-headless-model', 0)
+        // JDK's constructed, detached Component has no display peer:
+        // getGraphics() is null, never an invented writable surface.
+        'getGraphics()Ljava/awt/Graphics;' ->
+            _spec('component-detached-graphics', 0)
+        // A constructed, detached and peerless Component cannot be showing.
+        // Preserve virtual user overrides; attached/real peers are not modeled.
+        'isShowing()Z' -> _spec('component-detached-showing', 0)
+        'repaint()V' -> _spec('bounded-repaint', 0)
+        'size()Ljava/awt/Dimension;' -> _spec('bounded-size', 0)
+        'requestFocus()V' -> _spec('bounded-focus', 0)
+        // Independent JDK Oracle: only explicitly sized, detached Canvas
+        // geometry. Runtime refuses attached/unconstructed/non-Canvas peers.
+        'setBounds(IIII)V' -> _spec('canvas-bounds-set', 4)
+        'bounds()Ljava/awt/Rectangle;' -> _spec('canvas-bounds-get', 0)
+        // Detached Applet Component colors. These are per-instance references,
+        // not a general AWT parent/window hierarchy or font-rendering API.
+        'setBackground(Ljava/awt/Color;)V' -> _spec('component-background-set', 1)
+        'getBackground()Ljava/awt/Color;' -> _spec('component-background-get', 0)
+        'isBackgroundSet()Z' -> _spec('component-background-is-set', 0)
+        'setForeground(Ljava/awt/Color;)V' -> _spec('component-foreground-set', 1)
+        'getForeground()Ljava/awt/Color;' -> _spec('component-foreground-get', 0)
+        'isForegroundSet()Z' -> _spec('component-foreground-is-set', 0)
+        'enable()V' -> _spec('component-enable', 0)
+        'disable()V' -> _spec('component-disable', 0)
+        'isEnabled()Z' -> _spec('component-is-enabled', 0)
+        'getParent()Ljava/awt/Container;' -> _spec('component-parent', 0)
+        _ -> ?
+    }, _ -> ?}}
+    'java/awt/Image' -> if opcode = 182 {true -> if name + desc {
+        'getGraphics()Ljava/awt/Graphics;' -> _spec('raster-graphics', 0)
+        'flush()V' -> _spec('raster-flush', 0)
+        _ -> ?
+    }, _ -> ?}
+    'java/awt/Graphics' -> if opcode = 182 {
+        true -> if name + desc {
+            'setColor(Ljava/awt/Color;)V' -> _spec('draw-color', 1)
+            'setFont(Ljava/awt/Font;)V' -> _spec('draw-font', 1)
+            'fillRect(IIII)V' -> _spec('draw-rect', 4)
+            'drawRect(IIII)V' -> _spec('raster-outline', 4)
+            // Only a real bounded offscreen raster; no detached AWT peer.
+            'clipRect(IIII)V' -> _spec('raster-intersect-clip', 4)
+            // Runtime admits only metered JDK-checked centered arrow triangles;
+            // other polygons fail explicitly, never silently approximate AWT.
+            'fillPolygon([I[II)V' -> _spec('raster-arrow', 3)
+            'drawImage(Ljava/awt/Image;IILjava/awt/image/ImageObserver;)Z' ->
+                _spec('raster-blit', 4)
+            'drawLine(IIII)V' -> _spec('draw-line', 4)
+            // Record raw arc calls (including zero/negative sizes), NOT
+            // rasterized pixels or a browser/SVG translation.
+            'drawArc(IIIIII)V' -> _spec('draw-arc', 6)
+            'fillArc(IIIIII)V' -> _spec('fill-arc', 6)
+            'drawString(Ljava/lang/String;II)V' -> _spec('draw-text', 3)
+            _ -> ?
+        }
+        _ -> ?
+    }
+    _ -> ?
+}
+
+fn _error(message) {type: :error, message: message}
+fn _int32?(n) type(n) = :int & n >= -2147483648 & n <= 2147483647
+fn _i32(n) {
+    u := n & 4294967295
+    if u >= 2147483648 {true -> u - 4294967296, _ -> u}
+}
+// Java NumberFormatException is represented as a bounded VM error; it is
+// never silently treated as a successful result. Large zero-padded strings
+// beyond 4096 characters are intentionally outside this subset.
+fn _parseInt(text) {
+    if type(text) != :string | len(text) = 0 | len(text) > 4096 {
+        true -> _error('Integer.parseInt expects a bounded nonempty string')
+        _ -> {
+            first := text.(0)
+            negative? := first = '-'
+            start := if negative? | first = '+' {true -> 1, _ -> 0}
+            limit := if negative? {true -> 2147483648, _ -> 2147483647}
+            value := 0
+            issue := ?
+            if start >= len(text) -> issue <- 'invalid integer'
+            std.range(start, len(text)) |> std.each(fn(i) if issue = ? {
+                true -> {
+                    digit := codepoint(text.(i)) - 48
+                    if digit < 0 | digit > 9 {
+                        true -> issue <- 'invalid integer'
+                        _ -> if value > (limit - digit) / 10 {
+                            true -> issue <- 'integer overflow'
+                            _ -> value <- value * 10 + digit
+                        }
+                    }
+                }
+            })
+            if issue != ? {
+                true -> _error(issue)
+                _ -> {type: :ok, value: if negative? {true -> 0 - value, _ -> value}}
+            }
+        }
+    }
+}
+// Integer.valueOf(String, radix) parses ASCII digits only in bases 2..36.
+// Reject overflow *before* multiplying, including the MIN_VALUE boundary;
+// the host wraps invalid syntax/radix as a catchable NumberFormatException.
+fn _parseIntRadix(text, radix) {
+    if type(text) != :string | len(text) = 0 | len(text) > 4096 |
+        !_int32?(radix) | radix < 2 | radix > 36 {
+        true -> _error('invalid integer or radix')
+        _ -> {
+            first := text.(0)
+            negative? := first = '-'
+            start := if negative? | first = '+' {true -> 1, _ -> 0}
+            limit := if negative? {true -> 2147483648, _ -> 2147483647}
+            value := 0
+            issue := ?
+            if start >= len(text) -> issue <- 'invalid integer'
+            std.range(start, len(text)) |> std.each(fn(i) if issue = ? {
+                true -> {
+                    code := codepoint(text.(i))
+                    digit := if code >= 48 & code <= 57 {
+                        true -> code - 48
+                        _ -> if code >= 65 & code <= 90 {
+                            true -> code - 65 + 10
+                            _ -> if code >= 97 & code <= 122 {
+                                true -> code - 97 + 10, _ -> -1}
+                        }
+                    }
+                    if digit < 0 | digit >= radix {
+                        true -> issue <- 'invalid integer'
+                        _ -> if value > (limit - digit) / radix {
+                            true -> issue <- 'integer overflow'
+                            _ -> value <- value * radix + digit
+                        }
+                    }
+                }
+            })
+            if issue != ? {
+                true -> _error(issue)
+                _ -> {type: :ok, value: if negative? {true -> 0 - value, _ -> value}}
+            }
+        }
+    }
+}
+// Deterministic, host-independent integer service. MIN_VALUE abs stays
+// negative, and Integer.sum wraps as a JVM signed 32-bit addition.
+fn jvmInvoke(spec, args) {
+    if spec = ? | type(args) != :list | len(args) != spec.argc {
+        true -> _error('invalid portable JVM library invocation')
+        _ -> if spec.op = 'parse-int' | spec.op = 'boxed-int-string' {
+            true -> _parseInt(args.(0))
+            _ -> if spec.op = 'boxed-int-radix' {
+                true -> _parseIntRadix(args.(0), args.(1))
+                _ -> {
+                a := args.(0)
+                b := if spec.argc = 2 {true -> args.(1), _ -> ?}
+                if !_int32?(a) | (spec.argc = 2 & !_int32?(b)) {
+                    true -> _error('JVM integer library expects int32 arguments')
+                    _ -> if spec.op {
+                        'int-string' -> {type: :ok, value: string(a)}
+                        'iabs' -> {type: :ok, value: if a < 0 & a != -2147483648 {
+                            true -> 0 - a, _ -> a}}
+                        'imax' -> {type: :ok, value: if a > b {true -> a, _ -> b}}
+                        'imin' -> {type: :ok, value: if a < b {true -> a, _ -> b}}
+                        'isum' -> {type: :ok, value: _i32(a + b)}
+                        'icompare' -> {type: :ok, value: if a < b {
+                            true -> -1, _ -> if a > b {true -> 1, _ -> 0}}}
+                        _ -> _error('unsupported JVM integer library intrinsic')
+                    }
+                }
+            }
+            }
+        }
+    }
+}
+fn _ascii?(text) {
+    ascii? := type(text) = :string & len(text) <= 4194304
+    if ascii? -> std.range(len(text)) |> std.each(fn(i) if codepoint(text.(i)) >= 128 -> ascii? <- false)
+    ascii?
+}
+// Java strings are UTF-16; class constants currently retain raw modified
+// UTF-8 bytes. Refuse non-ASCII rather than returning incorrect Java lengths
+// or comparing an encoded class literal with a decoded host string.
+fn jvmString(spec, receiver, args) {
+    if spec = ? | type(args) != :list | len(args) != spec.argc |
+        !_ascii?(receiver) {
+        true -> _error('JVM String library requires an ASCII string receiver')
+        _ -> if spec.op {
+            'string-length' -> {type: :ok, value: len(receiver)}
+            'string-equals' -> {
+                other := args.(0)
+                if type(other) = :string & !_ascii?(other) {
+                    true -> _error('JVM String.equals does not support non-ASCII strings')
+                    _ -> {type: :ok, value: if receiver = other {true -> 1, _ -> 0}}
+                }
+            }
+            'string-equals-ignore-case' -> {
+                other := args.(0)
+                if other != ? & !_ascii?(other) {
+                    true -> _error('JVM String.equalsIgnoreCase supports ASCII only')
+                    _ -> {
+                        same? := type(other) = :string & len(receiver) = len(other)
+                        fn lower(c) {
+                            code := codepoint(c)
+                            if code >= 65 & code <= 90 {true -> code - (0 - 32), _ -> code}
+                        }
+                        if same? -> std.range(len(receiver)) |> std.each(fn(i) if
+                            lower(receiver.(i)) != lower(other.(i)) -> same? <- false)
+                        {type: :ok, value: if same? {true -> 1, _ -> 0}}
+                    }
+                }
+            }
+            'string-index-of' -> if type(args.(0)) = :int &
+                args.(0) >= 0 & args.(0) <= 127 {
+                true -> {
+                    index := -1
+                    std.range(len(receiver)) |> std.each(fn(i) if index = -1 &
+                        codepoint(receiver.(i)) = args.(0) -> index <- i)
+                    {type: :ok, value: index}
+                }
+                _ -> _error('JVM String.indexOf supports ASCII code points only')
+            }
+            // Java 8 returns the same String object for an unchanged result.
+            // The runtime wraps a changed result as a *new* JVM reference.
+            'bounded-ascii-char-replace' -> if len(receiver) <= 4096 &
+                type(args.(0)) = :int & type(args.(1)) = :int &
+                args.(0) >= 0 & args.(0) <= 127 &
+                args.(1) >= 0 & args.(1) <= 127 {
+                true -> {type: :ok, value: if args.(0) = args.(1) {
+                    true -> receiver, _ -> str.replace(receiver,
+                        char(args.(0)), char(args.(1)))}}
+                _ -> _error('String.replace requires bounded ASCII and char values')
+            }
+            'string-concat' -> if _ascii?(args.(0)) {
+                true -> if len(receiver) + len(args.(0)) > 4194304 {
+                    true -> _error('JVM String result exceeds 4 MiB limit')
+                    _ -> {type: :ok, value: receiver + args.(0)}
+                }
+                _ -> _error('JVM String.concat requires a nonnull ASCII string')
+            }
+            _ -> _error('unsupported JVM String library intrinsic')
+        }
+    }
+}

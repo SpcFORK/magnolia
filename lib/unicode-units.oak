@@ -1,0 +1,110 @@
+// libunicode-units — conversions between UTF-8/modified-UTF-8 byte sequences
+// and UTF-16 code units, implemented in Oak so all output targets share one
+// decoder/encoder.
+//
+// JVM class files store strings as modified UTF-8 (U+0000 as C0 80, U+10000
+// and above as surrogate pairs of three-byte units), while ordinary Oak
+// caller strings are plain UTF-8 bytes. `utf8Units` decodes either into the
+// list of UTF-16 code units Java source needs. `utf8Bytes` encodes a Unicode
+// codepoint as standard UTF-8 bytes (non-BMP planes use a four-byte form).
+//
+// This module was abstracted from the Java source emitter and the JavaScript
+// (ES3/ES5) tokenizer so they share one implementation. It depends on
+// libstd only.
+
+std := import('std')
+
+// _trail? reports whether b is a UTF-8 continuation byte (10xxxxxx).
+fn _trail?(b) if b { ? -> false, _ -> b >= 128 & b <= 191 }
+
+// utf8Units decodes the bytes of an Oak string (UTF-8, or modified UTF-8 for
+// JVM class-file data) into a list of UTF-16 code units. The MUTF-8 NUL
+// encoding (C0 80) decodes to U+0000. Standard four-byte sequences are
+// re-encoded as a UTF-16 surrogate pair, matching Java's String storage;
+// malformed input fails explicitly instead of producing replacement guesses.
+fn utf8Units(text) {
+    units := []
+    problem := ?
+    skip := 0
+    fn byte(i) if i < len(text) {true -> codepoint(text.(i)), _ -> ?}
+    std.range(len(text)) |> std.each(fn(i) if i >= skip & problem = ? {
+        true -> {
+            a := byte(i)
+            b := byte(i + 1)
+            c := byte(i + 2)
+            d := byte(i + 3)
+            if a < 128 {
+                true -> {
+                    units << a
+                    skip <- i + 1
+                }
+                _ -> if a = 192 & b = 128 {
+                    true -> {
+                        units << 0
+                        skip <- i + 2 // JVM modified-UTF-8 NUL
+                    }
+                    _ -> if a >= 194 & a <= 223 & _trail?(b) {
+                        true -> {
+                            units << (((a & 31) << 6) | (b & 63))
+                            skip <- i + 2
+                        }
+                        _ -> if a >= 224 & a <= 239 & _trail?(b) & _trail?(c) &
+                            (a != 224 | b >= 160) {
+                            true -> {
+                                // MUTF-8 also encodes UTF-16 surrogates as
+                                // three-byte units; leave them paired in Java.
+                                units << (((a & 15) << 12) | ((b & 63) << 6) | (c & 63))
+                                skip <- i + 3
+                            }
+                            _ -> if a >= 240 & a <= 244 & _trail?(b) &
+                                _trail?(c) & _trail?(d) &
+                                (a != 240 | b >= 144) & (a != 244 | b <= 143) {
+                                true -> {
+                                    // Standard UTF-8 for user-supplied args:
+                                    // Java stores non-BMP characters as a pair.
+                                    code := (((a & 7) << 18) | ((b & 63) << 12) |
+                                        ((c & 63) << 6) | (d & 63)) - 65536
+                                    units << (55296 + (code >> 10))
+                                    units << (56320 + (code & 1023))
+                                    skip <- i + 4
+                                }
+                                _ -> problem <- 'malformed UTF-8/modified UTF-8 in source data'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if problem != ? {true -> {type: :error, message: problem}, _ -> {type: :ok, value: units}}
+}
+
+// utf8Bytes encodes a Unicode codepoint as standard UTF-8 bytes. Code points
+// outside the Unicode range produce no bytes; callers validating input should
+// check the length or use `utf8Units` for decoding instead.
+fn utf8Bytes(cp) {
+    if cp >= 0 & cp < 128 {
+        true -> [cp]
+        _ -> if cp < 2048 {
+            true -> [192 | int(cp / 64), 128 | (cp % 64)]
+            _ -> if cp < 65536 {
+                true -> [
+                    224 | int(cp / 4096),
+                    128 | (int(cp / 64) % 64),
+                    128 | (cp % 64)
+                ]
+            _ -> [
+                    240 | int(cp / 262144),
+                    128 | ((int(cp / 4096)) % 64),
+                    128 | (int(cp / 64) % 64),
+                    128 | (cp % 64)
+                ]
+            }
+        }
+    }
+}
+
+{
+    utf8Units: utf8Units
+    utf8Bytes: utf8Bytes
+}

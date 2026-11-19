@@ -5,6 +5,7 @@ slice := std.slice
 default := std.default
 clone := std.clone
 map := std.map
+filter := std.filter
 each := std.each
 reduce := std.reduce
 append := std.append
@@ -560,7 +561,7 @@ fn renderLuaBundle(bundleNode) {
 		'repeat', 'return', 'then', 'true', 'until', 'while']
 
 	fn luaIdent(name) {
-		clean := name |> clone()
+		clean := if type(name) != :string { true -> '__oak_nonstring_ident', _ -> name |> clone() }
 		clean <- clean |> replace('?', '_qm') |> replace('!', '_exclam')
 		luaReserved |> each(fn(kw) if clean = kw {
 			true -> clean <- '__oak_lua_' << clean
@@ -572,13 +573,59 @@ fn renderLuaBundle(bundleNode) {
 	output := '-- oak build --lua\n'
 	output <- output << '-- Magnolia/Oak to Lua transpiled bundle\n\n'
 
-	// Lua runtime preamble
+	// Lua runtime preamble. The Oak builtin set is intentionally limited:
+	// this is a bounded execution layer, not a full Lua/std port.
 	output <- output << 'local __Oak_Modules = {}\n'
+	output <- output << 'local args = {...}\n\n'
+	// Raw captures, before the Oak builtin shadowing below.
+	output <- output << 'local _oakType = type\n'
+	output <- output << 'local _oakTostring = tostring\n'
+	output <- output << 'local _oakTonumber = tonumber\n'
+	output <- output << 'local _oakFloor = math.floor\n'
+	output <- output << 'local _oakCeil = math.ceil\n'
+	output <- output << 'local _oakStringsub = string.sub\n'
+	output <- output << 'local _oakStringchar = string.char\n'
+	output <- output << 'local _oakStringbyte = string.byte\n\n'
+	// Oak lists are Lua array tables (1..n); Oak indices are 0-based and
+	// Oak objects use raw keys. __oak_listp distinguishes the two so numeric
+	// indexing works for both. Results are cached with weak table keys.
+	output <- output << 'local __oakListCache = setmetatable({}, { __mode = "k" })\n'
+	output <- output << 'local function __oak_listp(t)\n'
+	output <- output << '  local cached = __oakListCache[t]\n'
+	output <- output << '  if cached ~= nil then return cached end\n'
+	output <- output << '  local n = #t\n'
+	output <- output << '  local count = 0\n'
+	output <- output << '  for k in pairs(t) do\n'
+	output <- output << '    if _oakType(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then\n'
+	output <- output << '      __oakListCache[t] = false\n'
+	output <- output << '      return false\n'
+	output <- output << '    end\n'
+	output <- output << '    count = count + 1\n'
+	output <- output << '  end\n'
+	output <- output << '  local r = count == n\n'
+	output <- output << '  __oakListCache[t] = r\n'
+	output <- output << '  return r\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function __oak_modularize(name, factory)\n'
+	output <- output << '  __Oak_Modules[name] = factory\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function __oak_module_import(name)\n'
+	output <- output << '  local m = __Oak_Modules[name]\n'
+	output <- output << '  if m == nil and __Oak_Import_Aliases and __Oak_Import_Aliases[name] then\n'
+	output <- output << '    m = __Oak_Modules[__Oak_Import_Aliases[name]]\n'
+	output <- output << '  end\n'
+	output <- output << '  if m == nil then return nil end\n'
+	output <- output << '  if _oakType(m) == "function" then\n'
+	output <- output << '    local result = m()\n'
+	output <- output << '    __Oak_Modules[name] = result\n'
+	output <- output << '    return result\n'
+	output <- output << '  end\n'
+	output <- output << '  return m\n'
+	output <- output << 'end\n\n'
 	output <- output << 'local __Oak_Import_Aliases = nil\n\n'
-
 	output <- output << 'local function __oak_eq(a, b)\n'
-	output <- output << '  if type(a) ~= type(b) then return false end\n'
-	output <- output << '  if type(a) == "table" then\n'
+	output <- output << '  if _oakType(a) ~= _oakType(b) then return false end\n'
+	output <- output << '  if _oakType(a) == "table" then\n'
 	output <- output << '    for k, v in pairs(a) do\n'
 	output <- output << '      if not __oak_eq(v, b[k]) then return false end\n'
 	output <- output << '    end\n'
@@ -589,63 +636,128 @@ fn renderLuaBundle(bundleNode) {
 	output <- output << '  end\n'
 	output <- output << '  return a == b\n'
 	output <- output << 'end\n\n'
-
 	output <- output << 'local function __oak_push(tbl, val)\n'
 	output <- output << '  tbl[#tbl + 1] = val\n'
 	output <- output << '  return tbl\n'
 	output <- output << 'end\n\n'
-
 	output <- output << 'local function __oak_acc(obj, key)\n'
 	output <- output << '  if obj == nil then return nil end\n'
-	output <- output << '  return obj[key]\n'
+	output <- output << '  local t = _oakType(obj)\n'
+	output <- output << '  if t == "string" then\n'
+	output <- output << '    if _oakType(key) ~= "number" or key % 1 ~= 0 or key < 0 then return nil end\n'
+	output <- output << '    return _oakStringsub(obj, math.floor(key) + 1, math.floor(key) + 1)\n'
+	output <- output << '  elseif t == "table" then\n'
+	output <- output << '    if _oakType(key) == "number" and key % 1 == 0 and key >= 0 and __oak_listp(obj) then\n'
+	output <- output << '      return obj[math.floor(key) + 1]\n'
+	output <- output << '    end\n'
+	output <- output << '    return obj[key]\n'
+	output <- output << '  end\n'
+	output <- output << '  return nil\n'
 	output <- output << 'end\n\n'
-
+	output <- output << 'local function __oak_set(obj, key, value)\n'
+	output <- output << '  if obj == nil or _oakType(obj) ~= "table" then return value end\n'
+	output <- output << '  if _oakType(key) == "number" and key % 1 == 0 and key >= 0 and __oak_listp(obj) then\n'
+	output <- output << '    obj[math.floor(key) + 1] = value\n'
+	output <- output << '    return value\n'
+	output <- output << '  end\n'
+	output <- output << '  obj[key] = value\n'
+	output <- output << '  return value\n'
+	output <- output << 'end\n\n'
 	output <- output << 'local function __as_oak_string(v)\n'
-	output <- output << '  if type(v) == "number" then return tostring(v) end\n'
 	output <- output << '  if v == nil then return "" end\n'
-	output <- output << '  return tostring(v)\n'
+	output <- output << '  return _oakTostring(v)\n'
 	output <- output << 'end\n\n'
-
+	output <- output << 'local function __oak_add(a, b)\n'
+	output <- output << '  if _oakType(a) == "number" and _oakType(b) == "number" then return a + b end\n'
+	output <- output << '  return __as_oak_string(a) .. __as_oak_string(b)\n'
+	output <- output << 'end\n\n'
 	output <- output << 'local function __oak_and(a, b)\n'
 	output <- output << '  if a == false then return false end\n'
 	output <- output << '  return b\n'
 	output <- output << 'end\n\n'
-
 	output <- output << 'local function __oak_or(a, b)\n'
 	output <- output << '  if a == true then return true end\n'
 	output <- output << '  return b\n'
 	output <- output << 'end\n\n'
-
 	output <- output << 'local function __oak_xor(a, b)\n'
-	output <- output << '  if type(a) == "boolean" and type(b) == "boolean" then\n'
+	output <- output << '  if _oakType(a) == "boolean" and _oakType(b) == "boolean" then\n'
 	output <- output << '    return a ~= b\n'
 	output <- output << '  end\n'
 	output <- output << '  return a ~ b\n'
 	output <- output << 'end\n\n'
-
-	output <- output << 'local function __oak_modularize(name, factory)\n'
-	output <- output << '  __Oak_Modules[name] = factory\n'
+	// ---- Oak builtins (bounded host surface) ----
+	output <- output << 'local function type(v)\n'
+	output <- output << '  local t = _oakType(v)\n'
+	output <- output << '  if t == "table" then\n'
+	output <- output << '    if __oak_listp(v) then return "list" end\n'
+	output <- output << '    return "object"\n'
+	output <- output << '  elseif t == "number" then\n'
+	output <- output << '    if v % 1 == 0 then return "int" end\n'
+	output <- output << '    return "float"\n'
+	output <- output << '  elseif t == "boolean" then return "bool" end\n'
+	output <- output << '  return t\n'
 	output <- output << 'end\n\n'
-
-	output <- output << 'local function __oak_module_import(name)\n'
-	output <- output << '  local m = __Oak_Modules[name]\n'
-	output <- output << '  if m == nil then\n'
-	output <- output << '    if __Oak_Import_Aliases and __Oak_Import_Aliases[name] then\n'
-	output <- output << '      m = __Oak_Modules[__Oak_Import_Aliases[name]]\n'
-	output <- output << '    end\n'
-	output <- output << '  end\n'
-	output <- output << '  if m == nil then return nil end\n'
-	output <- output << '  if type(m) == "function" then\n'
-	output <- output << '    local result = m()\n'
-	output <- output << '    __Oak_Modules[name] = result\n'
-	output <- output << '    return result\n'
-	output <- output << '  end\n'
-	output <- output << '  return m\n'
+	output <- output << 'local function len(x)\n'
+	output <- output << '  if x == nil then return 0 end\n'
+	output <- output << '  return #x\n'
 	output <- output << 'end\n\n'
-
+	output <- output << 'local function string(v)\n'
+	output <- output << '  if v == nil then return "" end\n'
+	output <- output << '  if _oakType(v) == "number" and v % 1 == 0 then return _oakTostring(_oakFloor(v)) end\n'
+	output <- output << '  return _oakTostring(v)\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function int(v)\n'
+	output <- output << '  local n = _oakTonumber(v)\n'
+	output <- output << '  if n == nil then return 0 end\n'
+	output <- output << '  if n >= 0 then return _oakFloor(n) else return _oakCeil(n) end\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function float(v)\n'
+	output <- output << '  return _oakTonumber(v) or 0\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function char(n) return _oakStringchar(int(n) % 256) end\n\n'
+	output <- output << 'local function codepoint(s)\n'
+	output <- output << '  if s == nil or s == "" then return 0 end\n'
+	output <- output << '  return _oakStringbyte(s, 1)\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function atom(n) return _oakTostring(n) end\n\n'
+	output <- output << 'local function keys(t)\n'
+	output <- output << '  local r = {}\n'
+	output <- output << '  if t == nil then return r end\n'
+	output <- output << '  if _oakType(t) == "table" and __oak_listp(t) then\n'
+	output <- output << '    for i = 1, #t do r[#r + 1] = i - 1 end\n'
+	output <- output << '    return r\n'
+	output <- output << '  end\n'
+	output <- output << '  for k in pairs(t) do r[#r + 1] = k end\n'
+	output <- output << '  return r\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function acos(x) return math.acos(x) end\n'
+	output <- output << 'local function asin(x) return math.asin(x) end\n'
+	output <- output << 'local function atan(x, y) if y then return math.atan(x, y) end return math.atan(x) end\n'
+	output <- output << 'local function cos(x) return math.cos(x) end\n'
+	output <- output << 'local function sin(x) return math.sin(x) end\n'
+	output <- output << 'local function tan(x) return math.tan(x) end\n'
+	output <- output << 'local function pow(x, y) return x ^ y end\n\n'
+	output <- output << 'local function print(s)\n'
+	output <- output << '  if s == nil then s = "" end\n'
+	output <- output << '  io.write(s)\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function time() return os.clock() end\n'
+	output <- output << 'local function nanotime() return math.floor(os.clock() * 1000000000) end\n'
+	output <- output << 'local function rand(n)\n'
+	output <- output << '  if n == nil then return math.random() end\n'
+	output <- output << '  if int(n) <= 1 then return 0 end\n'
+	output <- output << '  return math.random(0, int(n) - 1)\n'
+	output <- output << 'end\n'
+	output <- output << 'local function srand(n) math.randomseed(int(n)) end\n\n'
+	output <- output << 'local function env()\n'
+	output <- output << '  return setmetatable({}, { __index = function(_, k) return os.getenv(k) end })\n'
+	output <- output << 'end\n\n'
+	output <- output << 'local function exit(code) os.exit(int(code or 0)) end\n\n'
 	// Render the AST to Lua
 	fn renderReturnLua(node) ?
-	fn renderNode(node) if node.type {
+	fn renderNode(node) { renderNodeMode(node, false) }
+	fn renderChild(node) { renderNodeMode(node, false) }
+	fn renderNodeMode(node, stmtMode) if node.type {
 		:null -> 'nil'
 		:empty -> 'nil'
 		:string -> '\'' + (node.val |> map(fn(c) if c {
@@ -663,48 +775,49 @@ fn renderLuaBundle(bundleNode) {
 		:object -> '{' + (node.entries |> map(fn(entry) {
 			{ key: k, val: v } := entry
 			if k.type {
-				:identifier -> '["' + k.val + '"]=' + renderNode(v)
-				:string -> '["' + k.val + '"]=' + renderNode(v)
-				:int -> '[' + string(k.val) + ']=' + renderNode(v)
-				_ -> '[' + renderNode(k) + ']=' + renderNode(v)
+				:identifier -> '["' + k.val + '"]=' + renderChild(v)
+				:string -> '["' + k.val + '"]=' + renderChild(v)
+				:int -> '[' + string(k.val) + ']=' + renderChild(v)
+				_ -> '[' + renderChild(k) + ']=' + renderChild(v)
 			}
 		}) |> join(', ')) + '}'
 		:unary -> if node.op {
-			:minus -> '(-' + renderNode(node.right) + ')'
-			:exclam -> '(not ' + renderNode(node.right) + ')'
+			:minus -> '(-' + renderChild(node.right) + ')'
+			:exclam -> '(not ' + renderChild(node.right) + ')'
 		}
 		:binary -> if node.op {
-			:plus -> '__as_oak_string(' + renderNode(node.left) + ' + ' + renderNode(node.right) + ')'
-			:minus -> '(' + renderNode(node.left) + ' - ' + renderNode(node.right) + ')'
-			:times -> '(' + renderNode(node.left) + ' * ' + renderNode(node.right) + ')'
-			:divide -> '(' + renderNode(node.left) + ' / ' + renderNode(node.right) + ')'
-			:modulus -> '(' + renderNode(node.left) + ' % ' + renderNode(node.right) + ')'
-			:rshift -> '(' + renderNode(node.left) + ' >> ' + renderNode(node.right) + ')'
-			:and -> '__oak_and(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
-			:xor -> '__oak_xor(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
-			:or -> '__oak_or(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
-			:eq -> '__oak_eq(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
-			:neq -> '(not __oak_eq(' + renderNode(node.left) + ', ' + renderNode(node.right) + '))'
-			:greater -> '(' + renderNode(node.left) + ' > ' + renderNode(node.right) + ')'
-			:less -> '(' + renderNode(node.left) + ' < ' + renderNode(node.right) + ')'
-			:geq -> '(' + renderNode(node.left) + ' >= ' + renderNode(node.right) + ')'
-			:leq -> '(' + renderNode(node.left) + ' <= ' + renderNode(node.right) + ')'
-			:pushArrow -> '__oak_push(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			:plus -> '__oak_add(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
+			:minus -> '(' + renderChild(node.left) + ' - ' + renderChild(node.right) + ')'
+			:times -> '(' + renderChild(node.left) + ' * ' + renderChild(node.right) + ')'
+			:divide -> '(' + renderChild(node.left) + ' / ' + renderChild(node.right) + ')'
+			:modulus -> '(' + renderChild(node.left) + ' % ' + renderChild(node.right) + ')'
+			:rshift -> '(' + renderChild(node.left) + ' >> ' + renderChild(node.right) + ')'
+			:and -> '__oak_and(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
+			:xor -> '__oak_xor(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
+			:or -> '__oak_or(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
+			:eq -> '__oak_eq(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
+			:neq -> '(not __oak_eq(' + renderChild(node.left) + ', ' + renderChild(node.right) + '))'
+			:greater -> '(' + renderChild(node.left) + ' > ' + renderChild(node.right) + ')'
+			:less -> '(' + renderChild(node.left) + ' < ' + renderChild(node.right) + ')'
+			:geq -> '(' + renderChild(node.left) + ' >= ' + renderChild(node.right) + ')'
+			:leq -> '(' + renderChild(node.left) + ' <= ' + renderChild(node.right) + ')'
+			:pushArrow -> '__oak_push(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
 		}
 		:assignment -> if node.left.type {
 			:propertyAccess -> {
-				container := renderNode(node.left.left)
+				container := renderChild(node.left.left)
 				key := if node.left.right.type {
 					:identifier -> '"' + node.left.right.val + '"'
 					:block -> if len(node.left.right.exprs) = 1 {
-						true -> renderNode(node.left.right.exprs.0)
-						_ -> renderNode(node.left.right)
+						true -> renderChild(node.left.right.exprs.0)
+						_ -> renderChild(node.left.right)
 					}
-					_ -> renderNode(node.left.right)
+					_ -> renderChild(node.left.right)
 				}
-				container + '[' + key + '] = ' + renderNode(node.right)
+				'__oak_set(' + container + ', ' + key + ', ' + renderChild(node.right) + ')'
 			}
-			:object -> '(function()\nlocal __oak_assgn = ' + renderNode(node.right) + '\n' + {
+			:object -> (if node.local? & stmtMode { true -> _oakAssignmentPrefix(node), _ -> '' }) +
+				'(function()\nlocal __oak_assgn = ' + renderChild(node.right) + '\n' + {
 				result := ''
 				node.left.entries |> each(fn(entry) {
 					{ key: k, val: v } := entry
@@ -715,46 +828,66 @@ fn renderLuaBundle(bundleNode) {
 					result <- result + luaIdent(name) + ' = __oak_assgn["' + k.val + '"]\n'
 				})
 				result
-			} + 'return __oak_assgn\nend)()\n'
-			:list -> '(function()\nlocal __oak_assgn = ' + renderNode(node.right) + '\n' + {
+			} + 'return __oak_assgn\nend)()'
+			:list -> (if node.local? & stmtMode { true -> _oakAssignmentPrefix(node), _ -> '' }) +
+				'(function()\nlocal __oak_assgn = ' + renderChild(node.right) + '\n' + {
 				result := ''
 				node.left.elems |> each(fn(elem, i) if elem.type {
 					:identifier -> result <- result + luaIdent(elem.val) + ' = __oak_assgn[' + string(i + 1) + ']\n'
 					:empty -> ?
 				})
 				result
-			} + 'return __oak_assgn\nend)()\n'
-			_ -> luaIdent(node.left.val) + ' = ' + renderNode(node.right)
+			} + 'return __oak_assgn\nend)()'
+			_ -> if node.local? & stmtMode {
+				true -> 'local ' + luaIdent(node.left.val) + ' = ' + renderChild(node.right)
+				_ -> '(function() ' + luaIdent(node.left.val) + ' = ' + renderChild(node.right) + '; return ' + luaIdent(node.left.val) + ' end)()'
+			}
 		}
 		:propertyAccess -> if node.right.type {
-			:identifier -> renderNode(node.left) + '["' + node.right.val + '"]'
-			_ -> '__oak_acc(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+			:identifier -> renderChild(node.left) + '["' + node.right.val + '"]'
+			_ -> '__oak_acc(' + renderChild(node.left) + ', ' + renderChild(node.right) + ')'
 		}
 		:ifExpr -> '(function()\n' + {
-			result := ''
-			node.branches |> each(fn(br, i) {
-				prefix := if i { 0 -> 'if ', _ -> 'elseif ' }
-				if br.target.type = :empty {
-					true -> result <- result + 'else ' + renderReturnLua(br.body) + '\n'
-					_ -> result <- result + prefix + '__oak_eq(__oak_cond, ' + renderNode(br.target) + ') then ' + renderReturnLua(br.body) + '\n'
-				}
-			})
-			'local __oak_cond = ' + renderNode(node.cond) + '\n' + result + 'end\nend)()\n'
-		}
-		:block -> '(function()\n' + {
+				result := ''
+				node.branches |> each(fn(br, i) {
+					prefix := if i { 0 -> 'if ', _ -> 'elseif ' }
+					if br.target.type = :empty {
+						true -> result <- result + 'else ' + renderReturnLua(br.body) + '\n'
+						_ -> result <- result + prefix + '__oak_eq(__oak_cond, ' + renderChild(br.target) + ') then ' + renderReturnLua(br.body) + '\n'
+					}
+				})
+				'local __oak_cond = ' + renderChild(node.cond) + '\n' + result + 'end\nend)()'
+			}
+		:block -> '(function()\n' + _oakOperandPreamble(node.exprs) + {
 			result := ''
 			lastIdx := len(node.exprs) - 1
 			node.exprs |> each(fn(expr, i) {
 				if i = lastIdx {
 					true -> result <- result + renderReturnLua(expr) + '\n'
-					_ -> result <- result + renderNode(expr) + '\n'
+					_ -> result <- result + renderNodeMode(expr, true) + ';\n'
 				}
 			})
 			result
-		} + 'end)()\n'
+		} + 'end)()'
 		:function -> {
-			args := node.args |> map(luaIdent) |> join(', ')
-			fnBody := 'function(' + args + ')\n' + {
+			args := if type(node.args) {
+				:list -> node.args |> map(luaIdent) |> join(', ')
+				_ -> ''
+			}
+			hasRest := type(node.restArg) = :string & node.restArg != ''
+			restSuffix := if hasRest {
+				true -> if args = '' { true -> '...', _ -> ', ...' }
+				_ -> ''
+			}
+			restCapture := if hasRest {
+				true -> 'local ' + luaIdent(node.restArg) + ' = {...};\n'
+				_ -> ''
+			}
+			bodyPreamble := if node.body.type = :block {
+				true -> _oakOperandPreamble(node.body.exprs)
+				_ -> ''
+			}
+			fnBody := 'function(' + args + restSuffix + ')\n' + restCapture + bodyPreamble + {
 				if node.body.type = :block {
 					true -> {
 						result := ''
@@ -762,7 +895,7 @@ fn renderLuaBundle(bundleNode) {
 						node.body.exprs |> each(fn(expr, i) {
 							if i = lastIdx {
 								true -> result <- result + renderReturnLua(expr) + '\n'
-								_ -> result <- result + renderNode(expr) + '\n'
+								_ -> result <- result + renderNodeMode(expr, true) + ';\n'
 							}
 						})
 						result
@@ -772,17 +905,123 @@ fn renderLuaBundle(bundleNode) {
 			} + 'end'
 			if node.name {
 				'' -> fnBody
-				_ -> luaIdent(node.name) + ' = ' + fnBody
+				? -> fnBody
+				_ -> if stmtMode {
+					true -> 'local ' + luaIdent(node.name) + ';\n' + luaIdent(node.name) + ' = ' + fnBody
+					_ -> '(function() ' + luaIdent(node.name) + ' = ' + fnBody + '; return ' + luaIdent(node.name) + ' end)()'
+				}
 			}
 		}
-		:fnCall -> renderNode(node.function) + '(' + (node.args |> map(renderNode) |> join(', ')) + ')'
+		:fnCall -> renderChild(node.function) + '(' + (node.args |> map(renderNode) |> join(', ')) + ')'
 	}
 
+	// Oak allows `x := e` anywhere an expression is legal; Lua does not.
+	// Statement-position `x := e` renders as a Lua `local x = e` (RHS reads
+	// the outer binding, exactly like Oak). Operand-position `x := e` renders
+	// as a value-producing IIFE `(function() x = e; return x end)()` that
+	// assigns a pre-declared upvalue. Every body pre-declares all locals that
+	// bind in operand position (not crossing nested block/function/class
+	// boundaries) at the top — mirroring the Go backend's collectBlockLocals.
+	fn _oakIsBoundary?(node) type(node) = :object & (node.type = :function | node.type = :class | node.type = :block)
+
+	fn _oakAddName?(acc, name) {
+		if name != ? & type(name) = :string & !contains?(acc.names, name) {
+			true -> acc.names <- acc.names << name
+		}
+		acc
+	}
+
+	// Collect the bound names of one local?-assignment node (plain or
+	// destructured) without crossing boundaries.
+	fn _oakCollectAssignment(node, acc) {
+		if node.left.type {
+			:identifier -> _oakAddName?(acc, node.left.val)
+			:object -> {
+				node.left.entries |> each(fn(entry) {
+					{ key: k, val: v } := entry
+					name := if v.type {
+						:identifier -> v.val
+						_ -> if k.type = :identifier | k.type = :string {
+							true -> k.val
+							_ -> ?
+						}
+					}
+					_oakAddName?(acc, name)
+				})
+			}
+			:list -> {
+				node.left.elems |> each(fn(elem) if elem.type {
+					:identifier -> _oakAddName?(acc, elem.val)
+				})
+			}
+		}
+		acc
+	}
+
+	// Walk a subtree without crossing block/function/class boundaries and
+	// collect every bound local (destructured or plain) plus named fns.
+	fn _oakCollectLocalsIn(node, acc) {
+		if type(node) {
+			:list -> {
+				node |> each(fn(elem) _oakCollectLocalsIn(elem, acc))
+				acc
+			}
+			:object -> if _oakIsBoundary?(node) {
+				true -> acc
+				_ -> {
+					if node.type = :assignment & node.local? -> _oakCollectAssignment(node, acc)
+					if node.type = :function & type(node.name) = :string & node.name != '' -> _oakAddName?(acc, node.name)
+					keys(node) |> each(fn(k) {
+						skip := node.type = :assignment & k = 'left'
+						if !skip -> _oakCollectLocalsIn(node.(k), acc)
+					})
+					acc
+				}
+			}
+			_ -> acc
+		}
+	}
+
+	fn _oakPreambleLine(names) if len(names) > 0 {
+		true -> 'local ' + (names |> map(luaIdent) |> join(', ')) + ';\n'
+		_ -> ''
+	}
+
+	// Preamble for a body: every local that binds in OPERAND position anywhere
+	// in the body (excluding the direct children's own statement bindings,
+	// which emit their own statement locals). Ends with `;`.
+	fn _oakOperandPreamble(exprs) {
+		acc := { names: [] }
+		exprs |> each(fn(e) {
+			if _oakIsBoundary?(e) {
+				true -> ?
+				_ -> if type(e) = :object & e.type = :assignment & e.local? {
+					true -> if e.right != ? {
+						true -> _oakCollectLocalsIn(e.right, acc)
+						_ -> acc
+					}
+					_ -> if type(e) = :object & e.type = :function {
+						true -> acc
+						_ -> _oakCollectLocalsIn(e, acc)
+					}
+				}
+			}
+		})
+		_oakPreambleLine(acc.names)
+	}
+
+	// Bound names of a single local?-assignment node as a Lua statement-local
+	// prefix (statement position only; operand position uses the preamble).
+	fn _oakAssignmentPrefix(node) { 'local ' + (_oakCollectAssignment(node, { names: [] }).names |> map(luaIdent) |> join(', ')) + ';\n' }
+
 	renderReturnLua <- fn(node) if {
-		node.type = :function & node.name != '' -> renderNode(node) + '\nreturn ' + luaIdent(node.name)
-		node.type = :assignment & node.left.type = :propertyAccess -> renderNode(node) + '\nreturn ' + renderNode(node.left)
-		node.type = :assignment & !(node.left.type = :object | node.left.type = :list) -> renderNode(node) + '\nreturn ' + luaIdent(node.left.val)
-		_ -> 'return ' + renderNode(node)
+		node.type = :function & type(node.name) = :string & node.name != '' -> renderNodeMode(node, true) + '\nreturn ' + luaIdent(node.name)
+		node.type = :assignment -> if node.left.type {
+			:propertyAccess -> renderChild(node) + '\nreturn ' + renderChild(node.left)
+			:object, :list -> renderNodeMode(node, true) + '\nreturn __oak_assgn'
+			_ -> renderNodeMode(node, true) + '\nreturn ' + luaIdent(node.left.val)
+		}
+		_ -> 'return ' + renderChild(node)
 	}
 
 	output <- output + renderNode(bundleNode) + '\n'
@@ -1300,7 +1539,7 @@ fn renderBundle(bundleNode) {
 	)
 }
 
-fn run(config) {
+fn runOak(config) {
 	applyConfig(config)
 
 	// clear state for repeated invocations from non-CLI callers
@@ -1315,7 +1554,10 @@ fn run(config) {
 		_ -> if ModuleNodes.(spec.path) = ? -> addImportsFromFile(spec.path)
 	}
 	Log('[oak build] About to import entry file...')
-	addImportsFromFile(AbsoluteEntry)
+	if config.source != ? {
+		true -> addImportsFromSource(AbsoluteEntry, config.source)
+		_ -> addImportsFromFile(AbsoluteEntry)
+	}
 	Log('[oak build] Import resolution complete.')
 
 	Log(format('[oak build] Compiling {{0}} modules...', len(ModuleNodes |> keys())))
@@ -1330,8 +1572,126 @@ fn run(config) {
 
 	Log('[oak build] Rendering complete.')
 
-	if writeFile(Output, BundleFile) {
-		? -> Log(format('[oak build] Could not write bundle to {{0}}', Output))
-		_ -> Log(format('[oak build] Bundle written to {{0}}', Output))
+	if config.inMemory? = true {
+		true -> {type: :ok, value: BundleFile, target: Target}
+		_ -> if writeFile(Output, BundleFile) {
+			? -> {type: :error, message: format('[oak build] Could not write bundle to {{0}}', Output)}
+			_ -> {
+				Log(format('[oak build] Bundle written to {{0}}', Output))
+				{type: :ok, value: BundleFile, target: Target}
+			}
+		}
 	}
+}
+// Dispatch JVM inputs through the verified applet adapter, then use the
+// ordinary Builder engine for Oak -> JS. Native Oak uses the applet emitter
+// until the generic Oak renderer can compile this generated runtime correctly.
+fn jvmInput?(entry) {
+    name := if type(entry) = :string {true -> str.lower(entry), _ -> ''}
+    str.endsWith?(name, '.class') | str.endsWith?(name, '.jar') |
+    str.endsWith?(name, '.zip') | str.endsWith?(name, '.java') |
+    str.endsWith?(name, '.applet.json') |
+    str.endsWith?(name, '.applet') | str.endsWith?(name, '.html') |
+    str.endsWith?(name, '.htm') | str.endsWith?(name, '.jnlp')
+}
+// Reverse Builder route: verified, edited standalone Oak -> new .class or
+// unsigned .jar. No supplied Oak code is executed during bytecode assembly.
+fn editedOakBinary?(config) type(config.entry) = :string & type(config.output) = :string &
+    str.endsWith?(str.lower(config.entry), '.oak') &
+    (str.endsWith?(str.lower(config.output), '.class') |
+     str.endsWith?(str.lower(config.output), '.jar'))
+fn findAppletAdapter(directory, depth) if depth >= 32 {
+    true -> ?
+    _ -> {
+        candidate := resolve('lib/build-applet.oak', directory)
+        if statFile(candidate) != ? {
+            true -> candidate
+            _ -> if dir(directory) = directory {
+                true -> ?
+                _ -> findAppletAdapter(dir(directory), depth + 1)
+            }
+        }
+    }
+}
+fn recompileOakBinary(config) {
+    problem := ?
+    if config.web? = true | config.wasm? = true | config.java? = true |
+        config.ts? = true | config.lua? = true | config.go? = true |
+        config.native? = true | config.ast? = true | config.bin? = true |
+        config.doc? = true | config.graph? = true ->
+        problem <- 'Oak-to-class/JAR cannot use another Builder target flag'
+    source := config.source |> default(if problem = ? {true -> readFile(config.entry), _ -> ?})
+    if source = ? & problem = ? -> problem <- 'cannot read edited Oak source: ' + config.entry
+    opts := config.applet |> default({})
+    adapterPath := opts.adapterPath |>
+        default(env().MAGNOLIA_APPLET_ADAPTER) |>
+        default(if statFile(resolve('lib/build-applet.oak')) != ? {
+            true -> resolve('lib/build-applet.oak')
+            _ -> findAppletAdapter(dir(resolve(config.entry)), 0)
+        })
+    if problem = ? & adapterPath = ? ->
+        problem <- 'Magnolia applet adapter not found; supply applet.adapterPath'
+    compiled := if problem = ? {
+        true -> import(resolve('applet-recompile.oak', dir(adapterPath))).fromOak(source)
+        _ -> ?
+    }
+    if problem = ? & compiled.type = :error -> problem <- compiled.message
+    jar? := str.endsWith?(str.lower(config.output), '.jar')
+    if problem = ? & !jar? & len(compiled.value) != 1 ->
+        problem <- 'Oak archive contains multiple classes; output a .jar with an original JAR, or use api.recompileOak / tools/applet.oak recompile --output DIRECTORY'
+    if problem = ? & jar? & compiled.originalJar = ? ->
+        problem <- 'Oak archive has no original JAR; use a class output'
+    if problem = ? & config.inMemory? != true & statFile(config.output) != ? ->
+        problem <- 'refusing to overwrite ' + config.output
+    packed := if problem = ? & jar? & compiled.changedInstructions > 0 {
+        true -> import(resolve('jvm-jar-write.oak', dir(adapterPath))).repack(
+            compiled.originalJar, compiled.value)
+        _ -> ?
+    }
+    if problem = ? & packed != ? & packed.type = :error -> problem <- packed.message
+    if problem != ? {
+        true -> {type: :error, message: problem}
+        _ -> {
+            bytes := if jar? {
+                true -> if packed = ? {true -> compiled.originalJar, _ -> packed.value}
+                _ -> compiled.value.(0)
+            }
+            target := if jar? {true -> 'jar', _ -> 'class'}
+            if config.inMemory? = true {
+                true -> {type: :ok, target: target, value: bytes,
+                    changedInstructions: compiled.changedInstructions, entry: compiled.entry}
+                _ -> if writeFile(config.output, bytes) = ? {
+                    true -> {type: :error, message: 'could not write ' + target + ' ' + config.output}
+                    _ -> {type: :ok, target: target, value: bytes,
+                        changedInstructions: compiled.changedInstructions, entry: compiled.entry}
+                }
+            }
+        }
+    }
+}
+fn run(config) if editedOakBinary?(config) {
+    true -> recompileOakBinary(config)
+    _ -> if jvmInput?(config.entry) {
+    true -> {
+        // Lazy loading keeps ordinary Oak builds independent of applet files.
+        // An alternate location may be provided programmatically for callers
+        // outside the Magnolia checkout.
+        config.applet <- config.applet |> default({})
+        adapterPath := config.applet.adapterPath |>
+            default(env().MAGNOLIA_APPLET_ADAPTER) |>
+            default(if statFile(resolve('lib/build-applet.oak')) != ? {
+                true -> resolve('lib/build-applet.oak')
+                _ -> findAppletAdapter(dir(resolve(config.entry)), 0)
+            })
+        if adapterPath = ? {
+            true -> {type: :error, message: 'Magnolia applet adapter not found; supply applet.adapterPath'}
+            _ -> {
+                config.applet.adapterPath <- adapterPath
+                buildApplet := import(adapterPath)
+                buildApplet.run(config, runOak)
+            }
+        }
+    }
+    _ -> runOak(config)
+    }
 }

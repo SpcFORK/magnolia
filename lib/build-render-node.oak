@@ -28,11 +28,67 @@ format := fmt.format
 // createRenderer returns a renderNode function bound to the given
 // formatIdent and abort callbacks, matching the Oak bundle renderer.
 fn createRenderer(formatIdent, abort) {
-	fn renderNode(node) if node.type {
+	// Oak binary-operator precedence, mirroring infixOpPrecedence in parse.go.
+	// Unary operands are full sub-expressions in Oak (they take everything to
+	// their right), so they are never parenthesized as operands of binaries;
+	// dot-access and call are postfix and bind tighter than everything, so
+	// their left sides need parens for anything loose.
+	fn _oakPrec(op) if op {
+		:modulus -> 80
+		:power -> 75
+		:times, :divide -> 50
+		:plus, :minus -> 40
+		:eq, :neq, :greater, :less, :geq, :leq -> 30
+		:and -> 20
+		:xor -> 15
+		:or -> 10
+		:pushArrow, :rshift -> 1
+		_ -> 100
+	}
+
+	fn _childPrec(child) if child {
+		? -> 100
+		_ -> if child.type {
+			:binary -> _oakPrec(child.op)
+			:assignment, :ifExpr -> 0
+			:unary -> 90
+			_ -> 100
+		}
+	}
+
+	// should `child` be parenthesized as `side` (:left/:right) operand of a
+	// binary operator of precedence `parentPrec`? (oak binary operators are
+	// left-associative, so an equal-precedence child is only legal on the left)
+	fn _needBinP(parentPrec, side, child) {
+		cp := _childPrec(child)
+		if cp < parentPrec {
+			true -> true
+			_ -> if side = :right & cp = parentPrec {
+				true -> true
+				_ -> false
+			}
+		}
+	}
+
+	// must `child` be parenthesized in postfix positions (property access
+	// object, call callee)? Anything that does not self-delimit or bind at
+	// postfix tightness needs parens there.
+	fn _needTightP(child) if child {
+		? -> false
+		_ -> if child.type {
+			:binary, :assignment, :ifExpr, :unary, :function, :class -> true
+			_ -> false
+		}
+	}
+
+	fn renderNode(node) '' << if node.type {
 		:null -> '?'
 		:empty -> '_'
 		:string -> '\'' << node.val |> replace('\\', '\\\\') |> replace('\'', '\\\'') << '\''
-		:int, :float -> node.tok.val
+		:int, :float -> if node.tok.val {
+			? -> string(node.val)
+			_ -> node.tok.val
+		}
 		:bool -> string(node.val)
 		:identifier -> formatIdent(node.val)
 		:atom -> ':' << node.val
@@ -44,7 +100,11 @@ fn createRenderer(formatIdent, abort) {
 			:minus -> '-' << renderNode(node.right)
 			:exclam -> '!' << renderNode(node.right)
 		}
-		:binary -> renderNode(node.left) << if node.op {
+		:binary -> {
+			pp := _oakPrec(node.op)
+			lp := if _needBinP(pp, :left, node.left) { true -> '(' << renderNode(node.left) << ')', _ -> renderNode(node.left) }
+			rp := if _needBinP(pp, :right, node.right) { true -> '(' << renderNode(node.right) << ')', _ -> renderNode(node.right) }
+			lp << if node.op {
 			:plus -> '+'
 			:minus -> '-'
 			:times -> '*'
@@ -61,12 +121,17 @@ fn createRenderer(formatIdent, abort) {
 			:geq -> '>='
 			:leq -> '<='
 			:pushArrow -> '<<'
-		} << renderNode(node.right)
+			_ -> abort('[oak build] Unexpected binary op ' << string(node.op))
+		} << rp
+		}
 		:assignment -> renderNode(node.left) << if node.local? {
 			true -> ':='
 			_ -> '<-'
 		} << renderNode(node.right)
-		:propertyAccess -> renderNode(node.left) << '.' << renderNode(node.right)
+		:propertyAccess -> if _needTightP(node.left) {
+			true -> '(' << renderNode(node.left) << ')'
+			_ -> renderNode(node.left)
+		} << '.' << renderNode(node.right)
 		:ifExpr -> 'if ' << renderNode(node.cond) << '{' << node.branches |> map(fn(br) {
 			renderNode(br.target) << '->' << renderNode(br.body)
 		}) |> join(',') << '}'
@@ -85,7 +150,10 @@ fn createRenderer(formatIdent, abort) {
 			}
 		}
 		:fnCall -> '{{0}}({{1}})' |> format(
-			renderNode(node.function)
+			if _needTightP(node.function) {
+				true -> '(' << renderNode(node.function) << ')'
+				_ -> renderNode(node.function)
+			}
 			if node.restArg {
 				? -> node.args |> map(renderNode) |> join(',')
 				_ -> node.args |> map(renderNode) |> append([renderNode(node.restArg) << '...']) |> join(',')
