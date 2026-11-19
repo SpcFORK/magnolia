@@ -1,7 +1,11 @@
 // gui-native-linux contains Linux/X11-specific GUI lifecycle and event-loop helpers.
 
 linux := import('linux')
-{ _default: _default, _err: _err } := import('gui-common')
+{
+	_default: _default
+	_err: _err
+	_screenPositionFor: _screenPositionFor
+} := import('gui-common')
 guiThread := import('gui-thread')
 
 fn createWindowState(title, width, height, frameMs, updateOnDispatch) {
@@ -118,6 +122,55 @@ fn setFullscreen(window, enabled) {
 			window.fullscreen <- false
 			window
 		}
+	}
+}
+
+// ─── Easy window positioning ────────────────────────────────────────────────
+
+// getPrimaryScreenSize(window) -> { type: :ok, width, height, left, top }
+// Returns the full display size (X11 single-screen origin is 0,0).
+fn getPrimaryScreenSize(window) {
+	size := _displaySize(window)
+	if size.type = :ok {
+		true -> {
+			{
+				type: :ok
+				width: size.width
+				height: size.height
+				left: 0
+				top: 0
+			}
+		}
+		_ -> _err('Could not query Linux display size', size)
+	}
+}
+
+// centerWindow(window) — center window on the display (screen middle).
+fn centerWindow(window) {
+	size := getPrimaryScreenSize(window)
+	if size.type = :ok {
+		true -> {
+			coords := _screenPositionFor(size, window.width, window.height, :center, 0)
+			moveWindow(window, coords.x, coords.y)
+			window
+		}
+		_ -> _err('centerWindow failed', size)
+	}
+}
+
+// positionWindow(window, position, options) — move the window to a named
+// screen position.  See gui-common._screenPositionFor for the accepted atoms.
+// Linux has a single display so :monitorCenter behaves like :center.
+fn positionWindow(window, position, options) {
+	size := getPrimaryScreenSize(window)
+	if size.type = :ok {
+		true -> {
+			margin := _default(_default(options, {}).margin, 0)
+			coords := _screenPositionFor(size, window.width, window.height, position, margin)
+			moveWindow(window, coords.x, coords.y)
+			window
+		}
+		_ -> _err('positionWindow failed', size)
 	}
 }
 

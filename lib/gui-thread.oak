@@ -20,9 +20,11 @@
 	slice: slice
 	append: append
 	reduce: reduce
+	flatten: flatten
 } := import('std')
 
 threadLib := import('thread')
+
 { _default: _default } := import('gui-common')
 
 // ─── Command Queue ─────────────────────────────────────────────────────────
@@ -187,8 +189,12 @@ fn StateGuard() {
 }
 
 // ─── Parallel Mesh Transform ───────────────────────────────────────────────
-// Transforms mesh vertices in parallel batches.  Safe for worker threads
-// since it only touches numeric data, no GDI/GPU calls.
+// Transforms mesh vertices in parallel using worker goroutines.  Safe for
+// worker threads since it only touches numeric data, no GDI/GPU calls.
+//
+// Small meshes (< workers * 4 vertices) are transformed sequentially to avoid
+// goroutine spawn/channel overhead.  Large meshes are split into worker-sized
+// batches so that only `workers` goroutines are spawned — not one per vertex.
 
 fn parallelTransformVertices(vertices, transformFn, numWorkers) {
 	n := len(vertices)
@@ -196,7 +202,33 @@ fn parallelTransformVertices(vertices, transformFn, numWorkers) {
 	if n < workers * 4 {
 		// Too few vertices to benefit from threading — transform inline.
 		true -> vertices |> map(transformFn)
-		_ -> threadLib.pmap(vertices, transformFn)
+		_ -> {
+			// Batch: split vertices into worker-sized chunks and process each
+			// chunk in a separate goroutine via pmap on the batch list
+			// (not on individual vertices).
+			batchSize := int(n / workers) + 1
+
+			fn buildRanges(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > n -> end <- n
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			batchResults := threadLib.pmap(ranges, fn(r) {
+				fn sub(j, acc) if j >= r.end {
+					true -> acc
+					_ -> sub(j + 1, acc << transformFn(vertices.(j)))
+				}
+				sub(r.start, [])
+			})
+
+			flatten(batchResults)
+		}
 	}
 }
 

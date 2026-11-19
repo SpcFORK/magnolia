@@ -1,0 +1,234 @@
+<!doctype html>
+<head>
+    <meta charset="utf-8">
+    <title>windows-gdi.oak | Oak programming language</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/lib.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="overlay">
+            <div class="home">
+                <a href="/">Oak</a>
+            </div>
+            <nav>
+                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
+                <a href="/posts/">blog</a>
+                <a href="/#start">download</a>
+                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
+            </nav>
+        </div>
+    </header>
+    <main aria-role="main">
+        <article class="overlay stdlib">
+            <h1>windows-gdi.oak</h1>
+            <p class="meta">
+                <a href="/lib/">&larr; Standard library</a>
+                <a href="https://github.com/thesephist/oak/blob/main/lib/windows-gdi.oak">See on GitHub ↗</a>
+            </p>
+            <pre><code><span class="oak-comment">// windows-gdi provides Win32 painting and GDI helpers used by lib/windows.</span>
+
+<span class="oak-identifier">sys </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'sys'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">readU32</span><span class="oak-colon">: </span><span class="oak-identifier">readU32</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'writes'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">Gdi32</span><span class="oak-colon">: </span><span class="oak-identifier">Gdi32</span><span class="oak-newline">
+	</span><span class="oak-identifier">User32</span><span class="oak-colon">: </span><span class="oak-identifier">User32</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'windows-constants'</span><span class="oak-rightParen">)</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-identifier">apiName</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">error</span><span class="oak-newline">
+		</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-identifier">apiName </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">' is only available on Windows'</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-identifier">_isWindowsPlatform </span><span class="oak-assign">:= </span><span class="oak-fnName">___runtime_sys_info</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-dot">.</span><span class="oak-identifier">os </span><span class="oak-eq">= </span><span class="oak-stringLiteral">'windows'</span>
+
+<span class="oak-comment">// Pre-allocated 8-byte buffer for SIZE struct (cx, cy) used by getTextExtentPoint32.</span>
+<span class="oak-comment">// Reused across calls since it's only needed transiently within each call.</span>
+<span class="oak-identifier">_szBuf </span><span class="oak-assign">:= </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">isWindows? </span><span class="oak-identifier">_isWindowsPlatform</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">wstr</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-rightParen">) </span><span class="oak-fnName">utf16</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-rightParen">)</span>
+
+<span class="oak-comment">// Proc address caches — avoids sysproc + resolve + normalize overhead per call.</span>
+<span class="oak-identifier">_gdiProcCache </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-rightBrace">}</span>
+<span class="oak-identifier">_userProcCache </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_cachedGdi32</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">_isWindowsPlatform </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">addr </span><span class="oak-assign">:= </span><span class="oak-identifier">_gdiProcCache</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">addr </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">resolved </span><span class="oak-assign">:= </span><span class="oak-identifier">sys</span><span class="oak-dot">.</span><span class="oak-fnName">resolve</span><span class="oak-leftParen">(</span><span class="oak-identifier">Gdi32</span><span class="oak-comma">, </span><span class="oak-identifier">symbol</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">resolved</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-eq">= </span><span class="oak-colon">:</span><span class="oak-identifier">ok </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+					</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+						</span><span class="oak-identifier">_gdiProcCache</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">resolved</span><span class="oak-dot">.</span><span class="oak-identifier">proc</span><span class="oak-newline">
+						</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">syscall</span><span class="oak-leftParen">(</span><span class="oak-identifier">resolved</span><span class="oak-dot">.</span><span class="oak-identifier">proc</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">)</span><span class="oak-newline">
+						</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-eq">= </span><span class="oak-colon">:</span><span class="oak-identifier">success </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-newline">
+						</span><span class="oak-identifier">result</span><span class="oak-newline">
+					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+					</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">resolved</span><span class="oak-newline">
+				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">syscall</span><span class="oak-leftParen">(</span><span class="oak-identifier">addr</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-eq">= </span><span class="oak-colon">:</span><span class="oak-identifier">success </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-newline">
+				</span><span class="oak-identifier">result</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'gdi32'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_cachedUser32</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">_isWindowsPlatform </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">addr </span><span class="oak-assign">:= </span><span class="oak-identifier">_userProcCache</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">addr </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">resolved </span><span class="oak-assign">:= </span><span class="oak-identifier">sys</span><span class="oak-dot">.</span><span class="oak-fnName">resolve</span><span class="oak-leftParen">(</span><span class="oak-identifier">User32</span><span class="oak-comma">, </span><span class="oak-identifier">symbol</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">resolved</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-eq">= </span><span class="oak-colon">:</span><span class="oak-identifier">ok </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+					</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+						</span><span class="oak-identifier">_userProcCache</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">resolved</span><span class="oak-dot">.</span><span class="oak-identifier">proc</span><span class="oak-newline">
+						</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">syscall</span><span class="oak-leftParen">(</span><span class="oak-identifier">resolved</span><span class="oak-dot">.</span><span class="oak-identifier">proc</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">)</span><span class="oak-newline">
+						</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-eq">= </span><span class="oak-colon">:</span><span class="oak-identifier">success </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-newline">
+						</span><span class="oak-identifier">result</span><span class="oak-newline">
+					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+					</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">resolved</span><span class="oak-newline">
+				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">syscall</span><span class="oak-leftParen">(</span><span class="oak-identifier">addr</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-eq">= </span><span class="oak-colon">:</span><span class="oak-identifier">success </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">type </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-newline">
+				</span><span class="oak-identifier">result</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'user32'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">) </span><span class="oak-fnName">_cachedUser32</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">)</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">) </span><span class="oak-fnName">_cachedGdi32</span><span class="oak-leftParen">(</span><span class="oak-identifier">symbol</span><span class="oak-comma">, </span><span class="oak-identifier">args</span><span class="oak-ellipsis">...</span><span class="oak-rightParen">)</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">beginPaint</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">paintStructPtr</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'BeginPaint'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">paintStructPtr</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'beginPaint'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">endPaint</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">paintStructPtr</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'EndPaint'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">paintStructPtr</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'endPaint'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">getDC</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetDC'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'getDC'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">releaseDC</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ReleaseDC'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'releaseDC'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">getStockObject</span><span class="oak-leftParen">(</span><span class="oak-identifier">objectIndex</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetStockObject'</span><span class="oak-comma">, </span><span class="oak-identifier">objectIndex</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'getStockObject'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">selectObject</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">gdiObject</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'SelectObject'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">gdiObject</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'selectObject'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">setBkMode</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">mode</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'SetBkMode'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">mode</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'setBkMode'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">setTextColor</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">colorRef</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'SetTextColor'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">colorRef</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'setTextColor'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">textOut</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-comma">, </span><span class="oak-identifier">text</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'TextOutW'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-comma">, </span><span class="oak-fnName">wstr</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'textOut'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">createFont</span><span class="oak-leftParen">(</span><span class="oak-identifier">height</span><span class="oak-comma">, </span><span class="oak-identifier">width</span><span class="oak-comma">, </span><span class="oak-identifier">escapement</span><span class="oak-comma">, </span><span class="oak-identifier">orientation</span><span class="oak-comma">, </span><span class="oak-identifier">weight</span><span class="oak-comma">, </span><span class="oak-identifier">italic</span><span class="oak-comma">, </span><span class="oak-identifier">underline</span><span class="oak-comma">, </span><span class="oak-identifier">strikeOut</span><span class="oak-comma">, </span><span class="oak-identifier">charSet</span><span class="oak-comma">, </span><span class="oak-identifier">outPrecision</span><span class="oak-comma">, </span><span class="oak-identifier">clipPrecision</span><span class="oak-comma">, </span><span class="oak-identifier">quality</span><span class="oak-comma">, </span><span class="oak-identifier">pitchAndFamily</span><span class="oak-comma">, </span><span class="oak-identifier">faceName</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'CreateFontW'</span><span class="oak-newline">
+		</span><span class="oak-identifier">height</span><span class="oak-newline">
+		</span><span class="oak-identifier">width</span><span class="oak-newline">
+		</span><span class="oak-identifier">escapement</span><span class="oak-newline">
+		</span><span class="oak-identifier">orientation</span><span class="oak-newline">
+		</span><span class="oak-identifier">weight</span><span class="oak-newline">
+		</span><span class="oak-identifier">italic</span><span class="oak-newline">
+		</span><span class="oak-identifier">underline</span><span class="oak-newline">
+		</span><span class="oak-identifier">strikeOut</span><span class="oak-newline">
+		</span><span class="oak-identifier">charSet</span><span class="oak-newline">
+		</span><span class="oak-identifier">outPrecision</span><span class="oak-newline">
+		</span><span class="oak-identifier">clipPrecision</span><span class="oak-newline">
+		</span><span class="oak-identifier">quality</span><span class="oak-newline">
+		</span><span class="oak-identifier">pitchAndFamily</span><span class="oak-newline">
+		</span><span class="oak-fnName">wstr</span><span class="oak-leftParen">(</span><span class="oak-identifier">faceName</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'createFont'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">rectangle</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">left</span><span class="oak-comma">, </span><span class="oak-identifier">top</span><span class="oak-comma">, </span><span class="oak-identifier">right</span><span class="oak-comma">, </span><span class="oak-identifier">bottom</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'Rectangle'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">left</span><span class="oak-comma">, </span><span class="oak-identifier">top</span><span class="oak-comma">, </span><span class="oak-identifier">right</span><span class="oak-comma">, </span><span class="oak-identifier">bottom</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'rectangle'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">ellipse</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">left</span><span class="oak-comma">, </span><span class="oak-identifier">top</span><span class="oak-comma">, </span><span class="oak-identifier">right</span><span class="oak-comma">, </span><span class="oak-identifier">bottom</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'Ellipse'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">left</span><span class="oak-comma">, </span><span class="oak-identifier">top</span><span class="oak-comma">, </span><span class="oak-identifier">right</span><span class="oak-comma">, </span><span class="oak-identifier">bottom</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ellipse'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">createSolidBrush</span><span class="oak-leftParen">(</span><span class="oak-identifier">colorRef</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'CreateSolidBrush'</span><span class="oak-comma">, </span><span class="oak-identifier">colorRef</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'createSolidBrush'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">getTextExtentPoint32</span><span class="oak-leftParen">(</span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-identifier">text</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">res </span><span class="oak-assign">:= </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetTextExtentPoint32W'</span><span class="oak-comma">, </span><span class="oak-identifier">hdc</span><span class="oak-comma">, </span><span class="oak-fnName">wstr</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">_szBuf</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">res</span><span class="oak-dot">.</span><span class="oak-identifier">r1 </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">base </span><span class="oak-assign">:= </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">_szBuf</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-identifier">cx </span><span class="oak-assign">:= </span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">base</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-identifier">cy </span><span class="oak-assign">:= </span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">base </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">4</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-leftBrace">{ </span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-comma">, </span><span class="oak-identifier">cx</span><span class="oak-colon">: </span><span class="oak-identifier">cx</span><span class="oak-comma">, </span><span class="oak-identifier">cy</span><span class="oak-colon">: </span><span class="oak-identifier">cy </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'getTextExtentPoint32'</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'getTextExtentPoint32'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">deleteObject</span><span class="oak-leftParen">(</span><span class="oak-identifier">gdiObject</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">isWindows?</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'DeleteObject'</span><span class="oak-comma">, </span><span class="oak-identifier">gdiObject</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_platformError</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'deleteObject'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+</code></pre>
+        </article>
+    </main>
+    <footer>
+        <div class="split overlay">
+            <div class="left">
+            </div>
+            <div class="right">
+                - <a href="https://thesephist.com/">Linus</a>
+            </div>
+        </div>
+    </footer>
+</body>

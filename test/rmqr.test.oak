@@ -1,0 +1,68 @@
+rmqr := import('rmqr')
+{
+	map: map
+	slice: slice
+	range: range
+	join: listJoin
+} := import('std')
+{
+	join: join
+} := import('str')
+
+fn matrixText(matrix) matrix |> map(fn(row) row |> map(fn(cell) if cell { 0 -> '0', _ -> '1' }) |> join(''))
+
+fn run(t) {
+	// ISO/IEC 23941:2022 reference vector: R7x43, M, Numeric "123".
+	code := rmqr.make('R7x43', rmqr.M, [rmqr.segment('123', rmqr.Numeric)])
+	'R7x43 numeric version' |> t.eq(code.version, 'R7x43')
+	'R7x43 numeric ECC level' |> t.eq(code.ecc, rmqr.M)
+	'R7x43 dimensions' |> t.eq([code.width, code.height], [43, 7])
+	'R7x43 numeric reference matrix' |> t.eq(matrixText(code.matrix), [
+		'1111111010101010101011101010101010101010111'
+		'1000001001011101101110110111000011011000101'
+		'1011101010110011001011101101110010111111111'
+		'1011101001100000111000110010100011000010001'
+		'1011101000110010010011111101101110010010101'
+		'1000001011101110000110111000110101011010001'
+		'1111111010101010101011101010101010101011111'
+	])
+
+	// Automatic segmentation deliberately uses Numeric + Byte here.
+	auto := rmqr.fit('123Abc', rmqr.M, rmqr.Balanced)
+	'fit selects R7x43' |> t.eq(auto.version, 'R7x43')
+	'fit produces two segments' |> t.eq(len(auto.segments), 2)
+	'fit starts with Numeric' |> t.eq([auto.segments.(0).data, auto.segments.(0).mode], ['123', rmqr.Numeric])
+	'fit uses Byte for lowercase text' |> t.eq([auto.segments.(1).data, auto.segments.(1).mode], ['Abc', rmqr.Byte])
+
+	// Mixed data-block groups and four remainder bits occur at R17x139/H.
+	// These checks cover the final codeword bits and masked remainder cells.
+	mixed := rmqr.make('R17x139', rmqr.H, [rmqr.segment('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-*/=._~', rmqr.Byte)])
+	'R17x139 H dimensions' |> t.eq([mixed.width, mixed.height], [139, 17])
+	'R17x139 H tail and remainder modules' |> t.eq([
+		mixed.matrix.(14).(1)
+		mixed.matrix.(13).(1)
+		mixed.matrix.(12).(1)
+		mixed.matrix.(11).(1)
+		mixed.matrix.(10).(1)
+		mixed.matrix.(9).(1)
+		mixed.matrix.(8).(1)
+	], [1, 1, 0, 0, 0, 1, 1])
+
+	'all 32 standardized versions are present' |> t.eq(len(rmqr.versions()), 32)
+	'first standardized version' |> t.eq(rmqr.versions().(0).name, 'R7x43')
+	'last standardized version' |> t.eq(rmqr.versions().(31).name, 'R17x139')
+
+	maxNumeric := range(361) |> map(fn(_) '1') |> listJoin('')
+	'fit supports the standard maximum of 361 numeric characters' |> t.eq(
+		rmqr.fit(maxNumeric, rmqr.M, rmqr.Balanced).version
+		'R17x139'
+	)
+
+	quiet := rmqr.matrix(code, true)
+	'matrix adds two-module quiet zone' |> t.eq([len(quiet.(0)), len(quiet)], [47, 11])
+	'matrix quiet zone is white' |> t.eq(quiet.(0), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+	'pbm creates scaled P4 image' |> t.eq(rmqr.pbm(code, 2, true) |> slice(0, 9), 'P4\n94 22\n')
+
+	'unsupported numeric data returns null' |> t.eq(rmqr.make('R7x43', rmqr.M, [rmqr.segment('12A', rmqr.Numeric)]), ?)
+	'oversize data returns null' |> t.eq(rmqr.make('R7x43', rmqr.M, [rmqr.segment('ABCDEF', rmqr.Byte)]), ?)
+}

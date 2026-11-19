@@ -217,6 +217,30 @@ var libshell string
 //go:embed lib/transpile.oak
 var libtranspile string
 
+//go:embed lib/ui-surface.oak
+var libuisurface string
+
+//go:embed lib/style-bake.oak
+var libstylebake string
+
+//go:embed lib/font-bake.oak
+var libfontbake string
+
+//go:embed lib/ui-core.oak
+var libuicore string
+
+//go:embed lib/ui-sdk.oak
+var libuisdk string
+
+//go:embed lib/ui-sim.oak
+var libuisim string
+
+//go:embed lib/transpile-ui.oak
+var libtranspileui string
+
+//go:embed lib/gui-drawlist.oak
+var libguidrawlist string
+
 //go:embed lib/pack.oak
 var libpack string
 
@@ -598,11 +622,17 @@ var libwebfetch string
 //go:embed lib/web-runtime.oak
 var libwebruntime string
 
+//go:embed lib/web-pipeline.oak
+var libwebpipeline string
+
 //go:embed lib/b64.oak
 var libb64 string
 
 //go:embed lib/b64-hex.oak
 var libb64hex string
+
+//go:embed lib/obj.oak
+var libobj string
 
 var stdlibs = map[string]string{
 	"std":                             libstd,
@@ -685,6 +715,14 @@ var stdlibs = map[string]string{
 	"shell":                           libshell,
 	"thread":                          libthread,
 	"transpile":                       libtranspile,
+	"ui-surface":                      libuisurface,
+	"style-bake":                      libstylebake,
+	"font-bake":                       libfontbake,
+	"ui-core":                         libuicore,
+	"ui-sdk":                          libuisdk,
+	"ui-sim":                          libuisim,
+	"transpile-ui":                    libtranspileui,
+	"gui-drawlist":                    libguidrawlist,
 	"pack":                            libpack,
 	"build":                           libbuild,
 	"build-includes":                  libbuildincludes,
@@ -809,8 +847,10 @@ var stdlibs = map[string]string{
 	"data":                            libdata,
 	"web-fetch":                       libwebfetch,
 	"web-runtime":                     libwebruntime,
+	"web-pipeline":                    libwebpipeline,
 	"b64":                             libb64,
 	"b64-hex":                         libb64hex,
+	"obj":                             libobj,
 }
 
 var stdlibAutoLoadOrder = []string{
@@ -880,6 +920,14 @@ var stdlibAutoLoadOrder = []string{
 	"bundle-ast",
 	"shell",
 	"transpile",
+	"ui-surface",
+	"style-bake",
+	"font-bake",
+	"ui-core",
+	"ui-sdk",
+	"ui-sim",
+	"transpile-ui",
+	"gui-drawlist",
 	"pack",
 	"build",
 	"build-includes",
@@ -998,8 +1046,10 @@ var stdlibAutoLoadOrder = []string{
 	"data-yaml",
 	"web-runtime",
 	"web-fetch",
+	"web-pipeline",
 	"b64-hex",
 	"b64",
+	"obj",
 }
 
 func isStdLib(name string) bool {

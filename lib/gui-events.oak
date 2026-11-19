@@ -219,15 +219,32 @@ fn keyAltDown?(window) modAlt?(window)
 
 // Use if-expressions so readU32 fallback is only evaluated on cache miss.
 fn formMsgType(window) if window._cachedMsgType {
-	? -> windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+	? -> {
+		// web/headless windows have no native message buffer; report a value
+		// that never matches a real WM_* code so extractors fall through.
+		if window.msgBuf = ? {
+			true -> -1
+			_ -> windows.readU32(addr(window.msgBuf) + MSG_OFF_TYPE)
+		}
+	}
 	_ -> window._cachedMsgType
 }
 fn formMsgWParam(window) if window._cachedMsgWP {
-	? -> windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
+	? -> {
+		if window.msgBuf = ? {
+			true -> -1
+			_ -> windows.readU32(addr(window.msgBuf) + MSG_OFF_WPARAM)
+		}
+	}
 	_ -> window._cachedMsgWP
 }
 fn formMsgLParam(window) if window._cachedMsgLP {
-	? -> windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+	? -> {
+		if window.msgBuf = ? {
+			true -> -1
+			_ -> windows.readU32(addr(window.msgBuf) + MSG_OFF_LPARAM)
+		}
+	}
 	_ -> window._cachedMsgLP
 }
 fn formLoWord(v) v & 65535
@@ -468,14 +485,21 @@ fn onMouseLeave(window, handler) {
 }
 
 fn onKeyDown(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYDOWN -> {
-		handler(formMsgWParam(window))
+	on(window, :dispatch, fn(evt) {
+		// web/headless hosts publish pre-extracted { type, key } payloads
+		if evt.type = :keyDown {
+			true -> handler(_default(evt.key, ?))
+			_ -> if formMsgType(window) = FORM_WM_KEYDOWN -> handler(formMsgWParam(window))
+		}
 	})
 }
 
 fn onKeyUp(window, handler) {
-	on(window, :dispatch, fn(_) if formMsgType(window) = FORM_WM_KEYUP -> {
-		handler(formMsgWParam(window))
+	on(window, :dispatch, fn(evt) {
+		if evt.type = :keyUp {
+			true -> handler(_default(evt.key, ?))
+			_ -> if formMsgType(window) = FORM_WM_KEYUP -> handler(formMsgWParam(window))
+		}
 	})
 }
 

@@ -1,4 +1,5 @@
 gui := import('GUI')
+common := import('gui-common')
 
 fn run(t) {
 	// color packing
@@ -580,4 +581,188 @@ fn run(t) {
 
 		'gui.close returns without error' |> t.eq(type(gui.close(window)), :int)
 	}
+
+	// ─── Easy window positioning ─────────────────────────────────────
+	// POSITION_* constants are re-exported from gui-common as the named
+	// position atoms accepted by centerWindow / positionWindow.
+	'POSITION_* constants are exported atoms' |> t.eq(
+		[
+			gui.POSITION_CENTER
+			gui.POSITION_PRIMARY_CENTER
+			gui.POSITION_MONITOR_CENTER
+			gui.POSITION_TOP_LEFT
+			gui.POSITION_TOP_RIGHT
+			gui.POSITION_BOTTOM_LEFT
+			gui.POSITION_BOTTOM_RIGHT
+			gui.POSITION_TOP_CENTER
+			gui.POSITION_BOTTOM_CENTER
+			gui.POSITION_LEFT_CENTER
+			gui.POSITION_RIGHT_CENTER
+		]
+		[:center, :primaryCenter, :monitorCenter, :topLeft, :topRight, :bottomLeft, :bottomRight, :topCenter, :bottomCenter, :leftCenter, :rightCenter]
+	)
+
+	// Centering math is derived from getPrimaryScreenSize, so it adapts to
+	// whichever backend is active (windows / linux / web).
+	'getScreenCenter returns the primary-screen center for the window' |> t.eq(
+		if gui.backend() {
+			:web -> true
+			_ -> {
+				window := gui.createWindow('Screen Center Test', 240, 160, { layer2D: 'auto', layer3D: 'auto' })
+				if window.type {
+					:ok -> {
+						size := gui.getPrimaryScreenSize(window)
+						if size.type {
+							:ok -> {
+								ex := size.left + int((size.width - window.width) / 2)
+								ey := size.top + int((size.height - window.height) / 2)
+								got := gui.getScreenCenter(window)
+								ok := (got.type = :ok) & (got.x = ex) & (got.y = ey)
+								gui.close(window)
+								ok
+							}
+							_ -> false
+						}
+					}
+					_ -> false
+				}
+			}
+		}
+		true
+	)
+
+	'centerWindow moves the window to the primary screen center' |> t.eq(
+		if gui.backend() {
+			:web -> true
+			_ -> {
+				window := gui.createWindow('Center Test', 240, 160, { layer2D: 'auto', layer3D: 'auto' })
+				if window.type {
+					:ok -> {
+						size := gui.getPrimaryScreenSize(window)
+						if size.type {
+							:ok -> {
+								ex := size.left + int((size.width - window.width) / 2)
+								ey := size.top + int((size.height - window.height) / 2)
+								gui.centerWindow(window)
+								ok := (window.x = ex) & (window.y = ey)
+								gui.close(window)
+								ok
+							}
+							_ -> false
+						}
+					}
+					_ -> false
+				}
+			}
+		}
+		true
+	)
+
+	// Omitting the options argument must still center (options defaults to
+	// null -> _default({}) -> margin 0).
+	'positionWindow(:center) centers with defaulted options (two args)' |> t.eq(
+		if gui.backend() {
+			:web -> true
+			_ -> {
+				window := gui.createWindow('Pos Center Test', 240, 160, { layer2D: 'auto', layer3D: 'auto' })
+				if window.type {
+					:ok -> {
+						size := gui.getPrimaryScreenSize(window)
+						if size.type {
+							:ok -> {
+								ex := size.left + int((size.width - window.width) / 2)
+								ey := size.top + int((size.height - window.height) / 2)
+								gui.positionWindow(window, :center)
+								ok := (window.x = ex) & (window.y = ey)
+								gui.close(window)
+								ok
+							}
+							_ -> false
+						}
+					}
+					_ -> false
+				}
+			}
+		}
+		true
+	)
+
+	// A small window is strictly smaller than the screen, so the margin is
+	// applied verbatim (no clamping) at the top-left corner.
+	'positionWindow(:topLeft, {margin}) insets from the primary work area' |> t.eq(
+		if gui.backend() {
+			:web -> true
+			_ -> {
+				window := gui.createWindow('Pos TL Test', 200, 120, { layer2D: 'auto', layer3D: 'auto' })
+				if window.type {
+					:ok -> {
+						size := gui.getPrimaryScreenSize(window)
+						if size.type {
+							:ok -> {
+								gui.positionWindow(window, :topLeft, { margin: 12 })
+								ok := (window.x = size.left + 12) & (window.y = size.top + 12)
+								gui.close(window)
+								ok
+							}
+							_ -> false
+						}
+					}
+					_ -> false
+				}
+			}
+		}
+		true
+	)
+
+	'positionWindow(:monitorCenter) centers on the current monitor (windows)' |> t.eq(
+		if gui.backend() = :windows {
+			true -> {
+				window := gui.createWindow('Monitor Center Test', 200, 150, { layer2D: 'auto', layer3D: 'auto' })
+				if window.type {
+					:ok -> {
+						info := gui.getWindowMonitor(window)
+						if info != ? {
+							true -> {
+								ex := info.work.left + int((info.work.right - info.work.left - window.width) / 2)
+								ey := info.work.top + int((info.work.bottom - info.work.top - window.height) / 2)
+								gui.positionWindow(window, :monitorCenter)
+								ok := (window.x = ex) & (window.y = ey)
+								gui.close(window)
+								ok
+							}
+							_ -> true
+						}
+					}
+					_ -> false
+				}
+			}
+			_ -> true
+		}
+		true
+	)
+
+	// ─── _screenPositionFor pure math (backend-agnostic) ─────────────
+	// Exercises the shared cross-platform coordinate math directly, with no
+	// real window, so it covers every position atom plus edge cases
+	// (clamping, origin offsets, margin, unknown/null fallback).
+	sz := { width: 1920, height: 1080, left: 0, top: 0 }
+
+	'screen math: center' |> t.eq(common._screenPositionFor(sz, 400, 200, :center, 0), { x: 760, y: 440 })
+	'screen math: primaryCenter is center' |> t.eq(common._screenPositionFor(sz, 400, 200, :primaryCenter, 0), { x: 760, y: 440 })
+	'screen math: monitorCenter is center' |> t.eq(common._screenPositionFor(sz, 400, 200, :monitorCenter, 0), { x: 760, y: 440 })
+	'screen math: topLeft' |> t.eq(common._screenPositionFor(sz, 400, 200, :topLeft, 0), { x: 0, y: 0 })
+	'screen math: topRight' |> t.eq(common._screenPositionFor(sz, 400, 200, :topRight, 0), { x: 1520, y: 0 })
+	'screen math: bottomLeft' |> t.eq(common._screenPositionFor(sz, 400, 200, :bottomLeft, 0), { x: 0, y: 880 })
+	'screen math: bottomRight' |> t.eq(common._screenPositionFor(sz, 400, 200, :bottomRight, 0), { x: 1520, y: 880 })
+	'screen math: topCenter' |> t.eq(common._screenPositionFor(sz, 400, 200, :topCenter, 0), { x: 760, y: 0 })
+	'screen math: bottomCenter' |> t.eq(common._screenPositionFor(sz, 400, 200, :bottomCenter, 0), { x: 760, y: 880 })
+	'screen math: leftCenter' |> t.eq(common._screenPositionFor(sz, 400, 200, :leftCenter, 0), { x: 0, y: 440 })
+	'screen math: rightCenter' |> t.eq(common._screenPositionFor(sz, 400, 200, :rightCenter, 0), { x: 1520, y: 440 })
+	'screen math: topLeft with margin insets from origin' |> t.eq(common._screenPositionFor(sz, 400, 200, :topLeft, 8), { x: 8, y: 8 })
+	'screen math: bottomRight with margin' |> t.eq(common._screenPositionFor(sz, 400, 200, :bottomRight, 8), { x: 1512, y: 872 })
+	'screen math: center clamps to origin when window larger than screen' |> t.eq(common._screenPositionFor(sz, 2000, 1200, :center, 0), { x: 0, y: 0 })
+	'screen math: topLeft clamps to origin when window larger than screen' |> t.eq(common._screenPositionFor(sz, 2000, 1200, :topLeft, 8), { x: 0, y: 0 })
+	'screen math: origin offset is respected' |> t.eq(common._screenPositionFor({ width: 1920, height: 1080, left: 100, top: 50 }, 400, 200, :center, 0), { x: 860, y: 490 })
+	'screen math: unknown position falls back to center' |> t.eq(common._screenPositionFor(sz, 400, 200, :bogus, 0), { x: 760, y: 440 })
+	'screen math: null position falls back to center' |> t.eq(common._screenPositionFor(sz, 400, 200, ?, 0), { x: 760, y: 440 })
 }

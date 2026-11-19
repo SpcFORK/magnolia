@@ -178,7 +178,21 @@ fn renderJSBundle(bundleNode, vfsFiles, encodeJSON, oakJSRuntime, formatIdent, c
 					renderNode(node.right)
 				)
 			}
-			_ -> '(' << renderAssignTarget(node.left) << '=' << renderNode(node.right) << ')'
+			_ -> {
+				// __std_builtin_<name> := <name> capture idiom (lib/std.oak): on JS
+				// the RHS must read the global builtin, because the module closure
+				// shadows <name> with its own same-named top-level binding.
+				if node.left.type = :identifier & node.right.type = :identifier {
+					true -> {
+						suffix := replace(node.left.val, '__std_builtin_', '')
+						if suffix != node.left.val & node.right.val = suffix {
+							true -> '({{0}}=__oak_builtin_{{1}})' |> format(formatIdent(node.left.val), suffix)
+							_ -> '(' << renderAssignTarget(node.left) << '=' << renderNode(node.right) << ')'
+						}
+					}
+					_ -> '(' << renderAssignTarget(node.left) << '=' << renderNode(node.right) << ')'
+				}
+			}
 		}
 		:propertyAccess -> if node.right.type {
 			:identifier -> '({{0}}.{{1}}??null)' |> format(renderNode(node.left), renderNode(node.right))

@@ -1,0 +1,346 @@
+// web-pipeline — integrated web rendering and resource pipeline.
+//
+// Combines platform detection (web-runtime), async HTTP resource loading
+// (web-fetch), WebSocket connectivity (websocket), and WebGL context
+// management (gui-web) into a single pipeline for the web GUI backend.
+//
+// The pipeline is platform-adaptive: on native Oak, resource fetches resolve
+// synchronously via a resolved Thenable; on JS runtimes (browser / Node.js),
+// they resolve asynchronously via a pending Thenable and callback.
+//
+// Usage:
+//   pipeline := webPipeline.WebPipeline(window, { context: 'webgl' })
+//   pipeline.load('shader.frag')       // Thenable of raw response
+//   pipeline.loadProgram('v.c', 'f.c') // Thenable of { vertex, fragment, program }
+//   pipeline.submitShader(fragSrc)     // compile + link + use
+//   pipeline.render(fragSrc)           // submit + draw + flush
+//   pipeline.beginFrame()
+//   ...
+//   pipeline.endFrame()
+//   pipeline.destroy()
+
+{ jsRuntime?: jsRuntime?, node?: node?, browser?: browser? } := import('web-runtime')
+{ fetch: _fetch, resolved: resolved, pending: pending } := import('web-fetch')
+wsModule := import('websocket')
+guiWeb := import('gui-web')
+{ _default: _default, _err: _err } := import('gui-common')
+json := import('json')
+{ map: map, each: each, filter: filter, reduce: reduce, entries: entries, fromEntries: fromEntries } := import('std')
+threadLib := import('thread')
+
+// ─── Platform detection (re-exports) ─────────────────────────────────────────
+
+fn isWeb?() jsRuntime?()
+fn isNode?() node?()
+fn isBrowser?() browser?()
+
+// ─── Default WebGL context attributes ────────────────────────────────────────
+
+DefaultContextAttrs := {
+	alpha: true
+	antialias: true
+	depth: true
+	stencil: false
+	premultipliedAngle: true
+	preserveDrawingBuffer: false
+}
+
+// ─── Resource Loading (Thenable-based, cross-platform) ───────────────────────
+
+// loadResource performs an HTTP request and returns a Thenable of the raw
+// response envelope ({type: :resp, resp: {status,headers,body}} or
+// {type: :error, error, detail}).
+fn loadResource(url, options) {
+	opts := _default(options, {})
+	_fetch({
+		method: _default(opts.method, 'GET')
+		url: url
+		headers: _default(opts.headers, {})
+		body: opts.body
+	})
+}
+
+// fetchText fetches a URL and returns a Thenable of the response body string.
+// Chains through .then() to extract resp.body from the response envelope.
+fn fetchText(url, options) {
+	result := loadResource(url, options)
+	result.then(fn(raw) if raw.type {
+		:resp -> raw.resp.body
+		:error -> { type: :error, detail: raw.error, body: '' }
+	})
+}
+
+// fetchJson fetches a URL and parses the response body as JSON.
+// Returns a Thenable of the parsed JSON value.
+fn fetchJson(url, options) {
+	result := loadResource(url, options)
+	result.then(fn(raw) if raw.type {
+		:resp -> json.parse(raw.resp.body)
+		:error -> { type: :error, detail: raw.error }
+	})
+}
+
+// loadShader fetches shader source from a URL and creates a WebGL shader.
+// Returns a Thenable of {type: :ok, shader: {id, type, source}} or
+// {type: :error}.
+fn loadShader(window, url, shaderType) {
+	source := fetchText(url)
+	source.then(fn(src) if src.type {
+		:error -> src
+		_ -> guiWeb.webglCreateShader(window, shaderType, src)
+	})
+}
+
+// loadProgram fetches vertex and fragment shader sources from URLs, compiles
+// them, and links a WebGL program. Returns a Thenable of
+// {type: :ok, program, vertex, fragment}.
+//
+// The Thenable chain ensures both shaders are fetched and compiled before
+// linking. On native Oak this resolves synchronously; on JS runtimes it
+// resolves when both fetches complete.
+fn loadProgram(window, vertUrl, fragUrl) {
+	vertShader := loadShader(window, vertUrl, :vertex)
+	fragShader := loadShader(window, fragUrl, :fragment)
+	vertShader.then(fn(vert) {
+		fragShader.then(fn(frag) if vert.type {
+			:error -> vert
+			_ -> if frag.type {
+				:error -> frag
+				_ -> {
+					prog := guiWeb.webglCreateProgram(window, vert.shader, frag.shader)
+					guiWeb.webglUseProgram(window, prog.program)
+					{
+						type: :ok
+						vertex: vert.shader
+						fragment: frag.shader
+						program: prog.program
+					}
+				}
+			}
+		})
+	})
+}
+
+// ─── Context Management ──────────────────────────────────────────────────────
+
+// createContext creates and configures a WebGL context on a web backend window.
+// Initializes the context via gui-web.initWebGL, sets the initial clear color
+// and viewport, and returns a context object with a resource registry.
+//
+// Returns {type: :error} if the window is not a :web backend.
+fn createContext(window, options) {
+	opts := _default(options, {})
+	if window.type {
+		:ok -> if window.backend {
+			:web -> {
+				contextName := _default(opts.context, window.webgl.version)
+				attrs := _default(opts.contextAttrs, DefaultContextAttrs)
+				result := guiWeb.initWebGL(window, contextName, attrs)
+				cc := _default(opts.clearColor, [0, 0, 0, 1])
+				guiWeb.webglClearColor(window, cc.0, cc.1, cc.2, cc.3)
+				vp := _default(opts.viewport, [0, 0, window.width, window.height])
+				guiWeb.webglViewport(window, vp.0, vp.1, vp.2, vp.3)
+				{
+					type: result.type
+					backend: :web
+					window: window
+					context: result.context
+					attrs: attrs
+					clearColor: cc
+					viewport: vp
+					resources: {
+						shaders: {}
+						programs: {}
+						textures: {}
+						buffers: {}
+					}
+					ready: true
+				}
+			}
+			_ -> _err('createContext is only available on web backend', window.backend)
+		}
+		_ -> _err('createContext requires an initialized window', window.type)
+	}
+}
+
+// destroyContext cleans up a web context: stops the frame loop and marks the
+// context as not ready. The window state object is left intact for inspection.
+fn destroyContext(ctx) {
+	if ctx.type {
+		:ok -> if ctx.backend {
+			:web -> {
+				guiWeb.stopFrameLoop(ctx.window)
+				ctx.ready <- false
+				ctx
+			}
+			_ -> ctx
+		}
+		_ -> ctx
+	}
+}
+
+// ─── WebPipeline — integrated context + resource + render manager ───────────
+
+// WebPipeline creates an integrated web pipeline for a web backend window.
+// It manages WebGL context creation, async resource loading, shader
+// submission, frame loop control, and WebSocket integration.
+//
+// Returns a pipeline object with the following methods:
+//   - load(url, options): Thenable of raw response envelope
+//   - fetchText(url, options): Thenable of response body string
+//   - fetchJson(url, options): Thenable of parsed JSON
+//   - loadShader(url, shaderType): Thenable of WebGL shader object
+//   - loadProgram(vertUrl, fragUrl): Thenable of WebGL program object
+//   - submitShader(fragSource, vertSource?): compile + link + use program
+//   - render(fragSource): submit + draw + flush
+//   - draw(clearR?, clearG?, clearB?): clear + draw without flush
+//   - beginFrame(): clear message queue, record frame_begin
+//   - endFrame(): record frame_end
+//   - runFrameLoop(onFrame): start requestAnimationFrame loop
+//   - stopFrameLoop(): stop requestAnimationFrame loop
+//   - connectWebSocket(url, headers, onMessage): WebSocket connection
+//   - destroy(): stop frame loop, mark context as not ready
+fn WebPipeline(window, options) {
+	opts := _default(options, {})
+	ctx := createContext(window, opts)
+
+	// Mutable closure state (mutated via <- push-arrow, not object fields)
+	rc := 0
+	conns := {}
+	resources := {}
+
+	{
+		// Immutable snapshot fields
+		window: window
+		context: ctx
+		opts: opts
+		loadedResources: resources
+		resourceCounter: rc
+		websocketConns: conns
+
+		// ── Resource loading ──
+		load: fn(url, loadOptions) {
+			loadResource(url, _default(loadOptions, opts))
+		}
+
+		fetchText: fn(url, fetchOptions) {
+			fetchText(url, _default(fetchOptions, opts))
+		}
+
+		fetchJson: fn(url, fetchOptions) {
+			fetchJson(url, _default(fetchOptions, opts))
+		}
+
+		loadShader: fn(url, shaderType) {
+			result := loadShader(window, url, shaderType)
+			if result.type = :ok & result.shader != ? {
+				true -> rc <- rc + 1
+			}
+			result
+		}
+
+		loadProgram: fn(vertUrl, fragUrl) {
+			loadProgram(window, vertUrl, fragUrl)
+		}
+
+		// ── Shader submission & rendering ──
+		// These lazily import GUI to avoid circular imports (GUI imports
+		// web-pipeline, so web-pipeline must not import GUI at top level).
+		submitShader: fn(fragSource, vertSource?) {
+			gui := import('GUI')
+			gui.shaderSubmitWebGL(window, fragSource, vertSource?)
+		}
+
+		render: fn(fragSource) {
+			gui := import('GUI')
+			gui.shaderRenderWebGL(window, fragSource)
+		}
+
+		draw: fn(clearR?, clearG?, clearB?) {
+			gui := import('GUI')
+			gui.shaderDrawWebGL(window, clearR?, clearG?, clearB?)
+		}
+
+		// ── Frame loop ──
+		beginFrame: fn() guiWeb.beginFrame(window)
+		endFrame: fn() guiWeb.endFrame(window)
+
+		runFrameLoop: fn(onFrame) guiWeb.runFrameLoop(window, onFrame)
+		stopFrameLoop: fn() guiWeb.stopFrameLoop(window)
+
+		// ── WebSocket integration ──
+		connectWebSocket: fn(url, headers, onMessage?) {
+			conn := wsModule.connect(url, headers)
+			if conn.type {
+				:ok -> {
+					rc <- rc + 1
+					socketObj := wsModule.Socket(conn.socket)
+					conns.(string(rc)) <- socketObj
+					if onMessage {
+						? -> ?
+						_ -> {
+							go(fn() {
+								fn recvLoop {
+									msg := socketObj.recv()
+									if msg.type {
+										:error -> ?
+										_ -> {
+											onMessage(window, msg)
+											recvLoop()
+										}
+									}
+								}
+								recvLoop()
+							})
+						}
+					}
+					socketObj
+				}
+				_ -> conn
+			}
+		}
+
+		// ── Lifecycle ──
+		destroy: fn() {
+			if ctx.type = :ok {
+				true -> guiWeb.stopFrameLoop(window)
+			}
+			ctx
+		}
+
+		// ── Context readiness ──
+		isReady?: fn() if ctx.type { :ok -> ctx.ready, _ -> false }
+	}
+}
+
+// ─── Process-level resource pipeline using thread.pmap ────────────────────────
+//
+// pipelineResources loads a list of resource specs concurrently using
+// thread.pmap, where each spec is {url, type, key}. Returns a list of
+// Thenables (or resolved values on native Oak) for each resource.
+//
+// On native Oak, thread.pmap dispatches all fetches in parallel goroutines.
+// On JS runtimes, fetches are queued via setTimeout (go builtin).
+
+fn pipelineResources(window, specs) {
+	specs |> threadLib.pmap(fn(spec) {
+		url := spec.url
+		resourceType := _default(spec.type, 'text')
+		key := _default(spec.key, url)
+
+		if resourceType {
+			'json' -> fetchJson(url)
+			'shader' -> {
+				shaderType := _default(spec.shaderType, :fragment)
+				loadShader(window, url, shaderType)
+			}
+			'text' -> fetchText(url)
+			_ -> loadResource(url)
+		}
+	})
+}
+
+// ─── WebSocket module re-export ──────────────────────────────────────────────
+
+Opcode := wsModule.Opcode
+CloseCode := wsModule.CloseCode
