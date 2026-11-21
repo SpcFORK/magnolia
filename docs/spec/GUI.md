@@ -18,7 +18,7 @@ _Auto-generated from Magnolia source._
 ## Module: `gui-2d`
 
 - `threadLib` · `import(...)`
-- `PI` · `3.141592653589793`
+- `PI` — constant
 ### `_degToRad(deg)`
 
 ### `Vec2(x, y)`
@@ -236,7 +236,7 @@ _Auto-generated from Magnolia source._
 ## Module: `gui-3dmath`
 
 - `threadLib` · `import(...)`
-- `PI` · `3.141592653589793`
+- `PI` — constant
 ### `degToRad(deg)`
 
 ### `Vec3(x, y, z)`
@@ -269,9 +269,19 @@ _Auto-generated from Magnolia source._
 
 > returns `:object`
 
+### `_transformAndProjectVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz, isOrtho, pHalfW, pHalfH, pCamZ, pFocal, orthoS)`
+
+> returns `:object`
+
+### `_projectVertex(v, scale, tx, ty, tz, cx, sx, cy, sy, cz, sz, isOrtho, pHalfW, pHalfH, pCamZ, pFocal, orthoS)`
+
+> returns `:object`
+
 ### `transformVerticesBatch(meshes, transforms, i, out)`
 
 ### `transformAndProjectVertices(vertices, transform, projParams)`
+
+### `transformAndProjectScreen(vertices, transform, projParams)`
 
 ### `Mat4Identity()`
 
@@ -394,6 +404,10 @@ _Auto-generated from Magnolia source._
 ### `aabb3HalfExtents(box)`
 
 ### `parallelTransformVertices(vertices, transform, numWorkers)`
+
+### `parallelTransformAndProjectVertices(vertices, transform, projParams, numWorkers)`
+
+### `parallelTransformAndProjectScreen(vertices, transform, projParams, numWorkers)`
 
 ## Module: `gui-aa`
 
@@ -814,6 +828,21 @@ _Auto-generated from Magnolia source._
 
 ### `_clamp(v, minV, maxV)`
 
+### `_screenPositionFor(size, w, h, position, margin)`
+
+> returns `:object`
+
+- `POSITION_CENTER` · `:center`
+- `POSITION_PRIMARY_CENTER` · `:primaryCenter`
+- `POSITION_MONITOR_CENTER` · `:monitorCenter`
+- `POSITION_TOP_LEFT` · `:topLeft`
+- `POSITION_TOP_RIGHT` · `:topRight`
+- `POSITION_BOTTOM_LEFT` · `:bottomLeft`
+- `POSITION_BOTTOM_RIGHT` · `:bottomRight`
+- `POSITION_TOP_CENTER` · `:topCenter`
+- `POSITION_BOTTOM_CENTER` · `:bottomCenter`
+- `POSITION_LEFT_CENTER` · `:leftCenter`
+- `POSITION_RIGHT_CENTER` · `:rightCenter`
 ## Module: `gui-dialogs`
 
 - `std` · `import(...)`
@@ -1128,9 +1157,15 @@ _Auto-generated from Magnolia source._
 
 ### `formMsgType(window)`
 
+> returns `:int`
+
 ### `formMsgWParam(window)`
 
+> returns `:int`
+
 ### `formMsgLParam(window)`
+
+> returns `:int`
 
 ### `formLoWord(v)`
 
@@ -2089,7 +2124,7 @@ _Auto-generated from Magnolia source._
 ## Module: `gui-lighting`
 
 - `threadLib` · `import(...)`
-- `PI` · `3.141592653589793`
+- `PI` — constant
 ### `_len3(x, y, z)`
 
 ### `_norm3(x, y, z)`
@@ -2366,6 +2401,14 @@ _Auto-generated from Magnolia source._
 
 ### `setFullscreen(window, enabled)`
 
+### `getPrimaryScreenSize(window)`
+
+> returns `:object`
+
+### `centerWindow(window)`
+
+### `positionWindow(window, position, options)`
+
 ### `setTitle(window, title)`
 
 ### `lockResize(window, locked)`
@@ -2573,6 +2616,18 @@ _Auto-generated from Magnolia source._
 ### `centerOnMonitor(window)`
 
 ### `moveToMonitor(window, hMonitor)`
+
+### `getPrimaryScreenSize(window)`
+
+> returns `:object`
+
+### `centerWindow(window)`
+
+### `positionWindow(window, position, options)`
+
+### `_currentMonitorWorkArea(window)`
+
+> returns `:object`
 
 ### `getWindowDpi(window)`
 
@@ -3211,8 +3266,6 @@ _Auto-generated from Magnolia source._
 
 ### `drawTriangleFilledAA(deps, window, p0, p1, p2, color, borderColor, bgColor)`
 
-### `_concatLists(left, right, i, out)`
-
 ### `_compactTrisInPlace(tris)`
 
 ### `_insertionSortRange(arr, lo, hi)`
@@ -3224,6 +3277,16 @@ _Auto-generated from Magnolia source._
 ### `_slice(arr, start, end, acc)`
 
 ### `_sortDepthInPlace(tris, count)`
+
+### `_mergeByDepth(a, b, i, j, out)`
+
+### `_appendRest(dst, src, j)`
+
+### `_mergeSorted(lists, idx, acc)`
+
+### `_copyBack(src, dst, i)`
+
+### `parallelSortDepth(tris, count, numWorkers)`
 
 ### `_sortDepth(tris)`
 
@@ -3308,6 +3371,8 @@ _Auto-generated from Magnolia source._
 
 ### `_collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, start, end, acc)`
 
+### `parallelCollectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, numWorkers)`
+
 ### `_drawTriangles(deps, window, tris, i, count, drawn)`
 
 ### `drawMeshSolid(deps, window, mesh, transform, camera, color, light, borderColor)`
@@ -3323,6 +3388,8 @@ _Auto-generated from Magnolia source._
 ### `_collectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, i, acc)`
 
 ### `_collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, start, end, acc)`
+
+### `parallelCollectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, numWorkers)`
 
 ### `drawMeshLit(deps, window, mesh, transform, camera, color, scene, material, borderColor)`
 
@@ -3903,10 +3970,9 @@ _Auto-generated from Magnolia source._
 ## Module: `gui-shader-math`
 
 - `threadLib` · `import(...)`
-- `PI` · `3.14159265358979`
-- `TAU` · `6.28318530717959`
-- `HALF_PI` · `1.5707963267949`
-- `E` · `2.71828182845905`
+- `PI` — constant
+- `TAU` — constant
+- `HALF_PI` — constant
 - `DEG2RAD` — constant
 - `RAD2DEG` — constant
 - `SQRT2` · `1.4142135623731`
@@ -4407,6 +4473,14 @@ _Auto-generated from Magnolia source._
 
 ### `resizeWindow(window, width, height)`
 
+### `getPrimaryScreenSize(window)`
+
+> returns `:object`
+
+### `centerWindow(window)`
+
+### `positionWindow(window, position, options)`
+
 ### `setFullscreen(window, enabled)`
 
 ### `lockResize(window, locked)`
@@ -4469,6 +4543,56 @@ _Auto-generated from Magnolia source._
 
 ### `drawImageData(window, x, y, w, h, pixelBytes)`
 
+## Module: `json`
+
+### `esc(c)`
+
+> returns `:string`
+
+### `uEscape(c)`
+
+> returns `:string`
+
+### `uParse(uc)`
+
+### `escape(s)`
+
+### `serialize(c)`
+
+> returns `:string`
+
+### `cs Reader(s)`
+
+> returns `:object`
+
+### `parseNull(r)`
+
+> returns `?`
+
+### `parseString(r)`
+
+### `parseNumber(r)`
+
+> returns `:atom`
+
+### `parseTrue(r)`
+
+> returns `:bool`
+
+### `parseFalse(r)`
+
+> returns `:bool`
+
+### `parseList(r)`
+
+### `parseObject(r)`
+
+### `_parseReader(r)`
+
+> returns `:atom`
+
+### `parse(s)`
+
 ## Module: `lib\GUI.oak`
 
 - `_guiImportT0` · `nanotime(...)`
@@ -4484,6 +4608,8 @@ _Auto-generated from Magnolia source._
 - `guiLighting` · `import(...)`
 - `_guiImportT2` · `nanotime(...)`
 - `guiWeb` · `import(...)`
+- `webPipeline` · `import(...)`
+- `webRuntime` · `import(...)`
 - `guiNativeWin` · `import(...)`
 - `guiNativeLinux` · `import(...)`
 - `_guiImportT3` · `nanotime(...)`
@@ -4677,6 +4803,16 @@ _Auto-generated from Magnolia source._
 
 ### `monitorFromRect(left, top, right, bottom, flags)`
 
+### `getPrimaryScreenSize(window)`
+
+### `getScreenCenter(window)`
+
+> returns `:object`
+
+### `centerWindow(window)`
+
+### `positionWindow(window, position, options)`
+
 ### `extendFrameIntoClientArea(window, margins)`
 
 ### `enableGlassSheet(window)`
@@ -4761,6 +4897,36 @@ _Auto-generated from Magnolia source._
 ### `webglDrawArrays(window, mode, first, count)`
 
 ### `webglFlush(window)`
+
+### `createWebContext(window, options)`
+
+### `newWebPipeline(window, options)`
+
+### `fetchWebResource(url, options)`
+
+### `fetchWebText(url, options)`
+
+### `fetchWebJson(url, options)`
+
+### `loadWebShader(window, url, shaderType)`
+
+### `loadWebProgram(window, vertUrl, fragUrl)`
+
+### `connectWebSocket(url, headers, onMessage?)`
+
+### `pipelineResources(window, specs)`
+
+### `destroyWebContext(ctx)`
+
+### `webPipelineOpcode()`
+
+### `webPipelineCloseCode()`
+
+### `isWebBackend?()`
+
+### `isNode?()`
+
+### `isBrowser?()`
 
 ### `setTitle(window, title)`
 
@@ -6836,6 +7002,22 @@ _Auto-generated from Magnolia source._
 
 ### `round(n, decimals)`
 
+- `__math_builtin_sin` — constant
+- `__math_builtin_cos` — constant
+- `__math_builtin_tan` — constant
+- `__math_builtin_asin` — constant
+- `__math_builtin_acos` — constant
+- `__math_builtin_atan` — constant
+- `__math_builtin_pow` — constant
+- `__math_builtin_log` — constant
+- `sin` — constant
+- `cos` — constant
+- `tan` — constant
+- `asin` — constant
+- `acos` — constant
+- `atan` — constant
+- `pow` — constant
+- `log` — constant
 ## Module: `math-base`
 
 - `Pi` · `3.141592653589793`
@@ -7024,6 +7206,166 @@ _Auto-generated from Magnolia source._
 
 ### `println(xs...)`
 
+- `__std_builtin_int` — constant
+- `__std_builtin_float` — constant
+- `__std_builtin_string` — constant
+- `__std_builtin_type` — constant
+- `__std_builtin_len` — constant
+- `__std_builtin_char` — constant
+- `__std_builtin_codepoint` — constant
+- `__std_builtin_print` — constant
+- `__std_builtin_keys` — constant
+- `__std_builtin_atom` — constant
+- `__std_builtin_name` — constant
+- `__std_builtin_rand` — constant
+- `__std_builtin_srand` — constant
+- `__std_builtin_input` — constant
+- `__std_builtin_exit` — constant
+- `__std_builtin_args` — constant
+- `__std_builtin_addr` — constant
+- `__std_builtin_bits` — constant
+- `__std_builtin_memread` — constant
+- `__std_builtin_memwrite` — constant
+- `__std_builtin_utf16` — constant
+- `__std_builtin_go` — constant
+- `__std_builtin_wait` — constant
+- `__std_builtin_exec` — constant
+- `__std_builtin_env` — constant
+- `__std_builtin_write` — constant
+- `__std_builtin_read` — constant
+- `__std_builtin_interpreter` — constant
+- `__std_builtin_pointer` — constant
+- `__std_builtin_log` — constant
+- `__std_builtin_time` — constant
+- `__std_builtin_nanotime` — constant
+- `int` — constant
+- `float` — constant
+- `string` — constant
+- `type` — constant
+- `len` — constant
+- `print` — constant
+- `time` — constant
+- `nanotime` — constant
+- `char` — constant
+- `codepoint` — constant
+- `keys` — constant
+- `atom` — constant
+- `name` — constant
+- `rand` — constant
+- `srand` — constant
+- `input` — constant
+- `args` — constant
+- `addr` — constant
+- `bits` — constant
+- `memread` — constant
+- `memwrite` — constant
+- `utf16` — constant
+- `exec` — constant
+- `env` — constant
+- `write` — constant
+- `read` — constant
+- `interpreter` — constant
+- `pointer` — constant
+- `log` — constant
+- `wait` — constant
+- `__std_builtin_sin` — constant
+- `__std_builtin_cos` — constant
+- `__std_builtin_tan` — constant
+- `__std_builtin_asin` — constant
+- `__std_builtin_acos` — constant
+- `__std_builtin_atan` — constant
+- `__std_builtin_pow` — constant
+- `sin` — constant
+- `cos` — constant
+- `tan` — constant
+- `asin` — constant
+- `acos` — constant
+- `atan` — constant
+- `pow` — constant
+## Module: `str`
+
+### `checkRange(lo, hi)`
+
+> **thunk** returns `:function`
+
+### `upper?(c)`
+
+> returns `:bool`
+
+### `lower?(c)`
+
+> returns `:bool`
+
+### `digit?(c)`
+
+> returns `:bool`
+
+### `space?(c)`
+
+> returns `:bool`
+
+### `letter?(c)`
+
+> returns `:bool`
+
+### `word?(c)`
+
+> returns `:bool`
+
+### `join(strings, joiner)`
+
+> returns `:string`
+
+### `startsWith?(s, prefix)`
+
+### `endsWith?(s, suffix)`
+
+### `_matchesAt?(s, substr, idx)`
+
+> returns `:bool`
+
+### `indexOf(s, substr)`
+
+### `rindexOf(s, substr)`
+
+### `contains?(s, substr)`
+
+### `cut(s, sep)`
+
+> returns `:list`
+
+### `lower(s)`
+
+### `upper(s)`
+
+### `_replaceNonEmpty(s, old, new)`
+
+### `replace(s, old, new)`
+
+### `_splitNonEmpty(s, sep)`
+
+### `split(s, sep)`
+
+### `_extend(pad, n)`
+
+### `padStart(s, n, pad)`
+
+### `padEnd(s, n, pad)`
+
+### `_trimStartSpace(s)`
+
+### `_trimStartNonEmpty(s, prefix)`
+
+### `trimStart(s, prefix)`
+
+### `_trimEndSpace(s)`
+
+### `_trimEndNonEmpty(s, suffix)`
+
+### `trimEnd(s, suffix)`
+
+### `trim(s, part)`
+
 ## Module: `sys`
 
 ### `_isObject?(v)`
@@ -7085,6 +7427,8 @@ _Auto-generated from Magnolia source._
 ### `pmap(list, fnToRun)`
 
 ### `pmapConcurrent(list, fnToRun, maxConcurrent)`
+
+### `pmapWithPool(list, fnToRun, pool)`
 
 ### `race(fns)`
 
@@ -7176,6 +7520,81 @@ _Auto-generated from Magnolia source._
 
 ### `pmapFrames(frames, f)`
 
+## Module: `web-fetch`
+
+### `resolved(val)`
+
+> returns `:object`
+
+### `pending()`
+
+> returns `:object`
+
+### `fetch(data)`
+
+## Module: `web-pipeline`
+
+- `wsModule` · `import(...)`
+- `guiWeb` · `import(...)`
+- `json` · `import(...)`
+- `threadLib` · `import(...)`
+### `isWeb?()`
+
+### `isNode?()`
+
+### `isBrowser?()`
+
+- `DefaultContextAttrs` · `{6 entries}`
+### `loadResource(url, options)`
+
+### `fetchText(url, options)`
+
+### `fetchJson(url, options)`
+
+### `loadShader(window, url, shaderType)`
+
+### `loadProgram(window, vertUrl, fragUrl)`
+
+### `createContext(window, options)`
+
+> returns `:object`
+
+### `destroyContext(ctx)`
+
+### `WebPipeline(window, options)`
+
+> returns `:object`
+
+### `pipelineResources(window, specs)`
+
+- `Opcode` — constant
+- `CloseCode` — constant
+## Module: `web-runtime`
+
+### `jsRuntime?()`
+
+### `node?()`
+
+### `browser?()`
+
+## Module: `websocket`
+
+### `connect(url, headers)`
+
+### `send(socket, data, opcode)`
+
+### `recv(socket)`
+
+### `close(socket, code, reason)`
+
+### `listen(host, path, onConnect)`
+
+### `Socket(socket)`
+
+> returns `:object`
+
+- `Opcode` · `{5 entries}`
+- `CloseCode` · `{8 entries}`
 ## Module: `win-common`
 
 - `windows` · `import(...)`

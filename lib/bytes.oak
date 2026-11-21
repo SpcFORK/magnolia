@@ -1,0 +1,115 @@
+// libbytes — exact byte-order primitives shared by every language library
+// that encodes or decodes multi-byte integers.
+//
+// This module was abstracted from the binary encoders/decoders of the
+// audio codecs (WAV/OGG/AIFF/AU), the MessagePack codec, the style-bake
+// binary format and the JVM class-file machinery. The local copies each
+// language lib previously carried are now re-stubbed to the primitives
+// below, so encoder and decoder semantics are defined in one place and
+// cannot drift between libs.
+//
+// All encoders return **lists of byte integers** (0 .. 255) and all
+// decoders read from **binary strings** via `codepoint` — the same
+// representation the callers already build and consume. No JS Number
+// precision is lost: 16/32-bit words stay in integral limbs.
+
+std := import('std')
+
+fn _byteStr(blist) blist |> std.map(fn(b) char(b % 256)) |> std.join('')
+
+fn _u8(n) [n % 256]
+
+fn _u16LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256]
+}
+
+fn _u32LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256, int(n / 65536) % 256, int(n / 16777216) % 256]
+}
+
+fn _i16LE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 65536, _ -> n}
+	_u16LE(u)
+}
+
+fn _i32LE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 4294967296, _ -> n}
+	_u32LE(u)
+}
+
+fn _u16BE(n) {
+	n := int(n)
+	[int(n / 256) % 256, n % 256]
+}
+
+fn _u32BE(n) {
+	n := int(n)
+	[int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256]
+}
+
+fn _i16BE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 65536, _ -> n}
+	_u16BE(u)
+}
+
+fn _i32BE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 4294967296, _ -> n}
+	_u32BE(u)
+}
+
+// ---- decoders -----------------------------------------------------------
+
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readI8(s, off) {
+	u := _readU8(s, off)
+	if u > 127 {true -> u - 256, _ -> u}
+}
+
+fn _readU16LE(s, off) {
+	codepoint(s.(off)) + codepoint(s.(off + 1)) * 256
+}
+
+fn _readI16LE(s, off) {
+	u := _readU16LE(s, off)
+	if u > 32767 {true -> u - 65536, _ -> u}
+}
+
+fn _readU32LE(s, off) {
+	codepoint(s.(off)) +
+		codepoint(s.(off + 1)) * 256 +
+		codepoint(s.(off + 2)) * 65536 +
+		codepoint(s.(off + 3)) * 16777216
+}
+
+fn _readI32LE(s, off) {
+	u := _readU32LE(s, off)
+	if u > 2147483647 {true -> u - 4294967296, _ -> u}
+}
+
+fn _readU16BE(s, off) {
+	codepoint(s.(off)) * 256 + codepoint(s.(off + 1))
+}
+
+fn _readI16BE(s, off) {
+	u := _readU16BE(s, off)
+	if u > 32767 {true -> u - 65536, _ -> u}
+}
+
+fn _readU32BE(s, off) {
+	codepoint(s.(off)) * 16777216 +
+		codepoint(s.(off + 1)) * 65536 +
+		codepoint(s.(off + 2)) * 256 +
+		codepoint(s.(off + 3))
+}
+
+fn _readI32BE(s, off) {
+	u := _readU32BE(s, off)
+	if u > 2147483647 {true -> u - 4294967296, _ -> u}
+}

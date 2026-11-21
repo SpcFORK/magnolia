@@ -1,0 +1,251 @@
+// Bounded ORIGINAL-bytecode GUI session on Magnolia's full GUI facade.
+// Headless applet.run remains the independent oracle; this opts into one
+// retained JVM object, real GUI presentation, and selected handleEvent input.
+// It is NOT an AWT implementation or general Java applet window.
+std := import('std')
+app := import('./applet.oak')
+gui := import('./GUI.oak')
+guiWeb := import('./gui-web.oak')
+fn _error(text) {type: :error, message: text}
+
+fn _image(window, image) {
+    if image = ? | image.width != window.width |
+        image.height != window.height | type(image.raster) != :list |
+        len(image.raster) != window.width * window.height {
+        true -> _error('original raster does not match bounded GUI canvas')
+        _ -> {
+            gui.beginFrame(window)
+            drawn := gui.drawPackedImageData(window, 0, 0,
+                window.width, window.height, image.raster)
+            if drawn.type = :error {
+                true -> drawn
+                _ -> {
+                    gui.endFrame(window)
+                    {type: :ok}
+                }
+            }
+        }
+    }
+}
+
+// `bridge` receives full-GUI :canvas_create/:frame_begin/:image_data/
+// :frame_end operations in a web runtime. A native runtime needs no bridge.
+// Browser JS cannot supply frame data or original JVM references. `events`
+// and `method` intentionally cannot bypass the interactive input boundary.
+fn _open(program, params, options, bridge, forceWeb) {
+    opts := options |> std.default({})
+    if type(opts) != :object |
+        ((forceWeb | gui.backend() = :web) & type(bridge) != :function) |
+        type(program) != :object | program.kind != 'applet' |
+        program.eventEnabled? != true {
+        true -> _error('GUI needs an event-linked Applet and a web bridge on JS')
+        _ -> {
+            extras := keys(opts) |> std.some(fn(key) key != 'width' &
+                key != 'height' & key != 'title' & key != 'resources' &
+                key != 'resourceZip' & key != 'maxSteps' &
+                key != 'maxArray' & key != 'maxDepth' &
+                key != 'frameObserver')
+            width := opts.width |> std.default(320)
+            height := opts.height |> std.default(240)
+            if extras | (opts.frameObserver != ? &
+                type(opts.frameObserver) != :function) |
+                type(width) != :int | type(height) != :int |
+                width < 1 | height < 1 | width > 4096 | height > 4096 |
+                width * height > 81920 {
+                true -> _error('GUI options or canvas dimensions outside bounded subset')
+                _ -> {
+                    title := opts.title |> std.default('Bounded Applet')
+                    webOptions := {webBridge: bridge,
+                        canvasId: 'magnolia-applet-canvas', context: '2d'}
+                    window := if forceWeb {
+                        true -> guiWeb.createWindowState(title, width, height,
+                            16, false, webOptions)
+                        _ -> gui.createWindow(title, width, height, webOptions)
+                    }
+                    if window.type = :error {
+                        true -> window
+                        _ -> {
+                            if window.backend = :web ->
+                                gui.createWebCanvas(window,
+                                    'magnolia-applet-canvas',
+                                    {width: width, height: height})
+                            result := app.run(program, params, {
+                                width: width, height: height,
+                                resources: opts.resources,
+                                resourceZip: opts.resourceZip,
+                                maxSteps: opts.maxSteps,
+                                maxArray: opts.maxArray,
+                                maxDepth: opts.maxDepth,
+                                persistent?: true,
+                                frameSink: fn(image, number) {
+                                    presented := _image(window, image)
+                                    // A trusted native oracle can sample the
+                                    // *displayed* X11 window after endFrame,
+                                    // rather than comparing only the source
+                                    // raster. Existing two-argument observers
+                                    // ignore the optional window argument.
+                                    if presented.type = :ok &
+                                        opts.frameObserver != ? ->
+                                        opts.frameObserver(image, number, window)
+                                    presented
+                                }
+                            })
+                            if result.type = :error {
+                                true -> {
+                                    gui.close(window)
+                                    result
+                                }
+                                _ -> {type: :ok, window: window,
+                                    session: result.session, result: result}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Explicit web path also works as a headless native-process test oracle;
+// the production open() uses the actual GUI backend (web/X11/GDI).
+fn openWeb(program, params, options, bridge) _open(program, params, options, bridge, true)
+fn open(program, params, options, bridge) _open(program, params, options, bridge, false)
+
+// Interpret exactly one event from the GUI library's bounded web input queue.
+// AWT ids: 401 keyDown, 402 keyUp, 501/502 mouseDown/Up, 503 move,
+// 506 drag. Unsupported keys/buttons/window events fail closed, rather than
+// spoofing actions in Canvas controls. Coordinates are logical canvas pixels.
+fn _legacy(window, event) if type(event) != :object {
+    true -> _error('GUI input must be an event object')
+    _ -> {
+        extras := keys(event) |> std.some(fn(key) key != 'type' &
+            key != 'key' & key != 'x' & key != 'y' &
+            key != 'modifiers' & key != 'button' & key != 'buttons')
+        modifiers := event.modifiers |> std.default(0)
+        if extras | type(modifiers) != :int | modifiers < 0 |
+            modifiers > 65535 {
+            true -> _error('invalid GUI input fields or modifiers')
+            _ -> if event.type = :keydown | event.type = :keyup {
+                true -> if type(event.key) != :int | event.key < 32 |
+                    event.key > 126 | event.x != ? | event.y != ? |
+                    event.button != ? | event.buttons != ? {
+                    true -> _error('unsupported GUI keyboard event')
+                    _ -> {type: :ok, record: {
+                        id: if event.type = :keydown {true -> 401, _ -> 402},
+                        key: event.key, modifiers: modifiers}}
+                }
+                _ -> if event.type = :mousedown | event.type = :mouseup |
+                    event.type = :mousemove {
+                    true -> if type(event.x) != :int | type(event.y) != :int |
+                        event.x < 0 | event.y < 0 |
+                        event.x >= window.width | event.y >= window.height |
+                        event.key != ? | (event.button != ? & event.button != 0) |
+                        (event.buttons != ? & event.buttons != 0 &
+                            event.buttons != 1) {
+                        true -> _error('unsupported or out-of-bounds GUI mouse event')
+                        _ -> {type: :ok, record: {
+                            id: if event.type = :mousedown {
+                                true -> 501
+                                _ -> if event.type = :mouseup {
+                                    true -> 502
+                                    _ -> if event.buttons = 1 {true -> 506, _ -> 503}
+                                }
+                            },
+                            x: event.x, y: event.y, modifiers: modifiers}}
+                    }
+                    _ -> _error('unsupported GUI input kind')
+                }
+            }
+        }
+    }
+}
+
+// One shared, pure selected-input boundary for GUI and retained headless
+// sessions. The latter has a logical viewport but no DOM or native window.
+fn normalizeInput(width, height, event) if type(width) != :int |
+    type(height) != :int | width < 1 | height < 1 |
+    width > 4096 | height > 4096 | width * height > 81920 {
+    true -> _error('bounded original input needs a valid logical viewport')
+    _ -> _legacy({width: width, height: height}, event)
+}
+
+// Re-present the current ORIGINAL JVM raster after X11 Expose/window damage;
+// do not call bytecode or mint another captured oracle frame.
+fn redraw(view) if type(view) != :object | view.type != :ok |
+    view.session = ? | view.session.state.screen = ? {
+    true -> _error('GUI session has no original raster to redraw')
+    _ -> _image(view.window, view.session.state.screen)
+}
+
+fn close(view) if type(view) != :object | view.type != :ok {
+    true -> _error('GUI session is not open')
+    _ -> {
+        gui.close(view.window)
+        view.type <- :closed
+        {type: :ok}
+    }
+}
+
+fn sendInput(view, event) if type(view) != :object {
+    true -> _error('expected live GUI Applet session')
+    _ -> if view.type != :ok |
+        view.session.kind != 'bounded-legacy-event' {
+        true -> _error('GUI session is not event-linked')
+        _ -> {
+            checked := normalizeInput(view.window.width,
+                view.window.height, event)
+            if checked.type = :error {
+                true -> checked
+                _ -> {
+                    // Web input crosses GUI's bounded queue. Native input is
+                    // already normalized by the GUI window event pump. In
+                    // both cases revalidate before calling the original VM.
+                    queued := if view.window.backend = :web {
+                        true -> {
+                            gui.queueWebInput(view.window, event)
+                            gui.pollWebInput(view.window)
+                        }
+                        _ -> [event]
+                    }
+                    if len(queued) != 1 {
+                        true -> _error('GUI input queue must contain exactly one event')
+                        _ -> {
+                            mapped := normalizeInput(view.window.width,
+                                view.window.height, queued.(0))
+                            if mapped.type = :error {
+                                true -> mapped
+                                _ -> {
+                                    before := view.session.state.repaintCount
+                                    delivered := app.dispatchEvent(view.session, mapped.record)
+                                    if delivered.type = :error {
+                                        true -> delivered
+                                        _ -> {
+                                            // Post-event repaints stay outside
+                                            // the bounded 61-frame headless sink.
+                                            paint := if delivered.repaints > before &
+                                                delivered.screen != ? {
+                                                true -> _image(view.window, delivered.screen)
+                                                _ -> {type: :ok}
+                                            }
+                                            if paint.type = :error {
+                                                true -> paint
+                                                _ -> {type: :ok, handled: delivered.handled,
+                                                    events: delivered.events,
+                                                    steps: delivered.steps,
+                                                    repaints: delivered.repaints,
+                                                    statuses: delivered.statuses,
+                                                    painted?: delivered.repaints > before,
+                                                    object: delivered.object,
+                                                    screen: delivered.screen}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

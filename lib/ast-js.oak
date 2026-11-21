@@ -38,6 +38,48 @@ JSReserved := [
 
 fn _tok() { pos: [0, 1, 1], type: :identifier, val: ? }
 
+// synthetic int literal node with a correctly populated tok (renderers
+// read tok.val for the source text of numbers)
+fn _int(v) {
+	type: :int
+	tok: { pos: [0, 1, 1], type: :int, val: string(v) }
+	val: v
+}
+
+// -- module state: strict-mode flag, diagnostics, temp counter --
+JsStrictTranspile := false
+JsDiagnostics := []
+JsTempCounter := 0
+
+// takeDiagnostics drains and returns the list of transpile diagnostics
+// accumulated so far. Each entry is an Oak object with a `msg` field.
+fn takeDiagnostics() {
+	diags := JsDiagnostics
+	JsDiagnostics <- []
+	diags
+}
+
+fn clearDiagnostics() JsDiagnostics <- []
+
+fn setStrictTranspile(value) JsStrictTranspile <- value
+
+fn strictTranspile?() JsStrictTranspile
+
+fn _diagnose(msg) JsDiagnostics <- JsDiagnostics << { msg: msg }
+
+fn freshTemp() {
+	JsTempCounter <- JsTempCounter + 1
+	'__js_tmp_' << string(JsTempCounter)
+}
+
+// __oakKeyword? tells whether a JS identifier name would be an Oak keyword
+// when printed bare, and therefore needs a string-typed object key or a
+// subscript access instead.
+fn __oakKeyword?(name) if name {
+	'if', 'fn', 'with', 'cs', 'true', 'false' -> true
+	_ -> false
+}
+
 // -- JS AST node constructors --
 // These build JS-flavored AST nodes that can be inspected or transpiled to Oak.
 
@@ -107,9 +149,10 @@ fn jsUnary(op, operand) {
 	right: operand
 }
 
-fn jsAssignment(left, right) {
+fn jsAssignment(left, right, op) {
 	type: :jsAssignment
 	tok: _tok()
+	op: default(op, '=')
 	left: left
 	right: right
 }
@@ -198,6 +241,131 @@ fn jsSpread(argument) {
 	argument: argument
 }
 
+fn jsRegex(pattern, flags) {
+	type: :jsRegex
+	tok: _tok()
+	pattern: pattern
+	flags: flags
+}
+
+fn jsSequence(exprs) {
+	type: :jsSequence
+	tok: _tok()
+	exprs: exprs
+}
+
+fn jsUpdate(op, argument, prefix?) {
+	type: :jsUpdate
+	tok: _tok()
+	op: op
+	argument: argument
+	prefix?: default(prefix?, false)
+}
+
+fn jsBreak() {
+	type: :jsBreak
+	tok: _tok()
+}
+
+fn jsContinue() {
+	type: :jsContinue
+	tok: _tok()
+}
+
+fn jsEmptyStatement() {
+	type: :jsEmpty
+	tok: _tok()
+}
+
+fn jsExpressionStatement(expression) {
+	type: :jsExpressionStatement
+	tok: _tok()
+	expression: expression
+}
+
+fn jsNew(callee, args) {
+	type: :jsNew
+	tok: _tok()
+	callee: callee
+	args: args
+}
+
+fn jsWhile(test, body) {
+	type: :jsWhile
+	tok: _tok()
+	test: test
+	body: body
+}
+
+fn jsDoWhile(test, body) {
+	type: :jsDoWhile
+	tok: _tok()
+	test: test
+	body: body
+}
+
+fn jsFor(init, test, update, body) {
+	type: :jsFor
+	tok: _tok()
+	init: init
+	test: test
+	update: update
+	body: body
+}
+
+fn jsForIn(left, right, body) {
+	type: :jsForIn
+	tok: _tok()
+	left: left
+	right: right
+	body: body
+}
+
+fn jsForOf(left, right, body) {
+	type: :jsForOf
+	tok: _tok()
+	left: left
+	right: right
+	body: body
+}
+
+fn jsThis() {
+	type: :jsThis
+	tok: _tok()
+}
+
+fn jsSwitch(discriminant, cases) {
+	type: :jsSwitch
+	tok: _tok()
+	discriminant: discriminant
+	cases: cases
+}
+
+fn jsSwitchCase(test, body) {
+	test: test
+	body: body
+}
+
+fn jsDebugger() {
+	type: :jsDebugger
+	tok: _tok()
+}
+
+fn jsThrow(argument) {
+	type: :jsThrow
+	tok: _tok()
+	argument: argument
+}
+
+fn jsTry(guarded, param, catchBody, finallyBody) {
+	type: :jsTry
+	tok: _tok()
+	guarded: guarded
+	param: param
+	catchBody: catchBody
+	finallyBody: finallyBody
+}
+
 // -- JS operator to Oak operator mapping --
 fn _mapJSOp(op) if op {
 	'+' -> :plus
@@ -216,22 +384,70 @@ fn _mapJSOp(op) if op {
 	'&&' -> :and
 	'||' -> :or
 	'^' -> :xor
-	_ -> :plus
+	'&' -> :and
+	'|' -> :or
+	'>>>' -> {
+		_diagnose('>>> (unsigned right shift) lowered as >>; not modeled exactly')
+		:rshift
+	}
+	'**' -> :power
+	'instanceof' -> {
+		_diagnose('instanceof is not modeled; lowered as ==')
+		:eq
+	}
+	'in' -> {
+		_diagnose('in-operator is not modeled; lowered as ==')
+		:eq
+	}
+	_ -> {
+		_diagnose('unknown binary operator: ' << op)
+		:plus
+	}
 }
 
-fn _mapJSUnaryOp(op) if op {
-	'-' -> :minus
-	'!' -> :exclam
-	'~' -> :exclam
-	_ -> :minus
+// simple lvalue: safe to duplicate in the compound-assignment desugar
+// (a op= b  ->  a = a op b) without re-running side effects.
+// Member chains are fine as long as the object part and every computed
+// index are themselves simple (identifiers, literals).
+fn _jsSimpleLvalue?(node) if node {
+	? -> false
+	_ -> if node.type {
+		:jsIdentifier -> true
+		:jsProperty -> _jsSimpleLvalue?(node.object)
+		:jsIndex -> _jsSimpleLvalue?(node.object) & _jsSimpleValue?(node.index)
+		_ -> false
+	}
+}
+
+fn _jsSimpleValue?(node) if node {
+	? -> false
+	_ -> if node.type {
+		:jsIdentifier, :jsNumber, :jsString, :jsBool, :jsNull, :jsUndefined -> true
+		:jsProperty -> _jsSimpleLvalue?(node)
+		:jsIndex -> _jsSimpleLvalue?(node)
+		_ -> false
+	}
 }
 
 // -- JS identifier to Oak identifier mapping --
-fn _jsIdentToOak(name) if name {
+// JS identifiers that collide with the transpiler's internal __js*
+// temps/helpers are prefixed with '_' so they can never capture the
+// threaded-signal bindings.
+fn _jsIdentToOak(name) if startsWith?(name, '__js') {
+	true -> '_' << name
+	_ -> _jsIdentToOakMapped(name)
+}
+
+fn _jsIdentToOakMapped(name) if name {
 	'undefined' -> '?'
 	'null' -> '?'
 	'true' -> 'true'
 	'false' -> 'false'
+	'if' -> '_kw_if'
+	'fn' -> '_kw_fn'
+	'with' -> '_kw_with'
+	'cs' -> '_kw_cs'
+	'_' -> '_kw__'
 	'console' -> '__console'
 	'Math' -> '__Math'
 	'Array' -> '__Array'
@@ -245,17 +461,217 @@ fn _jsIdentToOak(name) if name {
 	_ -> name |> replace('$', '_dlr_')
 }
 
+// -- statement-threading helpers for the JS->Oak transpilation --
+// Oak has no exceptions and no early return, so JS control flow
+// (return / break / continue / throw) is lowered to ordinary values:
+// wrapped "signal" objects of the shape {__t: :jsReturn|:jsBreak|:jsContinue|:jsThrow, v: <value>}.
+// Sequences are rewritten so each statement's value is bound to `__js_s`
+// and the rest of the sequence only runs when it is not a signal object.
+//
+// Signals propagate verbatim through sequence lowering; the enclosing
+// function boundary wraps the whole body in __jsFunctionReturn exactly once
+// (jsReturn -> payload, fall-through -> ?, other signals propagate).
+fn _jsTruthyCall(expr) {
+	type: :fnCall
+	tok: _tok()
+	function: { type: :identifier, tok: _tok(), val: '__jsTruthy' }
+	args: [expr]
+	restArg: ?
+}
+
+fn _jsSignalCall(name, arg) {
+	type: :fnCall
+	tok: _tok()
+	function: { type: :identifier, tok: _tok(), val: name }
+	args: [arg]
+	restArg: ?
+}
+
+fn _jsSignalObject(tag, value) {
+	type: :object
+	tok: _tok()
+	entries: [
+		{ key: { type: :identifier, tok: _tok(), val: '__t' }, val: { type: :atom, tok: _tok(), val: string(tag) } }
+		{ key: { type: :identifier, tok: _tok(), val: 'v' }, val: value }
+	]
+}
+
+fn _ident(name) {
+	type: :identifier
+	tok: _tok()
+	val: name
+}
+
+fn _fnLit(args, body) {
+	type: :function
+	tok: _tok()
+	name: ''
+	args: args
+	restArg: ''
+	decls: []
+	body: body
+}
+
+fn _null() { type: :null, tok: _tok(), val: ? }
+
+fn _localAssign(name, right) {
+	type: :assignment
+	tok: _tok()
+	local?: true
+	left: _ident(name)
+	right: right
+}
+
+fn _orExpr(left, right) { type: :binary, tok: _tok(), op: :or, left: left, right: right }
+fn _andExpr(left, right) { type: :binary, tok: _tok(), op: :and, left: left, right: right }
+fn _notExpr(x) { type: :unary, tok: _tok(), op: :exclam, right: x }
+fn _bool(val) { type: :bool, tok: _tok(), val: val }
+fn _call2(name, a, b) {
+	type: :fnCall
+	tok: _tok()
+	function: _ident(name)
+	args: [a, b]
+	restArg: ?
+}
+
+fn _ifBool(cond, whenTrue, whenFalse) {
+	type: :ifExpr
+	tok: _tok()
+	cond: _jsTruthyCall(cond)
+	branches: [
+		{ type: :ifBranch, tok: _tok(), target: { type: :bool, tok: _tok(), val: true }, body: whenTrue }
+		{ type: :ifBranch, tok: _tok(), target: { type: :empty, tok: _tok() }, body: whenFalse }
+	]
+}
+
+// normalize a JS statement-or-block into a statement list
+fn _jsStmts(body) if body {
+	? -> []
+	_ -> if body.type {
+		:jsBlock -> default(body.stmts, [])
+		_ -> [body]
+	}
+}
+
+// build the nested sequence for statements i..n with signal threading
+fn _threadFrom(i, stmts, ctx) {
+	stmt := stmts.(i)
+	expr := transpileToOak(stmt, ctx)
+	if i + 1 = len(stmts) {
+		true -> expr
+		_ -> {
+			rest := _threadFrom(i + 1, stmts, ctx)
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: [
+					{
+						type: :assignment
+						tok: _tok()
+						local?: true
+						left: _ident('__js_s')
+						right: expr
+					}
+					{
+						type: :ifExpr
+						tok: _tok()
+						cond: _jsSignalCall('__jsSignal?', _ident('__js_s'))
+						branches: [
+							{
+								type: :ifBranch
+								tok: _tok()
+								target: { type: :bool, tok: _tok(), val: true }
+								body: _ident('__js_s')
+							}
+							{
+								type: :ifBranch
+								tok: _tok()
+								target: { type: :empty, tok: _tok() }
+								body: rest
+							}
+						]
+					}
+				]
+			}
+		}
+	}
+}
+
+fn _threadSeq(stmts, ctx) {
+	if len(stmts) {
+		0 -> _null()
+		_ -> _threadFrom(0, stmts, ctx)
+	}
+}
+
+// lower a sequence of JS statements, honoring the threaded flag on ctx
+fn _lowerBody(stmts, ctx) {
+	stmts := default(stmts, [])
+	if ctx.threaded? = true {
+		true -> _threadSeq(stmts, ctx)
+		_ -> {
+			type: :block
+			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+			decls: []
+			exprs: stmts |> map(fn(s) transpileToOak(s, ctx))
+		}
+	}
+}
+
+// scan a JS subtree for control-flow signals; nested functions are
+// independent boundaries and reset the scan
+fn _hasSignals?(node) if node {
+	? -> false
+	_ -> if node.type {
+		:jsReturn, :jsBreak, :jsContinue, :jsThrow -> true
+		:jsFunction, :jsArrowFunction -> false
+		_ -> len(keys(node) |> filter(fn(k) _hasSignalsValue?(node.(k)))) != 0
+	}
+}
+
+fn _hasSignalsValue?(v) if type(v) {
+	:object -> if v.type {
+		? -> false
+		_ -> _hasSignals?(v)
+	}
+	:list -> len(v |> filter(_hasSignalsValue?)) != 0
+	_ -> false
+}
+
+fn _jsUnsupported(msg) {
+	type: :jsError
+	tok: _tok()
+	val: ?
+	msg: msg
+}
+
+fn _jsLoopTargetName(node) if node.type {
+	:jsVar -> node.name
+	:jsIdentifier -> node.val
+	_ -> '_'
+}
+
 // -- transpileToOak: JS AST -> Oak AST --
 // Converts a JS-style AST node into an equivalent Oak AST node.
-fn transpileToOak(node) if node {
+// ctx (optional): { threaded?: true } rewrites statement sequences so
+// return/break/continue/throw values flow correctly.
+fn transpileToOak(node, ctx) if node {
 	? -> { type: :null, tok: _tok(), val: ? }
-	_ -> if node.type {
+	_ -> {
+		ctx := default(ctx, {})
+		if node.type {
+
 		:jsNull, :jsUndefined -> { type: :null, tok: _tok(), val: ? }
 
 		:jsNumber -> {
-			type: if int(node.val) = node.val { true -> :int, _ -> :float }
-			tok: _tok()
-			val: node.val
+			isInt := int(node.val) = node.val
+			numType := if isInt { true -> :int, _ -> :float }
+			{
+				type: numType
+				tok: { pos: [0, 1, 1], type: numType, val: string(node.val) }
+				val: node.val
+			}
 		}
 
 		:jsString -> {
@@ -270,172 +686,742 @@ fn transpileToOak(node) if node {
 			val: node.val
 		}
 
+		:jsRegex -> {
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: '__jsRegExp' }
+			args: [
+				{ type: :string, tok: _tok(), val: node.pattern }
+				{ type: :string, tok: _tok(), val: node.flags }
+			]
+			restArg: ?
+		}
+
 		:jsIdentifier -> {
 			type: :identifier
 			tok: _tok()
 			val: _jsIdentToOak(node.val)
 		}
 
+		:jsThis -> {
+			_diagnose('this is not modeled (Oak has no JS receiver binding); lowered to Oak this')
+			{ type: :identifier, tok: _tok(), val: 'this' }
+		}
+
 		:jsArray -> {
 			type: :list
 			tok: _tok()
-			elems: node.elems |> map(transpileToOak)
+			elems: node.elems |> map(fn(el) if el {
+				? -> _null()
+				_ -> transpileToOak(el, ctx)
+			})
 		}
 
 		:jsObject -> {
 			type: :object
 			tok: _tok()
 			entries: node.entries |> map(fn(entry) {
-				key: transpileToOak(entry.key)
-				val: transpileToOak(entry.val)
+				{ key: k, val: v } := entry
+				if k.type {
+					:jsString -> key := transpileToOak(k, ctx)
+					:jsIdentifier -> if __oakKeyword?(k.val) {
+						true -> key := { type: :string, tok: _tok(), val: k.val }
+						_ -> key := transpileToOak(k, ctx)
+					}
+					_ -> key := k
+				}
+				{ key: key, val: transpileToOak(v, ctx) }
 			})
 		}
 
 		:jsBinary -> {
-			type: :binary
-			tok: _tok()
-			op: _mapJSOp(node.op)
-			left: transpileToOak(node.left)
-			right: transpileToOak(node.right)
+			op := node.op
+			if op {
+				'&&', '||' -> if node.left.type = :jsBool & node.right.type = :jsBool {
+					true -> {
+						type: :binary
+						tok: _tok()
+						op: _mapJSOp(op)
+						left: transpileToOak(node.left, ctx)
+						right: transpileToOak(node.right, ctx)
+					}
+					_ -> {
+						tmp := freshTemp()
+						{
+							type: :block
+							tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+							decls: []
+							exprs: [
+								{
+									type: :assignment
+									tok: _tok()
+									local?: true
+									left: _ident(tmp)
+									right: transpileToOak(node.left, ctx)
+								}
+								{
+									type: :ifExpr
+									tok: _tok()
+									cond: _jsTruthyCall(_ident(tmp))
+									branches: [
+										{
+											type: :ifBranch
+											tok: _tok()
+											target: { type: :bool, tok: _tok(), val: true }
+											body: if op = '&&' { true -> transpileToOak(node.right, ctx), _ -> _ident(tmp) }
+										}
+										{
+											type: :ifBranch
+											tok: _tok()
+											target: { type: :empty, tok: _tok() }
+											body: if op = '&&' { true -> _ident(tmp), _ -> transpileToOak(node.right, ctx) }
+										}
+									]
+								}
+							]
+						}
+					}
+				}
+				_ -> {
+					type: :binary
+					tok: _tok()
+					op: _mapJSOp(op)
+					left: transpileToOak(node.left, ctx)
+					right: transpileToOak(node.right, ctx)
+				}
+			}
 		}
 
 		:jsUnary -> {
-			type: :unary
-			tok: _tok()
-			op: _mapJSUnaryOp(node.op)
-			right: transpileToOak(node.right)
+			op := node.op
+			if op {
+				'!' -> {
+					type: :unary
+					tok: _tok()
+					op: :exclam
+					right: _jsTruthyCall(transpileToOak(node.right, ctx))
+				}
+				'~' -> {
+					type: :binary
+					tok: _tok()
+					op: :xor
+					left: transpileToOak(node.right, ctx)
+					right: _int(-1)
+				}
+				'typeof' -> _jsSignalCall('__jsTypeof', transpileToOak(node.right, ctx))
+				'delete' -> {
+					arg := node.right
+					mk := fn(object, key) {
+						type: :fnCall
+						tok: _tok()
+						function: _ident('__jsDelete')
+						args: [object, key]
+						restArg: ?
+					}
+					if arg {
+						? -> _null()
+						_ -> if arg.type {
+							:jsProperty -> {
+								prop := arg.property
+								mk(
+									transpileToOak(arg.object, ctx)
+									if prop {
+										? -> _null()
+										_ -> if prop.type {
+											:jsString, :jsNumber, :jsBool -> { type: :string, tok: _tok(), val: string(prop.val) }
+											:jsIdentifier -> { type: :string, tok: _tok(), val: prop.val }
+											_ -> transpileToOak(prop, ctx)
+										}
+									}
+								)
+							}
+							:jsIndex -> mk(
+								transpileToOak(arg.object, ctx)
+								transpileToOak(arg.index, ctx)
+							)
+							_ -> {
+								_diagnose('delete operand is not an object property; lowered to true')
+								{ type: :bool, tok: _tok(), val: true }
+							}
+						}
+					}
+				}
+				'+' -> {
+					_diagnose('unary + (ToNumber) is not modeled; lowered to the operand')
+					transpileToOak(node.right, ctx)
+				}
+				'void' -> {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [
+						transpileToOak(node.right, ctx)
+						{ type: :null, tok: _tok(), val: ? }
+					]
+				}
+				'-' -> {
+					type: :unary
+					tok: _tok()
+					op: :minus
+					right: transpileToOak(node.right, ctx)
+				}
+				_ -> {
+					_diagnose('unsupported unary operator: ' << op)
+					{ type: :unary, tok: _tok(), op: :minus, right: transpileToOak(node.right, ctx) }
+				}
+			}
+		}
+
+		:jsUpdate -> {
+			arg := transpileToOak(node.argument, ctx)
+			binOp := if node.op = '++' { true -> :plus, _ -> :minus }
+			oldT := freshTemp()
+			newT := freshTemp()
+			if node.prefix? {
+				true -> {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [
+						{
+							type: :assignment
+							tok: _tok()
+							local?: false
+							left: arg
+							right: { type: :binary, tok: _tok(), op: binOp, left: transpileToOak(node.argument, ctx), right: _int(1) }
+						}
+						arg
+					]
+				}
+				_ -> {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [
+						{ type: :assignment, tok: _tok(), local?: true, left: _ident(oldT), right: arg }
+						{ type: :assignment, tok: _tok(), local?: false, left: arg, right: { type: :binary, tok: _tok(), op: binOp, left: _ident(oldT), right: _int(1) } }
+						_ident(oldT)
+					]
+				}
+			}
 		}
 
 		:jsAssignment -> {
-			type: :assignment
-			tok: _tok()
-			local?: true
-			left: transpileToOak(node.left)
-			right: transpileToOak(node.right)
+			left := transpileToOak(node.left, ctx)
+			rightOak := transpileToOak(node.right, ctx)
+			op := default(node.op, '=')
+			if op = '=' {
+				true -> {
+					type: :assignment
+					tok: _tok()
+					local?: false
+					left: left
+					right: rightOak
+				}
+				_ -> {
+					base := slice(op, 0, len(op) - 1)
+					if _jsSimpleLvalue?(node.left) {
+						false -> _diagnose('compound assignment target may be evaluated twice: ' << op)
+					}
+					{
+						type: :assignment
+						tok: _tok()
+						local?: false
+						left: left
+						right: { type: :binary, tok: _tok(), op: _mapJSOp(base), left: left, right: rightOak }
+					}
+				}
+			}
 		}
 
 		:jsProperty -> {
 			type: :propertyAccess
 			tok: _tok()
-			left: transpileToOak(node.object)
+			left: transpileToOak(node.object, ctx)
 			right: if node.property.type {
-				:jsString -> {
-					type: :identifier
-					tok: _tok()
-					val: node.property.val
+				:jsString, :jsIdentifier -> {
+					// JS obj.undefined === obj['undefined']; the Oak atom '?'
+					// would be an invalid member key, so member names whose
+					// Oak mapping is not an identifier (or which came from a
+					// string literal) use computed string keys.
+					strKey := { type: :block, tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }, decls: [], exprs: [ { type: :string, tok: _tok(), val: node.property.val } ] }
+					if node.property.type = :jsString {
+						true -> strKey
+						_ -> if mapped := _jsIdentToOak(node.property.val) {
+							'?', 'true', 'false' -> strKey
+							_ -> if __oakKeyword?(node.property.val) {
+								true -> strKey
+								_ -> { type: :identifier, tok: _tok(), val: mapped }
+							}
+						}
+					}
 				}
-				:jsIdentifier -> {
-					type: :identifier
-					tok: _tok()
-					val: node.property.val
-				}
-				_ -> transpileToOak(node.property)
+				_ -> transpileToOak(node.property, ctx)
 			}
 		}
 
 		:jsIndex -> {
 			type: :propertyAccess
 			tok: _tok()
-			left: transpileToOak(node.object)
+			left: transpileToOak(node.object, ctx)
 			right: {
 				type: :block
 				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
-				exprs: [transpileToOak(node.index)]
+				exprs: [transpileToOak(node.index, ctx)]
 			}
 		}
 
-		:jsCall -> {
-			type: :fnCall
-			tok: _tok()
-			function: transpileToOak(node.callee)
-			args: node.args |> map(transpileToOak)
-			restArg: ?
-		}
-
-		:jsFunction, :jsArrowFunction -> {
-			type: :function
-			tok: _tok()
-			name: default(node.name, '')
-			args: node.params |> map(fn(p) if type(p) {
-				:string -> p
-				_ -> if p.type {
-					:jsIdentifier -> _jsIdentToOak(p.val)
-					_ -> '_'
-				}
-			})
-			restArg: ?
-			body: transpileToOak(node.body)
-		}
-
-		:jsReturn -> transpileToOak(node.value)
-
-		:jsBlock -> {
+		:jsSequence -> {
 			type: :block
 			tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
 			decls: []
-			exprs: node.stmts |> map(transpileToOak)
+			exprs: default(node.exprs, []) |> map(fn(el) transpileToOak(el, ctx))
 		}
+
+		:jsCall -> {
+			spreadIdx := -1
+			node.args |> each(fn(a, i) if a.type = :jsSpread -> spreadIdx <- i)
+			callee := transpileToOak(node.callee, ctx)
+			if spreadIdx {
+				-1 -> {
+					type: :fnCall
+					tok: _tok()
+					function: callee
+					args: node.args |> map(fn(a) transpileToOak(a, ctx))
+					restArg: ?
+				}
+				_ -> if spreadIdx + 1 = len(node.args) {
+					true -> {
+						normalArgs := []
+						node.args |> each(fn(a, i) if i < spreadIdx -> normalArgs << transpileToOak(a, ctx))
+						{
+							type: :fnCall
+							tok: _tok()
+							function: callee
+							args: normalArgs
+							restArg: transpileToOak(node.args.(spreadIdx).argument, ctx)
+						}
+					}
+					_ -> {
+						_diagnose('spread call argument is only supported in the last position')
+						_jsUnsupported('jsSpread in middle of call arguments')
+					}
+				}
+			}
+		}
+
+		:jsNew -> {
+			_diagnose('new lowers to a plain call; JS constructor semantics are not modeled')
+			{
+				type: :fnCall
+				tok: _tok()
+				function: transpileToOak(node.callee, ctx)
+				args: node.args |> map(fn(a) transpileToOak(a, ctx))
+				restArg: ?
+			}
+		}
+
+		:jsFunction, :jsArrowFunction -> {
+			restArg := ''
+			params := []
+			node.params |> map(fn(p, i) {
+				if type(p) {
+					:string -> params << _jsIdentToOak(p)
+					_ -> if p.type {
+						:jsSpread -> restArg <- if p.argument.type {
+							:jsIdentifier -> _jsIdentToOak(p.argument.val)
+							_ -> '_'
+						}
+						:jsIdentifier -> params << _jsIdentToOak(p.val)
+						:jsObject, :jsArray -> {
+							_diagnose('destructured parameters are not yet supported; using placeholder _')
+							params << '_'
+						}
+						_ -> params << '_'
+					}
+				}
+			})
+			fmtName := default(node.name, '')
+			body := node.body
+			if _jsUsesArguments?(body) {
+				true -> body <- {
+					type: :jsBlock
+					tok: body.tok
+					stmts: [
+						{ type: :jsVar, tok: _tok(), name: 'arguments', init: { type: :jsArray, tok: _tok(), elems: params |> map(fn(name) { type: :jsIdentifier, tok: _tok(), val: name }) } }
+					] |> append(_jsStmts(body))
+				}
+			}
+			sig := _hasSignals?(body)
+			bodyOak := _lowerBody(
+				_jsStmts(body)
+				if sig { true -> { threaded?: true }, _ -> {} }
+			)
+			if sig {
+				true -> bodyOak <- {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [
+						{ type: :assignment, tok: _tok(), local?: true, left: _ident('__js_r'), right: bodyOak }
+						_jsSignalCall('__jsFunctionReturn', _ident('__js_r'))
+					]
+				}
+			}
+			{
+				type: :function
+				tok: _tok()
+				name: fmtName
+				args: params
+				restArg: restArg
+				decls: []
+				body: bodyOak
+			}
+		}
+
+		:jsReturn -> _jsSignalObject(:jsReturn, if node.value {
+			? -> _null()
+			_ -> transpileToOak(node.value, ctx)
+		})
+
+		:jsBreak -> _jsSignalObject(:jsBreak, _null())
+		:jsContinue -> _jsSignalObject(:jsContinue, _null())
+		:jsThrow -> _jsSignalObject(:jsThrow, transpileToOak(node.argument, ctx))
+
+		:jsBlock -> _lowerBody(node.stmts, ctx)
+
+		:jsEmpty -> _null()
+		:jsExpressionStatement -> transpileToOak(node.expression, ctx)
 
 		:jsIf -> {
-			type: :ifExpr
-			tok: _tok()
-			cond: transpileToOak(node.test)
-			branches: [
-				{
-					type: :ifBranch
-					tok: _tok()
-					target: { type: :bool, tok: _tok(), val: true }
-					body: transpileToOak(node.consequent)
-				}
-			] |> append(if node.alternate {
-				? -> [{
-					type: :ifBranch
-					tok: _tok()
-					target: { type: :empty, tok: _tok() }
-					body: { type: :null, tok: _tok(), val: ? }
-				}]
-				_ -> [{
-					type: :ifBranch
-					tok: _tok()
-					target: { type: :empty, tok: _tok() }
-					body: transpileToOak(node.alternate)
-				}]
-			})
-		}
-
-		:jsVar -> {
-			type: :assignment
-			tok: _tok()
-			local?: true
-			left: transpileToOak(jsIdentifier(node.name))
-			right: if node.init {
-				? -> { type: :null, tok: _tok(), val: ? }
-				_ -> transpileToOak(node.init)
+			cons := if node.consequent {
+				? -> _null()
+				_ -> transpileToOak(node.consequent, ctx)
+			}
+			alt := if node.alternate {
+				? -> _null()
+				_ -> transpileToOak(node.alternate, ctx)
+			}
+			{
+				type: :ifExpr
+				tok: _tok()
+				cond: _jsTruthyCall(transpileToOak(node.test, ctx))
+				branches: [
+					{
+						type: :ifBranch
+						tok: _tok()
+						target: { type: :bool, tok: _tok(), val: true }
+						body: cons
+					}
+					{
+						type: :ifBranch
+						tok: _tok()
+						target: { type: :empty, tok: _tok() }
+						body: alt
+					}
+				]
 			}
 		}
 
 		:jsTernary -> {
 			type: :ifExpr
 			tok: _tok()
-			cond: transpileToOak(node.test)
+			cond: _jsTruthyCall(transpileToOak(node.test, ctx))
 			branches: [
-				{
-					type: :ifBranch
-					tok: _tok()
-					target: { type: :bool, tok: _tok(), val: true }
-					body: transpileToOak(node.consequent)
-				}
-				{
-					type: :ifBranch
-					tok: _tok()
-					target: { type: :empty, tok: _tok() }
-					body: transpileToOak(node.alternate)
-				}
+				{ type: :ifBranch, tok: _tok(), target: { type: :bool, tok: _tok(), val: true }, body: transpileToOak(node.consequent, ctx) }
+				{ type: :ifBranch, tok: _tok(), target: { type: :empty, tok: _tok() }, body: transpileToOak(node.alternate, ctx) }
 			]
 		}
 
+		:jsVar -> {
+			type: :assignment
+			tok: _tok()
+			local?: true
+			left: transpileToOak(jsIdentifier(node.name), ctx)
+			right: if node.init {
+				? -> { type: :null, tok: _tok(), val: ? }
+				_ -> transpileToOak(node.init, ctx)
+			}
+		}
+
+		:jsWhile -> {
+			bodyOak := _lowerBody(_jsStmts(node.body), { threaded?: true })
+			{
+				type: :fnCall
+				tok: _tok()
+				function: _ident('__jsWhile')
+				args: [
+					_fnLit([], transpileToOak(node.test, ctx))
+					_fnLit([], bodyOak)
+				]
+				restArg: ?
+			}
+		}
+
+		:jsDoWhile -> {
+			bodyOak := _lowerBody(_jsStmts(node.body), { threaded?: true })
+			{
+				type: :fnCall
+				tok: _tok()
+				function: _ident('__jsDoWhile')
+				args: [
+					_fnLit([], bodyOak)
+					_fnLit([], transpileToOak(node.test, ctx))
+				]
+				restArg: ?
+			}
+		}
+
+		:jsFor -> {
+			exprs := []
+			if node.init {
+				? -> ?
+				_ -> exprs << transpileToOak(node.init, ctx)
+			}
+			bodyOak := _lowerBody(_jsStmts(node.body), { threaded?: true })
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: exprs << {
+					type: :fnCall
+					tok: _tok()
+					function: _ident('__jsFor')
+					args: [
+						_fnLit([], if node.test {
+							? -> { type: :bool, tok: _tok(), val: true }
+							_ -> transpileToOak(node.test, ctx)
+						})
+						_fnLit([], if node.update {
+							? -> _null()
+							_ -> transpileToOak(node.update, ctx)
+						})
+						_fnLit([], bodyOak)
+					]
+					restArg: ?
+				}
+			}
+		}
+
+		:jsForIn -> {
+			paramName := _jsLoopTargetName(node.left)
+			bodyOak := _lowerBody(_jsStmts(node.body), { threaded?: true })
+			call := {
+				type: :fnCall
+				tok: _tok()
+				function: _ident('__jsForIn')
+				args: [
+					transpileToOak(node.right, ctx)
+					_fnLit([paramName], bodyOak)
+				]
+				restArg: ?
+			}
+			if node.left.type = :jsVar {
+				true -> {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [
+						{ type: :assignment, tok: _tok(), local?: true, left: _ident(paramName), right: _null() }
+						call
+					]
+				}
+				_ -> call
+			}
+		}
+
+		:jsForOf -> {
+			paramName := _jsLoopTargetName(node.left)
+			bodyOak := _lowerBody(_jsStmts(node.body), { threaded?: true })
+			call := {
+				type: :fnCall
+				tok: _tok()
+				function: _ident('__jsForOf')
+				args: [
+					transpileToOak(node.right, ctx)
+					_fnLit([paramName], bodyOak)
+				]
+				restArg: ?
+			}
+			if node.left.type = :jsVar {
+				true -> {
+					type: :block
+					tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+					decls: []
+					exprs: [
+						{ type: :assignment, tok: _tok(), local?: true, left: _ident(paramName), right: _null() }
+						call
+					]
+				}
+				_ -> call
+			}
+		}
+
+		:jsSwitch -> {
+			// JS switch: strict (SameValueZero) comparison of the discriminant,
+			// cases execute in source order once entered (fall-through), break
+			// stops the switch and is consumed here; return/throw/continue
+			// propagate outward. Lowered to locals + a threaded if/else web.
+			tName := freshTemp()
+			aName := freshTemp()
+			dName := freshTemp()
+			cases := default(node.cases, [])
+			dexpr := transpileToOak(node.discriminant, ctx)
+			exprs := []
+			exprs << _localAssign(tName, dexpr)
+			exprs << _localAssign(aName, _bool(false))
+			exprs << _localAssign(dName, _bool(false))
+			rNames := []
+			cases |> each(fn(c) {
+				rname := freshTemp()
+				notDone := _notExpr(_ident(dName))
+				if c.test {
+					? -> {
+						// default clause: entered if reached before any signal
+						exprs << _localAssign(aName, _orExpr(_ident(aName), notDone))
+					}
+					_ -> {
+						eqCall := _call2('__jsSwitchEq', _ident(tName), transpileToOak(c.test, ctx))
+						exprs << _localAssign(aName, _orExpr(_ident(aName), _andExpr(notDone, eqCall)))
+					}
+				}
+				bodyOak := _lowerBody(default(c.body, []), { threaded?: true })
+				exprs << _localAssign(rname, _ifBool(_ident(aName), bodyOak, _bool(false)))
+				sigCall := _jsSignalCall('__jsSignal?', _ident(rname))
+				exprs << _localAssign(aName, _andExpr(_ident(aName), _notExpr(sigCall)))
+				exprs << _localAssign(dName, _orExpr(_ident(dName), _jsSignalCall('__jsSignal?', _ident(rname))))
+				rNames << rname
+			})
+			fn foldFrom(i, acc) if i {
+				0 -> acc
+				_ -> foldFrom(i - 1, _ifBool(_jsSignalCall('__jsSignal?', _ident(rNames.(i - 1))), _ident(rNames.(i - 1)), acc))
+			}
+			folded := foldFrom(len(rNames), _bool(false))
+			sName := freshTemp()
+			outName := freshTemp()
+			exprs << _localAssign(sName, folded)
+			// jsBreak is consumed by the switch boundary; other signals propagate
+			exprs << _localAssign(outName, _ifBool(
+				_jsSignalCall('__jsIsBreak', _ident(sName))
+				{ type: :null, tok: _tok(), val: ? }
+				_ident(sName)
+			))
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: exprs << _ident(outName)
+			}
+		}
+
+		:jsTry -> {
+			t1 := freshTemp()
+			prev := t1
+			stmts := []
+			stmts << {
+				type: :assignment
+				tok: _tok()
+				local?: true
+				left: _ident(t1)
+				right: _lowerBody(_jsStmts(node.guarded), { threaded?: true })
+			}
+			if node.param {
+				? -> ?
+				_ -> {
+					t2 := freshTemp()
+					catchParam := if type(node.param) {
+						:string -> node.param
+						_ -> node.param.val
+					}
+					catchExprs := []
+					catchExprs << {
+						type: :assignment
+						tok: _tok()
+						local?: true
+						left: _ident(catchParam)
+						right: {
+							type: :propertyAccess
+							tok: _tok()
+							left: _ident(t1)
+							right: { type: :identifier, tok: _tok(), val: 'v' }
+						}
+					}
+					catchExprs << _lowerBody(_jsStmts(node.catchBody), { threaded?: true })
+					stmts << {
+						type: :assignment
+						tok: _tok()
+						local?: true
+						left: _ident(t2)
+						right: {
+							type: :ifExpr
+							tok: _tok()
+							cond: _jsSignalCall('__jsIsThrow', _ident(t1))
+							branches: [
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :bool, tok: _tok(), val: true }
+									body: {
+										type: :block
+										tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+										decls: []
+										exprs: catchExprs
+									}
+								}
+								{
+									type: :ifBranch
+									tok: _tok()
+									target: { type: :empty, tok: _tok() }
+									body: _ident(t1)
+								}
+							]
+						}
+					}
+					prev <- t2
+				}
+			}
+			if node.finallyBody {
+				? -> ?
+				_ -> {
+					tF := freshTemp()
+					tOut := freshTemp()
+					stmts << {
+						type: :assignment
+						tok: _tok()
+						local?: true
+						left: _ident(tF)
+						right: _lowerBody(_jsStmts(node.finallyBody), { threaded?: true })
+					}
+					stmts << {
+						type: :assignment
+						tok: _tok()
+						local?: true
+						left: _ident(tOut)
+						right: {
+							type: :ifExpr
+							tok: _tok()
+							cond: _jsSignalCall('__jsSignal?', _ident(tF))
+							branches: [
+								{ type: :ifBranch, tok: _tok(), target: { type: :bool, tok: _tok(), val: true }, body: _ident(tF) }
+								{ type: :ifBranch, tok: _tok(), target: { type: :empty, tok: _tok() }, body: _ident(prev) }
+							]
+						}
+					}
+					prev <- tOut
+				}
+			}
+			stmts << _ident(prev)
+			{
+				type: :block
+				tok: { pos: [0, 1, 1], type: :leftBrace, val: ? }
+				decls: []
+				exprs: stmts
+			}
+		}
+
+		:jsDebugger -> _null()
+
 		:jsTemplateLiteral -> {
-			// Reduce template parts into a series of + concatenations
 			node.parts |> reduce(
 				{ type: :string, tok: _tok(), val: '' }
 				fn(acc, part) {
@@ -443,15 +1429,41 @@ fn transpileToOak(node) if node {
 					tok: _tok()
 					op: :plus
 					left: acc
-					right: transpileToOak(part)
+					right: transpileToOak(part, ctx)
 				}
 			)
 		}
 
-		:jsSpread -> transpileToOak(node.argument)
+		:jsSpread -> transpileToOak(node.argument, ctx)
 
-		_ -> { type: :null, tok: _tok(), val: ? }
+		_ -> {
+			_diagnose('unsupported JS node type: ' << string(node.type))
+			if JsStrictTranspile {
+				true -> _jsUnsupported('unsupported JS node type: ' << string(node.type))
+				_ -> { type: :null, tok: _tok(), val: ? }
+			}
+		}
+		}
 	}
+}
+
+// check whether a JS body subtree uses the implicit `arguments` binding
+fn _jsUsesArguments?(node) if node {
+	? -> false
+	_ -> if node.type {
+		:jsIdentifier -> node.val = 'arguments'
+		:jsFunction, :jsArrowFunction -> false
+		_ -> len(keys(node) |> filter(fn(k) _hasArgumentsValue?(node.(k)))) != 0
+	}
+}
+
+fn _hasArgumentsValue?(v) if type(v) {
+	:object -> if v.type {
+		? -> false
+		_ -> _jsUsesArguments?(v)
+	}
+	:list -> len(v |> filter(_hasArgumentsValue?)) != 0
+	_ -> false
 }
 
 // -- walkJS: traverse JS AST calling visitor on each node --
@@ -513,7 +1525,7 @@ fn renderJS(node) if node {
 		:jsNull -> 'null'
 		:jsUndefined -> 'undefined'
 		:jsNumber -> string(node.val)
-		:jsString -> '\'' << node.val |> replace('\'', '\\\'') << '\''
+		:jsString -> '\'' << node.val |> replace('\\', '\\\\') |> replace('\'', '\\\'') |> replace('\n', '\\n') << '\''
 		:jsBool -> string(node.val)
 		:jsIdentifier -> node.val
 		:jsArray -> '[' << node.elems |> map(renderJS) |> reduce('', fn(acc, el) if acc {
@@ -526,7 +1538,7 @@ fn renderJS(node) if node {
 		}) << '}'
 		:jsBinary -> '(' << renderJS(node.left) << ' ' << node.op << ' ' << renderJS(node.right) << ')'
 		:jsUnary -> '(' << node.op << renderJS(node.right) << ')'
-		:jsAssignment -> renderJS(node.left) << ' = ' << renderJS(node.right)
+		:jsAssignment -> renderJS(node.left) << ' ' << default(node.op, '=') << ' ' << renderJS(node.right)
 		:jsProperty -> renderJS(node.object) << '.' << renderJS(node.property)
 		:jsIndex -> renderJS(node.object) << '[' << renderJS(node.index) << ']'
 		:jsCall -> renderJS(node.callee) << '(' << node.args |> map(renderJS) |> reduce('', fn(acc, el) if acc {
@@ -563,6 +1575,9 @@ fn renderJS(node) if node {
 			_ -> '${' << renderJS(p) << '}'
 		}) |> reduce('', fn(acc, el) acc << el) << '`'
 		:jsSpread -> '...' << renderJS(node.argument)
+		:jsSwitch -> 'switch (' << renderJS(node.discriminant) << ') { ' << node.cases |> map(fn(c) {
+			(if c.test { ? -> 'default', _ -> 'case ' << renderJS(c.test) }) << ': ' << c.body |> map(fn(s) renderJS(s)) |> reduce('', fn(acc, el) acc << el << '; ')
+		}) |> reduce('', fn(acc, el) acc << el) << '}'
 		_ -> '/* unknown */'
 	}
 }

@@ -1,0 +1,139 @@
+// AWT-subset drawing -> Magnolia's GUI command queue. Not an AWT window,
+// event loop, imaging stack or substitute for missing JVM host methods.
+
+std := import('std')
+str := import('str')
+guiWeb := import('gui-web')
+guiColor := import('gui-color')
+
+fn _error(message) {type: :error, message: message}
+
+fn packedColor(css) {
+    if type(css) != :string | !str.startsWith?(css, 'rgb(') |
+        !str.endsWith?(css, ')') {
+        true -> _error('invalid AWT drawing color')
+        _ -> {
+            pieces := str.split(std.slice(css, 4, len(css) - 1), ',')
+            if len(pieces) != 3 {
+                true -> _error('expected rgb(r,g,b)')
+                _ -> {
+                    r := int(pieces.(0))
+                    g := int(pieces.(1))
+                    b := int(pieces.(2))
+                    if r = ? | g = ? | b = ? | r < 0 | r > 255 |
+                       g < 0 | g > 255 | b < 0 | b > 255 {
+                        true -> _error('AWT color channel outside 0..255')
+                        _ -> {type: :ok, value: guiColor.rgb(r, g, b)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A Magnolia Web backend state. Its bridge callback receives actual
+// :canvas_create/:frame_begin/:rect/:line/:text/:frame_end operations.
+// The embedder, not this module, connects the bridge to a DOM Canvas.
+fn createWeb(title, width, height, bridge) if width >= 1 & height >= 1 &
+    width <= 4096 & height <= 4096 {
+    true -> {
+        window := guiWeb.createWindowState(title, width, height, 16, false,
+            {webBridge: bridge, canvasId: 'magnolia-applet-canvas', context: '2d'})
+        guiWeb.createCanvas(window, 'magnolia-applet-canvas',
+            {width: width, height: height})
+        {type: :ok, window: window}
+    }
+    _ -> _error('canvas dimensions must be 1..4096')
+}
+
+// Prevalidate the complete frame so a bad operation never partially paints.
+fn _validate(commands) {
+    problem := ?
+    if type(commands) != :list | len(commands) > 16384 ->
+        problem <- 'expected at most 16384 drawing commands'
+    if problem = ? -> commands |> std.each(fn(op) if problem = ? {
+        true -> {
+            color := packedColor(op.color)
+            if color.type = :error -> problem <- color.message
+            if !(op.type = :rect | op.type = :line | op.type = :text) ->
+                problem <- 'unsupported drawing command ' + string(op.type)
+            if op.type = :rect & (type(op.x) != :int | type(op.y) != :int |
+                type(op.width) != :int | type(op.height) != :int |
+                op.width < 1 | op.height < 1) -> problem <- 'invalid rectangle'
+            if op.type = :line & (type(op.x1) != :int | type(op.y1) != :int |
+                type(op.x2) != :int | type(op.y2) != :int) -> problem <- 'invalid line'
+            if op.type = :text & (type(op.x) != :int | type(op.y) != :int |
+                type(op.text) != :string | len(op.text) > 65536) ->
+                problem <- 'invalid text command'
+        }
+    })
+    if problem = ? {true -> {type: :ok}, _ -> _error(problem)}
+}
+
+// Exact AWT geometry is queued; Magnolia's general gui-draw.fillRect
+// intentionally expands rectangles and is not suitable here.
+fn replayWeb(window, commands) if window.type != :ok | window.backend != :web {
+    true -> _error('replayWeb needs a Magnolia Web window')
+    _ -> {
+    checked := _validate(commands)
+    if checked.type = :error {
+        true -> checked
+        _ -> {
+            guiWeb.beginFrame(window)
+            commands |> std.each(fn(op) {
+                color := packedColor(op.color).value
+                if op.type {
+                    :rect -> guiWeb._webRecord(window, {
+                        type: :rect, x: op.x, y: op.y, width: op.width,
+                        height: op.height, color: color, borderColor: ?})
+                    :line -> guiWeb._webRecord(window, {
+                        type: :line, x1: op.x1, y1: op.y1, x2: op.x2,
+                        y2: op.y2, color: color})
+                    :text -> guiWeb._webRecord(window, {
+                        type: :text, x: op.x, y: op.y, text: op.text,
+                        color: color, font: '16px sans-serif'})
+                }
+            })
+            guiWeb.endFrame(window)
+            {type: :ok, window: window, commands: len(commands)}
+        }
+    }
+    }
+}
+
+// A native host may supply its own Magnolia GUI window. Native rendering is
+// deliberately not advertised as pixel-identical: GUI drawText/rect baseline
+// coordinates differ from AWT on Windows and X11; no event dispatch exists.
+fn replayNative(window, commands) if window.type != :ok | !(window.backend = :windows | window.backend = :linux) {
+    true -> _error('replayNative needs a Magnolia native GUI window')
+    _ -> {
+    checked := _validate(commands)
+    if checked.type = :error {
+        true -> checked
+        _ -> {
+            gui := import('GUI')
+            problem := ?
+            commands |> std.each(fn(op) if problem = ? {
+                true -> {
+                    color := packedColor(op.color).value
+                    result := if op.type {
+                        :rect -> gui.fillRect(window, op.x, op.y, op.width, op.height, color, ?)
+                        :line -> gui.drawLine(window, op.x1, op.y1, op.x2, op.y2, color)
+                        :text -> gui.drawText(window, op.x, op.y, op.text, color)
+                    }
+                    if result.type = :error -> problem <- result.message
+                }
+            })
+            if problem = ? {
+                true -> {type: :ok, window: window, commands: len(commands)}
+                _ -> _error(problem)
+            }
+        }
+    }
+    }
+}
+
+// Browser-to-runtime event routing is not silently stubbed. The current
+// interpreter has no AWT event dispatch/object semantics; return a diagnostic.
+fn sendEvent(window, event) _error('AWT input event dispatch is not yet implemented: ' +
+    string(event.type))

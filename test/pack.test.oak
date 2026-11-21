@@ -17,9 +17,16 @@ fn run(t) {
 	'pack exports collectVFSFiles function' |> t.eq(type(pack.collectVFSFiles), :function)
 
 	{
+		// serializeVFS emits MessagePack, so an empty map is the single byte
+		// 0x80 (fixmap with 0 entries), not the JSON text '{}'. The old
+		// assertion predates the JSON -> MessagePack switch.
 		'packUtils serializeVFS empty object' |> t.eq(
 			packUtils.serializeVFS({})
-			'{}'
+			'\x80'
+		)
+		'packUtils serializeVFS empty object round-trips' |> t.eq(
+			packUtils.deserializeVFS(packUtils.serializeVFS({}))
+			{}
 		)
 
 		'packUtils serializeVFS with files' |> t.eq(
@@ -35,12 +42,23 @@ fn run(t) {
 			{}
 		)
 
+		// The VFS format is MessagePack, not JSON (see serializeVFS). Feed it
+		// a real serialized payload rather than a JSON literal.
 		'packUtils deserializeVFS with data' |> t.eq(
 			{
-				vfs := packUtils.deserializeVFS('{"test.txt":"data"}')
+				payload := packUtils.serializeVFS({'test.txt': 'data'})
+				vfs := packUtils.deserializeVFS(payload)
 				vfs.('test.txt')
 			}
 			'data'
+		)
+
+		// Regression: non-object payloads must yield {} rather than leaking a
+		// scalar out to callers that expect a files map. '{"a":1}' is valid
+		// MessagePack for the integer 123.
+		'packUtils deserializeVFS rejects non-object payloads' |> t.eq(
+			packUtils.deserializeVFS('{"test.txt":"data"}')
+			{}
 		)
 
 		'packUtils roundtrip serialize/deserialize' |> t.eq(

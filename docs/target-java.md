@@ -1,8 +1,5 @@
-# Java Target (`--java`)
+> For Java **`.class`/`.jar`/`.java`/local HTML/JNLP inputs**, use the integrated [applet adapter](applet.md) and [Oak VM-library boundary](jvm-vm-libraries.md): `magnolia build --entry applet.class --output AppletConverted.java`. `.java` input may use `--java-backend oak` (small Magnolia-only subset) or isolated build-time `javac`; this is different from emitting Java *output*. Its Magnolia-authored, inline-preamble bytecode-to-Java emitter (optional limited AWT PNG rendering) differs from the general Oak-source renderer below. Java output needs a JDK to run; the applet Oak/JS/HTML outputs do not need a JVM.
 
-Transpiles Oak/Magnolia source to Java 17+.
-
-## Usage
 
 ```sh
 magnolia build --entry src/main.oak --output OakBundle.java --java

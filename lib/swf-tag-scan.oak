@@ -1,0 +1,151 @@
+// Bounded Oak-only FWS tag-envelope scanner, NOT an AVM1/AVM2 VM or player.
+// The older uploaded Flash-5 movie is 2.4 MiB with 7,394 top/sprite tags.
+// Byte offsets are never interpreted as code, images, sound or URLs. This
+// module refuses compression, later versions, unsupported AS3/ABC and
+// truncated/overlapping/unterminated tag streams before returning metadata.
+std := import('std')
+
+fn _error(message) {type: :error, message: 'FWS tag scan: ' + message}
+fn _at(raw, pos) codepoint(raw.(pos)) & 255
+fn _u16(raw, pos) _at(raw, pos) | (_at(raw, pos + 1) << 8)
+fn _u32(raw, pos) _u16(raw, pos) + _u16(raw, pos + 2) * 65536
+
+fn scan(raw) if type(raw) != :string | len(raw) < 16 |
+    len(raw) > 3000000 {
+    true -> _error('input outside 16..3000000 byte cap')
+    _ -> if std.slice(raw, 0, 3) != 'FWS' {
+        true -> _error('only uncompressed FWS admitted; no CWS/ZWS decoder')
+        _ -> if _at(raw, 3) < 1 | _at(raw, 3) > 7 |
+            _u32(raw, 4) != len(raw) {
+            true -> _error('version outside 1..7 or declared size differs')
+            _ -> {
+                bits := _at(raw, 8) >> 3
+                rectBytes := (5 + 4 * bits + 7) >> 3
+                if bits < 1 | bits > 31 | 8 + rectBytes + 4 >= len(raw) {
+                    true -> _error('invalid or truncated RECT and frame header')
+                    _ -> {
+                        fpsFixed := _u16(raw, 8 + rectBytes)
+                        frames := _u16(raw, 10 + rectBytes)
+                        if fpsFixed = 0 | frames > 4096 {
+                            true -> _error('frame rate/count outside finite profile')
+                            _ -> {
+                                totalTags := 0
+                                topTags := 0
+                                nestedTags := 0
+                                topActions := 0
+                                nestedActions := 0
+                                sprites := []
+                                problem := ?
+                                // Offsets are into ONE raw string, never copied
+                                // into unbounded nested strings/arrays.
+                                fn walk(start, stop, claimedFrames, depth) {
+                                    cursor := start
+                                    tags := 0
+                                    shows := 0
+                                    actionTags := 0
+                                    ended? := false
+                                    std.range(10000) |> std.each(fn(_) if
+                                        problem = ? & !ended? & cursor < stop {
+                                        true -> if stop - cursor < 2 {
+                                            true -> problem <- 'truncated tag header'
+                                            _ -> {
+                                                header := _u16(raw, cursor)
+                                                cursor <- cursor + 2
+                                                code := header >> 6
+                                                size := header & 63
+                                                if size = 63 {
+                                                    true -> if stop - cursor < 4 {
+                                                        true -> problem <- 'truncated long tag length'
+                                                        _ -> {
+                                                            size <- _u32(raw, cursor)
+                                                            cursor <- cursor + 4
+                                                        }
+                                                    }
+                                                }
+                                                if problem = ? {
+                                                    true -> if size > stop - cursor |
+                                                        totalTags >= 10000 {
+                                                        true -> problem <- 'tag overflows parent or 10000-tag budget'
+                                                        _ -> {
+                                                            tags <- tags + 1
+                                                            totalTags <- totalTags + 1
+                                                            if depth = 0 {
+                                                                true -> topTags <- topTags + 1
+                                                                _ -> nestedTags <- nestedTags + 1
+                                                            }
+                                                            if code = 0 {
+                                                                true -> if size != 0 {
+                                                                    true -> problem <- 'End tag has payload'
+                                                                    _ -> ended? <- true
+                                                                }
+                                                            }
+                                                            if code = 1 -> shows <- shows + 1
+                                                            if code = 12 | code = 59 {
+                                                                true -> {
+                                                                    actionTags <- actionTags + 1
+                                                                    if depth = 0 {
+                                                                        true -> topActions <- topActions + 1
+                                                                        _ -> nestedActions <- nestedActions + 1
+                                                                    }
+                                                                }
+                                                            }
+                                                            if code = 82 | code = 69 ->
+                                                                problem <- 'ABC/FileAttributes outside FWS v1..7 profile'
+                                                            if code = 39 & problem = ? {
+                                                                true -> if size < 4 | depth >= 8 |
+                                                                    len(sprites) >= 32 {
+                                                                    true -> problem <- 'truncated or over-budget sprite'
+                                                                    _ -> {
+                                                                        id := _u16(raw, cursor)
+                                                                        spriteFrames := _u16(raw, cursor + 2)
+                                                                        if spriteFrames > 4096 {
+                                                                            true -> problem <- 'sprite frames outside budget'
+                                                                            _ -> {
+                                                                                inner := walk(cursor + 4,
+                                                                                    cursor + size,
+                                                                                    spriteFrames, depth + 1)
+                                                                                if problem = ? -> sprites << {
+                                                                                    id: id, frames: spriteFrames,
+                                                                                    depth: depth + 1,
+                                                                                    tags: inner.tags,
+                                                                                    actionTags: inner.actionTags
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            cursor <- cursor + size
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    })
+                                    if problem = ? & (!ended? | cursor != stop |
+                                        shows != claimedFrames) ->
+                                        problem <- 'timeline End/length/ShowFrame differs'
+                                    {tags: tags, actionTags: actionTags}
+                                }
+                                walk(8 + rectBytes + 4, len(raw), frames, 0)
+                                if problem != ? {
+                                    true -> _error(problem)
+                                    _ -> {type: :ok, signature: 'FWS',
+                                        version: _at(raw, 3), bytes: len(raw),
+                                        frameCount: frames, fpsFixed: fpsFixed,
+                                        topTags: topTags, nestedTags: nestedTags,
+                                        totalTags: totalTags,
+                                        topActionTags: topActions,
+                                        nestedActionTags: nestedActions,
+                                        sprites: sprites,
+                                        actionRecordsExecuted?: false,
+                                        framesRendered?: false}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

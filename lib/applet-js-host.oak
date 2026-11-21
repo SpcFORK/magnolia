@@ -1,0 +1,121 @@
+// Small, self-contained host bridge appended to a Magnolia Builder JS bundle.
+// Bytecode and Oak runtime themselves are rendered by Magnolia Builder.
+// All original class bytes are carried in an optional verified Magnolia
+// archive; browser clients should pass it to applet.unbundle for validation.
+
+json := import('json')
+str := import('str')
+
+_BRIDGE := '
+;(() => {
+  "use strict";
+  const key = Object.keys(__Oak_Modules).find(x => x.endsWith("/.magnolia-applet-entry.oak"));
+  if (!key) throw new Error("Magnolia applet entry module missing");
+  const entry = __oak_module_import(key);
+  const archive = /*%ARCHIVE%*/;
+  const listeners = new Map();
+  const value = x => x && x.__mark_oak_string ? String(x) :
+    typeof x === "symbol" ? (Symbol.keyFor(x) || String(x)) : x;
+  function normalize(x, seen = new WeakSet(), depth = 0) {
+    if (depth > 64) throw new Error("host result nesting limit exceeded");
+    if (x && x.__mark_oak_string) return String(x);
+    if (typeof x === "symbol") return value(x);
+    if (x && typeof x === "object") {
+      if (seen.has(x)) throw new Error("cyclic host result cannot be serialized");
+      seen.add(x);
+      const out = Array.isArray(x) ? [] : {};
+      for (const [k, v] of Object.entries(x)) out[k] = normalize(v, seen, depth + 1);
+      seen.delete(x);
+      return out;
+    }
+    return x;
+  }
+  function emit(kind, payload) {
+    for (const cb of listeners.get(kind) || []) {
+      try { cb(payload); } catch (e) { console.error("Applet host listener:", e); }
+    }
+  }
+  const error = message => ({type: "error", message});
+  function info() {
+    const classes = Object.keys(entry.program.classes);
+    return {type: "ok", entry: String(entry.program.entry),
+      kind: String(entry.program.kind), classes,
+      methods: Object.fromEntries(classes.map(c =>
+        [c, Object.keys(entry.program.classes[c].methods)]))};
+  }
+  function setParameter(name, parameter) {
+    if (typeof name !== "string" || name.length > 256 || !name ||
+        (parameter !== null && typeof parameter !== "string"))
+      return error("parameter must have a name and string or null value");
+    Object.defineProperty(entry.params, name, {value: parameter === null ? null :
+      __Oak_String(parameter), writable: true, configurable: true, enumerable: true});
+    const result = {type: "ok", name, value: parameter};
+    emit("parameter", result);
+    return result;
+  }
+  // Each call starts fresh bounded execution: no persistent JVM object or
+  // unimplemented AWT input event is silently simulated.
+  function run(overrides = {}) {
+    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides))
+      return error("run options must be an object");
+    const options = {...entry.options, ...overrides};
+    if (Object.prototype.hasOwnProperty.call(overrides, "paint?"))
+      options.paint__oak_qm = overrides["paint?"] === true;
+    if (Object.prototype.hasOwnProperty.call(overrides, "emitDraw?"))
+      options.emitDraw__oak_qm = overrides["emitDraw?"] === true;
+    if (options.args !== undefined && options.args !== null) {
+      if (!Array.isArray(options.args)) return error("args must be an array");
+      options.args = options.args.map(x => typeof x === "string" ? __Oak_String(x) : x);
+    }
+    if (options.method !== undefined && options.method !== null) {
+      const method = String(options.method), desc = String(options.desc || "()V");
+      const cls = entry.program.classes[String(entry.program.entry)];
+      if (String(entry.program.kind) === "application" || !cls.methods[method + desc])
+        return error("method not in verified bundle; rebuild with --method and --desc");
+      options.method = __Oak_String(method);
+      options.desc = __Oak_String(desc);
+    }
+    const raw = entry.runtime.run(entry.program, entry.params, options);
+    const output = String(raw.output || "");
+    const draw = normalize(raw.draw || []);
+    const result = {type: raw.type === Symbol.for("ok") ? "ok" : "error",
+      output, value: normalize(raw.value), steps: raw.steps, draw,
+      message: raw.message == null ? null : String(raw.message)};
+    if (output) { emit("output", output); console.log(output); }
+    if (draw.length) {
+      const image = {width: options.width || 320, height: options.height || 200,
+        commands: draw};
+      emit("drawing", image);
+      if (typeof document !== "undefined")
+        console.log("__MAGNOLIA_DRAW_V1__:" + JSON.stringify(image));
+    }
+    emit(result.type === "ok" ? "result" : "error", result);
+    return result;
+  }
+  function dispatch(message) {
+    if (!message || typeof message !== "object") return error("host command must be an object");
+    switch (message.type) {
+      case "inspect": return info();
+      case "run": return run(message.options || {});
+      case "paint": return run({...(message.options || {}), "paint?": true});
+      case "setParameter": return setParameter(message.name, message.value);
+      case "invoke": return run({method: message.method,
+        desc: message.desc || "()V", args: message.args || []});
+      case "restore": return {type: archive === null ? "error" : "ok",
+        archive, message: archive === null ? "no embedded original" : null};
+      case "event": return error("AWT input event dispatch is not implemented");
+      default: return error("unsupported applet host command: " + String(message.type));
+    }
+  }
+  globalThis.MagnoliaApplet = Object.freeze({inspect: info, setParameter, run,
+    dispatch, restoreArchive: () => archive,
+    on(kind, cb) { if (typeof cb !== "function") return error("listener must be a function");
+      if (!listeners.has(kind)) listeners.set(kind, new Set());
+      listeners.get(kind).add(cb);
+      return () => listeners.get(kind).delete(cb);
+    }});
+})();
+'
+
+fn source(archive) str.replace(_BRIDGE, '/*%ARCHIVE%*/',
+    if archive = ? {true -> 'null', _ -> json.serialize(archive)})

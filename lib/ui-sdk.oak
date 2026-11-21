@@ -40,6 +40,22 @@ fn createApp(options) {
 	}
 }
 
+// _applyClass compiles classStr (reusing the styles-table cache) and binds it
+// to the node. uiCore.setStyle bumps the core epoch itself, so no separate
+// loadStyles round-trip is needed even for previously-unseen classes: the
+// styles table only grows, and new style ids have no cached resolutions.
+fn _applyClass(app, id, classStr) {
+	styleId := surface.STYLE_ID_NONE
+	if classStr != ? & classStr != '' {
+		true -> {
+			sid := styleBake.ensureClass(app.styles, classStr)
+			styleId <- sid
+			if sid >= 0 -> uiCore.setStyle(app.core, id, sid)
+		}
+	}
+	styleId
+}
+
 fn _mkey(id) string(id)
 
 fn _mirrorGet(app, id) app.mirror.(_mkey(id))
@@ -53,18 +69,7 @@ fn View(app, parentId, classStr, opts) {
 	o := default(opts, {})
 	id := uiCore.createNode(app.core, surface.NODE_TYPE.view)
 	uiCore.insertBefore(app.core, default(parentId, surface.ROOT_ID), id, 0)
-	styleId := surface.STYLE_ID_NONE
-	if classStr != ? & classStr != '' {
-		true -> {
-			styleId := styleBake.ensureClass(app.styles, classStr)
-			if styleId >= 0 {
-				true -> {
-					uiCore.loadStyles(app.core, app.styles)
-					uiCore.setStyle(app.core, id, styleId)
-				}
-			}
-		}
-	}
+	styleId := _applyClass(app, id, classStr)
 	// optional style object overrides
 	if o.style != ? {
 		true -> {
@@ -97,18 +102,7 @@ fn Text(app, parentId, text, classStr, opts) {
 	id := uiCore.createNode(app.core, surface.NODE_TYPE.text)
 	uiCore.insertBefore(app.core, default(parentId, surface.ROOT_ID), id, 0)
 	uiCore.setText(app.core, id, default(text, ''))
-	styleId := surface.STYLE_ID_NONE
-	if classStr != ? & classStr != '' {
-		true -> {
-			styleId := styleBake.ensureClass(app.styles, classStr)
-			if styleId >= 0 {
-				true -> {
-					uiCore.loadStyles(app.core, app.styles)
-					uiCore.setStyle(app.core, id, styleId)
-				}
-			}
-		}
-	}
+	styleId := _applyClass(app, id, classStr)
 	if o.style != ? {
 		true -> {
 			ks := std.keys(o.style)
@@ -141,7 +135,6 @@ fn setText(app, id, text) {
 // setClass recompiles class and applies style.
 fn setClass(app, id, classStr) {
 	styleId := styleBake.ensureClass(app.styles, classStr)
-	uiCore.loadStyles(app.core, app.styles)
 	if styleId >= 0 -> uiCore.setStyle(app.core, id, styleId)
 	m := _mirrorGet(app, id)
 	if m != ? {

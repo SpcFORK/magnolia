@@ -37,8 +37,8 @@ fn uEscape(c) {
 }
 
 fn uParse(uc) {
-	cp := ((fromHex(uc.(0)) << 4) | fromHex(uc.(1)))
-	codepoint(cp)
+	cp := ((((fromHex(uc.(0)) << 4) | fromHex(uc.(1))) << 8) | ((fromHex(uc.(2)) << 4) | fromHex(uc.(3))))
+	char(cp)
 }
 
 
@@ -135,6 +135,7 @@ fn parseString(r) {
 			'n' -> '\n'
 			'r' -> '\r'
 			'f' -> '\f'
+			'b' -> char(8)
 			'"' -> '"'
 			'u' -> uParse(nextWord(4))
 			_ -> c
@@ -143,6 +144,12 @@ fn parseString(r) {
 		_ -> sub(acc << c)
 	}
 	sub('')
+}
+
+// _pow10 builds 10.0^n (n >= 0) for float exponent parsing
+fn _pow10(n) if n {
+	0 -> 1.0
+	_ -> 10.0 * _pow10(n - 1)
 }
 
 fn parseNumber(r) {
@@ -156,6 +163,12 @@ fn parseNumber(r) {
 			true
 		}
 		_ -> false
+	}
+
+	fn digits(acc) if peek() {
+		'0', '1', '2', '3', '4'
+		'5', '6', '7', '8', '9' -> digits(acc << next())
+		_ -> acc
 	}
 
 	fn sub(acc) if peek() {
@@ -172,14 +185,62 @@ fn parseNumber(r) {
 	}
 	result := sub('')
 
-	if parsed := if decimal? {
+	// JSON exponents (e.g. 1e-10) -- without this the mantissa parses but
+	// the 'e...' tail derails the surrounding reader
+	expNeg? := false
+	expDigits := ''
+	expPart? := if peek() {
+		'e', 'E' -> {
+			next()
+			expNeg? <- if peek() {
+				'-' -> {
+					next()
+					true
+				}
+				_ -> if peek() = '+' {
+					true -> {
+						next()
+						false
+					}
+					_ -> false
+				}
+			}
+			expDigits <- digits('')
+			if expDigits = '' -> r.err!()
+			true
+		}
+		_ -> false
+	}
+
+	// clamp the decimal exponent: 10^324 overflows float64 to +Inf, so any
+	// larger exponent saturates instead of recursing without bound
+	// ('1e999999999' would otherwise mean a billion-deep _pow10 call)
+	expScale := if expDigits {
+		'' -> 0
+		_ -> if len(expDigits) > 3 {
+			true -> 324
+			_ -> if int(expDigits) > 324 {
+				true -> 324
+				_ -> int(expDigits)
+			}
+		}
+	}
+
+	mantissa := if decimal? | expPart? {
 		true -> float(result)
 		_ -> int(result)
+	}
+	if scaled := if expPart? {
+		true -> if expNeg? {
+			true -> mantissa / _pow10(expScale)
+			_ -> mantissa * _pow10(expScale)
+		}
+		_ -> mantissa
 	} {
 		? -> :error
 		_ -> if negate? {
-			true -> -parsed
-			_ -> parsed
+			true -> -scaled
+			_ -> scaled
 		}
 	}
 }

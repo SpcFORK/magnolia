@@ -1,5 +1,23 @@
 # Build Library (build)
 
+> **Builder's JVM input and reverse adapter:** `magnolia build --entry FILE.class|FILE.jar|FILE.java|FILE.html|FILE.jnlp --output APP.oak|APP.js|APP.html|APP.java` dispatches to Magnolia's verified [applet workflow](applet.md) and reusable [Oak VM-library transition layer](jvm-vm-libraries.md). `.java` uses a bounded Oak-only subset (`--java-backend oak`) or isolated build-time `javac` (`--java-backend javac`); final Oak/JS/HTML does **not** require a JVM. Builder owns the Oak→JS bundling via a virtual in-memory entrypoint. `magnolia build --entry EDITED.oak --output NEW.class|NEW.jar` performs **checked, same-layout bytecode reassembly**; `.jar` needs an embedded original JAR and edited signed archives are rejected. This is not a general Oak/Java compiler. `--no-optimize` is recommended for editable Oak. The native Oak applet emitter remains specialized because the generic Oak renderer misrenders this generated runtime. `magnolia build coverage --entry FILE.class|FILE.jar [--json]` scans **all** input methods, not only a chosen entry; its clean result is not JVM parity. Ordinary Oak builds are unchanged; no full JVM/AWT support is implied. See the [staged JVM compatibility plan](applet.md) for the mediated Transpile/Eval/Build/Compile route contract and acceptance gates.
+
+```sh
+magnolia build --entry test/fixtures/HelloMain.java --java-backend oak \
+  --args '["Ada"]' --output /tmp/Hello.oak
+magnolia /tmp/Hello.oak
+magnolia build --entry test/fixtures/LibraryMain.java --java-backend javac \
+  --args '["Oak"]' --output /tmp/Library.js
+node /tmp/Library.js
+# Edit a named [opcode, operand, reference] method instruction in Oak made
+# from an unsigned JAR, then ask the same Builder for a new, unsigned JAR.
+magnolia build --entry test/fixtures/EditableMain.jar --output /tmp/Editable.oak
+# Save an edited copy as /tmp/Edited.oak (see the applet guide for the exact instruction).
+magnolia build --entry /tmp/Edited.oak --output /tmp/Edited.jar
+```
+
+`import('build').run({entry: 'virtual.oak', source: editedOakText, output: 'New.jar', inMemory?: true})` returns new bytes without staging a file. `api.restoreOak` still restores the exact **original** archive, while `api.recompileJar` makes a new one from checked edits. Repacked ZIP32 containers preserve resource contents and the manifest, not compressed container bytes or signatures. The [`jvm-vm-libs.oak` allowlist](jvm-vm-libraries.md) checks external methods, fields and constructors in both the verifier and runtime. The same linked image now handles bounded `invokeinterface` and transitive user-defined interface membership; default methods and unsupported APIs fail explicitly.
+
 ## Overview
 
 `libbuild` is Oak's compiler and bundler, transforming Oak source code into standalone executables or JavaScript bundles for various target platforms.
@@ -30,7 +48,10 @@ build := import('build')
 Configures the build system with compilation options.
 
 **Parameters (config object):**
-- `entry` - Entry point file path (required). Probes extensions `.oak`, `.ok`, `.mag`, `.mg` if no extension given
+- `entry` - Entry point file path (required). Oak probes `.oak`, `.ok`, `.mag`, `.mg`; supported JVM inputs dispatch to the applet adapter
+- `source` - Optional Oak entry source string; use `entry` as its virtual filename, without staging a file
+- `inMemory?` - Return `{type: :ok, value: bundle}` without writing the output file
+- `applet` - JVM input settings: `entryClass`, `classFiles`, `javaFiles`, `javaBackend` (`auto`/`javac`/`oak`), `javacPath`, `javaRelease`, `params`, `options`, `adapterPath`, `embedOriginal?`, etc. (see [applet guide](applet.md))
 - `output` - Output file path (required)
 - `web?` - Compile to JavaScript (boolean)
 - `wasm?` - Compile to WebAssembly (boolean)

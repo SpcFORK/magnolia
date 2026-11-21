@@ -1,0 +1,1740 @@
+// applet-bytecode — conservative JVM-to-Magnolia instruction lowering.
+// Unsupported instructions and host APIs are rejected *before* code is emitted.
+// All operands/branch offsets/constant-pool entries are resolved once, here.
+
+std := import('std')
+map := std.map
+fmt := import('fmt')
+format := fmt.format
+str := import('str')
+classfile := import('./applet-class.oak')
+vmLib := import('./jvm-vm-libs.oak')
+
+fn byte(code, pc) codepoint(code.(pc)) & 255
+fn signed8(n) if n >= 128 { true -> n - 256, _ -> n }
+fn signed16(n) if n >= 32768 { true -> n - 65536, _ -> n }
+fn signed32(n) if n >= 2147483648 { true -> n - 4294967296, _ -> n }
+fn word(code, pc) (byte(code, pc) * 256) + byte(code, pc + 1)
+fn key(name, desc) name + desc
+fn errorAt(owner, methodName, desc, pc, message) {
+	type: :error
+	message: format('{{0}}.{{1}}{{2}} at byte {{3}}: {{4}}', owner, methodName, desc, pc, message)
+}
+
+// Resolve parameter *values* separately from local/operand *slots*.
+// J/D occupy two slots but are each passed as one tagged value. Neither
+// Java longs nor IEEE payloads are coerced into untagged JavaScript Numbers.
+fn argTypes(desc) if type(desc) {
+    :string -> if len(desc) > 0 & desc.(0) = '(' {
+        true -> _argTypes(desc), _ -> ?}
+    _ -> ?
+}
+fn _argTypes(desc) {
+    types := []
+    fn seekSemi(i) if i >= len(desc) {
+        true -> ?
+        _ -> if desc.(i) = ';' {true -> i, _ -> seekSemi(i + 1)}
+    }
+    fn scan(i) if i >= len(desc) {
+        true -> ?
+        _ -> if desc.(i) {
+            ')' -> types
+            'Z', 'B', 'C', 'S', 'I' -> {
+                types << 'I'
+                scan(i + 1)
+            }
+            'J', 'F', 'D' -> {
+                types << desc.(i)
+                scan(i + 1)
+            }
+            'L' -> if end := seekSemi(i + 1) {
+                ? -> ?
+                _ -> {
+                    // Preserve a declared class/interface reference. The
+                    // runtime still passes one value, but the frame gate can
+                    // now reject a known sibling at a call site.
+                    types << 'A:' + std.slice(desc, i + 1, end)
+                    scan(end + 1)
+                }
+            }
+            '[' -> {
+                fn skipArray(j) if j >= len(desc) {
+                    true -> ?
+                    _ -> if desc.(j) {
+                        '[' -> skipArray(j + 1)
+                        'L' -> if end := seekSemi(j + 1) { ? -> ?, _ -> end + 1 }
+                        'Z', 'B', 'C', 'S', 'I', 'J', 'F', 'D' -> j + 1
+                        _ -> ?
+                    }
+                }
+                end := skipArray(i + 1)
+                if end = ? {true -> ?, _ -> {
+                    // Preserve a verifier-known array component across
+                    // parameters; runtime arg widths remain one reference.
+                    types << 'A:' + std.slice(desc, i, end)
+                    scan(end)
+                }}
+            }
+            _ -> ?
+        }
+    }
+    scan(1)
+}
+fn argWidths(desc) if types := argTypes(desc) {
+    ? -> ?
+    _ -> types |> std.map(fn(kind) if kind = 'J' | kind = 'D' {true -> 2, _ -> 1})
+}
+fn arity(desc) if widths := argWidths(desc) {
+    ? -> ?
+    _ -> widths |> std.reduce(0, fn(sum, width) sum + width)
+}
+fn _valueType(desc) if type(desc) != :string | len(desc) = 0 {
+    true -> ?
+    _ -> if desc.(0) {
+        'Z', 'B', 'C', 'S', 'I' -> 'I'
+        'J' -> 'J'
+        'F' -> 'F'
+        'D' -> 'D'
+        'L' -> if desc.(len(desc) - 1) = ';' {
+            true -> 'A:' + std.slice(desc, 1, len(desc) - 1), _ -> ?}
+        '[' -> 'A:' + desc
+        'V' -> if desc = 'V' {true -> 'V', _ -> ?}
+        _ -> ?
+    }
+}
+fn _frameReference?(kind) kind = 'A' | kind = 'N' |
+    (type(kind) = :string & str.startsWith?(kind, 'A:'))
+// A fresh `new` value is NOT an initialized reference. Its allocation-site
+// token can be copied through locals and category-one stack forms and used
+// by reference identity/null tests. A narrow constructor putfield exception
+// applies only to a directly declared own instance field on `U:this`; other
+// field/call-argument/throw/return uses need an initialized reference.
+// `U:this` records the receiver of a constructor before its required
+// this()/super() call; the frame carries a separate readiness flag
+// so overwriting local zero cannot bypass the constructor-return check.
+fn _frameUninitialized?(kind) type(kind) = :string &
+    str.startsWith?(kind, 'U:')
+fn _frameNewOwner(kind) if !_frameUninitialized?(kind) | kind = 'U:this' {
+    true -> ?
+    _ -> {
+        parts := str.split(kind, ':')
+        if len(parts) = 3 & parts.(0) = 'U' {
+            true -> parts.(2), _ -> ?
+        }
+    }
+}
+fn _frameArray?(kind) type(kind) = :string &
+    str.startsWith?(kind, 'A:[')
+fn _newArrayType(op, tag) if op = 189 {
+    true -> if str.startsWith?(tag, '[') {true -> '[' + tag,
+        _ -> '[L' + tag + ';'}
+    _ -> if tag {
+        4 -> '[Z'
+        5 -> '[C'
+        8 -> '[B'
+        9 -> '[S'
+        10 -> '[I'
+        11 -> '[J'
+        6 -> '[F'
+        7 -> '[D'
+        _ -> ?
+    }
+}
+// The generic A verifier category cannot detect iaload on a known long[];
+// carry exact descriptors when available, but keep unknown A conservative.
+fn _frameArrayOpcode?(kind, op) if !_frameArray?(kind) {
+    true -> kind = 'A' | kind = 'N'
+    _ -> {
+        desc := std.slice(kind, 2)
+        if op {
+            46, 79 -> desc = '[I'
+            47, 80 -> desc = '[J'
+            48, 81 -> desc = '[F'
+            49, 82 -> desc = '[D'
+            50, 83 -> len(desc) > 2 & (desc.(1) = '[' | desc.(1) = 'L')
+            51, 84 -> desc = '[B' | desc = '[Z'
+            52, 85 -> desc = '[C'
+            53, 86 -> desc = '[S'
+            _ -> false
+        }
+    }
+}
+
+// The bounded frame gate and the interpreter share the same host hierarchy.
+// Unlike a runtime check, these functions only examine verifier-known types;
+// an unknown A is deliberately not promoted to an invented class.
+fn _frameComponent(name) if type(name) != :string | len(name) < 2 |
+    name.(0) != '[' {
+    true -> ?
+    _ -> {
+        tail := std.slice(name, 1)
+        if tail.(0) = '[' {
+            true -> tail
+            _ -> if tail.(0) = 'L' & len(tail) > 2 &
+                tail.(len(tail) - 1) = ';' {
+                true -> std.slice(tail, 1, len(tail) - 1), _ -> ?
+            }
+        }
+    }
+}
+fn _frameSubtype?(current, owner, classes, depth) if depth >= 64 |
+    type(current) != :string | type(owner) != :string {
+    true -> false
+    _ -> if current = owner {
+        true -> true
+        _ -> if str.startsWith?(current, '[') {
+            true -> if owner = 'java/lang/Object' |
+                owner = 'java/lang/Cloneable' | owner = 'java/io/Serializable' {
+                true -> true
+                _ -> if str.startsWith?(owner, '[') &
+                    _frameComponent(current) != ? &
+                    _frameComponent(owner) != ? {
+                    true -> _frameSubtype?(_frameComponent(current),
+                        _frameComponent(owner), classes, depth + 1)
+                    _ -> false
+                }
+            }
+            _ -> if vmLib.jvmReferenceSubtype?(current, owner) {
+                true -> true
+                _ -> if classes.(current) = ? {
+                    true -> false
+                    _ -> _frameSubtype?(classes.(current).super, owner,
+                        classes, depth + 1) |
+                        (classes.(current).interfaces |> std.default([]) |>
+                            std.some(fn(parent) _frameSubtype?(parent,
+                                owner, classes, depth + 1)))
+                }
+            }
+        }
+    }
+}
+fn _frameInterface?(name, classes) name = 'java/lang/Cloneable' |
+    name = 'java/io/Serializable' |
+    (classes.(name) != ? & (classes.(name).flags & 512) != 0)
+fn _frameAssignable?(actual, expected, classes) if actual = expected {
+    true -> true
+    _ -> if !_frameReference?(actual) | !_frameReference?(expected) {
+        true -> false
+        _ -> if expected = 'A' | actual = 'N' | actual = 'A' {
+            true -> true
+            // JDK bytecode verification permits a class-typed reference at
+            // an interface-typed call/field even if the class does not
+            // declare that interface. Dynamic invokeinterface checks it.
+            // Requiring nominal membership here rejected JDK-valid input.
+            _ -> if _frameInterface?(std.slice(expected, 2), classes) {
+                true -> true
+                _ -> _frameSubtype?(std.slice(actual, 2),
+                    std.slice(expected, 2), classes, 0)
+            }
+        }
+    }
+}
+// Keep a known common parent (and reference-array covariance) at a join.
+// Collapsing two known siblings to an unconstrained A would let an invalid
+// call pass verification after a branch. Unknown A remains unknown.
+fn _frameCommon(left, right, classes, depth) if depth >= 32 {
+    true -> 'java/lang/Object'
+    _ -> if _frameSubtype?(left, right, classes, 0) {
+        true -> right
+        _ -> if _frameSubtype?(right, left, classes, 0) {
+            true -> left
+            _ -> if str.startsWith?(left, '[') &
+                str.startsWith?(right, '[') &
+                _frameComponent(left) != ? & _frameComponent(right) != ? {
+                true -> {
+                    component := _frameCommon(_frameComponent(left),
+                        _frameComponent(right), classes, depth + 1)
+                    '[' + if str.startsWith?(component, '[') {
+                        true -> component, _ -> 'L' + component + ';'}
+                }
+                _ -> {
+                    parent := if classes.(left) != ? {
+                        true -> classes.(left).super
+                        _ -> vmLib.jvmThrowableParent(left)
+                    }
+                    if parent = ? {true -> 'java/lang/Object',
+                        _ -> _frameCommon(parent, right, classes, depth + 1)}
+                }
+            }
+        }
+    }
+}
+fn _frameMerge(left, right, classes) if left = right {
+    true -> left
+    _ -> if left = 'N' {
+        true -> if _frameReference?(right) {true -> right, _ -> ?}
+        _ -> if right = 'N' {
+            true -> if _frameReference?(left) {true -> left, _ -> ?}
+            _ -> if _frameReference?(left) & _frameReference?(right) {
+                true -> if left = 'A' | right = 'A' {true -> 'A',
+                    _ -> 'A:' + _frameCommon(std.slice(left, 2),
+                        std.slice(right, 2), classes, 0)}
+                _ -> ?
+            }
+        }
+    }
+}
+
+// Reject malformed field descriptors without conflating one-slot F with D.
+fn fieldType?(desc) if type(desc) {
+	:string -> if desc.(0) {
+		'I', 'Z', 'B', 'S', 'C', 'J', 'F', 'D' -> len(desc) = 1
+		'L' -> len(desc) > 2 & desc.(len(desc) - 1) = ';'
+		'[' -> fieldType?(std.slice(desc, 1))
+		_ -> false
+	}
+	_ -> false
+}
+fn returnType?(desc) {
+	parts := import('str').cut(desc, ')')
+	parts.(1) = 'V' | fieldType?(parts.(1))
+}
+
+// External JVM library calls and fields have a single admission table;
+// otherwise preflight, native execution and bundled output could disagree.
+fn _externalMethod?(ref, opcode) vmLib.jvmMethod(
+    ref.owner, ref.name, ref.desc, opcode) != ?
+fn _externalField?(ref, opcode) vmLib.jvmField(
+    ref.owner, ref.name, ref.desc, opcode) != ?
+
+// Check all operand types that can reach anewarray/instanceof/checkcast.
+// Treat an unprovided JDK interface as unsupported, not as an always-false
+// instanceof; reference arrays may contain packaged or admitted host types.
+fn _referenceType?(name, classes, depth) if depth >= 32 |
+    type(name) != :string | len(name) = 0 {
+    true -> false
+    _ -> if name.(0) != '[' {
+        true -> classes.(name) != ? | vmLib.jvmReference(name) != ?
+        _ -> {
+            component := std.slice(name, 1)
+            if len(component) = 1 {
+                true -> component = 'I' | component = 'Z' | component = 'B' |
+                    component = 'S' | component = 'C' | component = 'J' |
+                    component = 'F' | component = 'D'
+                _ -> if component.(0) = 'L' &
+                    component.(len(component) - 1) = ';' {
+                    true -> _referenceType?(std.slice(component, 1,
+                        len(component) - 1), classes, depth + 1)
+                    _ -> if component.(0) = '[' {
+                        true -> _referenceType?(component, classes, depth + 1)
+                        _ -> false
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Catch clauses must name an actual modeled Throwable subclass. An unknown
+// user class, an array or an arbitrary host type is never treated as a catch
+// type merely because it has a class-file CONSTANT_Class entry.
+fn _throwable?(name, classes, depth) if depth >= 64 |
+    type(name) != :string | len(name) = 0 {
+    true -> false
+    _ -> if vmLib.jvmThrowableParent(name) != ? {
+        true -> true
+        _ -> if classes.(name) = ? {
+            true -> false
+            _ -> _throwable?(classes.(name).super, classes, depth + 1)
+        }
+    }
+}
+
+// Decode an individual method. The accepted opcode set is intentionally
+// explicit: silently skipping an instruction would corrupt control flow.
+fn lowerMethod(cls, method, classes, optimize?) {
+	code := method.code |> std.default('')
+	pc := 0
+	items := []
+	problem := ?
+	if method.code = ? -> problem <- errorAt(cls.name, method.name, method.desc, 0, 'no bytecode (native/abstract method)')
+    handlerList := method.handlers |> std.default([])
+    catchCount := method.catches |> std.default(0)
+    if catchCount != len(handlerList) -> problem <- errorAt(cls.name,
+        method.name, method.desc, 0, 'invalid exception handler metadata')
+    handlerList |> std.each(fn(handler) if problem = ? &
+        handler.catch != ? & !_throwable?(handler.catch, classes, 0) ->
+        problem <- errorAt(cls.name, method.name, method.desc,
+            handler.start, 'unsupported or non-Throwable catch class ' +
+            string(handler.catch)))
+	if method.flags & 32 -> problem <- errorAt(cls.name, method.name, method.desc, 0, 'synchronized methods are not supported')
+	if !returnType?(method.desc) | arity(method.desc) = ? -> problem <- errorAt(cls.name, method.name, method.desc, 0, 'unsupported method descriptor')
+    if problem = ? & method.name = '<init>' &
+        ((method.flags & 8) != 0 | str.cut(method.desc, ')').(1) != 'V') ->
+        problem <- errorAt(cls.name, method.name, method.desc, 0,
+            'constructor must be an instance void method')
+	fn reject(at, message) if problem = ? -> problem <- errorAt(cls.name, method.name, method.desc, at, message)
+	fn read(index, width) if index + width > len(code) {
+		true -> {
+			reject(index, 'truncated bytecode operand')
+			0
+		}
+		_ -> if width { 1 -> byte(code, index), _ -> word(code, index) }
+	}
+    fn read32(index) signed32(read(index, 2) * 65536 + read(index + 2, 2))
+
+    // Both switch forms retain the original opcode and a default target;
+    // table refs are [low, target...], lookup refs [key, target, ...].
+    // Offsets start relative to the opcode, then become IR indices below.
+    fn readSwitch(at, op, inst) {
+        fn skipPadding() if pc % 4 != 0 & problem = ? {
+            true -> {
+                if read(pc, 1) != 0 -> reject(at, 'nonzero switch padding')
+                pc <- pc + 1
+                skipPadding()
+            }
+        }
+        skipPadding()
+        if problem = ? {
+            true -> {
+                defaultOffset := read32(pc)
+                first := read32(pc + 4)
+                last := if op = 170 {true -> read32(pc + 8), _ -> ?}
+                pc <- pc + if op = 170 {true -> 12, _ -> 8}
+                if problem = ? {
+                    true -> {
+                        count := if op = 170 {true -> last - first + 1, _ -> first}
+                        width := if op = 170 {true -> 4, _ -> 8}
+                        if count < 0 | (op = 170 & last < first) |
+                            count > (len(code) - pc) / width {
+                            true -> reject(at, 'invalid or truncated switch table')
+                            _ -> {
+                                inst.arg <- at + defaultOffset
+                                refs := []
+                                if op = 170 -> refs << first
+                                previous := ?
+                                std.range(count) |> std.each(fn(i) if problem = ? {
+                                    true -> {
+                                        if op = 171 {
+                                            true -> {
+                                                match := read32(pc)
+                                                if previous != ? & match <= previous ->
+                                                    reject(at, 'lookupswitch keys are not strictly increasing')
+                                                previous <- match
+                                                refs << match
+                                                pc <- pc + 4
+                                            }
+                                        }
+                                        refs << at + read32(pc)
+                                        pc <- pc + 4
+                                    }
+                                })
+                                inst.ref <- refs
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+	fn decode() if pc < len(code) & problem = ? {
+		true -> {
+			at := pc
+			op := byte(code, pc)
+			pc <- pc + 1
+			inst := {pc: at, op: op, arg: 0, ref: ?}
+            if (op = 16 | op = 18 | (op >= 21 & op <= 25) |
+                (op >= 54 & op <= 58) | op = 188) {
+				true -> {
+					inst.arg <- read(pc, 1)
+					pc <- pc + 1
+				}
+			}
+			if (op = 17 | op = 19 | op = 20 | op = 132 | (op >= 153 & op <= 166) |
+				op = 167 | op = 198 | op = 199 | (op >= 178 & op <= 184) |
+				op = 187 | op = 189 | op = 192 | op = 193) {
+				true -> {
+					inst.arg <- read(pc, 2)
+					pc <- pc + 2
+				}
+			}
+            if op = 170 | op = 171 -> readSwitch(at, op, inst)
+            if op = 196 {
+                true -> {
+                    // wide has either a 16-bit local index or a 16-bit
+                    // index AND signed increment. Its prefix is a single
+                    // instruction boundary, never a branchable opcode pair.
+                    sub := read(pc, 1)
+                    index := read(pc + 1, 2)
+                    increment := if sub = 132 {true -> signed16(read(pc + 3, 2)), _ -> 0}
+                    pc <- pc + if sub = 132 {true -> 5, _ -> 3}
+                    if problem = ? {
+                        true -> if !((sub >= 21 & sub <= 25) |
+                            (sub >= 54 & sub <= 58) | sub = 132) {
+                            true -> reject(at, 'unsupported wide local opcode 0x' +
+                                std.toHex(sub))
+                            _ -> if index >= method.locals {
+                                true -> reject(at, 'wide local index exceeds max_locals')
+                                _ -> {
+                                    inst.arg <- index
+                                    inst.ref <- [sub, increment]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if op = 197 {
+                true -> {
+                    index := read(pc, 2)
+                    dimensions := read(pc + 2, 1)
+                    pc <- pc + 3
+                    if problem = ? {
+                        true -> {
+                            name := classfile.className(cls.pool, index)
+                            rank := 0
+                            if type(name) = :string -> std.range(if len(name) > 17 {
+                                true -> 17, _ -> len(name)}) |>
+                                std.each(fn(i) if i = rank & name.(i) = '[' ->
+                                    rank <- rank + 1)
+                            if name = ? | rank = 0 | rank > 16 |
+                                dimensions = 0 | dimensions > rank |
+                                !_referenceType?(name, classes, 0) {
+                                true -> reject(at, 'invalid or unsupported multianewarray descriptor/dimensions')
+                                _ -> {
+                                    inst.arg <- name
+                                    inst.ref <- dimensions
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if op = 185 {
+                true -> {
+                    index := read(pc, 2)
+                    count := read(pc + 2, 1)
+                    zero := read(pc + 3, 1)
+                    pc <- pc + 4
+                    if problem = ? {
+                        true -> {
+                            ref := classfile.member(cls.pool, index, 11)
+                            if ref = ? | ref.owner = ? | ref.name = ? | ref.desc = ? {
+                                true -> reject(at, 'invalid invokeinterface member reference')
+                                _ -> {
+                                    if ref.name = '<init>' | ref.name = '<clinit>' ->
+                                        reject(at, 'invokeinterface cannot call an initializer')
+                                    slots := arity(ref.desc)
+                                    argc := argTypes(ref.desc)
+                                    if slots = ? | argc = ? | !returnType?(ref.desc) |
+                                        count != slots + 1 | zero != 0 {
+                                        true -> reject(at, 'invalid invokeinterface descriptor/count/reserved byte')
+                                        _ -> if classes.(ref.owner) = ? |
+                                            (classes.(ref.owner).flags & 512) = 0 {
+                                            true -> reject(at, 'unsupported or missing interface ' + ref.owner)
+                                            _ -> {
+                                                inst.arg <- len(argc)
+                                                inst.ref <- [ref.owner, ref.name, ref.desc]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+			if problem = ? -> {
+					if op = 132 {
+						true -> {
+							// iinc uses two 8-bit operands, not one 16-bit index.
+							inst.ref <- signed8(inst.arg & 255)
+							inst.arg <- inst.arg >> 8
+						}
+					}
+					if op = 16 -> inst.arg <- signed8(inst.arg)
+					if op = 17 -> inst.arg <- signed16(inst.arg)
+					if (op >= 153 & op <= 166) | op = 167 | op = 198 | op = 199 -> inst.arg <- at + signed16(inst.arg)
+					if op = 18 | op = 19 | op = 20 {
+						true -> {
+                            entry := cls.pool.(inst.arg)
+							value := classfile.literal(cls.pool, inst.arg)
+							if value = ? | entry = ? |
+                                (op = 20 & entry.tag != 5 & entry.tag != 6) |
+                                (op != 20 & entry.tag != 3 & entry.tag != 4 &
+                                    entry.tag != 8) {
+								true -> reject(at, if op = 20 {
+                                    true -> 'ldc2_w requires a long constant or double constant',
+                                    _ -> 'ldc supports only integer, float or string constants'})
+								_ -> inst.arg <- value
+							}
+						}
+					}
+					if op = 187 | op = 189 | op = 192 | op = 193 {
+						true -> {
+							name := classfile.className(cls.pool, inst.arg)
+							if name = ? {
+								true -> reject(at, 'invalid class constant')
+								_ -> {
+									inst.arg <- name
+									if op = 187 & classes.(name) = ? & vmLib.jvmNew(name) = ? ->
+										reject(at, format('unsupported or missing class {{0}}', name))
+                                    if op = 187 & classes.(name) != ? &
+                                        (classes.(name).flags & 512) != 0 ->
+                                        reject(at, 'cannot instantiate interface ' + name)
+                                    if (op = 189 | op = 192 | op = 193) &
+                                        !_referenceType?(name, classes, 0) ->
+                                        reject(at, 'unsupported or missing JVM reference type ' + name)
+								}
+							}
+						}
+					}
+					if op >= 178 & op <= 184 {
+						true -> {
+							tag := if op <= 181 { true -> 9, _ -> 10 }
+							ref := classfile.member(cls.pool, inst.arg, tag)
+							if ref = ? | ref.owner = ? | ref.name = ? | ref.desc = ? {
+								true -> reject(at, 'invalid member reference')
+								_ -> {
+									inst.ref <- [ref.owner, ref.name, ref.desc]
+									if op <= 181 & !fieldType?(ref.desc) -> reject(at, format('unsupported field descriptor {{0}}', ref.desc))
+									if op >= 182 & !returnType?(ref.desc) -> reject(at, format('unsupported return descriptor {{0}}', ref.desc))
+                                    if op >= 182 & (ref.name = '<clinit>' |
+                                        (ref.name = '<init>' &
+                                            (op != 183 | str.cut(ref.desc, ')').(1) != 'V'))) ->
+                                        reject(at, 'invalid initializer invocation form')
+									if op <= 181 {
+										true -> if classes.(ref.owner) = ? & !_externalField?(ref, op) ->
+											reject(at, format('unsupported field {{0}}.{{1}}', ref.owner, ref.name))
+										_ -> {
+											nargs := arity(ref.desc)
+											if nargs = ? -> reject(at, format('unsupported method descriptor {{0}}', ref.desc))
+											inst.arg <- len(argTypes(ref.desc))
+											if classes.(ref.owner) = ? & !_externalMethod?(ref, op) ->
+												reject(at, format('unsupported Java API {{0}}.{{1}}{{2}}', ref.owner, ref.name, ref.desc))
+										}
+									}
+								}
+							}
+							}
+					}
+				if op = 188 & !(inst.arg = 4 | inst.arg = 5 | inst.arg = 6 |
+                        inst.arg = 7 | inst.arg = 8 | inst.arg = 9 |
+                        inst.arg = 10 | inst.arg = 11) ->
+					reject(at, 'unsupported primitive array component type')
+			}
+            // Explicit contiguous opcode families; holes (jsr, ret, monitor,
+            // invokedynamic, etc.) remain forbidden before emission.
+			if !(op = 0 | op = 1 | (op >= 2 & op <= 15) |
+                (op >= 16 & op <= 53) | (op >= 54 & op <= 95) |
+                (op >= 96 & op <= 132) | (op >= 133 & op <= 152) |
+                (op >= 153 & op <= 167) | op = 170 | op = 171 |
+                (op >= 172 & op <= 185) | (op >= 187 & op <= 191) |
+                op = 192 | op = 193 | op = 196 | op = 197 |
+                op = 198 | op = 199) ->
+				reject(at, format('unsupported JVM opcode 0x{{0}}', std.toHex(op)))
+			if problem = ? -> items << inst
+			decode()
+		}
+	}
+	decode()
+	if problem != ? {
+		true -> problem
+		_ -> if len(items) = 0 {
+			true -> errorAt(cls.name, method.name, method.desc, 0, 'empty method')
+            _ -> _finishLower(cls, method, items, classes, optimize?)
+		}
+	}
+}
+
+// A first verifier gate for the currently admitted category-one opcodes.
+// It proves reachability/stack HEIGHT and local index bounds before emission;
+// it does not claim JVM frame types, initialized references or two-slot values.
+// Every opcode admitted above must have an effect here or fail closed.
+fn _stackShape(inst) {
+    op := inst.(0)
+    if op {
+        0, 132, 167 -> [0, 0]
+        1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 16, 17, 18, 19,
+        21, 23, 25, 26, 27, 28, 29, 34, 35, 36, 37,
+        42, 43, 44, 45, 187 -> [0, 1]
+        9, 10, 14, 15, 20, 22, 24, 30, 31, 32, 33,
+        38, 39, 40, 41 -> [0, 2]
+        54, 56, 58, 59, 60, 61, 62, 67, 68, 69, 70,
+        75, 76, 77, 78, 87, 153, 154, 155, 156,
+        157, 158, 170, 171, 191, 198, 199 -> [1, -1]
+        55, 57, 63, 64, 65, 66, 71, 72, 73, 74, 88 -> [2, -2]
+        178 -> [0, if inst.(2).(2) = 'J' | inst.(2).(2) = 'D' {
+            true -> 2, _ -> 1}]
+        179 -> if inst.(2).(2) = 'J' | inst.(2).(2) = 'D' {
+            true -> [2, -2], _ -> [1, -1]}
+        89 -> [1, 1]   // dup, category one only
+        90 -> [2, 1]   // dup_x1
+        91 -> [3, 1]   // dup_x2
+        92 -> [2, 2]   // dup2, either a category-two or two category-one values
+        93 -> [3, 2]   // dup2_x1, legal category forms checked by typed gate
+        94 -> [4, 2]   // dup2_x2, four JVMS category forms
+        95 -> [2, 0]   // swap, two category-one values
+        46, 48, 50, 51, 52, 53,
+        96, 98, 100, 102, 104, 106, 108, 110, 112, 114,
+        120, 122, 124, 126, 128, 130, 149, 150 -> [2, -1]
+        47, 49 -> [2, 0] // arrayref + index -> two-slot value
+        97, 99, 101, 103, 105, 107, 109, 111, 113, 115,
+        127, 129, 131 -> [4, -2]
+        121, 123, 125 -> [3, -1]
+        79, 81, 83, 84, 85, 86 -> [3, -3]
+        80, 82 -> [4, -4]
+        116, 118, 134, 139, 145, 146, 147,
+        188, 189, 190, 192, 193 -> [1, 0]
+        117, 119, 138, 143 -> [2, 0]
+        135, 140, 141 -> [1, 1]
+        137, 142, 144 -> [2, -1]
+        151, 152 -> [4, -3]
+        197 -> [inst.(2), 1 - inst.(2)] // dimensions -> one reference
+        133 -> [1, 1]
+        136 -> [2, -1]
+        148 -> [4, -3]
+        159, 160, 161, 162, 163, 164, 165, 166 -> [2, -2]
+        181 -> if inst.(2).(2) = 'J' | inst.(2).(2) = 'D' {
+            true -> [3, -3], _ -> [2, -2]}
+        172, 174, 176 -> [1, -1]
+        173, 175 -> [2, -2]
+        177 -> [0, 0]
+        180 -> [1, if inst.(2).(2) = 'J' | inst.(2).(2) = 'D' {
+            true -> 1, _ -> 0}]
+        182, 183, 184, 185 -> {
+            need := arity(inst.(2).(2)) + if op = 184 {true -> 0, _ -> 1}
+            returnDesc := import('str').cut(inst.(2).(2), ')').(1)
+            output := if returnDesc = 'V' {true -> 0,
+                _ -> if returnDesc = 'J' | returnDesc = 'D' {true -> 2, _ -> 1}}
+            [need, output - need]
+        }
+        196 -> if inst.(2).(0) {
+            21, 23, 25 -> [0, 1]
+            22, 24 -> [0, 2]
+            54, 56, 58 -> [1, -1]
+            55, 57 -> [2, -2]
+            132 -> [0, 0]
+            _ -> ?
+        }
+        _ -> ?
+    }
+}
+fn _localIndex(inst) {
+    op := inst.(0)
+    if op {
+        21, 22, 23, 24, 25, 54, 55, 56, 57, 58, 132, 196 -> inst.(1)
+        26, 27, 28, 29 -> op - 26
+        30, 31, 32, 33 -> op - 30
+        34, 35, 36, 37 -> op - 34
+        38, 39, 40, 41 -> op - 38
+        42, 43, 44, 45 -> op - 42
+        59, 60, 61, 62 -> op - 59
+        63, 64, 65, 66 -> op - 63
+        67, 68, 69, 70 -> op - 67
+        71, 72, 73, 74 -> op - 71
+        75, 76, 77, 78 -> op - 75
+        _ -> ?
+    }
+}
+fn _verifyStackHeights(cls, method, code, optimized, handlers) {
+    problem := ?
+    base := if (method.flags & 8) != 0 {true -> 0, _ -> 1}
+    if method.locals < arity(method.desc) + base ->
+        problem <- errorAt(cls.name, method.name, method.desc, 0,
+            'max_locals cannot hold method arguments')
+    heights := std.range(len(code)) |> std.map(fn(_) ?)
+    heights.(0) <- 0
+    queue := [0]
+    cursor := 0
+    returnDesc := import('str').cut(method.desc, ')').(1)
+    fn reject(index, message) if problem = ? ->
+        problem <- errorAt(cls.name, method.name, method.desc,
+            optimized.(index).pc, message)
+    fn edge(from, target, height) if problem = ? {
+        true -> if type(target) != :int | target < 0 | target >= len(code) {
+            true -> reject(from, 'control flow leaves the method')
+            _ -> if heights.(target) = ? {
+                true -> {
+                    heights.(target) <- height
+                    queue << target
+                }
+                _ -> if heights.(target) != height ->
+                    reject(target, 'inconsistent operand stack height at merge')
+            }
+        }
+    }
+    fn visit() if cursor < len(queue) & problem = ? {
+        true -> {
+            index := queue.(cursor)
+            cursor <- cursor + 1
+            inst := code.(index)
+            op := inst.(0)
+            shape := _stackShape(inst)
+            local := _localIndex(inst)
+            height := heights.(index)
+            if shape = ? -> reject(index, 'opcode lacks a verified stack effect')
+            if local != ? & (local < 0 | local >= method.locals |
+                (((op = 22 | op = 24 | op = 55 | op = 57 |
+                    (op >= 30 & op <= 33) | (op >= 38 & op <= 41) |
+                    (op >= 63 & op <= 66) | (op >= 71 & op <= 74) |
+                    (op = 196 & (inst.(2).(0) = 22 | inst.(2).(0) = 24 |
+                        inst.(2).(0) = 55 | inst.(2).(0) = 57))) &
+                    local + 1 >= method.locals))) ->
+                reject(index, 'local variable index exceeds max_locals')
+            if problem = ? {
+                true -> {
+                    nextHeight := height + shape.(1)
+                    if height < shape.(0) -> reject(index, 'operand stack underflow at preflight')
+                    if nextHeight > method.stack ->
+                        reject(index, 'operand stack exceeds max_stack')
+                    if op = 172 & !(returnDesc = 'I' | returnDesc = 'Z' |
+                        returnDesc = 'B' | returnDesc = 'C' | returnDesc = 'S') ->
+                        reject(index, 'ireturn does not match method descriptor')
+                    if op = 176 & !(import('str').startsWith?(returnDesc, 'L') |
+                        import('str').startsWith?(returnDesc, '[')) ->
+                        reject(index, 'areturn does not match method descriptor')
+                    if op = 173 & returnDesc != 'J' ->
+                        reject(index, 'lreturn does not match method descriptor')
+                    if op = 174 & returnDesc != 'F' ->
+                        reject(index, 'freturn does not match method descriptor')
+                    if op = 175 & returnDesc != 'D' ->
+                        reject(index, 'dreturn does not match method descriptor')
+                    if op = 177 & returnDesc != 'V' ->
+                        reject(index, 'return does not match method descriptor')
+                    // A handler replaces the operand stack with the one
+                    // thrown reference, even if the protected instruction
+                    // had already consumed operands before throwing.
+                    handlers |> std.each(fn(h) if problem = ? &
+                        index >= h.start & index < h.end ->
+                        edge(index, h.target, 1))
+                    if problem = ? -> if (op >= 172 & op <= 177) | op = 191 {
+                        true -> ?
+                        _ -> if op = 167 {
+                            true -> edge(index, inst.(1), nextHeight)
+                            _ -> if op = 170 | op = 171 {
+                                true -> {
+                                    edge(index, inst.(1), nextHeight)
+                                    refs := inst.(2)
+                                    count := if op = 170 {true -> len(refs) - 1,
+                                        _ -> int(len(refs) / 2)}
+                                    std.range(count) |> std.each(fn(i) if problem = ? ->
+                                        edge(index, refs.(if op = 170 {
+                                            true -> i + 1, _ -> i * 2 + 1}), nextHeight))
+                                }
+                                _ -> {
+                                    if (op >= 153 & op <= 166) |
+                                        op = 198 | op = 199 ->
+                                        edge(index, inst.(1), nextHeight)
+                                    edge(index, index + 1, nextHeight)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            visit()
+        }
+    }
+    if problem = ? -> visit()
+    if problem = ? {
+        true -> {type: :ok, reachable: heights |> std.map(fn(h) h != ?)}
+        _ -> problem
+    }
+}
+
+// Since version 51 the type-checking verifier needs a declared frame at each
+// reachable branch and exception-handler target. This includes a back edge
+// to bytecode PC 0: JDK 11 still requires an explicit frame there. Version 50
+// may fall back to type inference; older versions use inference directly.
+// This does NOT compare the declared frame's locals/stack with inferred types
+// or implement every block-start and exception-edge rule.
+fn _requireTargetFrames(cls, method, code, optimized, handlers, reachable) {
+    if cls.major = ? | cls.major < 51 {
+        true -> {type: :ok}
+        _ -> {
+            declared := {}
+            method.framePcs |> std.default([]) |> std.each(fn(pc) {
+                declared.(string(pc)) <- true
+            })
+            problem := ?
+            fn require(target) if problem = ? {
+                true -> {
+                    pc := optimized.(target).pc
+                    if declared.(string(pc)) = ? ->
+                        problem <- errorAt(cls.name, method.name, method.desc,
+                            pc, 'missing StackMapTable frame at reachable control-flow target')
+                }
+            }
+            code |> std.each(fn(inst, index) if problem = ? & reachable.(index) {
+                true -> {
+                    op := inst.(0)
+                    if (op >= 153 & op <= 166) | op = 167 |
+                        op = 198 | op = 199 | op = 170 | op = 171 ->
+                        require(inst.(1))
+                    if op = 170 | op = 171 {
+                        true -> {
+                            cases := if op = 170 {true -> len(inst.(2)) - 1,
+                                _ -> int(len(inst.(2)) / 2)}
+                            std.range(cases) |> std.each(fn(i) if problem = ? ->
+                                require(inst.(2).(if op = 170 {
+                                    true -> i + 1, _ -> i * 2 + 1})))
+                        }
+                    }
+                }
+            })
+            handlers |> std.each(fn(h) if problem = ? & reachable.(h.target) ->
+                require(h.target))
+            if problem = ? {true -> {type: :ok}, _ -> problem}
+        }
+    }
+}
+
+// A bounded frame gate tracks I/F/A and two-slot J/D across reachable
+// instructions and merges, rejecting cross-category and known-reference
+// misuse BEFORE execution. The height gate also guards physical JVM slots.
+// It tracks allocation-site uninitialized references and constructor return
+// state, but is NOT full JVMS verification: access rules, legal
+// constructor/handler forms, declared StackMapTable type compatibility and
+// all-method/block-start coverage remain open. Only bounded table structure,
+// selected-method instruction PCs and reachable branch/handler targets are checked.
+fn _verifyLongFrames(cls, method, code, optimized, handlers, classes) {
+    problem := ?
+    fn reject(index, message) if problem = ? ->
+        problem <- errorAt(cls.name, method.name, method.desc,
+            optimized.(index).pc, message)
+    if method.locals > 1024 | method.stack > 1024 | len(code) > 8192 ->
+        reject(0, 'long frame analysis exceeds bounded method limits')
+    if problem != ? {true -> problem, _ -> _verifyLongFramesBounded(cls,
+        method, code, optimized, handlers, classes)}
+}
+fn _verifyLongFramesBounded(cls, method, code, optimized, handlers, classes) {
+    problem := ?
+    argKinds := argTypes(method.desc)
+    initialLocals := std.range(method.locals) |> std.map(fn(_) ?)
+    position := if (method.flags & 8) != 0 {true -> 0, _ -> 1}
+    if position = 1 -> initialLocals.(0) <- if method.name = '<init>' {
+        true -> 'U:this', _ -> 'A:' + cls.name}
+    argKinds |> std.each(fn(kind) {
+        initialLocals.(position) <- kind
+        if kind = 'J' | kind = 'D' -> initialLocals.(position + 1) <- 'tail'
+        position <- position + if kind = 'J' | kind = 'D' {true -> 2, _ -> 1}
+    })
+    frames := std.range(len(code)) |> std.map(fn(_) ?)
+    frames.(0) <- {stack: [], locals: initialLocals,
+        thisReady?: method.name != '<init>'}
+    queue := [0]
+    cursor := 0
+    scans := 0
+    fn reject(index, message) if problem = ? ->
+        problem <- errorAt(cls.name, method.name, method.desc,
+            optimized.(index).pc, message)
+    fn visit() if cursor < len(queue) & problem = ? {
+        true -> {
+            index := queue.(cursor)
+            cursor <- cursor + 1
+            scans <- scans + 1
+            if scans > len(code) * 12 -> reject(index, 'long frame analysis work limit exceeded')
+            if problem = ? {
+                true -> {
+                    inst := code.(index)
+                    op := inst.(0)
+                    stack := frames.(index).stack |> std.map(fn(v) v)
+                    locals := frames.(index).locals |> std.map(fn(v) v)
+                    thisReady? := frames.(index).thisReady?
+                    fn take(kind) if problem = ? {
+                        true -> if len(stack) = 0 {
+                            true -> reject(index, 'operand stack underflow in long frame analysis')
+                            _ -> {
+                                top := stack.(len(stack) - 1)
+                                if top != kind & !_frameAssignable?(top,
+                                    kind, classes) {
+                                    true -> if _frameUninitialized?(top) &
+                                        _frameReference?(kind) {
+                                        true -> reject(index,
+                                            'uninitialized reference used before constructor invocation')
+                                        _ -> {
+                                            problemKind := if _frameReference?(kind) &
+                                                _frameReference?(top) {
+                                                true -> 'wrong reference subtype in long frame analysis: '
+                                                _ -> 'wrong value category in long frame analysis: '
+                                            }
+                                            reject(index, problemKind + 'expected ' + kind +
+                                                ', found ' + if top = 'N' {
+                                                    true -> 'A', _ -> string(top)})
+                                        }
+                                    }
+                                }
+                                stack <- std.slice(stack, 0, len(stack) - 1)
+                                top
+                            }
+                        }
+                    }
+                    // astore, null tests and reference identity comparisons
+                    // can carry/consume an uninitialized allocation-site
+                    // token. Other reference uses go through take(), which
+                    // refuses that token before any effects or output.
+                    fn takeCopyOrCompareReference() if problem = ? {
+                        true -> if len(stack) = 0 {
+                            true -> reject(index, 'operand stack underflow in typed frame analysis')
+                            _ -> {
+                                top := stack.(len(stack) - 1)
+                                if !_frameReference?(top) &
+                                    !_frameUninitialized?(top) {
+                                    true -> reject(index,
+                                        'wrong value category in long frame analysis: expected A, found ' +
+                                        string(top))
+                                    _ -> {
+                                        stack <- std.slice(stack, 0, len(stack) - 1)
+                                        top
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // invokespecial <init> is the only operation that turns
+                    // an allocation-site U token into an initialized A. The
+                    // object may have aliases in locals and on the stack.
+                    fn takeConstructor(owner) if problem = ? {
+                        true -> if len(stack) = 0 {
+                            true -> reject(index, 'constructor receiver is missing')
+                            _ -> {
+                                receiver := stack.(len(stack) - 1)
+                                validThis? := receiver = 'U:this' &
+                                    method.name = '<init>' &
+                                    (owner = cls.name | owner = cls.super)
+                                validNew? := receiver != 'U:this' &
+                                    owner != ? & _frameNewOwner(receiver) = owner
+                                if !validThis? & !validNew? {
+                                    true -> reject(index,
+                                        'constructor requires its uninitialized receiver')
+                                    _ -> {
+                                        stack <- std.slice(stack, 0, len(stack) - 1)
+                                        readyKind := 'A:' + if validThis? {
+                                            true -> cls.name, _ -> owner}
+                                        stack <- stack |> std.map(fn(kind) if kind = receiver {
+                                            true -> readyKind, _ -> kind})
+                                        locals <- locals |> std.map(fn(kind) if kind = receiver {
+                                            true -> readyKind, _ -> kind})
+                                        if validThis? -> thisReady? <- true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    fn takeNarrow() if problem = ? {
+                        true -> if len(stack) = 0 {
+                            true -> reject(index, 'operand stack underflow in typed frame analysis')
+                            _ -> {
+                                top := stack.(len(stack) - 1)
+                                if top != 'I' & top != 'F' &
+                                    !_frameReference?(top) &
+                                    !_frameUninitialized?(top) {
+                                    true -> reject(index, 'wrong value category in long frame analysis: expected one-slot value')
+                                    _ -> {
+                                        stack <- std.slice(stack, 0, len(stack) - 1)
+                                        top
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    fn push(kind) if problem = ? -> stack << kind
+                    fn load(slot, kind) if problem = ? {
+                        true -> if slot < 0 | slot >= method.locals |
+                            (kind = 'A' & !_frameReference?(locals.(slot)) &
+                                !_frameUninitialized?(locals.(slot))) |
+                            (kind != 'A' & locals.(slot) != kind) |
+                            ((kind = 'J' | kind = 'D') &
+                                (slot + 1 >= method.locals |
+                                locals.(slot + 1) != 'tail')) {
+                            true -> reject(index, 'invalid or uninitialized long frame local')
+                            _ -> push(if kind = 'A' {true -> locals.(slot), _ -> kind})
+                        }
+                    }
+                    fn store(slot, kind) if problem = ? {
+                        true -> {
+                            stored := if kind = 'A' {
+                                true -> takeCopyOrCompareReference(), _ -> take(kind)}
+                            if slot < 0 | slot >= method.locals |
+                                ((kind = 'J' | kind = 'D') &
+                                    slot + 1 >= method.locals) {
+                                true -> reject(index, 'invalid long frame local index')
+                                _ -> if problem = ? {
+                                    true -> {
+                                        // Overwriting either half invalidates the previous pair.
+                                        if slot > 0 & locals.(slot) = 'tail' ->
+                                            locals.(slot - 1) <- ?
+                                        if (locals.(slot) = 'J' | locals.(slot) = 'D') &
+                                            slot + 1 < method.locals ->
+                                            locals.(slot + 1) <- ?
+                                        if kind = 'J' | kind = 'D' {
+                                            true -> {
+                                                if (locals.(slot + 1) = 'J' |
+                                                    locals.(slot + 1) = 'D') &
+                                                    slot + 2 < method.locals ->
+                                                    locals.(slot + 2) <- ?
+                                                locals.(slot + 1) <- 'tail'
+                                            }
+                                        }
+                                        locals.(slot) <- if kind = 'A' {
+                                            true -> stored, _ -> kind}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    fn fieldKind() _valueType(inst.(2).(2))
+                    if op {
+                        0, 167 -> ?
+                        177 -> if method.name = '<init>' & !thisReady? ->
+                            reject(index, 'constructor returns before this()/super() initialization')
+                        1 -> push('N')
+                        187 -> push('U:' + string(optimized.(index).pc) + ':' + inst.(1))
+                        2, 3, 4, 5, 6, 7, 8, 16, 17 -> push('I')
+                        11, 12, 13 -> push('F')
+                        14, 15 -> push('D')
+                        18, 19 -> push(if type(inst.(1)) = :int {true -> 'I',
+                            _ -> if type(inst.(1)) = :object {true -> 'F',
+                                _ -> 'A:java/lang/String'}})
+                        9, 10 -> push('J')
+                        20 -> push(if inst.(1).jvmDouble = true {true -> 'D', _ -> 'J'})
+                        21 -> load(inst.(1), 'I')
+                        22 -> load(inst.(1), 'J')
+                        23 -> load(inst.(1), 'F')
+                        24 -> load(inst.(1), 'D')
+                        25 -> load(inst.(1), 'A')
+                        26, 27, 28, 29 -> load(op - 26, 'I')
+                        30, 31, 32, 33 -> load(op - 30, 'J')
+                        34, 35, 36, 37 -> load(op - 34, 'F')
+                        38, 39, 40, 41 -> load(op - 38, 'D')
+                        42, 43, 44, 45 -> load(op - 42, 'A')
+                        54 -> store(inst.(1), 'I')
+                        55 -> store(inst.(1), 'J')
+                        56 -> store(inst.(1), 'F')
+                        57 -> store(inst.(1), 'D')
+                        58 -> store(inst.(1), 'A')
+                        59, 60, 61, 62 -> store(op - 59, 'I')
+                        63, 64, 65, 66 -> store(op - 63, 'J')
+                        67, 68, 69, 70 -> store(op - 67, 'F')
+                        71, 72, 73, 74 -> store(op - 71, 'D')
+                        75, 76, 77, 78 -> store(op - 75, 'A')
+                        87 -> takeNarrow()
+                        88 -> if len(stack) > 0 &
+                            (stack.(len(stack) - 1) = 'J' |
+                                stack.(len(stack) - 1) = 'D') {
+                            true -> take(stack.(len(stack) - 1))
+                            _ -> {
+                                takeNarrow()
+                                takeNarrow()
+                            }
+                        }
+                        89 -> {
+                            first := takeNarrow()
+                            push(first)
+                            push(first)
+                        }
+                        90 -> {
+                            first := takeNarrow()
+                            second := takeNarrow()
+                            push(first)
+                            push(second)
+                            push(first)
+                        }
+                        91 -> {
+                            first := takeNarrow()
+                            if len(stack) > 0 &
+                                (stack.(len(stack) - 1) = 'J' |
+                                    stack.(len(stack) - 1) = 'D') {
+                                true -> {
+                                    second := stack.(len(stack) - 1)
+                                    take(second)
+                                    push(first)
+                                    push(second)
+                                    push(first)
+                                }
+                                _ -> {
+                                    second := takeNarrow()
+                                    third := takeNarrow()
+                                    push(first)
+                                    push(third)
+                                    push(second)
+                                    push(first)
+                                }
+                            }
+                        }
+                        92 -> if len(stack) > 0 &
+                            (stack.(len(stack) - 1) = 'J' |
+                                stack.(len(stack) - 1) = 'D') {
+                            true -> {
+                                kind := stack.(len(stack) - 1)
+                                take(kind)
+                                push(kind)
+                                push(kind)
+                            }
+                            _ -> {
+                                first := takeNarrow()
+                                second := takeNarrow()
+                                push(second)
+                                push(first)
+                                push(second)
+                                push(first)
+                            }
+                        }
+                        93 -> if len(stack) > 0 &
+                            (stack.(len(stack) - 1) = 'J' |
+                                stack.(len(stack) - 1) = 'D') {
+                            true -> {
+                                first := stack.(len(stack) - 1)
+                                take(first)
+                                second := takeNarrow()
+                                push(first)
+                                push(second)
+                                push(first)
+                            }
+                            _ -> {
+                                first := takeNarrow()
+                                second := takeNarrow()
+                                third := takeNarrow()
+                                push(second)
+                                push(first)
+                                push(third)
+                                push(second)
+                                push(first)
+                            }
+                        }
+                        94 -> if len(stack) > 0 &
+                            (stack.(len(stack) - 1) = 'J' |
+                                stack.(len(stack) - 1) = 'D') {
+                            true -> {
+                                first := stack.(len(stack) - 1)
+                                take(first)
+                                if len(stack) > 0 &
+                                    (stack.(len(stack) - 1) = 'J' |
+                                        stack.(len(stack) - 1) = 'D') {
+                                    true -> {
+                                        second := stack.(len(stack) - 1)
+                                        take(second)
+                                        push(first)
+                                        push(second)
+                                        push(first)
+                                    }
+                                    _ -> {
+                                        second := takeNarrow()
+                                        third := takeNarrow()
+                                        push(first)
+                                        push(third)
+                                        push(second)
+                                        push(first)
+                                    }
+                                }
+                            }
+                            _ -> {
+                                first := takeNarrow()
+                                second := takeNarrow()
+                                if len(stack) > 0 &
+                                    (stack.(len(stack) - 1) = 'J' |
+                                        stack.(len(stack) - 1) = 'D') {
+                                    true -> {
+                                        third := stack.(len(stack) - 1)
+                                        take(third)
+                                        push(second)
+                                        push(first)
+                                        push(third)
+                                        push(second)
+                                        push(first)
+                                    }
+                                    _ -> {
+                                        third := takeNarrow()
+                                        fourth := takeNarrow()
+                                        push(second)
+                                        push(first)
+                                        push(fourth)
+                                        push(third)
+                                        push(second)
+                                        push(first)
+                                    }
+                                }
+                            }
+                        }
+                        95 -> {
+                            first := takeNarrow()
+                            second := takeNarrow()
+                            push(first)
+                            push(second)
+                        }
+                        46, 47, 48, 49, 50, 51, 52, 53 -> {
+                            take('I')
+                            arrayKind := take('A')
+                            if problem = ? & !_frameArrayOpcode?(arrayKind, op) ->
+                                reject(index, 'array opcode incompatible with verifier-known component type')
+                            resultKind := if op = 47 {true -> 'J',
+                                _ -> if op = 48 {true -> 'F',
+                                    _ -> if op = 49 {true -> 'D',
+                                        _ -> if op = 50 {true -> 'A', _ -> 'I'}}}}
+                            if op = 50 & _frameArray?(arrayKind) ->
+                                resultKind <- 'A:' + _frameComponent(
+                                    std.slice(arrayKind, 2))
+                            push(resultKind)
+                        }
+                        79, 80, 81, 82, 83, 84, 85, 86 -> {
+                            take(if op = 80 {true -> 'J',
+                                _ -> if op = 81 {true -> 'F',
+                                    _ -> if op = 82 {true -> 'D',
+                                        _ -> if op = 83 {true -> 'A', _ -> 'I'}}}})
+                            take('I')
+                            arrayKind := take('A')
+                            if problem = ? & !_frameArrayOpcode?(arrayKind, op) ->
+                                reject(index, 'array opcode incompatible with verifier-known component type')
+                            // JVM aastore verifies reference categories, not
+                            // element subtyping: covariant arrays may fail
+                            // only at the runtime ArrayStoreException check.
+                        }
+                        96, 100, 104, 108, 112, 120, 122, 124,
+                        126, 128, 130 -> {
+                            take('I')
+                            take('I')
+                            push('I')
+                        }
+                        97, 101, 105, 109, 113, 127, 129, 131 -> {
+                            take('J')
+                            take('J')
+                            push('J')
+                        }
+                        98, 102, 106, 110, 114 -> {
+                            take('F')
+                            take('F')
+                            push('F')
+                        }
+                        99, 103, 107, 111, 115 -> {
+                            take('D')
+                            take('D')
+                            push('D')
+                        }
+                        121, 123, 125 -> {
+                            take('I')
+                            take('J')
+                            push('J')
+                        }
+                        116, 145, 146, 147 -> {
+                            take('I')
+                            push('I')
+                        }
+                        117 -> {
+                            take('J')
+                            push('J')
+                        }
+                        118, 119 -> {
+                            kind := if op = 118 {true -> 'F', _ -> 'D'}
+                            take(kind)
+                            push(kind)
+                        }
+                        132 -> if locals.(inst.(1)) != 'I' ->
+                            reject(index, 'iinc requires initialized integer local')
+                        133 -> {
+                            take('I')
+                            push('J')
+                        }
+                        136 -> {
+                            take('J')
+                            push('I')
+                        }
+                        134, 135, 137, 138, 139, 140, 141,
+                        142, 143, 144 -> {
+                            source := if op = 134 | op = 135 {true -> 'I',
+                                _ -> if op = 137 | op = 138 {true -> 'J',
+                                    _ -> if op = 139 | op = 140 | op = 141 {
+                                        true -> 'F', _ -> 'D'}}}
+                            target := if op = 134 | op = 137 | op = 144 {
+                                true -> 'F', _ -> if op = 135 | op = 138 |
+                                    op = 141 {true -> 'D',
+                                    _ -> if op = 140 | op = 143 {
+                                        true -> 'J', _ -> 'I'}}}
+                            take(source)
+                            push(target)
+                        }
+                        148, 149, 150, 151, 152 -> {
+                            kind := if op = 148 {true -> 'J',
+                                _ -> if op = 149 | op = 150 {true -> 'F', _ -> 'D'}}
+                            take(kind)
+                            take(kind)
+                            push('I')
+                        }
+                        153, 154, 155, 156, 157, 158, 170, 171 -> take('I')
+                        198, 199 -> takeCopyOrCompareReference()
+                        159, 160, 161, 162, 163, 164 -> {
+                            take('I')
+                            take('I')
+                        }
+                        165, 166 -> {
+                            takeCopyOrCompareReference()
+                            takeCopyOrCompareReference()
+                        }
+                        172 -> take('I')
+                        173 -> take('J')
+                        174 -> take('F')
+                        175 -> take('D')
+                        176 -> take(_valueType(str.cut(method.desc, ')').(1)))
+                        178 -> push(fieldKind())
+                        179 -> take(fieldKind())
+                        180 -> {
+                            take('A:' + inst.(2).(0))
+                            push(fieldKind())
+                        }
+                        181 -> {
+                            take(fieldKind())
+                            // JVMS permits one pre-super use of uninitialized
+                            // `this`: putfield of an *instance field declared
+                            // in this class*. An inherited field with a
+                            // current-class symbolic owner is NOT enough.
+                            ownField? := inst.(2).(0) = cls.name &
+                                (cls.fields |> std.some(fn(field) {
+                                    field.name = inst.(2).(1) &
+                                    field.desc = inst.(2).(2) &
+                                    (field.flags & 8) = 0
+                                }))
+                            if problem = ? & len(stack) > 0 &
+                                stack.(len(stack) - 1) = 'U:this' &
+                                method.name = '<init>' & ownField? {
+                                true -> stack <- std.slice(stack, 0, len(stack) - 1)
+                                _ -> take('A:' + inst.(2).(0))
+                            }
+                        }
+                        182, 183, 184, 185 -> {
+                            params := argTypes(inst.(2).(2))
+                            fn popArgs(i) if i >= 0 & problem = ? {
+                                true -> {
+                                    take(params.(i))
+                                    popArgs(i - 1)
+                                }
+                            }
+                            popArgs(len(params) - 1)
+                            if op = 183 & inst.(2).(1) = '<init>' {
+                                true -> takeConstructor(inst.(2).(0))
+                                _ -> if op != 184 -> take(if op = 185 {true -> 'A',
+                                    _ -> 'A:' + inst.(2).(0)})
+                            }
+                            result := _valueType(import('str').cut(inst.(2).(2), ')').(1))
+                            if result != 'V' -> push(result)
+                        }
+                        188, 189 -> {
+                            take('I')
+                            push('A:' + _newArrayType(op, inst.(1)))
+                        }
+                        197 -> {
+                            // JVM evaluates all dimensions, consuming the
+                            // innermost count first. Only I is admissible.
+                            std.range(inst.(2)) |> std.each(fn(_) take('I'))
+                            push('A:' + inst.(1))
+                        }
+                        190 -> {
+                            arrayKind := take('A')
+                            if problem = ? & arrayKind != 'N' &
+                                arrayKind != 'A' & !_frameArray?(arrayKind) ->
+                                reject(index, 'arraylength requires a verifier-known array')
+                            push('I')
+                        }
+                        191 -> {
+                            thrownKind := take('A')
+                            if problem = ? & type(thrownKind) = :string &
+                                str.startsWith?(thrownKind, 'A:') &
+                                !_throwable?(std.slice(thrownKind, 2),
+                                    classes, 0) ->
+                                reject(index, 'athrow requires a Throwable reference')
+                        }
+                        192 -> {
+                            take('A')
+                            push('A:' + inst.(1))
+                        }
+                        193 -> {
+                            take('A')
+                            push('I')
+                        }
+                        196 -> if inst.(2).(0) {
+                            21 -> load(inst.(1), 'I')
+                            22 -> load(inst.(1), 'J')
+                            23 -> load(inst.(1), 'F')
+                            24 -> load(inst.(1), 'D')
+                            25 -> load(inst.(1), 'A')
+                            54 -> store(inst.(1), 'I')
+                            55 -> store(inst.(1), 'J')
+                            56 -> store(inst.(1), 'F')
+                            57 -> store(inst.(1), 'D')
+                            58 -> store(inst.(1), 'A')
+                            132 -> if locals.(inst.(1)) != 'I' ->
+                                reject(index, 'wide iinc requires initialized integer local')
+                            _ -> reject(index, 'invalid wide frame local operation')
+                        }
+                        _ -> reject(index, 'opcode lacks a verified long frame effect')
+                    }
+                    if problem = ? {
+                        true -> {
+                            height := stack |> std.reduce(0,
+                                fn(n, kind) n + if kind = 'J' | kind = 'D' {true -> 2, _ -> 1})
+                            if height > method.stack ->
+                                reject(index, 'operand stack exceeds max_stack')
+                        }
+                    }
+                    fn edge(target) if problem = ? {
+                        true -> if type(target) != :int | target < 0 | target >= len(code) {
+                            true -> reject(index, 'control flow leaves the method')
+                            _ -> {
+                                prior := frames.(target)
+                                if prior = ? {
+                                    true -> {
+                                        frames.(target) <- {stack: stack, locals: locals,
+                                            thisReady?: thisReady?}
+                                        queue << target
+                                    }
+                                    _ -> {
+                                        if len(prior.stack) != len(stack) ->
+                                            reject(target, 'inconsistent value categories at merge')
+                                        if problem = ? {
+                                            true -> {
+                                                changed? := prior.thisReady? & !thisReady?
+                                                mergedStack := std.range(len(stack)) |>
+                                                    std.map(fn(i) {
+                                                        joined := _frameMerge(prior.stack.(i),
+                                                            stack.(i), classes)
+                                                        if joined = ? -> reject(target,
+                                                            'inconsistent value categories at merge')
+                                                        if joined != prior.stack.(i) ->
+                                                            changed? <- true
+                                                        joined
+                                                    })
+                                                if problem = ? {
+                                                    true -> {
+                                                        merged := std.range(method.locals) |>
+                                                            std.map(fn(i) if prior.locals.(i) = ? |
+                                                                locals.(i) = ? {
+                                                                true -> {
+                                                                    if prior.locals.(i) != ? ->
+                                                                        changed? <- true
+                                                                    ?
+                                                                }
+                                                                _ -> {
+                                                                    joined := _frameMerge(
+                                                                        prior.locals.(i),
+                                                                        locals.(i), classes)
+                                                                    if joined != prior.locals.(i) ->
+                                                                        changed? <- true
+                                                                    joined
+                                                                }
+                                                            })
+                                                        if changed? {
+                                                            true -> {
+                                                                frames.(target) <- {
+                                                                    stack: mergedStack, locals: merged,
+                                                                    thisReady?: prior.thisReady? & thisReady?}
+                                                                queue << target
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Exception edges use locals BEFORE the throwing
+                    // instruction and a fresh one-reference operand stack.
+                    // Do not let a failed call/array store initialize locals
+                    // in a catch block by accident.
+                    if problem = ? & len(handlers) > 0 {
+                        true -> {
+                            normalStack := stack
+                            normalLocals := locals
+                            normalReady? := thisReady?
+                            locals <- frames.(index).locals
+                            thisReady? <- frames.(index).thisReady?
+                            handlers |> std.each(fn(h) if problem = ? &
+                                index >= h.start & index < h.end {
+                                true -> {
+                                    stack <- ['A:' + if h.catch = ? {
+                                        true -> 'java/lang/Throwable', _ -> h.catch}]
+                                    edge(h.target)
+                                }
+                            })
+                            stack <- normalStack
+                            locals <- normalLocals
+                            thisReady? <- normalReady?
+                        }
+                    }
+                    if problem = ? -> if (op >= 172 & op <= 177) | op = 191 {
+                        true -> ?
+                        _ -> if op = 167 {
+                            true -> edge(inst.(1))
+                            _ -> if op = 170 | op = 171 {
+                                true -> {
+                                    edge(inst.(1))
+                                    refs := inst.(2)
+                                    count := if op = 170 {true -> len(refs) - 1,
+                                        _ -> int(len(refs) / 2)}
+                                    std.range(count) |> std.each(fn(i) if problem = ? ->
+                                        edge(refs.(if op = 170 {true -> i + 1,
+                                            _ -> i * 2 + 1})))
+                                }
+                                _ -> {
+                                    if (op >= 153 & op <= 166) |
+                                        op = 198 | op = 199 -> edge(inst.(1))
+                                    edge(index + 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            visit()
+        }
+    }
+    visit()
+    if problem = ? {true -> {type: :ok}, _ -> problem}
+}
+
+fn _finishLower(cls, method, items, classes, optimize?) {
+	problem := ?
+    // The class reader bounds frame offsets; here the selected method's
+    // decoded instruction PCs can prove they are real boundaries. A byte
+    // equal to 0xbb inside an operand is not an allocation instruction.
+    originalPcs := {}
+    items |> std.each(fn(item) originalPcs.(string(item.pc)) <- item)
+    method.framePcs |> std.default([]) |> std.each(fn(pc) if problem = ? {
+        true -> if originalPcs.(string(pc)) = ? ->
+            problem <- errorAt(cls.name, method.name, method.desc,
+                pc, 'StackMapTable frame is not on an instruction boundary')
+    })
+    method.newPcs |> std.default([]) |> std.each(fn(pc) if problem = ? {
+        true -> if originalPcs.(string(pc)) = ? |
+            originalPcs.(string(pc)).op != 187 ->
+            problem <- errorAt(cls.name, method.name, method.desc,
+                pc, 'StackMapTable uninitialized offset is not a new instruction')
+    })
+	// The only optimization is safe local constant folding. A branch/frame
+	// may not enter either discarded instruction; Java i32 is preserved.
+	targets := {}
+    method.framePcs |> std.default([]) |> std.each(fn(pc) {
+        targets.(string(pc)) <- true
+    })
+	items |> std.each(fn(item) {
+        if (item.op >= 153 & item.op <= 166) | item.op = 167 |
+            item.op = 198 | item.op = 199 | item.op = 170 | item.op = 171 ->
+            targets.(string(item.arg)) <- true
+        if item.op = 170 | item.op = 171 {
+            true -> {
+                cases := if item.op = 170 {true -> len(item.ref) - 1,
+                    _ -> int(len(item.ref) / 2)}
+                std.range(cases) |> std.each(fn(i) {
+                    index := if item.op = 170 {true -> i + 1, _ -> 2 * i + 1}
+                    targets.(string(item.ref.(index))) <- true
+                })
+            }
+        }
+    })
+	folds := 0
+	fn intConst(item) if item.op {
+		2, 3, 4, 5, 6, 7, 8 -> item.op - 3
+		16, 17 -> item.arg
+		18, 19 -> if type(item.arg) = :int { true -> item.arg, _ -> ? }
+		_ -> ?
+	}
+	fn wrap32(v) {
+		v := v & 4294967295
+		if v >= 2147483648 { true -> v - 4294967296, _ -> v }
+	}
+	optimized := []
+	fn fold(i) if i >= len(items) {
+		true -> ?
+		_ -> {
+			first := items.(i)
+			second := items.(i + 1)
+			third := items.(i + 2)
+            if optimize? & (method.catches |> std.default(0)) = 0 &
+                second != ? & third != ? &
+				intConst(first) != ? & intConst(second) != ? &
+				(third.op = 96 | third.op = 100 | third.op = 104) &
+				targets.(string(second.pc)) = ? & targets.(string(third.pc)) = ? {
+				true -> {
+					a := intConst(first)
+					b := intConst(second)
+					value := if third.op {96 -> a + b, 100 -> a - b, _ -> a * b}
+					optimized << {pc: first.pc, op: 18, arg: wrap32(value), ref: ?}
+					folds <- folds + 1
+					fold(i + 3)
+				}
+				_ -> {
+					optimized << first
+					fold(i + 1)
+				}
+			}
+		}
+	}
+	fold(0)
+    pcMap := {}
+    optimized |> std.each(fn(item, i) pcMap.(string(item.pc)) <- i)
+    handlers := []
+    method.handlers |> std.default([]) |> std.each(fn(handler) if problem = ? {
+        true -> {
+            start := pcMap.(string(handler.start))
+            end := if handler.end = len(method.code) {
+                true -> len(optimized), _ -> pcMap.(string(handler.end))}
+            target := pcMap.(string(handler.target))
+            if start = ? | end = ? | target = ? | start >= end {
+                true -> problem <- errorAt(cls.name, method.name, method.desc,
+                    handler.start, 'exception handler is not on instruction boundaries')
+                _ -> handlers << {start: start, end: end,
+                    target: target, catch: handler.catch}
+            }
+        }
+    })
+    out := []
+	optimized |> std.each(fn(item) {
+		arg := item.arg
+        ref := item.ref
+		if (item.op >= 153 & item.op <= 166) | item.op = 167 |
+            item.op = 198 | item.op = 199 | item.op = 170 | item.op = 171 {
+			true -> {
+				target := pcMap.(string(arg))
+				if target = ? -> problem <- errorAt(cls.name, method.name, method.desc,
+                    item.pc, 'branch target is not an instruction boundary')
+				arg <- target
+			}
+		}
+        if item.op = 170 | item.op = 171 {
+            true -> {
+                ref <- []
+                if item.op = 170 -> ref << item.ref.(0)
+                cases := if item.op = 170 {true -> len(item.ref) - 1,
+                    _ -> int(len(item.ref) / 2)}
+                std.range(cases) |> std.each(fn(i) {
+                    index := if item.op = 170 {true -> i + 1, _ -> 2 * i + 1}
+                    if item.op = 171 -> ref << item.ref.(index - 1)
+                    target := pcMap.(string(item.ref.(index)))
+                    if target = ? -> problem <- errorAt(cls.name, method.name,
+                        method.desc, item.pc, 'switch target is not an instruction boundary')
+                    ref << target
+                })
+            }
+        }
+		out << [item.op, arg, ref]
+	})
+	if problem != ? {
+		true -> problem
+		_ -> {
+            checked := _verifyStackHeights(cls, method, out, optimized, handlers)
+            if checked.type = :error {
+                true -> checked
+                _ -> {
+                    // Run the basic I/A/J type gate even without long values:
+                    // a ref used as int must fail before emitting runnable Oak.
+                    typed := _verifyLongFrames(cls, method, out, optimized,
+                        handlers, classes)
+                    if typed.type = :error {
+                        true -> typed
+                        _ -> {
+                            required := _requireTargetFrames(cls, method, out,
+                                optimized, handlers, checked.reachable)
+                            if required.type = :error {
+                                true -> required
+                                _ -> {type: :ok, code: out, handlers: handlers,
+                                    before: len(items), after: len(out), folds: folds}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+	}
+}

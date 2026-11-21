@@ -1,0 +1,204 @@
+// Repackage an edited class image as a new, unsigned JAR entirely in Oak.
+// All original members are bounded, CRC-checked and re-emitted as STORED ZIP
+// entries. Nonclass resource CONTENTS and the manifest survive; container
+// bytes/compression/timestamps do not. Signed JARs fail closed when edited.
+
+std := import('std')
+str := import('str')
+zip := import('./applet-zip.oak')
+classfile := import('./applet-class.oak')
+
+fn _error(message) {type: :error, message: message}
+fn _at(raw, pos) codepoint(raw.(pos)) & 255
+fn _u2(raw, pos) _at(raw, pos) + (_at(raw, pos + 1) << 8)
+fn _u4(raw, pos) _u2(raw, pos) + 65536 * _u2(raw, pos + 2)
+fn _le2(n) char(n & 255) + char((n >> 8) & 255)
+fn _le4(n) _le2(n & 65535) + _le2((n >> 16) & 65535)
+
+fn _safe?(name) {
+    if name = '' | len(name) > 1024 | name.(0) = '/' |
+        str.contains?(name, '\\') | str.contains?(name, char(0)) {
+        true -> false
+        _ -> {
+            parts := str.split(name, '/')
+            // ZIP directory markers end in '/', never allow empty interior
+            // segments, '..', drive letters or ambiguous path separators.
+            directory? := str.endsWith?(name, '/')
+            bad? := false
+            parts |> std.each(fn(part, i) {
+                if part = '.' | part = '..' | str.contains?(part, ':') |
+                    (part = '' & !(directory? & i = len(parts) - 1)) -> bad? <- true
+            })
+            !bad?
+        }
+    }
+}
+fn _signature?(name) {
+    low := str.lower(name)
+    str.startsWith?(low, 'meta-inf/') & (
+        str.endsWith?(low, '.sf') | str.endsWith?(low, '.rsa') |
+        str.endsWith?(low, '.dsa') | str.endsWith?(low, '.ec'))
+}
+
+fn _write(entries) {
+    body := ''
+    directory := ''
+    problem := ?
+    entries |> std.each(fn(item) if problem = ? {
+        true -> {
+            name := item.name
+            data := item.bytes
+            size := len(data)
+            offset := len(body)
+            if len(name) > 65535 | size > 33554432 | offset + size > 67108864 {
+                true -> problem <- 'new JAR entry exceeds ZIP32 size limit'
+                _ -> {
+                    crc := zip.crc32(data)
+                    body <- body + _le4(67324752) + _le2(20) + _le2(0) +
+                        _le2(0) + _le2(0) + _le2(33) + _le4(crc) +
+                        _le4(size) + _le4(size) + _le2(len(name)) + _le2(0) +
+                        name + data
+                    directory <- directory + _le4(33639248) + _le2(20) +
+                        _le2(20) + _le2(0) + _le2(0) + _le2(0) + _le2(33) +
+                        _le4(crc) + _le4(size) + _le4(size) + _le2(len(name)) +
+                        _le2(0) + _le2(0) + _le2(0) + _le2(0) +
+                        _le4(0) + _le4(offset) + name
+                }
+            }
+        }
+    })
+    if len(entries) > 4096 | len(body) + len(directory) + 22 > 67108864 ->
+        problem <- 'new JAR exceeds 64 MiB/4096 entries limit'
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {type: :ok, value: body + directory + _le4(101010256) +
+            _le2(0) + _le2(0) + _le2(len(entries)) + _le2(len(entries)) +
+            _le4(len(directory)) + _le4(len(body)) + _le2(0)}
+    }
+}
+
+// Require exactly the original class names and preserve the original Main-
+// Class. editedClasses come from the checked Oak->class recompiler in the
+// public API; calling repack directly still validates names and ZIP integrity.
+fn repack(original, editedClasses) {
+    old := zip.entries(original)
+    if old.type = :error {
+        true -> old
+        _ -> {
+            replacement := {}
+            problem := ?
+            if type(editedClasses) != :list | len(editedClasses) != old.count ->
+                problem <- 'edited JAR must contain exactly the original class set'
+            if problem = ? -> editedClasses |> std.each(fn(bytes) if problem = ? {
+                true -> {
+                    parsed := classfile.parseClass(bytes)
+                    if parsed.type = :error {
+                        true -> problem <- parsed.message
+                        _ -> {
+                            name := parsed.value.name + '.class'
+                            if replacement.(name) != ? {
+                                true -> problem <- 'duplicate edited JAR class ' + name
+                                _ -> replacement.(name) <- bytes
+                            }
+                        }
+                    }
+                }
+            })
+            originalNames := {}
+            old.classes |> std.each(fn(bytes) {
+                cls := classfile.parseClass(bytes).value
+                originalNames.(cls.name + '.class') <- true
+            })
+            if problem = ? -> keys(replacement) |> std.each(fn(name) if originalNames.(name) = ? ->
+                problem <- 'edited JAR has a foreign class ' + name)
+            if problem != ? {
+                true -> _error(problem)
+                _ -> _repack(original, replacement, old)
+            }
+        }
+    }
+}
+fn _repack(original, replacement, old) {
+    // zip.entries has already verified the central directory and class/manifest
+    // members. Recheck every resource as we copy it, including unused ones.
+    end := len(original) - 22
+    fn seek(i) if i < 0 {
+        true -> ?
+        _ -> if _u4(original, i) = 101010256 & i + 22 + _u2(original, i + 20) = len(original) {
+            true -> i
+            _ -> seek(i - 1)
+        }
+    }
+    eocd := seek(end)
+    if eocd = ? {
+        true -> _error('original JAR has no ZIP directory')
+        _ -> {
+            offset := _u4(original, eocd + 16)
+            count := _u2(original, eocd + 10)
+            entries := []
+            seen := {}
+            total := 0
+            problem := ?
+            fn scan(i, pos) if i < count & problem = ? {
+                true -> {
+                    if pos + 46 > len(original) | _u4(original, pos) != 33639248 {
+                        true -> problem <- 'invalid JAR central directory'
+                        _ -> {
+                            flags := _u2(original, pos + 8)
+                            method := _u2(original, pos + 10)
+                            checksum := _u4(original, pos + 16)
+                            compressed := _u4(original, pos + 20)
+                            size := _u4(original, pos + 24)
+                            n := _u2(original, pos + 28)
+                            x := _u2(original, pos + 30)
+                            c := _u2(original, pos + 32)
+                            local := _u4(original, pos + 42)
+                            next := pos + 46 + n + x + c
+                            if next > len(original) | next > offset + _u4(original, eocd + 12) |
+                                size = 4294967295 | compressed = 4294967295 {
+                                true -> problem <- 'invalid or ZIP64 JAR entry'
+                                _ -> {
+                                    name := std.slice(original, pos + 46, pos + 46 + n)
+                                    if !_safe?(name) | seen.(name) != ? {
+                                        true -> problem <- 'unsafe or duplicate JAR member ' + name
+                                        _ -> {
+                                            seen.(name) <- true
+                                            if _signature?(name) ->
+                                                problem <- 'edited signed JAR would have invalid signatures: ' + name
+                                            if total + size > 33554432 ->
+                                                problem <- 'new JAR resources exceed 32 MiB budget'
+                                            if problem = ? {
+                                                true -> {
+                                                    decoded := zip._member(original, name, local, flags, method,
+                                                        compressed, size, checksum, offset, 33554432)
+                                                    if decoded.type = :error {
+                                                        true -> problem <- decoded.message
+                                                        _ -> {
+                                                            if str.lower(name) = 'meta-inf/manifest.mf' &
+                                                                str.contains?(str.lower(decoded.value), '-digest:') ->
+                                                                problem <- 'edited signed/digested JAR manifest is not supported'
+                                                            data := replacement.(name) |> std.default(decoded.value)
+                                                            if str.endsWith?(name, '.class') & replacement.(name) = ? ->
+                                                                problem <- 'missing edited class ' + name
+                                                            if problem = ? -> {
+                                                                total <- total + len(data)
+                                                                entries << {name: name, bytes: data}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            scan(i + 1, next)
+                        }
+                    }
+                }
+            }
+            scan(0, offset)
+            if problem != ? {true -> _error(problem), _ -> _write(entries)}
+        }
+    }
+}

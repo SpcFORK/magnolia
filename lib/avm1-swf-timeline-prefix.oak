@@ -1,0 +1,324 @@
+// Bounded FIRST-FRAME executor for the separate uploaded FWS5 movie.
+// This is a strict, unpinned-on-direct-use *subset*, not a player: scan the
+// entire container, follow root frame-0 PlaceObject2 -> sprite12 frame0 ->
+// sprite11 frame0, verify the on-stage named bar and stream headers, execute
+// the original sprite11 frame0 DoAction bytes with the separate AVM1 VM, and
+// apply its _root.stop event to the virtual root. No subsequent tick/frame,
+// visual pixels, asset decode, MP3 playback, input, real loading or AVM2.
+// The Python oracle binds direct CLI input to the original full-SWF SHA-256.
+std := import('std')
+scan := import('swf-tag-scan')
+actions := import('avm1-preloader')
+
+fn _error(message) {type: :error, message: 'SWF5 timeline prefix: ' + message}
+fn _at(raw, i) codepoint(raw.(i)) & 255
+fn _u16(raw, i) _at(raw, i) + 256 * _at(raw, i + 1)
+fn _u32(raw, i) _u16(raw, i) + 65536 * _u16(raw, i + 2)
+
+fn _tag(raw, cursor, stop) if cursor < 0 | stop - cursor < 2 {
+    true -> _error('truncated tag header')
+    _ -> {
+        header := _u16(raw, cursor)
+        code := header >> 6
+        size := header & 63
+        payload := cursor + 2
+        if size = 63 {
+            true -> if stop - payload < 4 {
+                true -> _error('truncated extended tag header')
+                _ -> {
+                    size <- _u32(raw, payload)
+                    payload <- payload + 4
+                    if size > stop - payload {
+                        true -> _error('tag crosses enclosing frame/sprite')
+                        _ -> {type: :ok, code: code, offset: cursor,
+                            payload: payload, size: size, next: payload + size}
+                    }
+                }
+            }
+            _ -> if size > stop - payload {
+                true -> _error('tag crosses enclosing frame/sprite')
+                _ -> {type: :ok, code: code, offset: cursor,
+                    payload: payload, size: size, next: payload + size}
+            }
+        }
+    }
+}
+
+fn _placement(raw, tag) if tag.code != 26 | tag.size < 5 {
+    true -> _error('expected complete PlaceObject2 character reference')
+    _ -> {
+        flags := _at(raw, tag.payload)
+        if (flags & 2) = 0 {
+            true -> _error('PlaceObject2 without an explicitly placed character')
+            _ -> {type: :ok, flags: flags,
+                depth: _u16(raw, tag.payload + 1),
+                characterId: _u16(raw, tag.payload + 3),
+                offset: tag.offset, payloadBytes: tag.size}
+        }
+    }
+}
+
+fn _sprite(raw, definition, expectedFrames) {
+    if definition = ? | definition.size < 4 |
+        definition.size > 512 | _u16(raw, definition.payload + 2) != expectedFrames {
+        true -> _error('missing/oversized or changed sprite header')
+        _ -> {
+            frames := []
+            current := []
+            cursor := definition.payload + 4
+            problem := ?
+            ended? := false
+            std.range(64) |> std.each(fn(_) if problem = ? & !ended? {
+                true -> {
+                    tag := _tag(raw, cursor, definition.next)
+                    if tag.type != :ok {
+                        true -> problem <- tag.message
+                        _ -> {
+                            if tag.code != 0 & tag.code != 1 & tag.code != 12 &
+                                tag.code != 26 & tag.code != 28 & tag.code != 43 ->
+                                problem <- 'unsupported nested sprite tag in prefix'
+                            if tag.code = 0 {
+                                true -> if tag.size != 0 {
+                                    true -> problem <- 'nonempty sprite End tag'
+                                    _ -> ended? <- true
+                                }
+                                _ -> if tag.code = 1 {
+                                    true -> {
+                                        frames << current
+                                        current <- []
+                                    }
+                                    _ -> current << tag
+                                }
+                            }
+                            cursor <- tag.next
+                        }
+                    }
+                }
+            })
+            if problem = ? & (!ended? | cursor != definition.next |
+                len(frames) != expectedFrames | len(current) != 0) ->
+                problem <- 'nested sprite did not end at claimed frame count'
+            if problem != ? {
+                true -> _error(problem)
+                _ -> {type: :ok, frames: frames}
+            }
+        }
+    }
+}
+
+fn firstFrame(raw, loaded, total) if type(raw) != :string |
+    len(raw) < 16 | len(raw) > 3000000 {
+    true -> _error('input outside 16..3000000 byte cap')
+    _ -> {
+        envelope := scan.scan(raw)
+        if envelope.type != :ok {
+            true -> _error(envelope.message)
+            _ -> if envelope.version != 5 | envelope.frameCount != 2140 |
+                envelope.fpsFixed != 5120 | envelope.totalTags != 7394 |
+                envelope.topTags != 7369 | envelope.nestedTags != 25 |
+                envelope.topActionTags != 0 | envelope.nestedActionTags != 2 |
+                len(envelope.sprites) != 4 {
+                true -> _error('not the finite original SWF5 envelope profile')
+                _ -> {
+                    rootStart := 8 + ((5 + 4 * (_at(raw, 8) >> 3) + 7) >> 3) + 4
+                    cursor := rootStart
+                    definitions := []
+                    placements := []
+                    streamHead := ?
+                    streamBlock := ?
+                    firstShow := ?
+                    problem := ?
+                    std.range(64) |> std.each(fn(_) if problem = ? & firstShow = ? {
+                        true -> {
+                            tag := _tag(raw, cursor, len(raw))
+                            if tag.type != :ok {
+                                true -> problem <- tag.message
+                                _ -> {
+                                    if tag.code != 1 & tag.code != 2 & tag.code != 9 &
+                                        tag.code != 18 & tag.code != 19 & tag.code != 21 &
+                                        tag.code != 22 & tag.code != 26 & tag.code != 32 &
+                                        tag.code != 34 & tag.code != 39 & tag.code != 48 ->
+                                        problem <- 'unsupported first-root-frame tag'
+                                    if tag.code = 39 & problem = ? {
+                                        true -> if tag.size < 4 | tag.size > 512 |
+                                            len(definitions) >= 4 {
+                                            true -> problem <- 'bad/oversized sprite definition'
+                                            _ -> definitions << {id: _u16(raw, tag.payload),
+                                                tag: tag}
+                                        }
+                                    }
+                                    if tag.code = 26 & problem = ? {
+                                        true -> {
+                                            placed := _placement(raw, tag)
+                                            if placed.type != :ok {
+                                                true -> problem <- placed.message
+                                                _ -> placements << placed
+                                            }
+                                        }
+                                    }
+                                    if tag.code = 18 & problem = ? {
+                                        true -> if streamHead != ? | tag.size != 6 |
+                                            _at(raw, tag.payload) != 15 |
+                                            _at(raw, tag.payload + 1) != 47 {
+                                            true -> problem <- 'expected one bounded MP3 SoundStreamHead'
+                                            _ -> streamHead <- tag
+                                        }
+                                    }
+                                    if tag.code = 19 & problem = ? {
+                                        true -> if streamBlock != ? | tag.size < 4 |
+                                            tag.size > 2048 {
+                                            true -> problem <- 'expected one bounded SoundStreamBlock'
+                                            _ -> streamBlock <- tag
+                                        }
+                                    }
+                                    if tag.code = 1 -> firstShow <- tag
+                                    cursor <- tag.next
+                                }
+                            }
+                        }
+                    })
+                    if problem = ? & (firstShow = ? | len(definitions) != 3 |
+                        len(placements) != 3 | streamHead = ? | streamBlock = ?) ->
+                        problem <- 'incomplete first root frame/definitions/sound tags'
+                    fn defined(id) {
+                        index := definitions |> std.find(fn(item) item.id = id)
+                        if index = ? {true -> ?, _ -> definitions.(index).tag}
+                    }
+                    if problem = ? & (defined(6) = ? | defined(11) = ? |
+                        defined(12) = ? | placements.(0).depth != 1 |
+                        placements.(1).depth != 2 | placements.(2).depth != 3 |
+                        placements.(2).characterId != 12 |
+                        placements.(2).flags != 6) ->
+                        problem <- 'root frame0 did not place sprite12 at depth3'
+                    if problem = ? & (_u16(raw, streamHead.payload + 2) != 2205 |
+                        _u16(raw, streamHead.payload + 4) != 1673 |
+                        _u16(raw, streamBlock.payload) != 3456 |
+                        _u16(raw, streamBlock.payload + 2) != 1673) ->
+                        problem <- 'first MP3 stream header/block sample metadata differs'
+                    if problem != ? {
+                        true -> _error(problem)
+                        _ -> {
+                            sprite6 := _sprite(raw, defined(6), 1)
+                            sprite11 := _sprite(raw, defined(11), 3)
+                            sprite12 := _sprite(raw, defined(12), 1)
+                            if sprite6.type != :ok | sprite11.type != :ok |
+                                sprite12.type != :ok {
+                                true -> _error('nested sprite prefix differs')
+                                _ -> {
+                                    childPlace := ?
+                                    barPlace := ?
+                                    originalAction := ?
+                                    frame1Action := ?
+                                    label := ?
+                                    problem <- ?
+                                    sprite12.frames.(0) |> std.each(fn(tag) if
+                                        tag.code = 26 & problem = ? {
+                                        true -> {
+                                            placed := _placement(raw, tag)
+                                            if placed.type != :ok {
+                                                true -> problem <- placed.message
+                                                _ -> if placed.depth = 2 &
+                                                    placed.characterId = 11 &
+                                                    placed.flags = 6 -> childPlace <- placed
+                                            }
+                                        }
+                                    })
+                                    sprite11.frames.(0) |> std.each(fn(tag) if
+                                        problem = ? {
+                                        true -> {
+                                            if tag.code = 12 {
+                                                true -> if originalAction != ? | tag.size > 512 {
+                                                    true -> problem <- 'expected one bounded first-frame DoAction'
+                                                    _ -> originalAction <- tag
+                                                }
+                                            }
+                                            if tag.code = 26 {
+                                                true -> {
+                                                    placed := _placement(raw, tag)
+                                                    if placed.type != :ok {
+                                                        true -> problem <- placed.message
+                                                        _ -> if placed.depth = 3 &
+                                                            placed.characterId = 6 &
+                                                            placed.flags = 38 &
+                                                            tag.size >= 9 &
+                                                            std.slice(raw, tag.next - 4, tag.next) =
+                                                                'bar' + char(0) -> barPlace <- placed
+                                                }
+                                                }
+                                            }
+                                        }
+                                    })
+                                    sprite11.frames.(1) |> std.each(fn(tag) if tag.code = 12 ->
+                                        frame1Action <- tag)
+                                    sprite11.frames.(2) |> std.each(fn(tag) if tag.code = 43 &
+                                        tag.size = 7 &
+                                        std.slice(raw, tag.payload, tag.next) =
+                                            'loaded' + char(0) -> label <- tag)
+                                    if problem = ? & (childPlace = ? | barPlace = ? |
+                                        originalAction = ? | originalAction.size != 201 |
+                                        frame1Action = ? | frame1Action.size != 7 |
+                                        label = ?) ->
+                                        problem <- 'nested preloader placement/action/label differs'
+                                    if problem != ? {
+                                        true -> _error(problem)
+                                        _ -> {
+                                            // Frame1 actions and loaded frame2 are found but
+                                            // deliberately NOT entered or scheduled here.
+                                            body := std.slice(raw, originalAction.payload,
+                                                originalAction.next)
+                                            result := actions.run(body, loaded, total)
+                                            if result.type != :ok {
+                                                true -> _error(result.message)
+                                                _ -> if len(result.events) < 1 |
+                                                    result.events.(0).action != 'call' |
+                                                    result.events.(0).name != 'stop' |
+                                                    result.events.(0).target != '_root' {
+                                                    true -> _error('sprite did not stop virtual root')
+                                                    _ -> {
+                                                        jump := result.events |> std.some(fn(evt) evt.action = 'gotoLabel' & evt.label = 'loaded')
+                                                        {type: :ok, movieBytes: len(raw),
+                                                            rootFrame: 0, rootShowOffset: firstShow.offset,
+                                                            rootStopped?: true, rootFrame1Entered?: false,
+                                                            placements: [
+                                                                {parent: 'root', depth: 3,
+                                                                    spriteId: 12,
+                                                                    offset: placements.(2).offset},
+                                                                {parent: 'sprite12', depth: 2,
+                                                                    spriteId: 11,
+                                                                    offset: childPlace.offset},
+                                                                {parent: 'sprite11', depth: 3,
+                                                                    spriteId: 6, name: 'bar',
+                                                                    offset: barPlace.offset}],
+                                                            sound: {headOffset: streamHead.offset,
+                                                                blockOffset: streamBlock.offset,
+                                                                blockBytes: streamBlock.size,
+                                                                codec: 'MP3 header only',
+                                                                streamSamplesPerBlock: 2205,
+                                                                firstBlockSampleCount: 3456,
+                                                                firstBlockSeekSamples: 1673,
+                                                                decodedOrPlayed?: false},
+                                                            action: {spriteId: 11, frame: 0,
+                                                                offset: originalAction.payload,
+                                                                bytes: originalAction.size,
+                                                                result: result},
+                                                            frame1ActionOffset: frame1Action.payload,
+                                                            loadedLabelFrame: 2,
+                                                            pendingGotoLoaded?: jump,
+                                                            spriteFrame1Entered?: false,
+                                                            spriteFrame2Entered?: false,
+                                                            rendered?: false,
+                                                            realBytesLoadedMeasured?: false}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

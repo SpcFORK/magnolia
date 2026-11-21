@@ -8,3 +8,5 @@ require (
 )
 
 require golang.org/x/sys v0.6.0
+
+replace golang.org/x/sys => github.com/golang/sys v0.6.0

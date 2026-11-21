@@ -119,6 +119,48 @@ fn run(t) {
 			true
 		)
 
+		// --- ui-core prop cache ---
+		'resolved props invalidate after setProp' |> t.eq(
+			{
+				core := uiCore.createCore({ width: 100, height: 80 })
+				id := uiCore.createNode(core, surface.NODE_TYPE.view)
+				uiCore.insertBefore(core, surface.ROOT_ID, id, 0)
+				uiCore.setProp(core, id, 'width', 100)
+				uiCore.setProp(core, id, 'height', 80)
+				uiCore.setProp(core, id, 'bgColor', surface.rgb(1, 2, 3))
+				uiCore.draw(core)
+				uiCore.setProp(core, id, 'bgColor', surface.rgb(4, 5, 6))
+				dl := uiCore.draw(core)
+				// last rect emitted for the node carries the new color
+				found := { v: 0 }
+				dl |> std.each(fn(op) {
+					if op.op = surface.DRAW_OP.rect & op.color = surface.rgb(4, 5, 6) -> found.v := found.v + 1
+				})
+				found.v > 0
+			}
+			true
+		)
+
+		'prop cache survives repeated layout+draw' |> t.eq(
+			{
+				core := uiCore.createCore({ width: 120, height: 100 })
+				a := uiCore.createNode(core, surface.NODE_TYPE.view)
+				uiCore.insertBefore(core, surface.ROOT_ID, a, 0)
+				uiCore.setProp(core, a, 'bgColor', surface.rgb(9, 9, 9))
+				uiCore.setProp(core, a, 'width', 120)
+				uiCore.setProp(core, a, 'height', 100)
+				uiCore.draw(core)
+				uiCore.setProp(core, a, 'width', 60)
+				dl := uiCore.draw(core)
+				found := { v: 0 }
+				dl |> std.each(fn(op) {
+					if op.op = surface.DRAW_OP.rect & op.w = 60 & op.color = surface.rgb(9, 9, 9) -> found.v := found.v + 1
+				})
+				found.v > 0
+			}
+			true
+		)
+
 		// --- ui-sdk ---
 		'sdk View/Text builds mirror' |> t.eq(
 			{

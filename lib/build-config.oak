@@ -56,12 +56,17 @@ fn configure(config, state, parseIncludes, statFile, resolve, collectVFSFiles, t
 		_ -> targetFlags.0
 	}
 
-	// Resolve entry with extension probing if needed
-	entryPath := if hasOakExt?(state.Entry) {
+	// A caller may supply an in-memory Oak entrypoint. Resolve its virtual
+	// filename for relative imports, without requiring a staged file on disk.
+	entryPath := if config.source != ? {
 		true -> state.Entry
-		_ -> resolveImportFile(state.Entry, fn(p) statFile(p) != ?)
+		_ -> if hasOakExt?(state.Entry) {
+			true -> state.Entry
+			_ -> resolveImportFile(state.Entry, fn(p) statFile(p) != ?)
+		}
 	}
-	if statFile(entryPath) = ? -> state.Abort(format('[oak build] {{0}} does not exist.', state.Entry))
+	if config.source = ? & statFile(entryPath) = ? ->
+		state.Abort(format('[oak build] {{0}} does not exist.', state.Entry))
 
 	state.AbsoluteEntry <- resolve(entryPath)
 	state.VFSFiles <- collectVFSFiles(state.IncludeVFS, state.Log)

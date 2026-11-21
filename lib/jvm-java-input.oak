@@ -1,0 +1,296 @@
+// JVM Java-source frontend. Java source is compiled only at CONVERSION time;
+// the resulting class bytes still pass Magnolia's Oak verifier/VM. The
+// generated Oak/JS/HTML never calls javac or a Java VM. -proc:none and an
+// isolated class/source path prevent executing annotation processors or
+// implicitly compiling files outside the explicitly supplied source list.
+// Use javaBackend: 'oak' to select the separate Oak-only subset compiler.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+path := import('path')
+classfile := import('./applet-class.oak')
+subset := import('./jvm-java-subset.oak')
+
+fn _error(message) {type: :error, message: message}
+fn _source?(file) type(file) = :string & str.endsWith?(str.lower(file), '.java') &
+    !str.contains?(file, char(0))
+
+fn _oak(entry, text, opts) {
+    if opts.javaFiles != ? & len(opts.javaFiles) > 0 {
+        true -> _error('Oak-only Java subset accepts one source file; use javac for multiple sources')
+        _ -> subset.compile(entry, text)
+    }
+}
+
+fn _classFiles(directory) {
+    classes := []
+    seen := {}
+    total := 0
+    visited := 0
+    problem := ?
+    fn descend(folder, relative, depth) if problem = ? {
+        true -> {
+            if depth > 32 {
+                true -> problem <- 'Java output directory depth exceeds 32'
+                _ -> {
+                    files := fs.listFiles(folder)
+                    if files = ? {
+                        true -> problem <- 'cannot read javac output directory'
+                        _ -> files |> std.each(fn(file) if problem = ? {
+                            true -> {
+                                visited <- visited + 1
+                                name := file.name
+                                if visited > 4096 | name = '.' | name = '..' |
+                                    str.contains?(name, '/') | str.contains?(name, '\\') |
+                                    str.contains?(name, char(0)) {
+                                    true -> problem <- 'unsafe or oversized javac output tree'
+                                    _ -> {
+                                        rel := if relative = '' {true -> name,
+                                            _ -> relative + '/' + name}
+                                        location := path.resolve(rel, directory)
+                                        if !str.startsWith?(location, directory + '/') {
+                                            true -> problem <- 'javac output escapes temporary directory'
+                                            _ -> if file.dir {
+                                                true -> descend(location, rel, depth + 1)
+                                                _ -> if str.endsWith?(name, '.class') {
+                                                    true -> {
+                                                        raw := fs.readFile(location)
+                                                        if raw = ? | file.len > classfile.MAX_CLASS_BYTES |
+                                                            total + file.len > 33554432 | len(classes) >= 256 {
+                                                            true -> problem <- 'too many or oversized compiled Java classes'
+                                                            _ -> {
+                                                                parsed := classfile.parseClass(raw)
+                                                                if parsed.type = :error {
+                                                                    true -> problem <- 'invalid javac class ' + rel + ': ' + parsed.message
+                                                                    _ -> if parsed.value.name + '.class' != rel | seen.(rel) != ? {
+                                                                        true -> problem <- 'javac output class name mismatch/duplicate: ' + rel
+                                                                        _ -> {
+                                                                            seen.(rel) <- true
+                                                                            total <- total + len(raw)
+                                                                            classes << raw
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                    }
+                }
+            }
+        }
+    }
+    descend(directory, '', 0)
+    if problem = ? & len(classes) = 0 -> problem <- 'javac produced no .class files'
+    if problem != ? {true -> _error(problem), _ -> {type: :ok, classes: classes}}
+}
+
+fn _javac(entry, text, opts, compiler) {
+    extra := opts.javaFiles |> std.default([])
+    release := opts.javaRelease |> std.default(8)
+    if type(extra) != :list | len(extra) > 32 {
+        true -> _error('javaFiles must be a list of at most 32 explicit .java paths')
+        _ -> if type(release) != :int | release < 8 | release > 25 {
+            true -> _error('javaRelease must be an integer from 8 to 25')
+            _ -> _javacValidated(entry, text, opts, compiler, extra, release)
+        }
+    }
+}
+fn _javacValidated(entry, text, opts, compiler, extra, release) {
+    total := len(text)
+    problem := ?
+    // Keep the exact validated bytes, not paths that javac could read again
+    // after validation. Every explicit source is staged into the isolated
+    // source tree before the compiler is launched.
+    sources := [{file: entry, bytes: text}]
+    std.append([entry], extra) |> std.each(fn(file, i) if problem = ? {
+        true -> {
+            if !_source?(file) {
+                true -> problem <- 'expected .java source path: ' + string(file)
+                _ -> if i > 0 {
+                    true -> {
+                        location := path.resolve(file)
+                        content := fs.readFile(location)
+                        if content = ? | type(content) != :string |
+                            len(content) > 1048576 | len(content) = 0 {
+                            true -> problem <- 'cannot read bounded Java source ' + file
+                            _ -> {
+                                if location = path.resolve(entry) |
+                                    (sources |> std.some(fn(item) path.resolve(item.file) = location)) ->
+                                    problem <- 'duplicate Java source path ' + file
+                                total <- total + len(content)
+                                sources << {file: file, bytes: content}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if total > 4194304 -> problem <- 'Java sources exceed 4 MiB limit'
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {
+            made := exec('mktemp', ['-d', '-t', 'magnolia-java-XXXXXXXX'], '')
+            if made.type = :error | made.status != 0 {
+                true -> _error('mktemp is required for isolated javac builds')
+                _ -> {
+                    temporary := str.trim(made.stdout)
+                    if !str.startsWith?(temporary, '/') | fs.statFile(temporary).dir != true {
+                        true -> _error('mktemp did not create an absolute output directory')
+                        _ -> _javacInDir(opts, compiler, release, sources, temporary)
+                    }
+                }
+            }
+        }
+    }
+}
+// Read and validate helper classes before exposing them to javac. They remain
+// separate from javac's output directory, and Builder adds them to the linked
+// VM image exactly once after source compilation.
+fn _stageHelpers(opts, directory) {
+    files := opts.classFiles |> std.default([])
+    if type(files) != :list | len(files) > 128 {
+        true -> _error('classFiles must be a list of at most 128 helper class paths')
+        _ -> {
+            seen := {}
+            total := 0
+            problem := ?
+            files |> std.each(fn(file) if problem = ? {
+                true -> {
+                    bytes := if type(file) = :string {true -> fs.readFile(file), _ -> ?}
+                    if bytes = ? | len(bytes) > classfile.MAX_CLASS_BYTES {
+                        true -> problem <- 'cannot read bounded Java helper class ' + string(file)
+                        _ -> {
+                            parsed := classfile.parseClass(bytes)
+                            if parsed.type = :error {
+                                true -> problem <- parsed.message
+                                _ -> {
+                                    name := parsed.value.name
+                                    destination := path.resolve(name + '.class', directory)
+                                    if str.contains?(name, char(0)) | seen.(name) != ? |
+                                        !str.startsWith?(destination, directory + '/') |
+                                        total + len(bytes) > 33554432 {
+                                        true -> problem <- 'duplicate, unsafe or oversized Java helper class ' + name
+                                        _ -> {
+                                            seen.(name) <- true
+                                            total <- total + len(bytes)
+                                            if mkdir(path.dir(destination)).type = :error |
+                                                fs.writeFile(destination, bytes) = ? ->
+                                                problem <- 'could not stage Java helper class ' + name
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            if problem != ? {true -> _error(problem), _ -> {type: :ok}}
+        }
+    }
+}
+fn _javacInDir(opts, compiler, release, sources, temporary) {
+    classesDir := path.resolve('classes', temporary)
+    sourcesDir := path.resolve('source', temporary)
+    helpersDir := path.resolve('helpers', temporary)
+    result := ?
+    if mkdir(classesDir).type = :error | mkdir(sourcesDir).type = :error |
+        mkdir(helpersDir).type = :error {
+        true -> result <- _error('cannot create isolated Java build directory')
+        _ -> {
+            staged := _stageHelpers(opts, helpersDir)
+            if staged.type = :error -> result <- staged
+            paths := []
+            sources |> std.each(fn(item, i) if result = ? {
+                true -> {
+                    // Distinct directories retain equal simple filenames
+                    // from different Java packages (a/Peer and b/Peer).
+                    folder := path.resolve('unit-' + string(i), sourcesDir)
+                    location := path.resolve(path.base(item.file), folder)
+                    if mkdir(folder).type = :error |
+                        fs.writeFile(location, item.bytes) = ? {
+                        true -> result <- _error('cannot stage validated Java source ' + item.file)
+                        _ -> paths << location
+                    }
+                }
+            })
+            if result = ? {
+                true -> {
+                    // Exact staged sources and validated helper classes only.
+                    // No ambient source path, shell, annotation processor or
+                    // compiler read of the original Java files after checks.
+                    args := ['-proc:none', '--release', string(release), '-g:none',
+                        '-encoding', 'UTF-8', '-classpath', helpersDir,
+                        '-sourcepath', sourcesDir, '-implicit:none',
+                        '-d', classesDir]
+                    paths |> std.each(fn(file) args << file)
+                    compiled := exec(compiler, args, '')
+                    if compiled.type = :error {
+                        true -> result <- _error('cannot start javac: ' + string(compiled.error))
+                        _ -> if compiled.status != 0 {
+                            true -> result <- _error('javac rejected Java source: ' +
+                                std.slice(str.trim(compiled.stderr + compiled.stdout), 0, 4096))
+                            _ -> result <- _classFiles(classesDir)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    removed := rm(temporary)
+    if removed.type = :error {
+        true -> _error('cannot clean isolated Java build directory')
+        _ -> {
+            if result.type = :ok -> result.backend <- 'javac'
+            result
+        }
+    }
+}
+
+fn load(config, opts) {
+    entry := config.entry
+    source := if config.source != ? {true -> config.source, _ -> fs.readFile(entry)}
+    if !_source?(entry) {
+        true -> _error('Java input must end in .java')
+        _ -> if type(source) != :string | source = '' | len(source) > 1048576 |
+            str.contains?(source, char(0)) {
+            true -> _error('cannot read Java source (limit 1 MiB, no NUL bytes)')
+            _ -> {
+                backend := opts.javaBackend |> std.default('auto')
+                if backend != 'auto' & backend != 'oak' & backend != 'javac' {
+                    true -> _error('javaBackend must be auto, oak or javac')
+                    _ -> if backend = 'oak' {
+                        true -> _oak(entry, source, opts)
+                        _ -> {
+                            compiler := opts.javacPath |> std.default('javac')
+                            if type(compiler) != :string | compiler = '' |
+                                str.contains?(compiler, char(0)) {
+                                true -> _error('javacPath must be an executable name/path')
+                                _ -> {
+                                    probe := exec(compiler, ['-version'], '')
+                                    if probe.type = :error | probe.status != 0 {
+                                        true -> if backend = 'auto' {
+                                            true -> _oak(entry, source, opts)
+                                            _ -> _error('build-time javac unavailable; use javaBackend: oak for the supported subset')
+                                        }
+                                        _ -> {
+                                            _javac(entry, source, opts, compiler)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

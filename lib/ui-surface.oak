@@ -152,6 +152,28 @@ STYLE_VERSION := 1
 STYLE_HEADER_SIZE := 8
 
 // ---------------------------------------------------------------------------
+// Reverse lookup maps (code -> name), built once at module load.
+// Built from OP/PROP so they cannot drift; coders never renumber entries.
+// ---------------------------------------------------------------------------
+
+fn _byCode(table) {
+	m := {}
+	ks := keys(table)
+	fn loop(i) if i < len(ks) {
+		true -> {
+			name := ks.(i)
+			m.(string(table.(name))) := name
+			loop(i + 1)
+		}
+	}
+	loop(0)
+	m
+}
+
+OP_NAMES := _byCode(OP)
+PROP_NAMES := _byCode(PROP)
+
+// ---------------------------------------------------------------------------
 // Contract fingerprint — bump when any code above changes meaning
 // ---------------------------------------------------------------------------
 
@@ -165,36 +187,10 @@ fn fingerprint() {
 }
 
 // opName returns the string name for an op code, or ? if unknown.
-fn opName(code) {
-	ks := keys(OP)
-	fn loop(i) if i < len(ks) {
-		true -> {
-			k := ks.(i)
-			if OP.(k) = code {
-				true -> k
-				_ -> loop(i + 1)
-			}
-		}
-		_ -> ?
-	}
-	loop(0)
-}
+fn opName(code) OP_NAMES.(string(code))
 
 // propName returns the string name for a prop id, or ?.
-fn propName(code) {
-	ks := keys(PROP)
-	fn loop(i) if i < len(ks) {
-		true -> {
-			k := ks.(i)
-			if PROP.(k) = code {
-				true -> k
-				_ -> loop(i + 1)
-			}
-		}
-		_ -> ?
-	}
-	loop(0)
-}
+fn propName(code) PROP_NAMES.(string(code))
 
 // knownOp? reports whether code is a defined surface op.
 fn knownOp?(code) opName(code) != ?

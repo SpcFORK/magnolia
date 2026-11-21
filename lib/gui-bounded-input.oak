@@ -1,0 +1,147 @@
+// Native X11/Win32 -> the SAME bounded GUI input records consumed on Web.
+// This is deliberately a narrow original java.awt.Event subset, not a
+// translation of arbitrary XEvents, Win32 messages, IME, or AWT key events.
+linux := import('linux')
+windows := import('windows')
+writes := import('writes')
+
+fn _idle() {type: :idle}
+fn _signed32(raw) if raw >= 2147483648 {
+    true -> raw - 4294967296
+    _ -> raw
+}
+fn _signed16(raw) if raw >= 32768 {
+    true -> raw - 65536
+    _ -> raw
+}
+fn _coords(window, kind, x, y, buttons, mods) {
+    if x < 0 | x >= window.width | y < 0 | y >= window.height {
+        true -> _idle()
+        _ -> {type: :input, value: {
+            type: kind, x: x, y: y, buttons: buttons,
+            modifiers: mods}}
+    }
+}
+fn _xMods(state) {
+    shift := if (state & 1) != 0 {true -> 1, _ -> 0}
+    control := if (state & 4) != 0 {true -> 2, _ -> 0}
+    alt := if (state & 8) != 0 {true -> 8, _ -> 0}
+    shift | control | alt
+}
+// Pure decoding functions can be tested without a native window or display.
+fn normalizeX(window, eventType, x, y, state, button, ascii) {
+    mods := _xMods(state)
+    if eventType = 12 {
+        true -> {type: :redraw}
+        _ -> if eventType = 2 | eventType = 3 {
+            true -> if ascii >= 32 & ascii <= 126 {
+                true -> {type: :input, value: {
+                    type: if eventType = 2 {true -> :keydown, _ -> :keyup},
+                    key: ascii, modifiers: mods}}
+                _ -> _idle()
+            }
+            _ -> if eventType = 4 | eventType = 5 {
+                true -> if button != 1 {
+                    true -> _idle()
+                    _ -> _coords(window, if eventType = 4 {
+                        true -> :mousedown, _ -> :mouseup},
+                        x, y, if eventType = 4 {true -> 1, _ -> 0}, mods)
+                }
+                _ -> if eventType = 6 {
+                    true -> _coords(window, :mousemove, x, y,
+                        if (state & 256) != 0 {true -> 1, _ -> 0}, mods)
+                    _ -> _idle()
+                }
+            }
+        }
+    }
+}
+fn _winMods(wparam, shift, control, alt) {
+    s := if shift | (wparam & 4) != 0 {true -> 1, _ -> 0}
+    c := if control | (wparam & 8) != 0 {true -> 2, _ -> 0}
+    a := if alt {true -> 8, _ -> 0}
+    s | c | a
+}
+fn normalizeWindows(window, message, wparam, lparam, shift, control, alt) {
+    mods := _winMods(wparam, shift, control, alt)
+    if message = 258 | message = 257 {
+        true -> {
+            // WM_CHAR preserves translated ASCII; WM_KEYUP is a virtual key
+            // and can recover only printable US-ASCII A-Z/0-9/punctuation.
+            code := if message = 257 & wparam >= 65 & wparam <= 90 &
+                !shift {true -> wparam + 32, _ -> wparam}
+            if code >= 32 & code <= 126 {
+                true -> {type: :input, value: {
+                    type: if message = 258 {true -> :keydown, _ -> :keyup},
+                    key: code, modifiers: mods}}
+                _ -> _idle()
+            }
+        }
+        _ -> if message = 512 | message = 513 | message = 514 {
+            true -> {
+                x := _signed16(lparam & 65535)
+                y := _signed16((lparam >> 16) & 65535)
+                kind := if message = 513 {
+                    true -> :mousedown
+                    _ -> if message = 514 {true -> :mouseup,
+                        _ -> :mousemove}
+                }
+                buttons := if message = 513 | (message = 512 &
+                    (wparam & 1) != 0) {true -> 1, _ -> 0}
+                _coords(window, kind, x, y, buttons, mods)
+            }
+            _ -> _idle()
+        }
+    }
+}
+fn _winHeld(vk) {
+    result := windows.user32('GetKeyState', vk)
+    if windows.callOk?(result) {
+        true -> (result.r1 & 32768) != 0
+        _ -> false
+    }
+}
+fn decode(window, step) {
+    if step.type != :dispatch {
+        true -> step
+        _ -> if window.backend = :linux {
+            true -> {
+                if ___runtime_sys_info().arch != 'amd64' &
+                    ___runtime_sys_info().arch != 'arm64' {
+                    true -> {type: :error,
+                        message: 'bounded X11 event layout requires 64-bit'}
+                    _ -> {
+                        ptr := addr(window.eventBuf)
+                        kind := step.eventType
+                        ascii := 0
+                        if kind = 2 | kind = 3 {
+                            true -> {
+                                buf := bits([0,0,0,0,0,0,0,0])
+                                found := linux.x11('XLookupString', ptr,
+                                    addr(buf), 8, 0, 0)
+                                if linux.callOk?(found) & found.r1 = 1 ->
+                                    ascii <- writes.readU32(addr(buf)) & 255
+                            }
+                        }
+                        normalizeX(window, kind,
+                            _signed32(writes.readU32(ptr + 64)),
+                            _signed32(writes.readU32(ptr + 68)),
+                            writes.readU32(ptr + 80),
+                            writes.readU32(ptr + 84), ascii)
+                    }
+                }
+            }
+            _ -> if window.backend = :windows {
+                true -> {
+                    ptr := addr(window.msgBuf)
+                    normalizeWindows(window,
+                        writes.readU32(ptr + 8),
+                        writes.readU32(ptr + 16),
+                        writes.readU32(ptr + 24),
+                        _winHeld(16), _winHeld(17), _winHeld(18))
+                }
+                _ -> _idle()
+            }
+        }
+    }
+}

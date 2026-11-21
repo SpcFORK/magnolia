@@ -102,8 +102,19 @@ func runPackFile() bool {
 	}
 
 	exeFileSize := info.Size()
+	// A VFS-bearing pack places a bounded MessagePack file map after the Oak
+	// bundle marker. Recover the bundle boundary before applying the legacy
+	// bundle reader; an executable without a VFS remains byte-for-byte valid.
+	bundleEnd, vfsFiles, err := readPackedVFSTrailer(exeFile, exeFileSize)
+	if err != nil {
+		fmt.Printf("Invalid packed VFS: %s\n", err)
+		os.Exit(1)
+	}
+	if bundleEnd < 32 {
+		return false
+	}
 	// 24 bundle size bytes, 8 magic bytes. See: cmd/pack.oak
-	readFrom := exeFileSize - 24 - 8
+	readFrom := bundleEnd - 24 - 8
 	endOfFileBytes := make([]byte, 24+8)
 	_, err = exeFile.ReadAt(endOfFileBytes, readFrom)
 	if err != nil {
@@ -134,6 +145,18 @@ func runPackFile() bool {
 	ctx := NewContextWithCwd()
 	defer ctx.Wait()
 	ctx.LoadBuiltins()
+	if vfsFiles != nil {
+		// runtime-native.oak's ___packed_vfs() reads this global. Only a
+		// bounded, read-only file map crosses from the trailer into Oak.
+		ctx.scope.put("__Oak_VFS", packedVFSValue(vfsFiles))
+		if handled, entryErr := runPackedSourceEntry(&ctx, vfsFiles); handled {
+			if entryErr != nil {
+				fmt.Println(entryErr)
+				os.Exit(1)
+			}
+			return true
+		}
+	}
 
 	if _, err := ctx.Eval(bytes.NewReader(bundleBytes)); err != nil {
 		fmt.Println(err)

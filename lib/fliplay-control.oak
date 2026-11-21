@@ -1,0 +1,234 @@
+// Pinned ORIGINAL Fliplay/Flickframe + FLC, one bounded control contract for
+// headless, full-GUI web and full-GUI native (X11 / GDI) hosts.
+// This is a selected JVM program, NOT an AWT replacement or Flash runtime.
+std := import('std')
+crypto := import('crypto')
+app := import('./applet.oak')
+gui := import('./applet-gui.oak')
+fn _error(text) {type: :error, message: text}
+fn _checked(raw, digest, limit) type(raw) = :string &
+    len(raw) <= limit & crypto.sha256(raw) = digest
+fn _program(fliplayClass, flickframeClass, movie) {
+    if !_checked(fliplayClass,
+        'bc315872dafebbf3c634e64c0fc251b38031ed49b7c4698d39c94990de9fe20b',
+        100000) | !_checked(flickframeClass,
+        '12feb5321cd8c9aeb0bf285f055596d981e3d45ccfb8c62d029f2f6d95ccdf9f',
+        100000) | !_checked(movie,
+        '812379899d151a1460366249fd794899eeefe3c7bacdc528da22c2624b33cff4',
+        524288) {
+        true -> _error('original class/FLC bytes failed pinned hash/size gate')
+        _ -> app.compile([fliplayClass, flickframeClass],
+            {entry: 'fliplay', events?: true})
+    }
+}
+fn _params() {File: 'moonclouds.flc', Loops: '1', End: '60', Speed: '1'}
+fn _options(movie) {title: 'Moon Clouds · original Fliplay',
+    resources: {'moonclouds.flc': movie}, width: 320, height: 240,
+    maxArray: 81920, maxSteps: 40000000}
+fn _verify(result) {
+    if result.type != :ok {
+        true -> result
+        _ -> {
+            fields := result.object.fields
+            if fields.('fliplay.loaded:Z') != 1 |
+                fields.('fliplay.load_failed:Z') != 0 |
+                fields.('fliplay.frame_number:I') != 60 |
+                fields.('fliplay.userpause:Z') != 1 |
+                result.startedTasks != 1 |
+                result.virtualMillis > 100 |
+                result.repaintCount != 122 |
+                len(result.statusEvents) != 63 |
+                result.captureCount != 61 |
+                result.captureCells != 4684800 {
+                true -> _error('original bounded lifecycle disagrees with the JDK gate')
+                _ -> {type: :ok}
+            }
+        }
+    }
+}
+
+// Headless has no window, Canvas or browser. The independent finite oracle
+// stays non-retained by default. A caller must explicitly request retained
+// original input; both entry points preserve the same 61-image frame sink and
+// preflight and the VM disables that sink before post-pause events.
+fn _openHeadless(fliplayClass, flickframeClass, movie, sink, retained) {
+    checked := _program(fliplayClass, flickframeClass, movie)
+    if checked.type = :error {
+        true -> checked
+        _ -> if sink != ? & type(sink) != :function {
+            true -> _error('headless frame sink must be a function')
+            _ -> {
+                options := _options(movie)
+                options.frameSink <- sink
+                if retained -> options.persistent? <- true
+                result := app.run(checked.value, _params(), options)
+                verified := _verify(result)
+                if verified.type = :error {
+                    true -> verified
+                    _ -> {type: :ok, mode: :headless, backend: :headless,
+                        result: result, viewer: ?, session: result.session}
+                }
+            }
+        }
+    }
+}
+fn openHeadless(fliplayClass, flickframeClass, movie, sink) {
+    _openHeadless(fliplayClass, flickframeClass, movie, sink, false)
+}
+fn openHeadlessInteractive(fliplayClass, flickframeClass, movie, sink) {
+    _openHeadless(fliplayClass, flickframeClass, movie, sink, true)
+}
+
+// A web caller supplies the full GUI command bridge; a native caller can
+// omit it. Both use the SAME GUI facade and retained ORIGINAL JVM object.
+fn openGui(fliplayClass, flickframeClass, movie, bridge, observer) {
+    checked := _program(fliplayClass, flickframeClass, movie)
+    if checked.type = :error {
+        true -> checked
+        _ -> {
+            options := _options(movie)
+            options.frameObserver <- observer
+            view := gui.open(checked.value, _params(),
+                options, bridge)
+            if view.type = :error {
+                true -> view
+                _ -> {
+                    verified := _verify(view.result)
+                    if verified.type = :error {
+                        true -> {
+                            gui.close(view)
+                            verified
+                        }
+                        _ -> {type: :ok, mode: :gui,
+                            backend: view.window.backend,
+                            viewer: view, result: view.result}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn status(player) if type(player) != :object | player.type != :ok {
+    true -> _error('original session is not open')
+    _ -> {
+        fields := player.result.object.fields
+        running := if player.mode = :gui {
+            true -> player.viewer.session.state
+            _ -> if player.session != ? {
+                true -> player.session.state
+                _ -> ?
+            }
+        }
+        {type: :ok, backend: player.backend,
+            frame: fields.('fliplay.frame_number:I'),
+            paused?: fields.('fliplay.userpause:Z') = 1,
+            reverse?: fields.('fliplay.reverse_flag:Z') = 1,
+            dragging?: fields.('fliplay.drag_flag:Z') = 1,
+            x: fields.('fliplay.klick_panel_xpos:I'),
+            y: fields.('fliplay.klick_panel_ypos:I'),
+            delay: fields.('fliplay.frame_delay:I'),
+            repaints: if running != ? {
+                true -> running.repaintCount
+                _ -> player.result.repaintCount
+            },
+            statuses: if running != ? {
+                true -> len(running.statusEvents)
+                _ -> len(player.result.statusEvents)
+            },
+            events: if running != ? {
+                true -> len(running.eventResults)
+                _ -> 0
+            },
+            steps: if running != ? {
+                true -> running.steps
+                _ -> player.result.steps
+            },
+            states: player.result.captureCount}
+    }
+}
+
+// Strict one-event gateway to the SAME original handleEvent bytecode. The
+// retained headless route uses the GUI route's pure logical input validation
+// but creates neither a GUI window nor a browser input queue. Default
+// non-retained headless runs intentionally cannot accept post-pause events.
+fn input(player, event) if type(player) != :object | player.type != :ok {
+    true -> _error('selected original input needs a live session')
+    _ -> if player.mode = :gui {
+        true -> {
+            reply := gui.sendInput(player.viewer, event)
+            if reply.type = :error {
+                true -> reply
+                _ -> {type: :ok, handled: reply.handled,
+                    painted?: reply.painted?, state: status(player),
+                    screen: reply.screen}
+            }
+        }
+        _ -> if player.mode = :headless & player.session != ? {
+            true -> {
+                checked := gui.normalizeInput(320, 240, event)
+                if checked.type = :error {
+                    true -> checked
+                    _ -> {
+                        before := player.session.state.repaintCount
+                        delivered := app.dispatchEvent(player.session,
+                            checked.record)
+                        if delivered.type = :error {
+                            true -> delivered
+                            _ -> {type: :ok, handled: delivered.handled,
+                                painted?: delivered.repaints > before,
+                                state: status(player), screen: delivered.screen}
+                        }
+                    }
+                }
+            }
+            _ -> _error('selected original input needs a retained GUI or headless session')
+        }
+    }
+}
+
+// Every named action maps to an ORIGINAL Fliplay keyboard callback. The
+// original 16-event budget, instruction meter and refusal gates still apply.
+fn command(player, action) {
+    state := status(player)
+    if state.type = :error {
+        true -> state
+        _ -> {
+            key := if action {
+                :toggle -> 32
+                :play -> if state.paused? {true -> 32, _ -> ?}
+                :pause -> if state.paused? {true -> ?, _ -> 32}
+                :previous -> 44
+                :next -> 46
+                :faster -> 43
+                :slower -> 45
+                :resetSpeed -> 48
+                :reverse -> 114
+                :forward -> if state.reverse? {true -> 114, _ -> ?}
+                :backward -> if state.reverse? {true -> ?, _ -> 114}
+                _ -> -1
+            }
+            if key = -1 {
+                true -> _error('unsupported original Fliplay command')
+                _ -> if key = ? {
+                    true -> {type: :ok, handled: 0,
+                        painted?: false, state: state}
+                    _ -> input(player, {type: :keydown, key: key})
+                }
+            }
+        }
+    }
+}
+fn redraw(player) if type(player) != :object | player.type != :ok |
+    player.mode != :gui {
+    true -> _error('redraw requires a live GUI session')
+    _ -> gui.redraw(player.viewer)
+}
+fn close(player) if type(player) != :object | player.type != :ok {
+    true -> _error('original session is not open')
+    _ -> {
+        if player.mode = :gui -> gui.close(player.viewer)
+        player.type <- :closed
+        {type: :ok}
+    }
+}

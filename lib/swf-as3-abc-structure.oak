@@ -1,0 +1,240 @@
+// Opt-in ABC16/46 structural envelope AFTER the separately checked ASCII
+// pool and zero-flag method_info gates. On the narrow observed original-SWF
+// profile, bound and cross-check the class/script/trait/body TABLES, but treat
+// every method's code bytes as OPAQUE. No opcode or exception verifier, AVM2,
+// Flash display, or actual original-game execution follows from this reader.
+std := import('std')
+headers := import('./swf-as3-abc-signatures.oak')
+pools := import('./swf-as3-abc-pool.oak')
+fn _error(message) {type: :error, message: 'ABC16/46 structure: ' + message}
+fn _byte(s) if s.problem != ? | s.pos >= len(s.raw) {
+    true -> {
+        if s.problem = ? -> s.problem <- 'truncated structural table'
+        0
+    }
+    _ -> {
+        b := codepoint(s.raw.(s.pos)) & 255
+        s.pos <- s.pos + 1
+        b
+    }
+}
+// Canonical unsigned U30; refuse oversized, noncanonical, unterminated and
+// truncated encodings before using the value for loops, offsets or indexing.
+fn _var(s) {
+    value := 0
+    done? := false
+    std.range(5) |> std.each(fn(i) if s.problem = ? & !done? {
+        true -> {
+            b := _byte(s)
+            if s.problem = ? {
+                true -> {
+                    part := b & 127
+                    value <- value + (part << (7 * i))
+                    if i = 4 & (part > 3 | (b & 128) != 0) ->
+                        s.problem <- 'structural U30 overflow'
+                    if (b & 128) = 0 {
+                        true -> {
+                            done? <- true
+                            if i > 0 & value < (1 << (7 * i)) ->
+                                s.problem <- 'noncanonical structural U30'
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if !done? & s.problem = ? -> s.problem <- 'unterminated structural U30'
+    value
+}
+fn _count(s, name, minimum, maximum) {
+    n := _var(s)
+    if s.problem = ? & (n < minimum | n > maximum) ->
+        s.problem <- name + ' count outside bounded original profile'
+    n
+}
+fn _index(s, size, name, zero?) {
+    n := _var(s)
+    if s.problem = ? & (n >= size | (!zero? & n = 0)) ->
+        s.problem <- name + ' outside checked table'
+    n
+}
+fn _limit(s, value, maximum, name) if s.problem = ? & value > maximum ->
+    s.problem <- name + ' outside bounded original profile'
+fn _traits(s, parent, pool, classes) {
+    count := _count(s, 'trait block', 0, 128)
+    if s.problem = ? & count > 256 - s.traitCount ->
+        s.problem <- 'total traits outside 256-entry profile'
+    std.range(if s.problem = ? {true -> count, _ -> 0}) |>
+        std.each(fn(_) if s.problem = ? {
+            true -> {
+                _index(s, pool.poolCounts.multiname, 'trait name', false)
+                tag := _byte(s)
+                kind := tag & 15
+                if s.problem = ? & (tag >> 4) != 0 ->
+                    s.problem <- 'unsupported trait attributes or metadata'
+                if s.problem = ? {
+                    true -> if kind = 0 | kind = 6 {
+                        true -> {
+                            id := _var(s)
+                            _limit(s, id, 128, 'slot id')
+                            _index(s, pool.poolCounts.multiname, 'slot type', true)
+                            value := _var(s)
+                            if s.problem = ? & value != 0 {
+                                true -> {
+                                    if value >= pool.poolCounts.int ->
+                                        s.problem <- 'slot default outside checked int pool'
+                                    if _byte(s) != 3 & s.problem = ? ->
+                                        s.problem <- 'unsupported slot default value kind'
+                                    if s.problem = ? ->
+                                        s.nonzeroIntDefaults <- s.nonzeroIntDefaults + 1
+                                }
+                            }
+                            if kind = 0 {
+                                true -> s.slots <- s.slots + 1
+                                _ -> s.constants <- s.constants + 1
+                            }
+                        }
+                        _ -> if kind = 1 {
+                            true -> {
+                                id := _var(s)
+                                _limit(s, id, 128, 'method disp id')
+                                _index(s, parent.methodSignatureCount, 'trait method', true)
+                                s.methods <- s.methods + 1
+                            }
+                            _ -> if kind = 4 {
+                                true -> {
+                                    id := _var(s)
+                                    _limit(s, id, 128, 'class slot id')
+                                    _index(s, classes, 'trait class', true)
+                                    s.classTraits <- s.classTraits + 1
+                                }
+                                _ -> s.problem <- 'unsupported trait kind'
+                            }
+                        }
+                    }
+                }
+                if s.problem = ? -> s.traitCount <- s.traitCount + 1
+            }
+        })
+}
+fn scan(raw) {
+    parent := headers.scan(raw)
+    if parent.type = :error {
+        true -> _error('preceding method-signature gate: ' + parent.message)
+        _ -> {
+            pool := pools.scan(raw)
+            if pool.type = :error {
+                true -> _error('preceding constant-pool gate: ' + pool.message)
+                _ -> _scan(raw, parent, pool)
+            }
+        }
+    }
+}
+fn _scan(raw, parent, pool) {
+    s := {raw: raw, pos: parent.signatureTableEndOffset, problem: ?,
+        traitCount: 0, slots: 0, methods: 0, classTraits: 0, constants: 0,
+        nonzeroIntDefaults: 0, opaqueOpcodeBytes: 0, largestOpaqueBodyBytes: 0,
+        protectedClasses: 0, maxStackObserved: 0, maxLocalsObserved: 0}
+    if parent.constantPoolEndOffset != pool.constantPoolEndOffset ->
+        s.problem <- 'preceding gates disagree on pool boundary'
+    // The two pinned originals have zero metadata, trait metadata and
+    // exception handlers. A legitimate nonzero value belongs to ANOTHER
+    // profile, not a silently ignored part of this bounded preflight.
+    metadata := _count(s, 'metadata', 0, 0)
+    classes := _count(s, 'instance/class', 1, 32)
+    std.range(if s.problem = ? {true -> classes, _ -> 0}) |>
+        std.each(fn(_) if s.problem = ? {
+            true -> {
+                _index(s, pool.poolCounts.multiname, 'instance name', false)
+                _index(s, pool.poolCounts.multiname, 'instance superclass', true)
+                flags := _byte(s)
+                if flags != 8 & flags != 9 & s.problem = ? ->
+                    s.problem <- 'unsupported instance flags'
+                if s.problem = ? {
+                    true -> {
+                        s.protectedClasses <- s.protectedClasses + 1
+                        _index(s, pool.poolCounts.namespace, 'protected namespace', false)
+                    }
+                }
+                interfaces := _count(s, 'instance interface', 0, 0)
+                _index(s, parent.methodSignatureCount, 'instance initializer', true)
+                if s.problem = ? -> _traits(s, parent, pool, classes)
+            }
+        })
+    std.range(if s.problem = ? {true -> classes, _ -> 0}) |>
+        std.each(fn(_) if s.problem = ? {
+            true -> {
+                _index(s, parent.methodSignatureCount, 'class initializer', true)
+                if s.problem = ? -> _traits(s, parent, pool, classes)
+            }
+        })
+    scripts := _count(s, 'script', 1, 32)
+    std.range(if s.problem = ? {true -> scripts, _ -> 0}) |>
+        std.each(fn(_) if s.problem = ? {
+            true -> {
+                _index(s, parent.methodSignatureCount, 'script initializer', true)
+                if s.problem = ? -> _traits(s, parent, pool, classes)
+            }
+        })
+    bodies := _count(s, 'method body', parent.methodSignatureCount,
+                     parent.methodSignatureCount)
+    std.range(if s.problem = ? {true -> bodies, _ -> 0}) |>
+        std.each(fn(i) if s.problem = ? {
+            true -> {
+                // Every method of these TWO originals has exactly one body,
+                // and they occur in ascending method-index order. This is a
+                // deliberate restriction, not a general ABC rule.
+                method := _index(s, parent.methodSignatureCount, 'body method', true)
+                if s.problem = ? & method != i ->
+                    s.problem <- 'body method not one-to-one ascending'
+                stack := _var(s)
+                locals := _var(s)
+                initScope := _var(s)
+                maxScope := _var(s)
+                if s.problem = ? & (stack < 1 | stack > 32 |
+                    locals < 1 | locals > 32 | initScope > maxScope |
+                    maxScope > 32) -> s.problem <- 'body stack/local/scope outside profile'
+                if stack > s.maxStackObserved & s.problem = ? ->
+                    s.maxStackObserved <- stack
+                if locals > s.maxLocalsObserved & s.problem = ? ->
+                    s.maxLocalsObserved <- locals
+                length := _var(s)
+                if s.problem = ? & (length < 1 | length > 2048 |
+                    length > 16384 - s.opaqueOpcodeBytes |
+                    length > len(raw) - s.pos) ->
+                    s.problem <- 'opaque code length exceeds bounded input'
+                if s.problem = ? {
+                    true -> {
+                        s.pos <- s.pos + length
+                        s.opaqueOpcodeBytes <- s.opaqueOpcodeBytes + length
+                        if length > s.largestOpaqueBodyBytes ->
+                            s.largestOpaqueBodyBytes <- length
+                        _count(s, 'exception', 0, 0)
+                        if s.problem = ? -> _traits(s, parent, pool, classes)
+                    }
+                }
+            }
+        })
+    if s.problem = ? & s.pos != len(raw) ->
+        s.problem <- 'trailing bytes outside ABC structural envelope'
+    if s.problem != ? {
+        true -> _error(s.problem)
+        _ -> {type: :ok,
+            profile: 'ABC16/46-ASCII-pool-flag0-headers-opaque-code-structure',
+            abcBytes: len(raw), signatureTableEndOffset: parent.signatureTableEndOffset,
+            metadataCount: metadata, classCount: classes,
+            protectedClassCount: s.protectedClasses,
+            scriptCount: scripts, traitCount: s.traitCount,
+            traitKindCounts: {slot: s.slots, method: s.methods,
+                class: s.classTraits, const: s.constants},
+            nonzeroIntSlotDefaults: s.nonzeroIntDefaults,
+            methodBodyCount: bodies, opaqueOpcodeBytes: s.opaqueOpcodeBytes,
+            largestOpaqueBodyBytes: s.largestOpaqueBodyBytes,
+            maxDeclaredStack: s.maxStackObserved,
+            maxDeclaredLocals: s.maxLocalsObserved,
+            ABCStructuralEndOffset: s.pos, unparsedTrailingBytes: 0,
+            opcodeBytesDecodedOrVerified: 0,
+            methodBodyInstructionsOrScopesVerified: false,
+            AVM2OrOriginalGameExecuted: false}
+    }
+}

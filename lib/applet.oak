@@ -1,0 +1,643 @@
+// applet — Magnolia-native, JVM-free applet class-file workflow.
+// Inspect/build bounded .class and JAR entries; execute and transpile a strict
+// bytecode subset with opt-in painting. The same verified IR feeds native/web.
+
+std := import('std')
+default := std.default
+map := std.map
+each := std.each
+slice := std.slice
+sort := import('sort')
+str := import('str')
+join := str.join
+fmt := import('fmt')
+format := fmt.format
+parser := import('./applet-class.oak')
+bytecode := import('./applet-bytecode.oak')
+runtime := import('./applet-runtime.oak')
+oakEmitter := import('./applet-oak.oak')
+zip := import('./applet-zip.oak')
+b64 := import('b64')
+crypto := import('crypto')
+json := import('json')
+
+fn _error(message) {type: :error, message: message}
+fn inspect(raw) parser.parseClass(raw)
+fn fieldKey(owner, name, desc) owner + '.' + name + ':' + desc
+fn methodKey(name, desc) name + desc
+fn _defaultField(desc) if desc.(0) {
+	'Z', 'B', 'C', 'S', 'I' -> 0
+    'J' -> {jvmLong: true, hi: 0, lo: 0}
+    'F' -> {jvmFloat: true, bits: 0}
+    'D' -> {jvmDouble: true, hi: 0, lo: 0}
+	_ -> ?
+}
+
+// Input: a list of parsed class objects or raw binary class-file strings.
+// config: entry?, method?, desc?, optimize? (default true).
+// Returns a portable, predecoded instruction program or a precise diagnostic.
+fn compile(inputs, config) {
+	config := default(config, {})
+    classes := {}
+    programClasses := {}
+    problem := ?
+    firstName := ?
+    if len(inputs) = 0 | len(inputs) > 256 -> problem <- 'expected 1–256 class files'
+	inputs |> each(fn(item) if problem = ? {
+		true -> {
+			result := if type(item) = :string {true -> parser.parseClass(item), _ -> {type: :ok, value: item}}
+			if result.type = :error {
+				true -> problem <- result.message
+				_ -> {
+                    cls := result.value
+                    if firstName = ? -> firstName <- cls.name
+                    if classes.(cls.name) != ? {
+						true -> problem <- 'duplicate class ' + cls.name
+						_ -> {
+							classes.(cls.name) <- cls
+								programClasses.(cls.name) <- {super: cls.super, interfaces: cls.interfaces,
+                                    fields: {}, static: {}, methods: {}}
+							cls.fields |> each(fn(field) {
+								key := fieldKey(cls.name, field.name, field.desc)
+								if field.flags & 8 {
+									0 -> programClasses.(cls.name).fields.(key) <- _defaultField(field.desc)
+									_ -> programClasses.(cls.name).static.(key) <-
+                                        field.constant |> default(_defaultField(field.desc))
+									}
+								})
+						}
+					}
+			}
+		}
+		}
+	})
+    entry := config.entry |> default(firstName)
+	if classes.(entry) = ? & problem = ? -> problem <- 'entry class not found: ' + string(entry)
+    fn appletAncestor?(owner, depth) if depth >= 64 {
+        true -> false
+        _ -> if owner = 'java/applet/Applet' | owner = 'javax/swing/JApplet' {
+            true -> true
+            _ -> if classes.(owner) = ? {true -> false, _ -> appletAncestor?(classes.(owner).super, depth - (0 - 1))}
+        }
+    }
+    kind := if problem = ? {
+        true -> if config.method != ? {
+            true -> 'method'
+            _ -> if appletAncestor?(entry, 0) {
+                true -> 'applet'
+                _ -> {
+                    main := parser.method(classes.(entry), 'main', '([Ljava/lang/String;)V')
+                    if main != ? & (main.flags & 9) = 9 {true -> 'application', _ -> ?}
+                }
+            }
+        }
+        _ -> ?
+    }
+    if problem = ? & kind = ? -> problem <- 'entry has no supported Applet lifecycle or static main(String[]): ' + entry
+    if problem = ? & kind != 'applet' & config.paint? = true -> problem <- 'paint(Graphics) requires an Applet entry'
+    fn findInherited(owner, name, desc, depth) if depth >= 64 | classes.(owner) = ? {
+        true -> ?
+        _ -> {
+            found := parser.method(classes.(owner), name, desc)
+            if found != ? {
+                true -> {owner: owner, method: found}
+                _ -> findInherited(classes.(owner).super, name, desc, depth - (0 - 1))
+            }
+        }
+    }
+    // An interface can inherit an abstract declaration from another
+    // interface; it is never lowered as executable code. Invocation is
+    // linked to the concrete receiver implementation instead.
+    fn findInterface(owner, name, desc, depth) if depth >= 64 | classes.(owner) = ? {
+        true -> ?
+        _ -> {
+            cls := classes.(owner)
+            direct := parser.method(cls, name, desc)
+            if direct != ? {
+                true -> {owner: owner, method: direct}
+                _ -> {
+                    found := ?
+                    cls.interfaces |> each(fn(parent) if found = ? ->
+                        found <- findInterface(parent, name, desc, depth - (0 - 1)))
+                    found
+                }
+            }
+        }
+    }
+    fn findField(owner, name, desc, depth) if depth >= 64 | classes.(owner) = ? {
+        true -> ?
+        _ -> {
+            cls := classes.(owner)
+            index := cls.fields |> std.find(fn(field) field.name = name & field.desc = desc)
+            if index != -1 {
+                true -> {owner: owner, field: cls.fields.(index)}
+                _ -> findField(cls.super, name, desc, depth - (0 - 1))
+            }
+        }
+    }
+		queue := []
+	seen := {}
+		fn enqueue(owner, name, desc) {
+			id := owner + '#' + methodKey(name, desc)
+			if seen.(id) = ? {
+				true -> {
+					seen.(id) <- true
+					queue << {owner: owner, name: name, desc: desc}
+				}
+			}
+		}
+        // Only classes that can be actively used need their initializers
+        // verified. Java initializes the superclass first, exactly once.
+        fn enqueueInitialization(owner, depth) if depth < 64 & classes.(owner) != ? {
+            true -> {
+                parent := classes.(owner).super
+                if parent != ? -> enqueueInitialization(parent, depth - (0 - 1))
+                if parser.method(classes.(owner), '<clinit>', '()V') != ? ->
+                    enqueue(owner, '<clinit>', '()V')
+            }
+        }
+        // invokevirtual and invokeinterface dispatch against the concrete
+        // receiver. Track instantiated classes, including transitive interface
+        // membership, and revisit call sites as new receivers appear.
+        instantiated := {}
+        virtualCalls := []
+        virtualSeen := {}
+        fn compatible?(owner, ancestor, depth) if depth >= 64 | owner = ? {
+            true -> false
+            _ -> if owner = ancestor {
+                true -> true
+                _ -> if classes.(owner) = ? {
+                    true -> false
+                    _ -> {
+                        cls := classes.(owner)
+                        compatible?(cls.super, ancestor, depth - (0 - 1)) |
+                            (cls.interfaces |> std.some(fn(parent) compatible?(parent, ancestor, depth - (0 - 1))))
+                    }
+                }
+            }
+        }
+        fn resolveVirtual(owner, ref) if compatible?(owner, ref.(0), 0) {
+            true -> {
+                found := findInherited(owner, ref.(1), ref.(2), 0)
+                if found = ? | found.method.code = ? {
+                    true -> problem <- 'missing concrete virtual/interface method ' +
+                        owner + '.' + ref.(1) + ref.(2)
+                    _ -> enqueue(found.owner, ref.(1), ref.(2))
+                }
+            }
+        }
+        fn markInstantiated(owner) if classes.(owner) != ? & instantiated.(owner) = ? {
+            true -> {
+                instantiated.(owner) <- true
+                virtualCalls |> each(fn(ref) resolveVirtual(owner, ref))
+            }
+        }
+        fn registerVirtual(ref) {
+            id := ref.(0) + '#' + methodKey(ref.(1), ref.(2))
+            if virtualSeen.(id) = ? {
+                true -> {
+                    virtualSeen.(id) <- true
+                    virtualCalls << ref
+                    keys(instantiated) |> each(fn(owner) resolveVirtual(owner, ref))
+                }
+            }
+        }
+		if problem = ? {
+			true -> {
+				cls := classes.(entry)
+                enqueueInitialization(entry, 0)
+                if kind != 'application' -> markInstantiated(entry)
+            if kind != 'application' & parser.method(cls, '<init>', '()V') != ? ->
+                enqueue(entry, '<init>', '()V')
+            if kind {
+                'method' -> {
+                    desc := config.desc |> default('()V')
+                    inherited := findInherited(entry, config.method, desc, 0)
+                    if inherited = ? {
+                        true -> problem <- 'missing selected method ' + entry + '.' + config.method + desc
+                        _ -> enqueue(inherited.owner, config.method, desc)
+                    }
+                }
+                'application' -> enqueue(entry, 'main', '([Ljava/lang/String;)V')
+                'applet' -> {
+                    init := findInherited(entry, 'init', '()V', 0)
+                    start := findInherited(entry, 'start', '()V', 0)
+                    if init != ? -> enqueue(init.owner, 'init', '()V')
+                    if start != ? -> enqueue(start.owner, 'start', '()V')
+                    if config.paint? = true {
+                        true -> {
+                            paint := findInherited(entry, 'paint', '(Ljava/awt/Graphics;)V', 0)
+                            if paint = ? {
+                                true -> problem <- 'paint(Graphics) is not implemented by entry class ' + entry
+                                _ -> enqueue(paint.owner, 'paint', '(Ljava/awt/Graphics;)V')
+                            }
+                        }
+                    }
+                }
+            }
+		}
+	}
+	stats := {before: 0, after: 0, folds: 0, methods: 0}
+	fn visit(i) if i < len(queue) & problem = ? {
+		true -> {
+			q := queue.(i)
+			cls := classes.(q.owner)
+			method := parser.method(cls, q.name, q.desc)
+			if method = ? {
+				true -> problem <- format('missing method {{0}}.{{1}}{{2}}', q.owner, q.name, q.desc)
+				_ -> {
+					lowered := bytecode.lowerMethod(cls, method, classes, config.optimize? |> default(true))
+					if lowered.type = :error {
+						true -> problem <- lowered.message
+						_ -> {
+							programClasses.(q.owner).methods.(methodKey(q.name, q.desc)) <- {
+                                code: lowered.code
+                                handlers: lowered.handlers
+                                locals: method.locals
+								stack: method.stack
+                                argWidths: bytecode.argWidths(method.desc)
+								static?: (method.flags & 8) != 0
+							}
+							stats.before <- stats.before + lowered.before
+							stats.after <- stats.after + lowered.after
+							stats.folds <- stats.folds + lowered.folds
+							stats.methods <- stats.methods + 1
+							lowered.code |> each(fn(inst) {
+                                op := inst.(0)
+                                if op = 187 {
+                                    true -> {
+                                        enqueueInitialization(inst.(1), 0)
+                                        markInstantiated(inst.(1))
+                                    }
+                                }
+                                if op >= 178 & op <= 181 &
+                                    inst.(2).(0) != 'java/lang/System' & inst.(2).(0) != 'java/awt/Color' {
+                                    true -> {
+                                        ref := inst.(2)
+                                        if classes.(ref.(0)) != ? {
+                                            true -> {
+                                                resolved := findField(ref.(0), ref.(1), ref.(2), 0)
+                                                if resolved = ? {
+                                                    true -> problem <- 'missing field ' + ref.(0) + '.' + ref.(1) + ':' + ref.(2)
+                                                    _ -> {
+                                                        expectsStatic? := op = 178 | op = 179
+                                                        if ((resolved.field.flags & 8) != 0) != expectsStatic? ->
+                                                            problem <- 'incorrect field access kind: ' + ref.(0) + '.' + ref.(1)
+                                                        // The declaring class (not a referring subclass)
+                                                        // owns the field and is initialized on getstatic.
+                                                        ref.(0) <- resolved.owner
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if op = 178 | op = 179 ->
+                                    enqueueInitialization(inst.(2).(0), 0)
+                                if op >= 182 & op <= 185 {
+                                    true -> {
+                                        ref := inst.(2)
+                                        symbolicOwner := ref.(0)
+                                        if classes.(symbolicOwner) != ? {
+                                            true -> {
+                                                resolved := if op = 185 {
+                                                    true -> findInterface(symbolicOwner, ref.(1), ref.(2), 0)
+                                                    _ -> if ref.(1) = '<init>' {
+                                                        true -> if direct := parser.method(classes.(symbolicOwner), ref.(1), ref.(2)) {
+                                                            ? -> ?
+                                                            _ -> {owner: symbolicOwner, method: direct}
+                                                        }
+                                                        _ -> findInherited(symbolicOwner, ref.(1), ref.(2), 0)
+                                                    }
+                                                }
+                                                inheritedParameter? := ref.(1) = 'getParameter' &
+                                                    ref.(2) = '(Ljava/lang/String;)Ljava/lang/String;' &
+                                                    appletAncestor?(symbolicOwner, 0)
+                                                if op = 185 & resolved = ? ->
+                                                    problem <- 'missing interface method ' +
+                                                        symbolicOwner + '.' + ref.(1) + ref.(2)
+                                                if op = 185 & resolved != ? & resolved.method.code != ? ->
+                                                    problem <- 'interface default methods are not supported: ' +
+                                                        symbolicOwner + '.' + ref.(1) + ref.(2)
+                                                if op != 185 & resolved = ? & !inheritedParameter? ->
+                                                    enqueue(symbolicOwner, ref.(1), ref.(2))
+                                                if resolved != ? & problem = ? {
+                                                    true -> {
+                                                        if ((resolved.method.flags & 8) != 0) != (op = 184) ->
+                                                            problem <- 'incorrect method access kind: ' +
+                                                                symbolicOwner + '.' + ref.(1) + ref.(2)
+                                                        if op = 182 | op = 185 {
+                                                            true -> registerVirtual(ref)
+                                                            _ -> {
+                                                                if op = 184 -> ref.(0) <- resolved.owner
+                                                                enqueue(resolved.owner, ref.(1), ref.(2))
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if op = 184 -> enqueueInitialization(ref.(0), 0)
+                                    }
+                                }
+							})
+						}
+					}
+				}
+			}
+			visit(i + 1)
+		}
+	}
+	visit(0)
+	if problem != ? {
+		true -> _error(problem)
+		_ -> {type: :ok, value: {entry: entry, kind: kind, classes: programClasses}, stats: stats}
+	}
+}
+
+fn run(program, params, options) runtime.run(program, params, options)
+
+// Archive format: self-contained, textual .applet.json. Packaging does not
+// promise executability; translation's preflight is a separate step.
+fn bundle(inputs, entry) {
+	classes := []
+	seen := {}
+	totalBytes := 0
+	problem := ?
+	if len(inputs) = 0 | len(inputs) > 256 -> problem <- 'expected 1–256 class files'
+	inputs |> each(fn(raw) if problem = ? {
+		true -> {
+			totalBytes <- totalBytes + len(raw)
+			if totalBytes > 33554432 -> problem <- 'bundle exceeds 32 MiB limit'
+			parsed := if problem = ? {true -> parser.parseClass(raw), _ -> _error(problem)}
+			if parsed.type = :error {
+				true -> problem <- parsed.message
+				_ -> if seen.(parsed.value.name) != ? {
+					true -> problem <- 'duplicate class ' + parsed.value.name
+					_ -> {
+						seen.(parsed.value.name) <- true
+						byteList := std.range(len(raw)) |> map(fn(i) codepoint(raw.(i)) & 255)
+						classes << {name: parsed.value.name, sha256: crypto.sha256(raw), bytes: b64.encodeBytes(byteList)}
+					}
+				}
+		}
+		}
+	})
+	entry := entry |> default(if len(classes) > 0 {true -> classes.(0).name, _ -> ?})
+	if problem = ? & !std.contains?(classes |> map(:name), entry) -> problem <- 'entry class not present in bundle'
+	if problem != ? {
+		true -> _error(problem)
+		_ -> {type: :ok, value: json.serialize({format: 'magnolia-applet', version: 1, entry: entry, classes: classes})}
+	}
+}
+
+// Optional exact-container preservation for ZIP/JAR -> Oak -> ZIP/JAR.
+// Ordinary class bundles stay small and keep the same v1 archive shape.
+fn bundleJar(inputs, entry, raw) {
+    packed := bundle(inputs, entry)
+    if packed.type = :error {
+        true -> packed
+        _ -> if type(raw) != :string | len(raw) > 8388608 {
+            true -> _error('exact JAR preservation supports at most 8 MiB of ZIP data')
+            _ -> {
+                found := zip.entries(raw)
+                if found.type = :error {
+                    true -> found
+                    _ -> {
+                        mismatch? := len(inputs) != len(found.classes)
+                        inputs |> each(fn(item, i) if i < len(found.classes) & item != found.classes.(i) -> mismatch? <- true)
+                        if mismatch? {
+                            true -> _error('JAR classes differ from the supplied class bytes')
+                            _ -> {
+                                archive := json.parse(packed.value)
+                                archive.jar <- {
+                                    sha256: crypto.sha256(raw)
+                                    bytes: b64.encodeBytes(std.range(len(raw)) |> map(fn(i) codepoint(raw.(i)) & 255))
+                                }
+                                encoded := json.serialize(archive)
+                                if len(encoded) > 50331648 {
+                                    true -> _error('archive with original JAR exceeds 48 MiB limit')
+                                    _ -> {type: :ok, value: encoded}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn unbundle(text) if type(text) = :string & len(text) <= 50331648 {
+	true -> if archive := json.parse(text) {
+		? -> _error('invalid .applet.json archive')
+		_ -> if type(archive) = :object & archive.format = 'magnolia-applet' &
+			archive.version = 1 & type(archive.classes) = :list &
+			len(archive.classes) > 0 & len(archive.classes) <= 256 {
+			true -> _unbundle(archive)
+			_ -> _error('invalid .applet.json archive')
+		}
+	}
+	_ -> _error('invalid or oversized .applet.json archive')
+}
+fn _unbundle(archive) {
+	inputs := []
+	seen := {}
+	totalBytes := 0
+	problem := ?
+	archive.classes |> each(fn(item) if problem = ? {
+		true -> {
+			decoded := if type(item.bytes) = :string {true -> b64.decodeBytes(item.bytes), _ -> ?}
+			if decoded = ? | len(decoded) > parser.MAX_CLASS_BYTES {
+				true -> problem <- 'invalid or oversized base64 class data'
+				_ -> {
+					totalBytes <- totalBytes + len(decoded)
+					if totalBytes > 33554432 -> problem <- 'bundle exceeds 32 MiB limit'
+					raw := decoded |> map(char) |> join('')
+					parsed := if problem = ? {true -> parser.parseClass(raw), _ -> _error(problem)}
+					if parsed.type = :error | parsed.value.name != item.name | crypto.sha256(raw) != item.sha256 {
+						true -> problem <- 'archive class failed name/hash verification'
+						_ -> if seen.(item.name) != ? {
+							true -> problem <- 'duplicate class ' + item.name
+							_ -> {
+								seen.(item.name) <- true
+								inputs << raw
+							}
+						}
+					}
+				}
+			}
+		}
+	})
+	if problem = ? & seen.(archive.entry) = ? -> problem <- 'entry class not present in bundle'
+    originalJar := ?
+    if problem = ? & archive.jar != ? {
+        true -> {
+            source := archive.jar
+            bytes := if type(source) = :object & type(source.bytes) = :string &
+                type(source.sha256) = :string {true -> b64.decodeBytes(source.bytes), _ -> ?}
+            if bytes = ? | len(bytes) > 8388608 {
+                true -> problem <- 'invalid or oversized embedded JAR'
+                _ -> {
+                    originalJar <- bytes |> map(char) |> join('')
+                    if crypto.sha256(originalJar) != source.sha256 {
+                        true -> problem <- 'embedded JAR SHA-256 mismatch'
+                        _ -> {
+                            extracted := zip.entries(originalJar)
+                            if extracted.type = :error {
+                                true -> problem <- extracted.message
+                                _ -> {
+                                    if len(extracted.classes) != len(inputs) -> problem <- 'embedded JAR class count differs from archive'
+                                    extracted.classes |> each(fn(raw, i) if i < len(inputs) & raw != inputs.(i) ->
+                                        problem <- 'embedded JAR class bytes differ from archive')
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+	if problem != ? {
+		true -> _error(problem)
+		_ -> {type: :ok, entry: archive.entry, value: inputs, jar: originalJar}
+	}
+}
+
+_hex := '0123456789abcdef'
+fn quoteOak(s) {
+	fn escape(c) if c {
+		'\\' -> '\\\\'
+		'\n' -> '\\n'
+		'\r' -> '\\r'
+		'\t' -> '\\t'
+		_ -> if c = char(39) {
+			true -> '\\' + char(39)
+			_ -> {
+				v := codepoint(c)
+				if v < 32 | v >= 127 {
+					true -> '\\x' + _hex.(v >> 4) + _hex.(v & 15)
+					_ -> c
+				}
+			}
+		}
+	}
+	char(39) + (std.range(len(s)) |> map(fn(i) escape(s.(i))) |> join('')) + char(39)
+}
+
+// Oak literal rendering avoids a JSON parser and copies no raw binary into
+// the generated program. Keys are sorted for deterministic build output.
+fn literal(value) if type(value) {
+	:null, :empty -> '?'
+	:string -> quoteOak(value)
+	:bool, :int, :float -> string(value)
+	:list -> '[' + (value |> map(literal) |> join(', ')) + ']'
+	:object -> {
+		ks := sort.sort!(keys(value))
+        // The JS backend renames Oak ?-suffixed identifiers. Emitting these as
+        // quoted keys would make options.paint? and method.static? inaccessible.
+		'{' + (ks |> map(fn(k) (if k {
+            'static?', 'static__oak_qm' -> 'static?'
+            'paint?', 'paint__oak_qm' -> 'paint?'
+            'emitDraw?', 'emitDraw__oak_qm' -> 'emitDraw?'
+            _ -> quoteOak(k)
+        }) + ': ' + literal(value.(k))) |> join('\n')) + '}'
+	}
+	_ -> '?'
+}
+
+// Return an Oak entrypoint. Pass an absolute path for runtimePath; build.run
+// can inline that module into native Oak, JS and Java output.
+fn source(program, params, options, runtimePath) {
+	[
+		'// Generated by Magnolia applet transpile (bounded JVM/AWT subset).\n'
+		'runtime := import(' + quoteOak(runtimePath) + ')\n'
+        'println := import(' + quoteOak('std') + ').println\n'
+        'drawEncoder := import(' + quoteOak('json') + ')\n'
+		'program := ' + literal(program) + '\n'
+		'params := ' + literal(default(params, {})) + '\n'
+		'options := ' + literal(default(options, {})) + '\n'
+		'result := runtime.run(program, params, options)\n'
+		'if result.output != ' + quoteOak('') + ' -> print(result.output)\n'
+        'if result.type = :ok & options.emitDraw? = true & len(result.draw) > 0 -> print(' +
+            quoteOak('__MAGNOLIA_DRAW_V1__:') + ' + drawEncoder.serialize({' +
+            'width: options.width, height: options.height, commands: result.draw}) + ' + quoteOak('\n') + ')\n'
+		'if result.type = :error -> {\n'
+		'    println(' + quoteOak('[applet] ') + ' + result.message)\n'
+		'    exit(1)\n' + '}\n'
+        'if result.value != ? -> {\n' +
+        '    shown := runtime.valueText(result.value)\n' +
+        '    if shown.type = :error -> {\n' +
+        '        println(' + quoteOak('[applet] ') + ' + shown.message)\n' +
+        '        exit(1)\n' +
+        '    }\n' +
+        '    println(shown.value)\n' +
+        '}\n'
+	] |> join('')
+}
+
+// Primary applet -> Oak output: named methods and an inlined executor.
+// Pass a bundle to enable lossless .class/.applet archive restoration.
+fn standaloneSource(program, params, options, runtimePath, archive) {
+    oakEmitter.standaloneSource(program, params, options, runtimePath, archive)
+}
+fn fromOak(sourceText) oakEmitter.fromOak(sourceText, unbundle)
+
+// Serialize actual AWT draw calls as an SVG for non-browser/headless hosts.
+// The coordinates and colors come from bytecode execution, not a mock image.
+fn _xml(text) {
+    str.replace(str.replace(str.replace(str.replace(str.replace(string(text), '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), '"', '&quot;'), char(39), '&apos;')
+}
+fn svg(commands, width, height) {
+    page := '<svg xmlns="http://www.w3.org/2000/svg" width="' + string(width) + '" height="' + string(height) +
+        '" viewBox="0 0 ' + string(width) + ' ' + string(height) + '">\n'
+    commands |> each(fn(op) if op.type {
+        :rect -> page <- page + '<rect x="' + string(op.x) + '" y="' + string(op.y) +
+            '" width="' + string(op.width) + '" height="' + string(op.height) +
+            '" fill="' + _xml(op.color) + '"/>\n'
+        :line -> page <- page + '<line x1="' + string(op.x1) + '" y1="' + string(op.y1) +
+            '" x2="' + string(op.x2) + '" y2="' + string(op.y2) +
+            '" stroke="' + _xml(op.color) + '"/>\n'
+        :text -> page <- page + '<text x="' + string(op.x) + '" y="' + string(op.y) +
+            '" fill="' + _xml(op.color) + '" font-family="sans-serif" font-size="16">' + _xml(op.text) + '</text>\n'
+    })
+    page + '</svg>\n'
+}
+
+fn html(script, title) {
+    // HTML's </script> terminator is case insensitive, even inside a JS
+    // string. The former one-character-at-a-time accumulator copied the
+    // growing 400+ KiB bundle on EVERY byte (quadratic build time). Split
+    // only at '<' and examine the seven following ASCII characters; joining
+    // the resulting short list keeps even a self-contained bundle bounded.
+    fn escapeScript(text) {
+        sections := str.split(text, '<')
+        acc := sections.(0)
+        std.range(len(sections) - 1) |> std.each(fn(i) {
+            next := sections.(i + 1)
+            prefix := if str.lower(slice(next, 0, 7)) = '/script' {
+                true -> '<\\', _ -> '<'
+            }
+            acc <- acc + prefix + next
+        })
+        acc
+    }
+	label := title |> str.replace('&', '&amp;') |> str.replace('<', '&lt;') |>
+		str.replace('>', '&gt;') |> str.replace('"', '&quot;')
+	'<!doctype html>\n<html lang="en"><meta charset="utf-8">' +
+	'<title>' + label + ' · Magnolia applet</title>' +
+	'<style>body{font:16px system-ui;background:#111827;color:#e5e7eb;max-width:64rem;margin:3rem auto;padding:1rem}pre{white-space:pre-wrap;background:#1f2937;padding:1rem;border-radius:8px;min-height:8rem}p{color:#9ca3af}canvas{display:none;background:white;border:1px solid #6b7280;max-width:100%}</style>' +
+	'<h1>' + label + '</h1><p>Bounded Java bytecode subset, with opt-in AWT painting; no Java plugin or external scripts.</p><pre id="output" role="log" aria-live="polite"></pre><canvas id="drawing" aria-label="Applet painting"></canvas>' +
+    '<script>const out=document.getElementById("output"),canvas=document.getElementById("drawing"),old=console.log;' +
+    'console.log=(...x)=>{const s=x.join(" "),tag="__MAGNOLIA_DRAW_V1__:";' +
+    'if(s.startsWith(tag)){try{const p=JSON.parse(s.slice(tag.length));' +
+    'if(!Number.isInteger(p.width)||!Number.isInteger(p.height)||p.width<1||p.height<1||p.width>4096||p.height>4096)throw Error("invalid canvas size");' +
+    'canvas.width=p.width;canvas.height=p.height;canvas.style.display="block";const ctx=canvas.getContext("2d");' +
+    'for(const c of p.commands){ctx.fillStyle=c.color;ctx.strokeStyle=c.color;' +
+    'if(c.type==="rect")ctx.fillRect(c.x,c.y,c.width,c.height);' +
+    'else if(c.type==="line"){ctx.beginPath();ctx.moveTo(c.x1,c.y1);ctx.lineTo(c.x2,c.y2);ctx.stroke()}' +
+    'else if(c.type==="text"){ctx.font="16px sans-serif";ctx.fillText(c.text,c.x,c.y)}}' +
+    '}catch(e){out.textContent+="Drawing error: "+e.message+"\\n"}return}' +
+    'out.textContent+=s+(s.endsWith("\\n")?"":"\\n");old(...x)};</script>' +
+    '<script>\n' + escapeScript(script) + '\n</script></html>\n'
+}

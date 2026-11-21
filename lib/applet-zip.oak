@@ -1,0 +1,618 @@
+// applet-zip — bounded ZIP/JAR class extraction implemented in Magnolia.
+// Supports stored and raw-DEFLATE entries without invoking unzip, a JVM,
+// a system library, or an external dependency. No ZIP64 or encryption.
+
+std := import('std')
+str := import('str')
+classfile := import('./applet-class.oak')
+manifest := import('./jvm-jar-manifest.oak')
+
+fn _error(message) {type: :error, message: message}
+fn _at(raw, i) if i >= 0 & i < len(raw) {true -> codepoint(raw.(i)) & 255, _ -> ?}
+fn _u2(raw, i) if i >= 0 & i + 2 <= len(raw) {
+    true -> _at(raw, i) + (_at(raw, i + 1) << 8)
+    _ -> ?
+}
+fn _u4(raw, i) if i >= 0 & i + 4 <= len(raw) {
+    true -> _u2(raw, i) + _u2(raw, i + 2) * 65536
+    _ -> ?
+}
+fn _validName?(name) {
+    parts := str.split(name, '/')
+    if name = '' | name.(0) = '/' | str.contains?(name, '\\') | str.contains?(name, char(0)) {
+        true -> false
+        _ -> !(parts |> std.some(fn(part) part = '.' | part = '..' | part = ''))
+    }
+}
+
+_LENGTH_BASE := [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258]
+_LENGTH_EXTRA := [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]
+_DIST_BASE := [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577]
+_DIST_EXTRA := [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13]
+_CODE_ORDER := [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]
+
+// RFC 1951 canonical Huffman table. Stored codes are read MSB-first, while
+// *non-Huffman* extra fields use LSB-first bit order.
+fn _huffman(lengths) {
+    counts := std.range(16) |> std.map(fn(_) 0)
+    lengths |> std.each(fn(length) if length > 0 & length <= 15 -> counts.(length) <- counts.(length) + 1)
+    nextCode := std.range(16) |> std.map(fn(_) 0)
+    code := 0
+    table := {}
+    fn buildLength(i) if i <= 15 {
+        true -> {
+            code <- (code + counts.(i - 1)) << 1
+            nextCode.(i) <- code
+            buildLength(i + 1)
+        }
+    }
+    buildLength(1)
+    lengths |> std.each(fn(length, symbol) if length > 0 & length <= 15 {
+        true -> {
+            table.(string(length) + ':' + string(nextCode.(length))) <- symbol
+            nextCode.(length) <- nextCode.(length) + 1
+        }
+    })
+    table
+}
+
+// Returns {type: :ok, value: bytes} or a structured error. Bounds on *both*
+// input and output prevent ZIP bombs, malformed trees and infinite blocks.
+fn inflate(raw, expected, limit) {
+    pos := 0
+    bitsLeft := 0
+    current := 0
+    output := []
+    problem := ?
+    fn fail(message) if problem = ? -> problem <- message
+    fn bit() if bitsLeft = 0 & pos >= len(raw) {
+        true -> {
+            fail('truncated DEFLATE stream')
+            0
+        }
+        _ -> {
+            if bitsLeft = 0 {
+                true -> {
+                    current <- _at(raw, pos)
+                    pos <- pos + 1
+                    bitsLeft <- 8
+                }
+            }
+            value := current & 1
+            current <- current >> 1
+            bitsLeft <- bitsLeft - 1
+            value
+        }
+    }
+    fn read(n) {
+        val := 0
+        fn loop(i) if i >= n | problem != ? {
+            true -> val
+            _ -> {
+                val <- val | (bit() << i)
+                loop(i + 1)
+            }
+        }
+        loop(0)
+    }
+    fn decode(table) {
+        code := 0
+        fn scan(n) if n > 15 | problem != ? {
+            true -> {
+                fail('invalid DEFLATE Huffman code')
+                ?
+            }
+            _ -> {
+                code <- (code << 1) | bit()
+                found := table.(string(n) + ':' + string(code))
+                if found != ? {true -> found, _ -> scan(n + 1)}
+            }
+        }
+        scan(1)
+    }
+    fn emit(n) if len(output) >= limit | len(output) >= expected {
+        true -> fail('DEFLATE output exceeds advertised size or limit')
+        _ -> output << (n & 255)
+    }
+    fn backref(distance, length) {
+        if distance <= 0 | distance > len(output) {
+            true -> fail('invalid DEFLATE back-reference')
+            _ -> {
+                fn copy(i) if i >= length | problem != ? {
+                    true -> ?
+                    _ -> {
+                        emit(output.(len(output) - distance))
+                        copy(i + 1)
+                    }
+                }
+                copy(0)
+            }
+        }
+    }
+    fn dynamicTrees() {
+        hlit := 257 + read(5)
+        hdist := 1 + read(5)
+        hclen := 4 + read(4)
+        codeLengths := std.range(19) |> std.map(fn(_) 0)
+        std.range(hclen) |> std.each(fn(i) codeLengths.(_CODE_ORDER.(i)) <- read(3))
+        codeTree := _huffman(codeLengths)
+        lengths := []
+        fn nextLength() if len(lengths) >= hlit + hdist | problem != ? {
+            true -> ?
+            _ -> {
+                symbol := decode(codeTree)
+                if symbol != ? -> if symbol {
+                    16 -> {
+                        if len(lengths) = 0 -> fail('DEFLATE repeat without previous length')
+                        n := 3 + read(2)
+                        std.range(n) |> std.each(fn(_) lengths << lengths.(len(lengths) - 1))
+                    }
+                    17 -> {
+                        n := 3 + read(3)
+                        std.range(n) |> std.each(fn(_) lengths << 0)
+                    }
+                    18 -> {
+                        n := 11 + read(7)
+                        std.range(n) |> std.each(fn(_) lengths << 0)
+                    }
+                    _ -> lengths << symbol
+                }
+                if len(lengths) > hlit + hdist -> fail('DEFLATE code length overflow')
+                nextLength()
+            }
+        }
+        nextLength()
+        if len(lengths) != hlit + hdist | lengths.(256) = 0 -> fail('incomplete DEFLATE literal tree')
+        [_huffman(std.slice(lengths, 0, hlit)), _huffman(std.slice(lengths, hlit))]
+    }
+    fn compressed(litTree, distTree) {
+        fn symbolLoop() if problem = ? {
+            true -> {
+                symbol := decode(litTree)
+                if symbol != ? -> if symbol {
+                    256 -> ?
+                    _ -> if symbol < 256 {
+                        true -> {
+                            emit(symbol)
+                            symbolLoop()
+                        }
+                        _ -> {
+                            index := symbol - 257
+                            if index < 0 | index >= len(_LENGTH_BASE) {
+                                true -> fail('invalid DEFLATE length code')
+                                _ -> {
+                                    length := _LENGTH_BASE.(index) + read(_LENGTH_EXTRA.(index))
+                                    distCode := decode(distTree)
+                                    if distCode = ? | distCode >= len(_DIST_BASE) {
+                                        true -> fail('invalid DEFLATE distance code')
+                                        _ -> {
+                                            distance := _DIST_BASE.(distCode) + read(_DIST_EXTRA.(distCode))
+                                            backref(distance, length)
+                                            symbolLoop()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        symbolLoop()
+    }
+    fn block() if problem = ? {
+        true -> {
+            final := read(1)
+            kind := read(2)
+            if kind {
+                0 -> {
+                    bitsLeft <- 0
+                    n := read(16)
+                    inverted := read(16)
+                    if (n ^ inverted) != 65535 -> fail('invalid DEFLATE stored block length')
+                    fn copy(i) if i >= n | problem != ? {
+                        true -> ?
+                        _ -> {
+                            emit(read(8))
+                            copy(i + 1)
+                        }
+                    }
+                    copy(0)
+                }
+                1 -> {
+                    litLens := std.range(288) |> std.map(fn(i) if i < 144 {true -> 8, _ -> if i < 256 {true -> 9, _ -> if i < 280 {true -> 7, _ -> 8}}})
+                    compressed(_huffman(litLens), _huffman(std.range(32) |> std.map(fn(_) 5)))
+                }
+                2 -> {
+                    trees := dynamicTrees()
+                    if problem = ? -> compressed(trees.(0), trees.(1))
+                }
+                _ -> fail('reserved DEFLATE block type')
+            }
+            if final = 0 & problem = ? -> block()
+        }
+    }
+    if expected < 0 | expected > limit {
+        true -> _error('invalid or oversized DEFLATE output')
+        _ -> {
+            block()
+            if problem != ? | len(output) != expected {
+                true -> _error(if problem = ? {true -> 'DEFLATE size mismatch', _ -> problem})
+                _ -> {type: :ok, value: output |> std.map(char) |> str.join('')}
+            }
+        }
+    }
+}
+
+// JS bitwise operators produce signed 32-bit values; normalize after every
+// XOR and emulate a logical right shift so native Oak and bundled JS agree.
+fn _u32(n) if n < 0 {true -> n + 4294967296, _ -> n}
+fn _shr(n, count) ((n & 2147483647) >> count) + if n >= 2147483648 {true -> 1 << (31 - count), _ -> 0}
+fn _crcTable() {
+    std.range(256) |> std.map(fn(i) {
+        crc := i
+        std.range(8) |> std.each(fn(_) crc <- if crc & 1 {
+            0 -> _shr(crc, 1)
+            _ -> _u32(_shr(crc, 1) ^ 3988292384)
+        })
+        crc
+    })
+}
+_CRC_TABLE := _crcTable()
+fn crc32(raw) {
+    crc := 4294967295
+    std.range(len(raw)) |> std.each(fn(i) {
+        byte := codepoint(raw.(i)) & 255
+        crc <- _u32(_shr(crc, 8) ^ _CRC_TABLE.((crc ^ byte) & 255))
+    })
+    _u32(crc ^ 4294967295)
+}
+
+// Validate the local header and CRC for every consumed entry, including the
+// manifest. Resource entries not consumed by the VM are never executed.
+fn _member(raw, name, local, flags, method, compressedSize, size, checksum, end, limit) {
+    if size > limit | compressedSize > 67108864 | (flags & 1) != 0 {
+        true -> _error('oversized or encrypted JAR member ' + name)
+        _ -> if method != 0 & method != 8 {
+            true -> _error('unsupported ZIP compression method ' + string(method))
+            _ -> if local + 30 > len(raw) | _u4(raw, local) != 67324752 {
+                true -> _error('invalid ZIP local header')
+                _ -> {
+                    localNameLen := _u2(raw, local + 26)
+                    dataStart := local + 30 + localNameLen + _u2(raw, local + 28)
+                    if dataStart + compressedSize > len(raw) | dataStart + compressedSize > end |
+                        std.slice(raw, local + 30, local + 30 + localNameLen) != name |
+                        _u2(raw, local + 8) != method {
+                        true -> _error('inconsistent ZIP local header')
+                        _ -> {
+                            bytes := std.slice(raw, dataStart, dataStart + compressedSize)
+                            expanded := if method = 0 {
+                                true -> if compressedSize = size {true -> {type: :ok, value: bytes},
+                                    _ -> _error('ZIP stored size mismatch')}
+                                _ -> inflate(bytes, size, limit)
+                            }
+                            if expanded.type = :error {
+                                true -> expanded
+                                _ -> if crc32(expanded.value) != checksum {
+                                    true -> _error('ZIP member CRC32 mismatch: ' + name)
+                                    _ -> expanded
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn entries(raw) if type(raw) = :string & len(raw) <= 67108864 {
+    true -> _entries(raw)
+    _ -> _error('ZIP/JAR must be a binary file of at most 64 MiB')
+}
+fn _entries(raw) {
+    end := len(raw) - 22
+    lower := if end > 65535 {true -> end - 65535, _ -> 0}
+    fn findEnd(i) if i < lower {
+        true -> ?
+        _ -> if _u4(raw, i) = 101010256 & i + 22 + _u2(raw, i + 20) = len(raw) {
+            true -> i
+            _ -> findEnd(i - 1)
+        }
+    }
+    eocd := findEnd(end)
+    if eocd = ? {
+        true -> _error('ZIP end-of-central-directory record missing')
+        _ -> _central(raw, eocd)
+    }
+}
+fn _central(raw, eocd) {
+    disk := _u2(raw, eocd + 4)
+    diskOfDir := _u2(raw, eocd + 6)
+    countOnDisk := _u2(raw, eocd + 8)
+    count := _u2(raw, eocd + 10)
+    dirSize := _u4(raw, eocd + 12)
+    offset := _u4(raw, eocd + 16)
+    if disk != 0 | diskOfDir != 0 | countOnDisk != count | count > 4096 |
+        offset = 4294967295 | offset + dirSize > eocd {
+        true -> _error('unsupported multipart/ZIP64/oversized archive')
+        _ -> {
+            classes := []
+            seen := {}
+            total := 0
+            jarManifest := ?
+            problem := ?
+            fn readEntry(i, pos) if i >= count | problem != ? {
+                true -> ?
+                _ -> {
+                    if pos + 46 > len(raw) | _u4(raw, pos) != 33639248 {
+                        true -> problem <- 'invalid ZIP central-directory entry'
+                        _ -> {
+                            flags := _u2(raw, pos + 8)
+                            method := _u2(raw, pos + 10)
+                            checksum := _u4(raw, pos + 16)
+                            compressedSize := _u4(raw, pos + 20)
+                            size := _u4(raw, pos + 24)
+                            nameLen := _u2(raw, pos + 28)
+                            extraLen := _u2(raw, pos + 30)
+                            commentLen := _u2(raw, pos + 32)
+                            local := _u4(raw, pos + 42)
+                            finish := pos + 46 + nameLen + extraLen + commentLen
+                            if finish > len(raw) | finish > offset + dirSize | size = 4294967295 | compressedSize = 4294967295 {
+                                true -> problem <- 'invalid ZIP entry size or ZIP64 extension'
+                                _ -> {
+                                    name := std.slice(raw, pos + 46, pos + 46 + nameLen)
+                                    if !_validName?(name) & !str.endsWith?(name, '/') -> problem <- 'unsafe ZIP entry name'
+                                    if str.endsWith?(name, '.class') & problem = ? {
+                                        true -> {
+                                            if len(classes) >= 256 | total + size > 33554432 |
+                                                size > classfile.MAX_CLASS_BYTES {
+                                                true -> problem <- 'too many or oversized ZIP class files'
+                                                _ -> {
+                                                    inflated := _member(raw, name, local, flags, method,
+                                                        compressedSize, size, checksum, offset,
+                                                        classfile.MAX_CLASS_BYTES)
+                                                    if inflated.type = :error {
+                                                        true -> problem <- inflated.message
+                                                        _ -> {
+                                                            cls := classfile.parseClass(inflated.value)
+                                                            if cls.type = :error {
+                                                                true -> problem <- 'ZIP class failed class-file verification: ' + cls.message
+                                                                _ -> {
+                                                                    if name != cls.value.name + '.class' ->
+                                                                        problem <- 'ZIP class filename does not match internal JVM name'
+                                                                    if seen.(name) != ? ->
+                                                                        problem <- 'duplicate ZIP class ' + name
+                                                                    if problem = ? {
+                                                                        true -> {
+                                                                            seen.(name) <- true
+                                                                            total <- total + size
+                                                                            classes << inflated.value
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if str.lower(name) = 'meta-inf/manifest.mf' & problem = ? {
+                                        true -> if jarManifest != ? {
+                                            true -> problem <- 'duplicate JAR manifest'
+                                            _ -> {
+                                                inflated := _member(raw, name, local, flags, method,
+                                                    compressedSize, size, checksum, offset, 65536)
+                                                if inflated.type = :error {
+                                                    true -> problem <- inflated.message
+                                                    _ -> {
+                                                        parsed := manifest.parse(inflated.value)
+                                                        if parsed.type = :error {
+                                                            true -> problem <- parsed.message
+                                                            _ -> jarManifest <- parsed
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            readEntry(i + 1, finish)
+                        }
+                    }
+                }
+            }
+            readEntry(0, offset)
+            if problem = ? & len(classes) = 0 -> problem <- 'JAR/ZIP contains no supported .class files'
+            if problem != ? {
+                true -> _error(problem)
+                _ -> {
+                    // JARs commonly put helper classes before their applet.
+                    // Prefer an Applet/JApplet entry, then a static main class;
+                    // never treat an arbitrary first helper as executable.
+                    parsed := classes |> std.map(fn(bytes) classfile.parseClass(bytes).value)
+                    infos := {}
+                    parsed |> std.each(fn(cls) infos.(cls.name) <- cls)
+                    fn descendsFrom?(name, ancestor, depth) if depth >= 64 | name = ? {
+                        true -> false
+                        _ -> if name = ancestor {
+                            true -> true
+                            _ -> if infos.(name) = ? {
+                                true -> false
+                                _ -> descendsFrom?(infos.(name).super, ancestor, depth + 1)
+                            }
+                        }
+                    }
+                    applets := []
+                    mains := []
+                    parsed |> std.each(fn(cls) {
+                        if descendsFrom?(cls.name, 'java/applet/Applet', 0) |
+                            descendsFrom?(cls.name, 'javax/swing/JApplet', 0) ->
+                            applets << cls.name
+                        main := classfile.method(cls, 'main', '([Ljava/lang/String;)V')
+                        if main != ? & (main.flags & 9) = 9 -> mains << cls.name
+                    })
+                    declared := if jarManifest = ? {true -> ?, _ -> jarManifest.entry}
+                    if declared != ? & !(mains |> std.some(fn(main) main = declared)) ->
+                        problem <- 'JAR Main-Class is missing or not a public static main: ' + declared
+                    entry := if declared != ? {
+                        true -> declared
+                        _ -> if len(applets) > 0 {
+                        true -> {
+                            selected := applets.(0)
+                            // If the archive includes a superclass and its
+                            // executable subclass, select the leaf subclass.
+                            applets |> std.each(fn(name) if name != selected &
+                                descendsFrom?(name, selected, 0) -> selected <- name)
+                            selected
+                        }
+                        _ -> if len(mains) > 0 {true -> mains.(0), _ -> ?}
+                        }
+                    }
+                    if problem != ? {
+                        true -> _error(problem)
+                        _ -> {type: :ok, classes: classes, entry: entry, count: len(classes),
+                            applets: applets, mains: mains, manifest: jarManifest}
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Read ONE named class from an otherwise oversized JAR without inflating the
+// rest. A modern client can contain tens of thousands of entries: scanning
+// central-directory metadata is permitted, but full linking/playing is not.
+// Keep existing entries() and its 256-class limit unchanged. The selected
+// member still passes local-header, CRC32, size, ratio, path and class-name
+// checks; no resource or manifest is silently staged into a standalone build.
+fn selectClass(raw, owner) if type(raw) != :string | len(raw) > 67108864 |
+    type(owner) != :string | len(owner) = 0 | len(owner) > 512 {
+    true -> _error('selectClass requires a JAR <=64 MiB and a bounded JVM class name')
+    _ -> {
+        name := if str.endsWith?(owner, '.class') {true -> owner, _ -> owner + '.class'}
+        if !_validName?(name) | !str.endsWith?(name, '.class') {
+            true -> _error('unsafe selected ZIP class name')
+            _ -> _selectClass(raw, name)
+        }
+    }
+}
+fn _selectClass(raw, wanted) {
+    end := len(raw) - 22
+    lower := if end > 65535 {true -> end - 65535, _ -> 0}
+    fn findEnd(i) if i < lower {
+        true -> ?
+        _ -> if _u4(raw, i) = 101010256 &
+            i + 22 + _u2(raw, i + 20) = len(raw) {
+            true -> i
+            _ -> findEnd(i - 1)
+        }
+    }
+    eocd := findEnd(end)
+    if eocd = ? {
+        true -> _error('ZIP end-of-central-directory record missing')
+        _ -> _selectCentral(raw, eocd, wanted)
+    }
+}
+fn _selectCentral(raw, eocd, wanted) {
+    disk := _u2(raw, eocd + 4)
+    diskOfDir := _u2(raw, eocd + 6)
+    countOnDisk := _u2(raw, eocd + 8)
+    count := _u2(raw, eocd + 10)
+    dirSize := _u4(raw, eocd + 12)
+    offset := _u4(raw, eocd + 16)
+    if disk != 0 | diskOfDir != 0 | countOnDisk != count | count > 50000 |
+        dirSize > 8388608 | offset = 4294967295 |
+        offset + dirSize > eocd {
+        true -> _error('unsupported multipart/ZIP64/oversized selective JAR index')
+        _ -> {
+            pos := offset
+            selected := ?
+            problem := ?
+            std.range(count) |> std.each(fn(_) if problem = ? {
+                true -> {
+                    if pos + 46 > offset + dirSize |
+                        _u4(raw, pos) != 33639248 {
+                        true -> problem <- 'invalid selective ZIP central-directory entry'
+                        _ -> {
+                            compressedSize := _u4(raw, pos + 20)
+                            size := _u4(raw, pos + 24)
+                            nameLen := _u2(raw, pos + 28)
+                            extraLen := _u2(raw, pos + 30)
+                            commentLen := _u2(raw, pos + 32)
+                            finish := pos + 46 + nameLen + extraLen + commentLen
+                            if finish > offset + dirSize | size = 4294967295 |
+                                compressedSize = 4294967295 {
+                                true -> problem <- 'invalid selective ZIP entry size or ZIP64 extension'
+                                _ -> {
+                                    name := std.slice(raw, pos + 46, pos + 46 + nameLen)
+                                    safe := if str.endsWith?(name, '/') {
+                                        true -> std.slice(name, 0, len(name) - 1)
+                                        _ -> name
+                                    }
+                                    if !_validName?(safe) {
+                                        true -> problem <- 'unsafe ZIP entry name'
+                                        _ -> if name = wanted {
+                                            true -> if selected != ? {
+                                                true -> problem <- 'duplicate selected ZIP class'
+                                                _ -> {
+                                                    if size > classfile.MAX_CLASS_BYTES |
+                                                        compressedSize = 0 |
+                                                        size > compressedSize * 256 {
+                                                        true -> problem <- 'selected ZIP class exceeds size or compression-ratio limit'
+                                                        _ -> {
+                                                            local := _u4(raw, pos + 42)
+                                                            if local = 4294967295 {
+                                                                true -> problem <- 'selected ZIP class requires ZIP64'
+                                                                _ -> {
+                                                                    bytes := _member(raw, name, local,
+                                                                        _u2(raw, pos + 8), _u2(raw, pos + 10),
+                                                                        compressedSize, size, _u4(raw, pos + 16),
+                                                                        offset, classfile.MAX_CLASS_BYTES)
+                                                                    if bytes.type = :error {
+                                                                        true -> problem <- bytes.message
+                                                                        _ -> {
+                                                                            parsed := classfile.parseClass(bytes.value)
+                                                                            if parsed.type = :error {
+                                                                                true -> problem <- 'selected ZIP class invalid: ' + parsed.message
+                                                                                _ -> if name != parsed.value.name + '.class' {
+                                                                                    true -> problem <- 'selected ZIP filename differs from class name'
+                                                                                    _ -> selected <- {type: :ok,
+                                                                                        value: bytes.value,
+                                                                                        name: parsed.value.name,
+                                                                                        major: parsed.value.major,
+                                                                                        minor: parsed.value.minor,
+                                                                                        archiveEntries: count}
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            pos <- finish
+                        }
+                    }
+                }
+            })
+            if problem = ? & pos != offset + dirSize ->
+                problem <- 'selective ZIP central-directory length mismatch'
+            if problem != ? {
+                true -> _error(problem)
+                _ -> if selected = ? {
+                    true -> _error('class not found in ZIP: ' + wanted)
+                    _ -> selected
+                }
+            }
+        }
+    }
+}

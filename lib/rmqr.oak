@@ -1,0 +1,714 @@
+// librmqr implements ISO/IEC 23941:2022 Rectangular Micro QR (rMQR) encoding.
+//
+// It creates the 32 standardized rectangular symbols (R7x43 through R17x139),
+// performs the single rMQR data mask, BCH format coding, and Reed-Solomon error
+// correction. Numeric, alphanumeric, and UTF-8 byte segments are supported.
+//
+// The implementation was cross-checked against OUDON/rmqrcode-python and is
+// self-contained: it has no Python runtime or external encoder dependency.
+// Public API is exported at the bottom of this module.
+
+{
+	default: default
+	range: range
+	map: map
+	join: listJoin
+	reverse: reverse
+	each: each
+	slice: slice
+} := import('std')
+{
+	indexOf: indexOf
+	join: join
+} := import('str')
+ppm := import('image-ppm')
+
+// Error correction levels: M restores about 15% of codewords; H about 30%.
+M := :M
+H := :H
+
+// Size-selection strategies for fit().
+MinimizeWidth := :minimizeWidth
+MinimizeHeight := :minimizeHeight
+Balanced := :balanced
+
+// Segment modes. Kanji is reserved for API compatibility; use Byte for UTF-8
+// data because Magnolia currently has no Shift-JIS codec in its standard library.
+Numeric := :numeric
+Alphanumeric := :alphanumeric
+Byte := :byte
+Kanji := :kanji
+
+_Inf := 1000000
+_QuietZone := 2
+_AlphaChars := '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:'
+
+// Each version row is:
+// [name, indicator, height, width, remainderBits, [CCI numeric/alpha/byte/kanji],
+//  M blocks [[num,total,data]], H blocks, M dataBits, H dataBits].
+_Versions := [
+	['R7x43', 0, 7, 43, 0, [4, 3, 3, 2], [[1, 13, 6]], [[1, 13, 3]], 48, 24]
+	['R7x59', 1, 7, 59, 3, [5, 5, 4, 3], [[1, 21, 12]], [[1, 21, 7]], 96, 56]
+	['R7x77', 2, 7, 77, 5, [6, 5, 5, 4], [[1, 32, 20]], [[1, 32, 10]], 160, 80]
+	['R7x99', 3, 7, 99, 6, [7, 6, 5, 5], [[1, 44, 28]], [[1, 44, 14]], 224, 112]
+	['R7x139', 4, 7, 139, 1, [7, 6, 6, 5], [[1, 68, 44]], [[2, 34, 12]], 352, 192]
+	['R9x43', 5, 9, 43, 2, [5, 5, 4, 3], [[1, 21, 12]], [[1, 21, 7]], 96, 56]
+	['R9x59', 6, 9, 59, 3, [6, 5, 5, 4], [[1, 33, 21]], [[1, 33, 11]], 168, 88]
+	['R9x77', 7, 9, 77, 1, [7, 6, 5, 5], [[1, 49, 31]], [[1, 24, 8], [1, 25, 9]], 248, 136]
+	['R9x99', 8, 9, 99, 4, [7, 6, 6, 5], [[1, 66, 42]], [[2, 33, 11]], 336, 176]
+	['R9x139', 9, 9, 139, 5, [8, 7, 6, 6], [[1, 49, 31], [1, 50, 32]], [[3, 33, 11]], 504, 264]
+	['R11x27', 10, 11, 27, 2, [4, 4, 3, 2], [[1, 15, 7]], [[1, 15, 5]], 56, 40]
+	['R11x43', 11, 11, 43, 1, [6, 5, 5, 4], [[1, 31, 19]], [[1, 31, 11]], 152, 88]
+	['R11x59', 12, 11, 59, 0, [7, 6, 5, 5], [[1, 47, 31]], [[1, 23, 7], [1, 24, 8]], 248, 120]
+	['R11x77', 13, 11, 77, 2, [7, 6, 6, 5], [[1, 67, 43]], [[1, 33, 11], [1, 34, 12]], 344, 184]
+	['R11x99', 14, 11, 99, 7, [8, 7, 6, 6], [[1, 44, 28], [1, 45, 29]], [[1, 44, 14], [1, 45, 15]], 456, 232]
+	['R11x139', 15, 11, 139, 6, [8, 7, 7, 6], [[2, 66, 42]], [[3, 44, 14]], 672, 336]
+	['R13x27', 16, 13, 27, 4, [5, 5, 4, 3], [[1, 21, 14]], [[1, 21, 7]], 96, 56]
+	['R13x43', 17, 13, 43, 1, [6, 6, 5, 5], [[1, 41, 27]], [[1, 41, 13]], 216, 104]
+	['R13x59', 18, 13, 59, 6, [7, 6, 6, 5], [[1, 60, 38]], [[2, 30, 10]], 304, 160]
+	['R13x77', 19, 13, 77, 4, [7, 7, 6, 6], [[1, 42, 26], [1, 43, 27]], [[1, 42, 14], [1, 43, 15]], 424, 232]
+	['R13x99', 20, 13, 99, 3, [8, 7, 7, 6], [[1, 56, 36], [1, 57, 37]], [[1, 37, 11], [2, 38, 12]], 584, 280]
+	['R13x139', 21, 13, 139, 0, [8, 8, 7, 7], [[2, 55, 35], [1, 56, 36]], [[2, 41, 13], [2, 42, 14]], 848, 432]
+	['R15x43', 22, 15, 43, 1, [7, 6, 6, 5], [[1, 51, 33]], [[1, 25, 7], [1, 26, 8]], 264, 120]
+	['R15x59', 23, 15, 59, 4, [7, 7, 6, 5], [[1, 74, 48]], [[2, 37, 13]], 384, 208]
+	['R15x77', 24, 15, 77, 6, [8, 7, 7, 6], [[1, 51, 33], [1, 52, 34]], [[2, 34, 10], [1, 35, 11]], 536, 248]
+	['R15x99', 25, 15, 99, 7, [8, 7, 7, 6], [[2, 68, 44]], [[4, 34, 12]], 704, 384]
+	['R15x139', 26, 15, 139, 2, [9, 8, 7, 7], [[2, 66, 42], [1, 67, 43]], [[1, 39, 13], [4, 40, 14]], 1016, 552]
+	['R17x43', 27, 17, 43, 1, [7, 6, 6, 5], [[1, 60, 39]], [[1, 30, 10], [1, 31, 11]], 312, 168]
+	['R17x59', 28, 17, 59, 2, [8, 7, 6, 6], [[2, 44, 28]], [[2, 44, 14]], 448, 224]
+	['R17x77', 29, 17, 77, 0, [8, 7, 7, 6], [[2, 61, 39]], [[1, 40, 12], [2, 41, 13]], 624, 304]
+	['R17x99', 30, 17, 99, 3, [8, 8, 7, 6], [[2, 53, 33], [1, 54, 34]], [[4, 40, 14]], 800, 448]
+	['R17x139', 31, 17, 139, 4, [9, 8, 8, 7], [[4, 58, 38]], [[2, 38, 12], [4, 39, 13]], 1216, 608]
+]
+
+_AlignmentXs := {
+	'27': []
+	'43': [21]
+	'59': [19, 39]
+	'77': [25, 51]
+	'99': [23, 49, 75]
+	'139': [27, 55, 83, 111]
+}
+
+// ---- general helpers -------------------------------------------------
+
+fn _version(name) {
+	fn find(i) if i >= len(_Versions) {
+		true -> ?
+		_ -> if _Versions.(i).(0) = name { true -> _Versions.(i), _ -> find(i + 1) }
+	}
+	find(0)
+}
+
+fn _modeIndex(mode) if mode {
+	Numeric -> 0
+	Alphanumeric -> 1
+	Byte -> 2
+	Kanji -> 3
+	_ -> ?
+}
+
+fn _bitString(n, width) {
+	fn sub(i, out) if i < 0 {
+		true -> out
+		_ -> sub(i - 1, out + if ((n >> i) & 1) { 0 -> '0', _ -> '1' })
+	}
+	sub(width - 1, '')
+}
+
+fn _bitLength(n) if n {
+	0 -> 0
+	_ -> 1 + _bitLength(n >> 1)
+}
+
+fn _bch(data) {
+	g := 7973 // x^12+x^11+x^10+x^9+x^8+x^5+x^2+1
+	fn reduce(v) if _bitLength(v) >= 13 {
+		true -> reduce(v ^ (g << (_bitLength(v) - 13)))
+		_ -> v
+	}
+	reduce(data << 12)
+}
+
+fn _alphaValue(c) {
+	n := indexOf(_AlphaChars, c)
+	if n >= 0 { true -> n, _ -> ? }
+}
+
+fn _numeric?(c) indexOf('0123456789', c) >= 0
+
+fn _modeValid?(mode, data) {
+	fn sub(i) if i >= len(data) {
+		true -> true
+		_ -> if mode {
+			Numeric -> if _numeric?(data.(i)) { true -> sub(i + 1), _ -> false }
+			Alphanumeric -> if _alphaValue(data.(i)) { ? -> false, _ -> sub(i + 1) }
+			Byte -> true
+			_ -> false
+		}
+	}
+	sub(0)
+}
+
+fn _grid(width, height, value) range(height) |> map(fn(_) range(width) |> map(fn(_) value))
+
+fn _dataBits(info, ecc) if ecc {
+	H -> info.(9)
+	_ -> info.(8)
+}
+
+fn _blockDefinitions(info, ecc) if ecc {
+	H -> info.(7)
+	_ -> info.(6)
+}
+
+fn _dataCodewordCount(defs) {
+	fn sub(i, total) if i >= len(defs) {
+		true -> total
+		_ -> sub(i + 1, total + defs.(i).(0) * defs.(i).(2))
+	}
+	sub(0, 0)
+}
+
+// ---- segment encoding ------------------------------------------------
+
+fn _numericPayload(data) {
+	fn sub(i, out) if i >= len(data) {
+		true -> out
+		_ -> {
+			take := if len(data) - i >= 3 { true -> 3, _ -> len(data) - i }
+			part := slice(data, i, i + take)
+			width := if take { 3 -> 10, 2 -> 7, _ -> 4 }
+			sub(i + take, out + _bitString(int(part), width))
+		}
+	}
+	sub(0, '')
+}
+
+fn _alphanumericPayload(data) {
+	fn sub(i, out) if i >= len(data) {
+		true -> out
+		_ -> if i + 1 < len(data) {
+			true -> sub(i + 2, out + _bitString(_alphaValue(data.(i)) * 45 + _alphaValue(data.(i + 1)), 11))
+			_ -> sub(i + 1, out + _bitString(_alphaValue(data.(i)), 6))
+		}
+	}
+	sub(0, '')
+}
+
+fn _bytePayload(data) {
+	fn sub(i, out) if i >= len(data) {
+		true -> out
+		_ -> sub(i + 1, out + _bitString(codepoint(data.(i)), 8))
+	}
+	sub(0, '')
+}
+
+fn _segmentBits(segment, info) {
+	mode := default(segment.mode, Byte)
+	data := default(segment.data, '')
+	idx := _modeIndex(mode)
+	if idx = ? | !_modeValid?(mode, data) {
+		true -> ?
+		_ -> {
+			cci := info.(5).(idx)
+			count := len(data)
+			if count >= (1 << cci) {
+				true -> ?
+				_ -> {
+					payload := if mode {
+						Numeric -> _numericPayload(data)
+						Alphanumeric -> _alphanumericPayload(data)
+						Byte -> _bytePayload(data)
+						_ -> ?
+					}
+					if payload { ? -> ?, _ -> _bitString(idx + 1, 3) + _bitString(count, cci) + payload }
+				}
+			}
+		}
+	}
+}
+
+fn _segmentsBits(segments, info) {
+	fn sub(i, out) if i >= len(segments) {
+		true -> out
+		_ -> if part := _segmentBits(segments.(i), info) {
+			? -> ?
+			_ -> sub(i + 1, out + part)
+		}
+	}
+	sub(0, '')
+}
+
+fn _bitsToDataCodewords(bits, count) {
+	fn take(i, out) if i >= len(bits) {
+		true -> out
+		_ -> {
+			end := if len(bits) - i >= 8 { true -> i + 8, _ -> len(bits) }
+			piece := slice(bits, i, end)
+			fn readBit(j, n) if j >= len(piece) { true -> n, _ -> readBit(j + 1, n * 2 + if piece.(j) = '1' { true -> 1, _ -> 0 }) }
+			take(i + 8, out << (readBit(0, 0) << (8 - len(piece))))
+		}
+	}
+	words := take(0, [])
+	fn pad(n, flip) if n >= count {
+		true -> words
+		_ -> { words << if flip { 0 -> 236, _ -> 17 }
+			pad(n + 1, 1 - flip) }
+	}
+	pad(len(words), 0)
+}
+
+// ---- Reed-Solomon over GF(256) --------------------------------------
+
+fn _gfMultiply(a, b) {
+	fn sub(x, y, acc) if y {
+		0 -> acc & 255
+		_ -> {
+			next := if x & 128 { 0 -> (x << 1) & 255, _ -> ((x << 1) ^ 285) & 255 }
+			nextAcc := if y & 1 { 0 -> acc, _ -> acc ^ x }
+			sub(next, y >> 1, nextAcc)
+		}
+	}
+	sub(a, b, 0)
+}
+
+fn _gfPow2(n) {
+	fn sub(i, value) if i >= n { true -> value, _ -> sub(i + 1, _gfMultiply(value, 2)) }
+	sub(0, 1)
+}
+
+fn _generator(degree) {
+	fn multiply(poly, term) {
+		out := range(len(poly) + 1) |> map(fn(_) 0)
+		fn row(i) if i >= len(poly) {
+			true -> out
+			_ -> {
+				out.(i) <- out.(i) ^ poly.(i)
+				out.(i + 1) <- out.(i + 1) ^ _gfMultiply(poly.(i), term)
+				row(i + 1)
+			}
+		}
+		row(0)
+	}
+	fn sub(i, poly) if i >= degree { true -> poly, _ -> sub(i + 1, multiply(poly, _gfPow2(i))) }
+	sub(0, [1])
+}
+
+fn _reedSolomon(data, degree) {
+	generator := _generator(degree)
+	work := []
+	fn copy(i) if i >= len(data) { true -> ?, _ -> { work << data.(i)
+		copy(i + 1) } }
+	copy(0)
+	range(degree) |> each(fn(_) work << 0)
+	fn process(i) if i >= len(data) {
+		true -> slice(work, len(data), len(work))
+		_ -> {
+			factor := work.(i)
+			fn apply(j) if j > degree {
+				true -> ?
+				_ -> { work.(i + j) <- work.(i + j) ^ _gfMultiply(generator.(j), factor)
+					apply(j + 1) }
+			}
+			if factor { 0 -> ?, _ -> apply(0) }
+			process(i + 1)
+		}
+	}
+	process(0)
+}
+
+fn _blocks(data, definitions) {
+	result := []
+	cursor := { value: 0 }
+	fn groups(i) if i >= len(definitions) {
+		true -> result
+		_ -> {
+			d := definitions.(i)
+			fn add(n) if n >= d.(0) {
+				true -> groups(i + 1)
+				_ -> {
+					dataPart := slice(data, cursor.value, cursor.value + d.(2))
+					cursor.value <- cursor.value + d.(2)
+					result << { data: dataPart, ecc: _reedSolomon(dataPart, d.(1) - d.(2)) }
+					add(n + 1)
+				}
+			}
+			add(0)
+		}
+	}
+	groups(0)
+}
+
+fn _interleave(blocks, key) {
+	max := if len(blocks) { 0 -> 0, _ -> len(blocks.(len(blocks) - 1).(key)) }
+	out := []
+	fn rows(i) if i >= max {
+		true -> out
+		_ -> {
+			fn cols(j) if j >= len(blocks) {
+				true -> rows(i + 1)
+				_ -> {
+					part := blocks.(j).(key)
+					if i < len(part) -> out << part.(i)
+					cols(j + 1)
+				}
+			}
+			cols(0)
+		}
+	}
+	rows(0)
+}
+
+fn _finalCodewords(blocks) listJoin(_interleave(blocks, 'data'), _interleave(blocks, 'ecc'))
+
+// ---- module placement ------------------------------------------------
+
+fn _set(grid, x, y, value) grid.(y).(x) := value
+fn _get(grid, x, y) grid.(y).(x)
+
+fn _putFinder(grid, width, height) {
+	range(7) |> each(fn(y) range(7) |> each(fn(x) _set(grid, x, y, if y = 0 | y = 6 | x = 0 | x = 6 { true -> 1, _ -> 0 })))
+	range(3) |> each(fn(y) range(3) |> each(fn(x) _set(grid, x + 2, y + 2, 1)))
+	range(8) |> each(fn(n) {
+		if n < height -> _set(grid, 7, n, 0)
+		if height >= 9 -> _set(grid, n, 7, 0)
+	})
+}
+
+fn _putFinderSub(grid, width, height) {
+	range(5) |> each(fn(i) range(5) |> each(fn(j) _set(grid, width - j - 1, height - i - 1, if i = 0 | i = 4 | j = 0 | j = 4 { true -> 1, _ -> 0 })))
+	_set(grid, width - 3, height - 3, 1)
+}
+
+fn _putCornerFinders(grid, width, height) {
+	_set(grid, 0, height - 1, 1)
+	_set(grid, 1, height - 1, 1)
+	_set(grid, 2, height - 1, 1)
+	if height >= 11 -> { _set(grid, 0, height - 2, 1)
+		_set(grid, 1, height - 2, 0) }
+	_set(grid, width - 1, 0, 1)
+	_set(grid, width - 2, 0, 1)
+	_set(grid, width - 1, 1, 1)
+	_set(grid, width - 2, 1, 0)
+}
+
+fn _alignmentCenters(width) _AlignmentXs.(string(width))
+
+fn _putAlignment(grid, width, height) {
+	_alignmentCenters(width) |> each(fn(center) range(3) |> each(fn(y) range(3) |> each(fn(x) {
+		color := if y = 0 | y = 2 | x = 0 | x = 2 { true -> 1, _ -> 0 }
+		_set(grid, center + x - 1, y, color)
+		_set(grid, center + x - 1, height - 1 - y, color)
+	})))
+}
+
+fn _putTiming(grid, width, height) {
+	range(width) |> each(fn(x) {
+		color := if (x + 1) % 2 { 0 -> 0, _ -> 1 }
+		if _get(grid, x, 0) = -1 -> _set(grid, x, 0, color)
+		if _get(grid, x, height - 1) = -1 -> _set(grid, x, height - 1, color)
+	})
+	centers := listJoin(listJoin([0], _alignmentCenters(width)), [width - 1])
+	range(height) |> each(fn(y) {
+		color := if (y + 1) % 2 { 0 -> 0, _ -> 1 }
+		centers |> each(fn(x) if _get(grid, x, y) = -1 -> _set(grid, x, y, color))
+	})
+}
+
+fn _putFormat(grid, width, height, format) {
+	finderSide := format ^ 129714 // 0b011111101010110010
+	range(18) |> each(fn(n) _set(grid, 8 + int(n / 5), 1 + n % 5, (finderSide >> n) & 1))
+	subSide := format ^ 133755 // 0b100000101001111011
+	range(15) |> each(fn(n) _set(grid, width - 8 + int(n / 5), height - 6 + n % 5, (subSide >> n) & 1))
+	_set(grid, width - 5, height - 6, (subSide >> 15) & 1)
+	_set(grid, width - 4, height - 6, (subSide >> 16) & 1)
+	_set(grid, width - 3, height - 6, (subSide >> 17) & 1)
+}
+
+fn _placeData(grid, width, height, words, remainderBits) {
+	area := _grid(width, height, false)
+	state := { word: 0, bit: 0, rem: remainderBits, x: width - 2, y: height - 6, dy: -1, done: false }
+	fn step {
+		if state.done {
+			true -> area
+			_ -> {
+				[state.x, state.x - 1] |> each(fn(x) {
+					if !state.done & _get(grid, x, state.y) = -1 -> {
+						value := if state.word = len(words) { true -> 0, _ -> (words.(state.word) >> (7 - state.bit)) & 1 }
+						_set(grid, x, state.y, value)
+						area.(state.y).(x) := true
+						if state.word = len(words) {
+							true -> state.rem <- state.rem - 1
+							_ -> {
+								state.bit <- state.bit + 1
+								if state.bit = 8 -> { state.bit <- 0
+									state.word <- state.word + 1 }
+							}
+						}
+						if state.word = len(words) & state.rem = 0 -> state.done <- true
+					}
+				})
+				if !state.done -> if state.dy < 0 & state.y = 1 {
+					true -> { state.x <- state.x - 2
+						state.dy <- 1 }
+					_ -> if state.dy > 0 & state.y = height - 2 {
+						true -> { state.x <- state.x - 2
+							state.dy <- -1 }
+						_ -> state.y <- state.y + state.dy
+					}
+				}
+				step()
+			}
+		}
+	}
+	step()
+}
+
+fn _applyMask(grid, area, width, height) {
+	range(height) |> each(fn(y) range(width) |> each(fn(x) {
+		if area.(y).(x) & ((int(y / 2) + int(x / 3)) % 2 = 0) -> _set(grid, x, y, 1 - _get(grid, x, y))
+	}))
+	grid
+}
+
+// ---- public constructors --------------------------------------------
+
+// segment creates a segment for make(). Modes: rmqr.Numeric,
+// rmqr.Alphanumeric, and rmqr.Byte.
+fn segment(data, mode) { data: data, mode: default(mode, Byte) }
+
+// make creates one specific rMQR version. It returns ? for an unknown version,
+// unsupported segment, invalid input for a segment mode, or input over capacity.
+fn make(versionName, ecc, segments) {
+	info := _version(versionName)
+	ecc := default(ecc, M)
+	if info = ? | (ecc != M & ecc != H) | len(segments) = 0 {
+		true -> ?
+		_ -> if encoded := _segmentsBits(segments, info) {
+			? -> ?
+			_ -> {
+				bits := if len(encoded) + 3 <= _dataBits(info, ecc) { true -> encoded + '000', _ -> encoded }
+				if len(bits) > _dataBits(info, ecc) {
+					true -> ?
+					_ -> {
+						defs := _blockDefinitions(info, ecc)
+						data := _bitsToDataCodewords(bits, _dataCodewordCount(defs))
+						words := _finalCodewords(_blocks(data, defs))
+						width := info.(3)
+						height := info.(2)
+						grid := _grid(width, height, -1)
+						_putFinder(grid, width, height)
+						_putFinderSub(grid, width, height)
+						_putCornerFinders(grid, width, height)
+						_putAlignment(grid, width, height)
+						_putTiming(grid, width, height)
+						formatData := info.(1) | if ecc = H { true -> 32, _ -> 0 }
+						_putFormat(grid, width, height, (formatData << 12) | _bch(formatData))
+						area := _placeData(grid, width, height, words, info.(4))
+						_applyMask(grid, area, width, height)
+						{ version: info.(0), ecc: ecc, width: width, height: height, matrix: grid, segments: segments }
+					}
+				}
+			}
+		}
+	}
+}
+
+// _autoSegments uses the reference dynamic-programming cost model for Numeric,
+// Alphanumeric, and Byte modes. It treats Magnolia strings as UTF-8 byte arrays,
+// so all non-ASCII input remains safely encodable in Byte mode.
+fn _autoSegments(data, info, ecc) {
+	n := len(data)
+	if n = 0 | n > 361 {
+		true -> ?
+		_ -> {
+			dp := range(n + 1) |> map(fn(_) [[_Inf, _Inf, _Inf], [_Inf, _Inf, _Inf], [_Inf, _Inf, _Inf]])
+			parents := range(n + 1) |> map(fn(_) [[[-1, -1, -1], [-1, -1, -1], [-1, -1, -1]], [[-1, -1, -1], [-1, -1, -1], [-1, -1, -1]], [[-1, -1, -1], [-1, -1, -1], [-1, -1, -1]]])
+			// Keep the table four-wide internally so the values mirror the ISO modes.
+			// The Kanji column is not reachable without a Shift-JIS codec.
+			dp.(0) << [_Inf, _Inf, _Inf]
+			parents.(0) << [[-1, -1, -1], [-1, -1, -1], [-1, -1, -1]]
+			range(3) |> each(fn(mode) { dp.(0).(mode).(0) := 3 + info.(5).(mode)
+				parents.(0).(mode).(0) := [0, 0, 0] })
+			fn allowed(mode, char) if mode {
+				0 -> _numeric?(char)
+				1 -> _alphaValue(char) != ?
+				_ -> true
+			}
+			fn transitionCost(mode, unfilled, changing) {
+				if changing {
+					true -> [if mode { 0, 1 -> 1, _ -> 0 }, 3 + info.(5).(mode) + if mode { 0 -> 4, 1 -> 6, _ -> 8 }]
+					_ -> if mode {
+						0 -> [(unfilled + 1) % 3, if unfilled = 0 { true -> 4, _ -> 3 }]
+						1 -> [(unfilled + 1) % 2, if unfilled = 0 { true -> 6, _ -> 5 }]
+						_ -> [0, 8]
+					}
+				}
+			}
+			fn fillAt(pos) if pos >= n {
+				true -> ?
+				_ -> {
+					with range(3) |> each() fn(mode) {
+						range(3) |> with each() fn(unfilled) {
+							base := dp.(pos).(mode).(unfilled)
+							if base < _Inf -> range(3) |> with each() fn(nextMode) {
+								if allowed(nextMode, data.(pos)) {
+									true -> {
+										[nextUnfilled, added] := transitionCost(nextMode, unfilled, nextMode != mode)
+										candidate := base + added
+										if candidate < dp.(pos + 1).(nextMode).(nextUnfilled) -> {
+											dp.(pos + 1).(nextMode).(nextUnfilled) := candidate
+											parents.(pos + 1).(nextMode).(nextUnfilled) := [pos, mode, unfilled]
+										}
+									}
+									_ -> ?
+								}
+							}
+						}
+					}
+					fillAt(pos + 1)
+				}
+			}
+			fillAt(0)
+			best := { cost: _Inf, state: ? }
+			range(3) |> each(fn(mode) {
+				range(3) |> each(fn(unfilled) {
+					if dp.(n).(mode).(unfilled) < best.cost -> {
+						best.cost <- dp.(n).(mode).(unfilled)
+						best.state <- [n, mode, unfilled]
+					}
+				})
+			})
+			if best.cost > _dataBits(info, ecc) {
+				true -> ?
+				_ -> {
+					path := []
+					fn trace(state) if state.(0) = 0 {
+						true -> reverse(path)
+						_ -> {
+							path << state
+							trace(parents.(state.(0)).(state.(1)).(state.(2)))
+						}
+					}
+					ordered := trace(best.state)
+					result := []
+					current := { mode: -1, data: '' }
+					fn build(i) if i >= len(ordered) {
+						true -> if current.mode >= 0 -> result << { data: current.data, mode: [Numeric, Alphanumeric, Byte].(current.mode) }
+						_ -> {
+							mode := ordered.(i).(1)
+							if current.mode {
+								-1 -> { current.mode <- mode
+									current.data <- data.(ordered.(i).(0) - 1) }
+								_ -> if current.mode = mode {
+									true -> current.data <- current.data + data.(ordered.(i).(0) - 1)
+									_ -> { result << { data: current.data, mode: [Numeric, Alphanumeric, Byte].(current.mode) }
+										current.mode <- mode
+										current.data <- data.(ordered.(i).(0) - 1) }
+								}
+							}
+							build(i + 1)
+						}
+					}
+					build(0)
+					result
+				}
+			}
+		}
+	}
+}
+
+// fit chooses a supported rMQR version and optimizes ASCII numeric,
+// alphanumeric, and byte segments. It returns ? when data cannot fit.
+fn fit(data, ecc, strategy) {
+	ecc := default(ecc, M)
+	strategy := default(strategy, Balanced)
+	best := { code: ?, score: _Inf }
+	fn score(info) if strategy {
+		MinimizeWidth -> info.(3)
+		MinimizeHeight -> info.(2)
+		_ -> info.(2) * 9 + info.(3)
+	}
+	fn consider(i) if i >= len(_Versions) {
+		true -> best.code
+		_ -> {
+			info := _Versions.(i)
+			if segments := _autoSegments(data, info, ecc) {
+				? -> consider(i + 1)
+				_ -> {
+					candidate := make(info.(0), ecc, segments)
+					if candidate != ? & score(info) < best.score -> { best.code <- candidate
+						best.score <- score(info) }
+					consider(i + 1)
+				}
+			}
+		}
+	}
+	consider(0)
+}
+
+// matrix returns the module matrix. Optional quietZone defaults to false.
+fn matrix(code, quietZone) {
+	quietZone := default(quietZone, false)
+	if code = ? {
+		true -> ?
+		_ -> if !quietZone {
+			true -> code.matrix
+			_ -> {
+				width := code.width + _QuietZone * 2
+				out := range(_QuietZone) |> map(fn(_) range(width) |> map(fn(_) 0))
+				code.matrix |> each(fn(row) out << listJoin(listJoin(range(_QuietZone) |> map(fn(_) 0), row), range(_QuietZone) |> map(fn(_) 0)))
+				range(_QuietZone) |> each(fn(_) out << (range(width) |> map(fn(_) 0)))
+				out
+			}
+		}
+	}
+}
+
+// ascii renders the symbol using double-width terminal cells. Quiet zone defaults to true.
+fn ascii(code, quietZone) {
+	rows := matrix(code, default(quietZone, true))
+	if rows = ? {
+		true -> ?
+		_ -> rows |> map(fn(row) row |> map(fn(cell) if cell { 0 -> '  ', _ -> '██' }) |> join('')) |> join('\n')
+	}
+}
+
+// pbm renders a PBM P4 file. scale and quietZone default to 1 and true.
+fn pbm(code, scale, quietZone) {
+	scale := default(scale, 1)
+	rows := matrix(code, default(quietZone, true))
+	if rows = ? | scale < 1 {
+		true -> ?
+		_ -> {
+			pixels := []
+			rows |> each(fn(row) range(scale) |> each(fn(_) row |> each(fn(cell) range(scale) |> each(fn(_) pixels << cell))))
+			ppm.pbm(len(rows.(0)) * scale, len(rows) * scale, pixels)
+		}
+	}
+}
+
+// versions returns records for all available standardized symbol dimensions.
+fn versions {
+	_Versions |> map(fn(v) { name: v.(0), height: v.(2), width: v.(3), dataBitsM: v.(8), dataBitsH: v.(9) })
+}
+
+{
+	M: M
+	H: H
+	MinimizeWidth: MinimizeWidth
+	MinimizeHeight: MinimizeHeight
+	Balanced: Balanced
+	Numeric: Numeric
+	Alphanumeric: Alphanumeric
+	Byte: Byte
+	Kanji: Kanji
+	segment: segment
+	make: make
+	fit: fit
+	matrix: matrix
+	ascii: ascii
+	pbm: pbm
+	versions: versions
+}

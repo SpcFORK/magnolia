@@ -13,112 +13,65 @@
 {
 	join: join
 } := import('str')
-{
-	floor: floor
-	pow: pow
-	log: log
-} := import('math')
+// pow and log are Oak runtime builtins on native and generated JavaScript.
+fn _floor(n) {
+	i := int(n)
+	if n < i { true -> i - 1, _ -> i }
+}
 {
 	pmap: pmap
 } := import('thread')
 
 // ---- clamp -----------------------------------------------------------
 
-fn _clipF32(s) if {
-	s > 1 -> 1
-	s < -1 -> -1
-	_ -> s
-}
+// Sample-conversion primitives are abstracted into lib/sample.oak; this lib
+// keeps thin re-stubs so the call sites below are unchanged.
+_sample := import('sample')
+fn _clipF32(s) _sample._clipF32(s)
 
 // ---- sample conversions (same as WAV, but signed for 8-bit) ----------
 
-fn _f32ToI8(s) {
-	v := int(s * 127)
-	if v < -128 { true -> -128, _ -> if v > 127 { true -> 127, _ -> v } }
-}
+fn _f32ToI8(s) _sample._f32ToI8(s)
 
-fn _i8ToF32(s) s / 128
+fn _i8ToF32(s) _sample._i8ToF32(s)
 
-fn _f32ToI16(s) int(s * 32767)
-fn _i16ToF32(s) s / 32768
+fn _f32ToI16(s) _sample._f32ToI16(s)
+fn _i16ToF32(s) _sample._i16ToF32(s)
 
-fn _f32ToI32(s) int(s * 2147483647)
-fn _i32ToF32(s) s / 2147483648
+fn _f32ToI32(s) _sample._f32ToI32(s)
+fn _i32ToF32(s) _sample._i32ToF32(s)
 
 // ---- big-endian byte utilities --------------------------------------
 
-fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
-
-fn _u16BE(n) {
-	n := int(n)
-	[int(n / 256) % 256, n % 256]
-}
-
-fn _i16BE(n) {
-	n := int(n)
-	u := if n < 0 { true -> n + 65536, _ -> n }
-	_u16BE(u)
-}
-
-fn _u32BE(n) {
-	n := int(n)
-	b3 := n % 256
-	b2 := int(n / 256) % 256
-	b1 := int(n / 65536) % 256
-	b0 := int(n / 16777216) % 256
-	[b0, b1, b2, b3]
-}
-
-fn _i32BE(n) {
-	n := int(n)
-	u := if n < 0 { true -> n + 4294967296, _ -> n }
-	_u32BE(u)
-}
-
-fn _readU8(s, off) codepoint(s.(off))
-
-fn _readI8(s, off) {
-	u := _readU8(s, off)
-	if u > 127 { true -> u - 256, _ -> u }
-}
-
-fn _readU16BE(s, off) {
-	b0 := codepoint(s.(off))
-	b1 := codepoint(s.(off + 1))
-	b0 * 256 + b1
-}
-
-fn _readI16BE(s, off) {
-	u := _readU16BE(s, off)
-	if u > 32767 { true -> u - 65536, _ -> u }
-}
-
-fn _readU32BE(s, off) {
-	b0 := codepoint(s.(off))
-	b1 := codepoint(s.(off + 1))
-	b2 := codepoint(s.(off + 2))
-	b3 := codepoint(s.(off + 3))
-	b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
-}
-
-fn _readI32BE(s, off) {
-	u := _readU32BE(s, off)
-	if u > 2147483647 { true -> u - 4294967296, _ -> u }
-}
-
+// Byte-order primitives are abstracted into lib/bytes.oak; this lib keeps
+// thin re-stubs so the call sites below are unchanged.
+_bytes := import('bytes')
+fn _byteStr(blist) _bytes._byteStr(blist)
+fn _u16BE(n) _bytes._u16BE(n)
+fn _i16BE(n) _bytes._i16BE(n)
+fn _u32BE(n) _bytes._u32BE(n)
+fn _i32BE(n) _bytes._i32BE(n)
+fn _readU8(s, off) _bytes._readU8(s, off)
+fn _readI8(s, off) _bytes._readI8(s, off)
+fn _readU16BE(s, off) _bytes._readU16BE(s, off)
+fn _readI16BE(s, off) _bytes._readI16BE(s, off)
+fn _readU32BE(s, off) _bytes._readU32BE(s, off)
+fn _readI32BE(s, off) _bytes._readI32BE(s, off)
 // ---- IEEE 754 80-bit extended float (big-endian) --------------------
 // AIFF stores sample rate as 80-bit extended. We support common rates
 // via encode/decode of the subset needed for integer sample rates.
 
-fn _encodeExtended80(val) {
-	// Handle zero
-	if val = 0 -> _byteStr([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+fn _encodeExtended80(val) if val = 0 {
+	true -> _byteStr([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+	_ -> _encodeNonzeroExtended80(val)
+}
 
+fn _encodeNonzeroExtended80(val) {
 	sign := if val < 0 { true -> 1, _ -> 0 }
 	v := if val < 0 { true -> 0 - val, _ -> val }
 
 	// exponent bias for 80-bit extended is 16383
-	exp := int(floor(log(v) / log(2)))
+	exp := _floor(log(2, v))
 	mantissa := v / pow(2, exp)
 	// mantissa is in [1, 2), the integer bit is explicit in extended
 	biasedExp := exp + 16383
@@ -131,11 +84,11 @@ fn _encodeExtended80(val) {
 	// encode mantissa as 64-bit unsigned integer
 	// mantissa * 2^63 gives us the full 64-bit significand with integer bit
 	mHigh := mantissa * 2147483648 // mantissa * 2^31
-	mHighInt := int(floor(mHigh))
+	mHighInt := _floor(mHigh)
 	mLow := (mHigh - mHighInt) * 4294967296 // remainder * 2^32
-	mLowInt := int(floor(mLow))
+	mLowInt := _floor(mLow)
 
-	_byteStr([eByte0, eByte1]) + _byteStr(_u32BE(mHighInt)) + _byteStr(_u32BE(mLowInt)) + _byteStr([0, 0])
+	_byteStr([eByte0, eByte1]) + _byteStr(_u32BE(mHighInt)) + _byteStr(_u32BE(mLowInt))
 }
 
 fn _decodeExtended80(s, off) {
@@ -144,15 +97,17 @@ fn _decodeExtended80(s, off) {
 
 	sign := if int(b0 / 128) = 1 { true -> -1, _ -> 1 }
 	biasedExp := (b0 % 128) * 256 + b1
-	exp := biasedExp - 16383
-
 	mHigh := _readU32BE(s, off + 2)
 	mLow := _readU32BE(s, off + 6)
-
-	// reconstruct mantissa: mHigh * 2^(-31) + mLow * 2^(-63) approximately
-	mantissa := mHigh / 2147483648 + mLow / 2147483648 / 4294967296
-
-	sign * mantissa * pow(2, exp)
+	if biasedExp = 0 & mHigh = 0 & mLow = 0 {
+		true -> 0
+		_ -> {
+			exp := biasedExp - 16383
+			// Reconstruct mantissa: mHigh * 2^-31 + mLow * 2^-63.
+			mantissa := mHigh / 2147483648 + mLow / 2147483648 / 4294967296
+			sign * mantissa * pow(2, exp)
+		}
+	}
 }
 
 // ---- AIFF sample encoding -------------------------------------------

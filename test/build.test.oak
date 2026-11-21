@@ -5,6 +5,9 @@ buildRender := import('build-render')
 runtimeCodegen := import('runtime-codegen')
 
 fn run(t) {
+	'imported std exposes builtin keys and len' |> t.assert(
+		type(std.keys) = :function & type(std.len) = :function &
+		std.len(std.keys({a: 1, b: 2})) = 2)
 	parsed := build.parseIncludes('alpha:./one,beta:./two,third')
 	'names from comma spec' |> t.eq(
 		parsed |> std.map(:name)
@@ -68,6 +71,19 @@ fn run(t) {
 			'(8>>2)'
 		)
 	)
+
+	// Oak source strings are byte strings, including non-ASCII UTF-8 and
+	// arbitrary binary. Generated JS source must not contain raw high bytes.
+	fn jsLiteral(s) buildRender.renderJSBundle(
+		{type: :string, val: s}, {}, fn(_) '{}', '', fn(name) name, fn(x) x)
+	'JS renderer emits binary literal as ASCII byte escapes' |> t.eq(
+		jsLiteral('A' + char(0) + char(27) + char(127) + char(128) + char(255))
+		'/* oak build --web */__Oak_String(\'A\\x00\\x1b\\x7f\\x80\\xff\')'
+	)
+	'JS renderer retains UTF-8 source as Oak bytes' |> t.eq(
+		jsLiteral('é'), '/* oak build --web */__Oak_String(\'\\xc3\\xa9\')')
+	'JS renderer preserves quote slash and control escapes' |> t.eq(
+		jsLiteral('a\'\\\n\r\t\f'), '/* oak build --web */__Oak_String(\'a\\\'\\\\\\n\\r\\t\\f\')')
 
 	wat := runtimeCodegen.renderWasmBundle({}, fn(_) {
 		'line1\nline2\t"q"'

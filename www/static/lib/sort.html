@@ -30,19 +30,32 @@
                 <a href="/lib/">&larr; Standard library</a>
                 <a href="https://github.com/thesephist/oak/blob/main/lib/sort.oak">See on GitHub ↗</a>
             </p>
-            <pre><code><span class="oak-comment">// libsort implements efficient list sorting algorithms</span>
+            <pre><code><span class="oak-comment">// libsort implements efficient list sorting algorithms.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Provides both in-place (sort!) and non-mutating (sort) sorting operations</span>
+<span class="oak-comment">// using the quicksort algorithm with Hoare partitioning.</span>
 
 <span class="oak-leftBrace">{</span><span class="oak-newline">
 	</span><span class="oak-identifier">default</span><span class="oak-colon">: </span><span class="oak-identifier">default</span><span class="oak-newline">
 	</span><span class="oak-identifier">identity</span><span class="oak-colon">: </span><span class="oak-identifier">id</span><span class="oak-newline">
 	</span><span class="oak-identifier">map</span><span class="oak-colon">: </span><span class="oak-identifier">map</span><span class="oak-newline">
-	</span><span class="oak-identifier">clone</span><span class="oak-colon">: </span><span class="oak-identifier">clone</span>
+	</span><span class="oak-identifier">clone</span><span class="oak-colon">: </span><span class="oak-identifier">clone</span><span class="oak-newline">
+	</span><span class="oak-identifier">slice</span><span class="oak-colon">: </span><span class="oak-identifier">slice</span>
 <span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">parallel</span><span class="oak-colon">: </span><span class="oak-identifier">parallel</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'thread'</span><span class="oak-rightParen">)</span>
 
 <span class="oak-comment">// sort! sorts items in the list `xs` by each item's `pred` value, using the</span>
 <span class="oak-comment">// Hoare partitioning strategy. If `pred` is not given, each item is sorted by</span>
 <span class="oak-comment">// its own value. It mutates the original list for efficiency. If mutation is</span>
 <span class="oak-comment">// not desired, use sort below.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Example:</span>
+<span class="oak-comment">//   nums := [3, 1, 4, 1, 5]</span>
+<span class="oak-comment">//   sort!(nums)              // nums is now [1, 1, 3, 4, 5]</span>
+<span class="oak-comment">//   people := [{name: 'Bob', age: 30}, {name: 'Alice', age: 25}]</span>
+<span class="oak-comment">//   sort!(people, fn(p) p.age)  // sort by age</span>
 <span class="oak-fnKeyword">fn </span><span class="oak-fnName">sort!</span><span class="oak-leftParen">(</span><span class="oak-identifier">xs</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
 	</span><span class="oak-identifier">pred </span><span class="oak-assign">:= </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">pred</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">)</span>
 <span class="oak-newline">
@@ -96,7 +109,56 @@
 <span class="oak-comment">// sort returns a copy of `xs` that is sorted by `pred`, or by each item's</span>
 <span class="oak-comment">// value if `pred` is not given. If the performance cost of a copy is not</span>
 <span class="oak-comment">// desirable, use sort!.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Example:</span>
+<span class="oak-comment">//   nums := [3, 1, 4, 1, 5]</span>
+<span class="oak-comment">//   sorted := sort(nums)     // => [1, 1, 3, 4, 5], nums unchanged</span>
+<span class="oak-comment">//   people := [{name: 'Bob', age: 30}, {name: 'Alice', age: 25}]</span>
+<span class="oak-comment">//   byAge := sort(people, fn(p) p.age)</span>
 <span class="oak-fnKeyword">fn </span><span class="oak-fnName">sort</span><span class="oak-leftParen">(</span><span class="oak-identifier">xs</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">) </span><span class="oak-identifier">xs </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">clone</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">sort!</span><span class="oak-leftParen">(</span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span>
+
+<span class="oak-comment">// _mergeSorted merges two pre-sorted lists into a single sorted list.</span>
+<span class="oak-comment">// Both lists must be sorted by the same `pred` key function.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_mergeSorted</span><span class="oak-leftParen">(</span><span class="oak-identifier">a</span><span class="oak-comma">, </span><span class="oak-identifier">b</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">aKeys </span><span class="oak-assign">:= </span><span class="oak-identifier">a </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">bKeys </span><span class="oak-assign">:= </span><span class="oak-identifier">b </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">a</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">j </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">) </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result</span><span class="oak-newline">
+		</span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">a</span><span class="oak-rightParen">) </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">restB</span><span class="oak-leftParen">(</span><span class="oak-identifier">k</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">k </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">b</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">k</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">restB</span><span class="oak-leftParen">(</span><span class="oak-identifier">k </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-fnName">restB</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-identifier">j </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">) </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">restA</span><span class="oak-leftParen">(</span><span class="oak-identifier">k</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">k </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">a</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">a</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">k</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">restA</span><span class="oak-leftParen">(</span><span class="oak-identifier">k </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">result </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-fnName">restA</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-identifier">aKeys</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-leq">&lt;= </span><span class="oak-identifier">bKeys</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">a</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">b</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">j </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// psort returns a sorted copy of `xs` using parallel merge-sort.</span>
+<span class="oak-comment">// For small lists (&lt;=256 elements), falls back to sequential sort.</span>
+<span class="oak-comment">// For large lists, splits in half, sorts each half concurrently, and merges.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Example:</span>
+<span class="oak-comment">//   psort([3, 1, 4, 1, 5])  // => [1, 1, 3, 4, 5]</span>
+<span class="oak-comment">//   psort(people, fn(p) p.age)</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">psort</span><span class="oak-leftParen">(</span><span class="oak-identifier">xs</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">pred </span><span class="oak-assign">:= </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">pred</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">xs</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-leq">&lt;= </span><span class="oak-numberLiteral">256 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">xs </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">clone</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">sort!</span><span class="oak-leftParen">(</span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span>
+<span class="oak-newline">
+	</span><span class="oak-identifier">mid </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-divide">/ </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">halves </span><span class="oak-assign">:= </span><span class="oak-fnName">parallel</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-newline">
+		</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-fnName">psort</span><span class="oak-leftParen">(</span><span class="oak-fnName">slice</span><span class="oak-leftParen">(</span><span class="oak-identifier">xs</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">mid</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-fnName">psort</span><span class="oak-leftParen">(</span><span class="oak-fnName">slice</span><span class="oak-leftParen">(</span><span class="oak-identifier">xs</span><span class="oak-comma">, </span><span class="oak-identifier">mid</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-newline">
+	</span><span class="oak-fnName">_mergeSorted</span><span class="oak-leftParen">(</span><span class="oak-identifier">halves</span><span class="oak-dot">.</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">halves</span><span class="oak-dot">.</span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">pred</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
 
 </code></pre>
         </article>

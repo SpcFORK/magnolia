@@ -700,4 +700,50 @@ fn println(xs...) if len(xs) {
 		print(out + '\n')
 	}
 }
+// --- packed-bundle parity (fnf/magnolia-win32 patch) -----------------------
+// When oak build / oak pack bundles a program, this file is inlined as the
+// bundled 'std' module. In the interpreter, import('std') resolves to the
+// host module which also exposes the interpreter globals (int, string, time,
+// nanotime, ...). The bundled (source) copy only exported the helpers written
+// in this file, so destructures such as { time: _windTime } := import('std')
+// evaluated to null and crashed packed binaries (e.g. inside
+// windows-windowing.registerWindowClassEx during GUI startup).
+//
+// These aliases capture each builtin that lib modules actually destructure
+// from import('std') and re-bind it, letting the bundler's export synthesis
+// carry them into packed binaries, restoring parity between the runtime and
+// the bundle. Builtins that no module destructures are intentionally omitted.
 
+__std_builtin_int := int
+__std_builtin_float := float
+__std_builtin_string := string
+__std_builtin_type := type
+__std_builtin_len := len
+__std_builtin_char := char
+__std_builtin_codepoint := codepoint
+__std_builtin_keys := keys
+__std_builtin_rand := rand
+__std_builtin_bits := bits
+__std_builtin_wait := wait
+__std_builtin_time := time
+
+int := __std_builtin_int
+float := __std_builtin_float
+string := __std_builtin_string
+type := __std_builtin_type
+len := __std_builtin_len
+char := __std_builtin_char
+codepoint := __std_builtin_codepoint
+keys := __std_builtin_keys
+bits := __std_builtin_bits
+rand := __std_builtin_rand
+time := __std_builtin_time
+wait := __std_builtin_wait
+
+// math builtins (same packed-bundle parity as above): lib/math-base.oak and
+// others destructure these from import('std')
+__std_builtin_sin := sin
+__std_builtin_cos := cos
+
+sin := __std_builtin_sin
+cos := __std_builtin_cos
