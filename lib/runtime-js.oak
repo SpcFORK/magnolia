@@ -812,18 +812,230 @@ function exec(path, args = [], stdin = "") {
 			return __oak_io_error("exec() failed: " + e);
 		}
 	}
-	return __oak_io_error("exec() unavailable in this runtime");
+	// Virtual exec on web: simulate common commands via VFS and runtime.
+	const cmd = __oak_to_string_value(path);
+	const cmdArgs = (Array.isArray(args) ? args : []).map(__oak_to_string_value);
+	try {
+		if (cmd === "echo") {
+			return {
+				type: Symbol.for("end"),
+				status: 0,
+				stdout: __as_oak_string(cmdArgs.join(" ") + "\n"),
+				stderr: __as_oak_string(""),
+			};
+		}
+		if (cmd === "cat") {
+			if (cmdArgs.length === 0) return __oak_io_error("cat() missing file argument");
+			const vfs = __oak_get_vfs();
+			if (vfs && typeof vfs.readFile === "function") {
+				const data = vfs.readFile(cmdArgs[0]);
+				if (data == null) return __oak_io_error("cat() no such file: " + cmdArgs[0]);
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(data), stderr: __as_oak_string("") };
+			}
+			return __oak_io_error("cat() unavailable in this runtime");
+		}
+		if (cmd === "ls") {
+			const target = cmdArgs[0] || ".";
+			const vfs = __oak_get_vfs();
+			if (vfs && typeof vfs.listFiles === "function") {
+				const names = vfs.listFiles() || [];
+				const normalized = target.replace(/\\\\/g, "/");
+				const prefix = normalized === "/" || normalized === "" || normalized === "." ? "" : normalized + "/";
+				const parts = new Set();
+				for (const name of names) {
+					if (prefix !== "" && !name.startsWith(prefix)) continue;
+					const rel = prefix === "" ? name : name.slice(prefix.length);
+					if (rel === "") continue;
+					const slash = rel.indexOf("/");
+					const part = slash < 0 ? rel : rel.slice(0, slash);
+					if (part) parts.add(part);
+				}
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(Array.from(parts).sort().join("\n") + "\n"), stderr: __as_oak_string("") };
+			}
+			return __oak_io_error("ls() unavailable in this runtime");
+		}
+		if (cmd === "pwd") {
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("/\n"), stderr: __as_oak_string("") };
+		}
+		if (cmd === "true") {
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(""), stderr: __as_oak_string("") };
+		}
+		if (cmd === "false") {
+			return { type: Symbol.for("end"), status: 1, stdout: __as_oak_string(""), stderr: __as_oak_string("") };
+		}
+		if (cmd === "mkdir") {
+			if (cmdArgs.length === 0) return __oak_io_error("mkdir() missing directory argument");
+			const vfs = __oak_get_vfs();
+			if (vfs && typeof vfs.mkdirFile === "function") {
+				vfs.mkdirFile(cmdArgs[0]);
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(""), stderr: __as_oak_string("") };
+			}
+		}
+		if (cmd === "rm") {
+			if (cmdArgs.length === 0) return __oak_io_error("rm() missing file argument");
+			const vfs = __oak_get_vfs();
+			if (vfs && typeof vfs.deleteFile === "function") {
+				vfs.deleteFile(cmdArgs[0]);
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(""), stderr: __as_oak_string("") };
+			}
+		}
+		if (cmd === "date") {
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(new Date().toString() + "\n"), stderr: __as_oak_string("") };
+		}
+		if (cmd === "wc") {
+			if (cmdArgs.length === 0) return __oak_io_error("wc() missing file argument");
+			const vfs = __oak_get_vfs();
+			if (vfs && typeof vfs.readFile === "function") {
+				const data = vfs.readFile(cmdArgs[0]);
+				if (data == null) return __oak_io_error("wc() no such file: " + cmdArgs[0]);
+				const lines = data.split("\n").length;
+				const chars = data.length;
+				const words = data.split(/\s+/).filter(w => w !== "").length;
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(`${lines} ${words} ${chars} ${cmdArgs[0]}\n`), stderr: __as_oak_string("") };
+			}
+		}
+		if (cmd === "head" || cmd === "tail") {
+			if (cmdArgs.length === 0) return __oak_io_error(cmd + "() missing file argument");
+			const vfs = __oak_get_vfs();
+			if (vfs && typeof vfs.readFile === "function") {
+				const data = vfs.readFile(cmdArgs[0]) || "";
+				const allLines = data.split("\n");
+				let resultLines;
+				if (cmd === "head") resultLines = allLines.slice(0, 10);
+				else resultLines = allLines.slice(-10);
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(resultLines.join("\n") + "\n"), stderr: __as_oak_string("") };
+			}
+		}
+		if (cmd === "whoami") {
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("oak\n"), stderr: __as_oak_string("") };
+		}
+		if (cmd === "hostname") {
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("oak-runtime\n"), stderr: __as_oak_string("") };
+		}
+		return __oak_io_error("exec() command not found on web: " + cmd);
+	} catch (e) {
+		return __oak_io_error("exec() failed: " + e);
+	}
 }
 
+// Virtual sysproc: resolve procedures from registered Oak modules.
+// On web, sysproc can look up functions in the module registry.
 function sysproc(library, name) {
 	const lib = __oak_to_string_value(library);
 	const proc = __oak_to_string_value(name);
+	if (__Is_Oak_Node) {
+		return __oak_io_error(`Could not resolve procedure ${lib}!${proc}: sysproc() unavailable in this runtime`);
+	}
+	// Virtual: look up the module and try to find a matching procedure.
+	const module = __Oak_Modules[lib] || __Oak_Modules[(__Oak_Import_Aliases || {})[lib]];
+	if (module != null) {
+		if (typeof module === "function") {
+			// If the module is a function, it may be the procedure itself.
+			if (module.name === proc || proc === "default") {
+				return module;
+			}
+		}
+		if (typeof module === "object") {
+			// Check if the module object has the procedure as a property.
+			if (typeof module[proc] === "function") {
+				return module[proc];
+			}
+			// Check for a "proc" registry on the module.
+			if (module.proc && typeof module.proc === "object" && typeof module.proc[proc] === "function") {
+				return module.proc[proc];
+			}
+		}
+	}
 	return __oak_io_error(`Could not resolve procedure ${lib}!${proc}: sysproc() unavailable in this runtime`);
 }
 
+// Virtual syscall: dispatch to registered syscall handlers.
+// On web, syscall targets that are known virtual handlers are dispatched;
+// others return an error. This allows Oak code to perform virtual system
+// operations without a native OS.
+const __Oak_Syscall_Handlers = new Map();
+function __oak_syscall_register(name, handler) {
+	__Oak_Syscall_Handlers.set(name, handler);
+}
 function syscall(target, ...args) {
 	if (target == null) return __oak_io_error("syscall() missing target");
-	return __oak_io_error("syscall() unavailable in this runtime");
+	const targetName = typeof target === "symbol" ? Symbol.keyFor(target) : __oak_to_string_value(target);
+	if (__Is_Oak_Node) {
+		return __oak_io_error("syscall() unavailable in this runtime");
+	}
+	// Virtual: look up the handler in the registry.
+	const handler = __Oak_Syscall_Handlers.get(targetName);
+	if (typeof handler === "function") {
+		try {
+			return handler(...args);
+		} catch (e) {
+			return __oak_io_error("syscall() handler error: " + e);
+		}
+	}
+	// Handle common virtual syscalls directly.
+	if (targetName === "getcwd") {
+		return __as_oak_string("/");
+	}
+	if (targetName === "getpid") {
+		return int(0);
+	}
+	if (targetName === "getppid") {
+		return int(0);
+	}
+	if (targetName === "getuid") {
+		return int(0);
+	}
+	if (targetName === "geteuid") {
+		return int(0);
+	}
+	if (targetName === "getgid") {
+		return int(0);
+	}
+	if (targetName === "getegid") {
+		return int(0);
+	}
+	if (targetName === "gettimeofday") {
+		const now = Date.now();
+		return { sec: int(Math.floor(now / 1000)), usec: int((now % 1000) * 1000) };
+	}
+	if (targetName === "clock_gettime") {
+		const now = Date.now();
+		return { sec: int(Math.floor(now / 1000)), nsec: int((now % 1000) * 1000000) };
+	}
+	if (targetName === "uname") {
+		return {
+			sysname: __as_oak_string("oak"),
+			nodename: __as_oak_string("oak-runtime"),
+			release: __as_oak_string("1.0.0"),
+			version: __as_oak_string("js"),
+			machine: __as_oak_string("js"),
+		};
+	}
+	if (targetName === "getenv") {
+		const key = __oak_to_string_value(args[0]);
+		const env = env();
+		return env[key] ?? __as_oak_string("");
+	}
+	if (targetName === "setenv") {
+		return int(0);
+	}
+	if (targetName === "unsetenv") {
+		return int(0);
+	}
+	if (targetName === "sleep") {
+		const ms = int(args[0] ?? 0) * 1000;
+		setTimeout(() => {}, ms);
+		return null;
+	}
+	if (targetName === "malloc") {
+		const size = int(args[0] ?? 0);
+		const region = __oak_alloc_region(size);
+		return region;
+	}
+	if (targetName === "free") {
+		return null;
+	}
+	return __oak_io_error("syscall() unavailable in this runtime: " + targetName);
 }
 
 function utf16(x) {
@@ -918,26 +1130,39 @@ function ls() {
 	return __oak_io_error("ls() unavailable in this runtime");
 }
 function rm() {
+	const target = __oak_to_string_value(arguments[0]);
 	if (__Is_Oak_Node) {
 		try {
-			__oak_require_fs().rmSync(Buffer.from(__oak_to_string_value(arguments[0]), "latin1"), { recursive: true, force: true });
+			__oak_require_fs().rmSync(Buffer.from(target, "latin1"), { recursive: true, force: true });
 			return { type: Symbol.for("end") };
 		} catch (e) {
 			return __oak_io_error("rm() failed: " + e);
 		}
 	}
+	const vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.deleteFile === "function") {
+		vfs.deleteFile(target);
+		return { type: Symbol.for("end") };
+	}
 	return __oak_io_error("rm() unavailable in this runtime");
 }
 function mkdir() {
+	const target = __oak_to_string_value(arguments[0]);
 	if (__Is_Oak_Node) {
 		try {
-			__oak_require_fs().mkdirSync(Buffer.from(__oak_to_string_value(arguments[0]), "latin1"), { recursive: true });
+			__oak_require_fs().mkdirSync(Buffer.from(target, "latin1"), { recursive: true });
 			return { type: Symbol.for("end") };
 		} catch (e) {
 			return __oak_io_error("mkdir() failed: " + e);
 		}
 	}
+	const vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.mkdirFile === "function") {
+		vfs.mkdirFile(target);
+		return { type: Symbol.for("end") };
+	}
 	return __oak_io_error("mkdir() unavailable in this runtime");
+}
 }
 function stat() {
 	const target = __oak_to_string_value(arguments[0]);
@@ -1112,7 +1337,19 @@ function listen(host, handler, cb) {
 		server.listen(port, hostname || \'0.0.0.0\');
 		return (...args) => { server.close(); return null; };
 	}
-	return __oak_io_error(\'listen() unavailable in this runtime\');
+	// Virtual listen on web: an in-memory HTTP server that accepts virtual
+	// requests from req() on the same runtime. Routes match the native
+	// contract: handler receives {type:\'req\', req:{method,url,headers,body}, end}.
+	const hostStr = __oak_to_string_value(host);
+	const [hostname, portStr] = hostStr.split(\':\');
+	const port = int(portStr) ?? 9090;
+	if (typeof handler !== \'function\') {
+		return __oak_io_error(\'listen() requires a handler function\');
+	}
+	const __Oak_Virtual_Servers = globalThis.__Oak_Virtual_Servers || (globalThis.__Oak_Virtual_Servers = []);
+	const serverEntry = { host: hostStr, port, handler, closed: false };
+	__Oak_Virtual_Servers.push(serverEntry);
+	return (...args) => { serverEntry.closed = true; return null; };
 }
 function req(data, cb) {
 	const method = __oak_to_string_value((data && data.method) || \'GET\');
@@ -1268,6 +1505,49 @@ function req(data, cb) {
 	}
 	// Browser fetch is asynchronous. Refuse a synchronous call before fetch
 	// so reporting an error cannot also send an unobserved request.
+	// Virtual server dispatch: if a virtual listen() server matches this URL,
+	// route the request in-memory without a real network call.
+	const __Oak_Virtual_Servers = globalThis.__Oak_Virtual_Servers || (globalThis.__Oak_Virtual_Servers = []);
+	if (__Oak_Virtual_Servers.length > 0) {
+		const reqHostname = parsedUrl.hostname;
+		const reqPort = parsedUrl.port || (parsedUrl.protocol === \'https:\' ? \'443\' : \'80\');
+		for (const srv of __Oak_Virtual_Servers) {
+		if (srv.closed) continue;
+		const [srvHost, srvPortStr] = srv.host.split(\':\');
+		const srvPort = int(srvPortStr) ?? 9090;
+		if (srvHost === reqHostname && srvPort === int(reqPort)) {
+			if (typeof cb === \'function\') {
+				const reqPath = parsedUrl.pathname || \'/\';
+				const reqQuery = parsedUrl.search || \'\';
+				const hdrsIn = {};
+				for (const k of Object.getOwnPropertyNames(headers)) {
+					hdrsIn[k] = __as_oak_string(headers[k]);
+				}
+				const endFn = (args) => {
+					const resp = args[0] ?? {};
+					cb(__oak_make_resp(int(resp.status) ?? 200, resp.headers ?? {}, resp.body ?? \'\'));
+				};
+				try {
+					srv.handler({
+						type: Symbol.for(\'req\'),
+						req: {
+							method: __as_oak_string(method),
+							url: __as_oak_string(reqPath + reqQuery),
+							headers: hdrsIn,
+							body: body != null ? __as_oak_string(body) : __as_oak_string(\'\'),
+						},
+						end: endFn,
+					});
+					return null;
+				} catch (e) {
+					cb(__oak_io_error(\'req() virtual handler error: \' + e));
+					return null;
+				}
+			}
+			return __oak_io_error(\'req() in browser requires a callback for virtual servers\');
+		}
+		}
+	}
 	if (typeof fetch === \'function\') {
 		if (typeof cb !== \'function\') return __oak_io_error(\'req() in browser requires a callback\');
 		const opts = { method, headers: fetchHeaders, redirect: \'manual\' };
@@ -1330,55 +1610,46 @@ function __oak_socket_opts(options) {
 function socket_connect(address, options, cb) {
 	if (typeof options === \'function\') { cb = options; options = {}; }
 	if (!__Is_Oak_Node) {
+		// Virtual socket: check if a virtual listen server is on this address.
+		const __Oak_Virtual_Servers = globalThis.__Oak_Virtual_Servers || (globalThis.__Oak_Virtual_Servers = []);
+		const addr = __oak_to_string_value(address);
+		const parts = addr.split(\':\');
+		const host = parts[0] || \'localhost\';
+		const port = int(parts[1]) ?? 0;
+		for (const srv of __Oak_Virtual_Servers) {
+			if (srv.closed) continue;
+			const sp = srv.host.split(\':\');
+			const srvHost = sp[0] || \'localhost\';
+			const srvPort = int(sp[1]) ?? 9090;
+			if (srvHost === host && srvPort === port) {
+				const serverId = __Oak_Socket_NextID++;
+				const clientId = __Oak_Socket_NextID++;
+				const serverEntry = { conn: null, isTLS: false, serverTLS: false, reader: null, buffer: \'\', virtual: true, peer: clientId };
+				const clientEntry = { conn: null, isTLS: false, serverTLS: false, reader: null, buffer: \'\', virtual: true, peer: serverId };
+				__Oak_Socket_Map.set(serverId, serverEntry);
+				__Oak_Socket_Map.set(clientId, clientEntry);
+				if (typeof srv.handler === \'function\') {
+					srv.handler({
+						type: Symbol.for(\'connect\'),
+						socket: __oak_socket_obj(serverId),
+						remote: __as_oak_string(addr),
+						local: __as_oak_string(addr),
+						tls: false,
+					});
+				}
+				const result = {
+					type: Symbol.for(\'ok\'),
+					socket: __oak_socket_obj(clientId),
+					remote: __as_oak_string(addr),
+					local: __as_oak_string(addr),
+					tls: false,
+				};
+				if (typeof cb === \'function\') { cb(result); return null; }
+				return result;
+			}
+		}
 		return __oak_socket_unavailable(\'socket_connect\', cb);
 	}
-	const addr = __oak_to_string_value(address);
-	const opts = __oak_socket_opts(options);
-	const useTLS = !!opts.tls;
-	try {
-		const net = require(\'net\');
-		let conn;
-		if (useTLS) {
-			const tls = require(\'tls\');
-			const config = {};
-			if (opts.serverName) config.servername = __oak_to_string_value(opts.serverName);
-			if (opts.insecureSkipVerify) config.rejectUnauthorized = false;
-			conn = tls.connect(addr, config);
-		} else {
-			conn = net.connect(addr);
-		}
-		const id = __Oak_Socket_NextID++;
-		const entry = { conn, isTLS: useTLS, serverTLS: false, reader: null, buffer: \'\' };
-		__Oak_Socket_Map.set(id, entry);
-		if (typeof cb === \'function\') {
-			conn.once(\'error\', e => {
-				__Oak_Socket_Map.delete(id);
-				cb(__oak_io_error(\'Could not connect socket: \' + e));
-			});
-			conn.once(\'connect\', () => {
-				cb({
-					type: Symbol.for(\'ok\'),
-					socket: __oak_socket_obj(id),
-					remote: __as_oak_string(conn.remoteAddress + \':\' + conn.remotePort),
-					local: __as_oak_string(conn.localAddress + \':\' + conn.localPort),
-					tls: useTLS,
-				});
-			});
-			return null;
-		}
-		conn.on(\'error\', e => __Oak_Socket_Map.delete(id));
-		return {
-			type: Symbol.for(\'ok\'),
-			socket: __oak_socket_obj(id),
-			remote: __as_oak_string(\'\'),
-			local: __as_oak_string(\'\'),
-			tls: useTLS,
-		};
-	} catch (e) {
-		return __oak_io_error(\'Could not connect socket: \' + e);
-	}
-}
-
 function socket_send(socket, data, cb) {
 	const [entry, err] = __oak_socket_get(socket, \'socket_send\');
 	if (err) {
@@ -1386,6 +1657,32 @@ function socket_send(socket, data, cb) {
 		return err;
 	}
 	const payload = __oak_to_string_value(data);
+	if (entry.virtual) {
+		const peer = __Oak_Socket_Map.get(entry.peer);
+		if (peer) {
+			peer.buffer = (peer.buffer || \'\') + payload;
+			if (peer.waitingRecv) {
+				const cb2 = peer.waitingRecv;
+				peer.waitingRecv = null;
+				cb2({ type: Symbol.for(\'data\'), data: __as_oak_string(payload) });
+			}
+			if (peer.waitingLine) {
+				const cb2 = peer.waitingLine;
+				peer.waitingLine = null;
+				const idx = peer.buffer.indexOf(\'\\n\');
+				if (idx >= 0) {
+					const line = peer.buffer.slice(0, idx).replace(/\\r$/, \'\');
+					peer.buffer = peer.buffer.slice(idx + 1);
+					cb2({ type: Symbol.for(\'data\'), data: __as_oak_string(line) });
+				} else {
+					peer.waitingLine = cb2;
+				}
+			}
+		}
+		const result = { type: Symbol.for(\'sent\'), bytes: int(payload.length) };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	}
 	try {
 		const written = entry.conn.write(payload, \'latin1\');
 		const result = { type: Symbol.for(\'sent\'), bytes: int(written) };
@@ -1397,7 +1694,6 @@ function socket_send(socket, data, cb) {
 		return ferr;
 	}
 }
-
 function socket_recv(socket, size, cb) {
 	const [entry, err] = __oak_socket_get(socket, \'socket_recv\');
 	if (err) {
@@ -1412,6 +1708,13 @@ function socket_recv(socket, size, cb) {
 	}
 	if (typeof cb !== \'function\') {
 		return __oak_io_error(\'socket_recv() requires a callback in this runtime\');
+	}
+	if (entry.virtual) {
+		const data = entry.buffer ? entry.buffer.slice(0, count) : \'\';
+		entry.buffer = entry.buffer ? entry.buffer.slice(count) : \'\';
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(data) };
+		cb(result);
+		return null;
 	}
 	const buf = Buffer.alloc(count);
 	entry.conn.once(\'data\', chunk => {
@@ -1431,7 +1734,6 @@ function socket_recv(socket, size, cb) {
 	});
 	return null;
 }
-
 function socket_recv_exact(socket, size, cb) {
 	const [entry, err] = __oak_socket_get(socket, \'socket_recv_exact\');
 	if (err) {
@@ -1446,6 +1748,20 @@ function socket_recv_exact(socket, size, cb) {
 	}
 	if (typeof cb !== \'function\') {
 		return __oak_io_error(\'socket_recv_exact() requires a callback in this runtime\');
+	}
+	if (entry.virtual) {
+		// If buffer has enough data, return it. Otherwise return what's available.
+		const avail = entry.buffer ? entry.buffer.length : 0;
+		if (avail >= count) {
+			const data = entry.buffer.slice(0, count);
+			entry.buffer = entry.buffer.slice(count);
+			cb({ type: Symbol.for(\'data\'), data: __as_oak_string(data) });
+		} else {
+			const data = entry.buffer || \'\';
+			entry.buffer = \'\';
+			cb({ type: Symbol.for(\'data\'), data: __as_oak_string(data) });
+		}
+		return null;
 	}
 	const buf = Buffer.alloc(count);
 	let received = 0;
@@ -1473,7 +1789,6 @@ function socket_recv_exact(socket, size, cb) {
 	});
 	return null;
 }
-
 function socket_recv_line(socket, cb) {
 	const [entry, err] = __oak_socket_get(socket, \'socket_recv_line\');
 	if (err) {
@@ -1483,13 +1798,26 @@ function socket_recv_line(socket, cb) {
 	if (typeof cb !== \'function\') {
 		return __oak_io_error(\'socket_recv_line() requires a callback in this runtime\');
 	}
+	if (entry.virtual) {
+		entry.buffer = entry.buffer || \'\';
+		const idx = entry.buffer.indexOf(\'\\n\');
+		if (idx >= 0) {
+			const line = entry.buffer.slice(0, idx).replace(/\\r$/, \'\');
+			entry.buffer = entry.buffer.slice(idx + 1);
+			cb({ type: Symbol.for(\'data\'), data: __as_oak_string(line) });
+		} else {
+			// No newline yet — arm the waiter so socket_send can trigger it
+			entry.waitingLine = cb;
+		}
+		return null;
+	}
 	entry.buffer = entry.buffer || \'\';
 	const onData = chunk => {
 		entry.buffer += chunk.toString(\'latin1\');
-		const idx = entry.buffer.indexOf(\'\n\');
+		const idx = entry.buffer.indexOf(\'\\n\');
 		if (idx >= 0) {
 			entry.conn.removeListener(\'data\', onData);
-			const line = entry.buffer.slice(0, idx).replace(/\r$/, \'\');
+			const line = entry.buffer.slice(0, idx).replace(/\\r$/, \'\');
 			entry.buffer = entry.buffer.slice(idx + 1);
 			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(line) };
 			cb(result);
@@ -1498,7 +1826,7 @@ function socket_recv_line(socket, cb) {
 	entry.conn.on(\'data\', onData);
 	entry.conn.once(\'end\', () => {
 		entry.conn.removeListener(\'data\', onData);
-		const line = entry.buffer.replace(/\r?\n$/, \'\');
+		const line = entry.buffer.replace(/\\r?\\n$/, \'\');
 		if (line !== \'\') {
 			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(line) };
 			cb(result);
@@ -1514,7 +1842,6 @@ function socket_recv_line(socket, cb) {
 	});
 	return null;
 }
-
 function socket_starttls(socket, options, cb) {
 	const [entry, err] = __oak_socket_get(socket, \'socket_starttls\');
 	if (err) {
@@ -1571,9 +1898,20 @@ function socket_close(socket, cb) {
 		if (typeof cb === \'function\') { cb(err); return null; }
 		return err;
 	}
+	// For virtual sockets, close the peer as well.
+	if (entry.virtual && entry.peer != null) {
+		const peer = __Oak_Socket_Map.get(entry.peer);
+		if (peer) {
+			if (peer.waitingRecv) { peer.waitingRecv(null); peer.waitingRecv = null; }
+			if (peer.waitingLine) { peer.waitingLine(null); peer.waitingLine = null; }
+			__Oak_Socket_Map.delete(entry.peer);
+		}
+	}
 	try {
-		entry.conn.end();
-		entry.conn.destroy();
+		if (entry.conn) {
+			entry.conn.end();
+			entry.conn.destroy();
+		}
 		__Oak_Socket_Map.delete(socket.id);
 		const result = { type: Symbol.for(\'closed\') };
 		if (typeof cb === \'function\') { cb(result); return null; }
@@ -1585,7 +1923,6 @@ function socket_close(socket, cb) {
 		return ferr;
 	}
 }
-
 function socket_listen(address, handler, options) {
 	if (!__Is_Oak_Node) {
 		return __oak_socket_unavailable(\'socket_listen\');
@@ -2018,14 +2355,189 @@ function ___runtime_sys_info() {
 			cpus: cpus,
 		};
 	}
+	// Virtual sys_info on web: derive OS/arch from navigator when possible.
+	let osName = "js";
+	let archName = "js";
+	let cpuCount = 1;
+	if (typeof navigator === "object") {
+		if (navigator.userAgent) {
+			const ua = navigator.userAgent;
+			if (ua.indexOf("Windows") >= 0) osName = "windows";
+			else if (ua.indexOf("Mac") >= 0) osName = "darwin";
+			else if (ua.indexOf("Linux") >= 0) osName = "linux";
+			else if (ua.indexOf("Android") >= 0) osName = "linux";
+			else if (ua.indexOf("iPhone") >= 0 || ua.indexOf("iPad") >= 0) osName = "darwin";
+		}
+		if (navigator.hardwareConcurrency) {
+			cpuCount = int(navigator.hardwareConcurrency) ?? 1;
+		}
+	}
 	return {
-		os: __as_oak_string("js"),
-		arch: __as_oak_string("js"),
-		cpus: 1,
+		os: __as_oak_string(osName),
+		arch: __as_oak_string(archName),
+		cpus: cpuCount,
 	};
 }
+// Virtual filesystem — in-memory file tree for browser/web environments.
+// Node.js uses the real OS filesystem; browsers get a persistent virtual
+// tree seeded with standard directories so file-based stdlibs work.
+let __Oak_VFS_Root = null;
+
+function __Oak_VFS_init() {
+	if (__Oak_VFS_Root) return;
+	__Oak_VFS_Root = { type: "dir", children: new Map(), mod: 0 };
+	__Oak_VFS_mkdir_node(__Oak_VFS_Root, ["tmp", "etc", "var", "home", "root", "lib", "usr", "bin", "sbin", "opt", "srv", "mnt"]);
+}
+
+function __Oak_VFS_split(path) {
+	const raw = __oak_to_string_value(path);
+	const norm = raw.replace(/\\\\/g, "/");
+	return norm.split("/").filter(p => p !== "" && p !== ".");
+}
+
+function __Oak_VFS_resolve(parts) {
+	if (!__Oak_VFS_Root) return null;
+	let node = __Oak_VFS_Root;
+	for (const part of parts) {
+		if (node.type !== "dir") return null;
+		const child = node.children.get(part);
+		if (child == null) return null;
+		node = child;
+	}
+	return node;
+}
+
+function __Oak_VFS_mkdir_node(parent, parts) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	let node = parent;
+	for (const part of parts) {
+		if (node.type !== "dir") return false;
+		let child = node.children.get(part);
+		if (child == null) {
+			child = { type: "dir", children: new Map(), mod: 0 };
+			node.children.set(part, child);
+		}
+		node = child;
+	}
+	return true;
+}
+
+function __Oak_VFS_mkdir(path) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	const parts = __Oak_VFS_split(path);
+	if (parts.length === 0) return true;
+	const parentParts = parts.slice(0, -1);
+	const leaf = parts[parts.length - 1];
+	let node = __Oak_VFS_Root;
+	for (const part of parentParts) {
+		if (node.type !== "dir") return false;
+		const child = node.children.get(part);
+		if (child == null) {
+			child = { type: "dir", children: new Map(), mod: 0 };
+			node.children.set(part, child);
+		}
+		node = child;
+	}
+	if (node.type !== "dir") return false;
+	if (!node.children.has(leaf)) {
+		node.children.set(leaf, { type: "dir", children: new Map(), mod: 0 });
+	}
+	return true;
+}
+
+function __Oak_VFS_writeFile(path, content) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	const parts = __Oak_VFS_split(path);
+	if (parts.length === 0) return false;
+	const leaf = parts.pop();
+	let node = __Oak_VFS_Root;
+	for (const part of parts) {
+		if (node.type !== "dir") {
+			node = { type: "dir", children: new Map(), mod: 0 };
+			// replace non-dir with dir
+			node.children = new Map();
+			// re-parent: find parent and replace
+			break;
+		}
+		let child = node.children.get(part);
+		if (child == null) {
+			child = { type: "dir", children: new Map(), mod: 0 };
+			node.children.set(part, child);
+		}
+		node = child;
+	}
+	node.children.set(leaf, { type: "file", content: __oak_to_string_value(content), mod: 0 });
+	return true;
+}
+
+function __Oak_VFS_readFile(path) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	const parts = __Oak_VFS_split(path);
+	const node = __Oak_VFS_resolve(parts);
+	if (node == null || node.type !== "file") return null;
+	return node.content;
+}
+
+function __Oak_VFS_delete(path) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	const parts = __Oak_VFS_split(path);
+	if (parts.length === 0) return false;
+	const leaf = parts.pop();
+	const parent = __Oak_VFS_resolve(parts);
+	if (parent == null || parent.type !== "dir") return false;
+	return parent.children.delete(leaf);
+}
+
+function __Oak_VFS_listFiles() {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	const out = [];
+	const walk = (node, prefix) => {
+		for (const [name, child] of node.children.entries()) {
+			const full = prefix + name;
+			if (child.type === "dir") {
+				out.push(full + "/");
+				walk(child, full + "/");
+			} else {
+				out.push(full);
+			}
+		}
+	};
+	walk(__Oak_VFS_Root, "");
+	return out;
+}
+
+function __Oak_VFS_stat(path) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	const parts = __Oak_VFS_split(path);
+	const node = __Oak_VFS_resolve(parts);
+	if (node == null) return null;
+	return {
+		name: parts.length > 0 ? parts[parts.length - 1] : "/",
+		size: node.type === "file" ? node.content.length : 0,
+		dir: node.type === "dir",
+		mod: node.mod,
+	};
+}
+
+function __Oak_VFS_exists(path) {
+	if (!__Oak_VFS_Root) __Oak_VFS_init();
+	return __Oak_VFS_resolve(__Oak_VFS_split(path)) != null;
+}
+
 function ___packed_vfs() {
-	return null;
+	// Return a virtual filesystem for browser/web environments.
+	// On Node.js, the host may override this with a real packed VFS.
+	if (__Is_Oak_Node) return null;
+	__Oak_VFS_init();
+	return {
+		listFiles: () => __Oak_VFS_listFiles(),
+		statFile: (p) => __Oak_VFS_stat(p),
+		readFile: (p) => __Oak_VFS_readFile(p),
+		writeFile: (p, c) => __Oak_VFS_writeFile(p, c),
+		deleteFile: (p) => __Oak_VFS_delete(p),
+		mkdirFile: (p) => __Oak_VFS_mkdir(p),
+		existsFile: (p) => __Oak_VFS_exists(p),
+	};
 }
 
 // JavaScript interop
