@@ -23,3 +23,89 @@ fn _clamp(v, minV, maxV) if v < minV {
 		_ -> v
 	}
 }
+
+// _screenPositionFor(size, w, h, position, margin) -> { x: int, y: int }
+//
+// Pure coordinate math shared by every platform backend.  Given a screen
+// work area (size.width/height and optional size.left/top origin), a window
+// of size w×h, a named position atom and an edge margin, returns the
+// top-left coordinate to pass to moveWindow().
+//
+// Position atoms:
+//   :center        screen middle — work-area center
+//   :primaryCenter center on the primary monitor (alias of :center here)
+//   :monitorCenter center on the window's current monitor
+//                    (backend may resolve this against the live monitor
+//                     instead of the primary work area)
+//   :topLeft      :topRight     :bottomLeft    :bottomRight
+//   :topCenter    :bottomCenter :leftCenter    :rightCenter
+//
+// Unknown / null positions fall back to :center so callers always get a
+// coordinate and positioning never silently fails.
+fn _screenPositionFor(size, w, h, position, margin) {
+	workW := _default(size.width, 0)
+	workH := _default(size.height, 0)
+	workLeft := _default(size.left, 0)
+	workTop := _default(size.top, 0)
+	m := _default(margin, 0)
+	// Clamp the window to the work area so a window larger than the screen
+	// still produces a valid (on-screen) coordinate.
+	ew := if w > workW { true -> workW, _ -> w }
+	eh := if h > workH { true -> workH, _ -> h }
+	// Center coordinate and the on-screen edge bounds the window must stay within.
+	cx := workLeft + int((workW - ew) / 2)
+	cy := workTop + int((workH - eh) / 2)
+	rightEdge := workLeft + workW - ew
+	bottomEdge := workTop + workH - eh
+	// xRange / yRange are [lo, hi] bounds that keep the *whole* window visible.
+	xLo := workLeft
+	xHi := rightEdge
+	yLo := workTop
+	yHi := bottomEdge
+	if position {
+		:center -> { x: cx, y: cy }
+		:primaryCenter -> { x: cx, y: cy }
+		:monitorCenter -> { x: cx, y: cy }
+		:topLeft -> { x: _clamp(workLeft + m, xLo, xHi), y: _clamp(workTop + m, yLo, yHi) }
+		:topRight -> { x: _clamp(rightEdge - m, xLo, xHi), y: _clamp(workTop + m, yLo, yHi) }
+		:bottomLeft -> { x: _clamp(workLeft + m, xLo, xHi), y: _clamp(bottomEdge - m, yLo, yHi) }
+		:bottomRight -> { x: _clamp(rightEdge - m, xLo, xHi), y: _clamp(bottomEdge - m, yLo, yHi) }
+		:topCenter -> { x: cx, y: _clamp(workTop + m, yLo, yHi) }
+		:bottomCenter -> { x: cx, y: _clamp(bottomEdge - m, yLo, yHi) }
+		:leftCenter -> { x: _clamp(workLeft + m, xLo, xHi), y: cy }
+		:rightCenter -> { x: _clamp(rightEdge - m, xLo, xHi), y: cy }
+		_ -> { x: cx, y: cy }
+	}
+}
+
+// Position atom constants.  Exported re-exports live in libGUI (GUI.oak) so
+// user code can write `gui.POSITION_TOP_RIGHT` instead of remembering the
+// raw atom.  Defined here as the single source of truth shared by every
+// backend and the facade.
+POSITION_CENTER := :center
+POSITION_PRIMARY_CENTER := :primaryCenter
+POSITION_MONITOR_CENTER := :monitorCenter
+POSITION_TOP_LEFT := :topLeft
+POSITION_TOP_RIGHT := :topRight
+POSITION_BOTTOM_LEFT := :bottomLeft
+POSITION_BOTTOM_RIGHT := :bottomRight
+POSITION_TOP_CENTER := :topCenter
+POSITION_BOTTOM_CENTER := :bottomCenter
+POSITION_LEFT_CENTER := :leftCenter
+POSITION_RIGHT_CENTER := :rightCenter
+
+// _readUtf16Str reads a null-terminated UTF-16LE string from a memory address.
+// Abstracted from gui-clipboard, gui-dialogs and gui-filedrop, which each
+// carried an identical local copy. Uses memread/pointer from the host bindings.
+fn _readUtf16Str(addr) {
+	fn sub(i, out) {
+		lo := bits(memread(pointer(addr + i), 1)).(0)
+		hi := bits(memread(pointer(addr + i + 1), 1)).(0)
+		cp := lo + hi * 256
+		if cp = 0 {
+			true -> out
+			_ -> sub(i + 2, out + char(cp))
+		}
+	}
+	sub(0, '')
+}

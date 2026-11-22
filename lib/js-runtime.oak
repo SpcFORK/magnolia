@@ -1,0 +1,264 @@
+// js-runtime -- runtime helpers for JS -> Oak transpiled programs
+//
+// JS has truthiness and coercion, and Oak `if` is pattern matching rather
+// than truthiness testing. Transpiled output references these helpers as
+// free identifiers; a driver harness must provide bindings for them.
+// This library provides the Oak implementations so generated programs can
+// be linked with js-runtime:
+//
+//   {
+//       __jsTruthy: __jsTruthy
+//       ...
+//   } := import('js-runtime')
+//
+// Control-flow signals are plain objects {__t: 'jsReturn'|'jsBreak'|
+// 'jsContinue'|'jsThrow', v: <value>} produced by the transpiler and
+// consumed by the loop helpers below. Signals flow through ordinary
+// value positions; Oak has no exceptions.
+
+// len/keys/values are VM builtins; on the JS backend they resolve to the
+// ambient globals defined by the web prelude (runtime-js.oak). Do not bind
+// them from std -- std does not export them.
+std := import('std')
+map := std.map
+sqrt := import('math-base').sqrt
+abs := import('math-base').abs
+sign := import('math-base').sign
+
+// -- truthiness (Oak `if` does not do JS truthiness) --
+fn __jsTruthy(v) if type(v) {
+	:null, :empty -> false
+	:bool -> v
+	:int -> v != 0
+	:float -> v != 0.0
+	:string -> len(v) != 0
+	_ -> true
+}
+
+// -- control-flow signals --
+fn __jsSignal?(v) if type(v) {
+	:object -> if v.__t {
+		? -> false
+		'' -> false
+		'jsReturn' -> true
+		'jsBreak' -> true
+		'jsContinue' -> true
+		'jsThrow' -> true
+		_ -> false
+	}
+	_ -> false
+}
+
+fn __jsSignalTag(v) if __jsSignal?(v) {
+	true -> string(v.__t)
+	_ -> ''
+}
+
+fn __jsIsReturn(v) if __jsSignalTag(v) {
+	'jsReturn' -> true
+	_ -> false
+}
+
+fn __jsIsBreak(v) if __jsSignalTag(v) {
+	'jsBreak' -> true
+	_ -> false
+}
+
+fn __jsIsContinue(v) if __jsSignalTag(v) {
+	'jsContinue' -> true
+	_ -> false
+}
+
+fn __jsIsThrow(v) if __jsSignalTag(v) {
+	'jsThrow' -> true
+	_ -> false
+}
+
+// function boundaries: unwrap :jsReturn, everything else stays a signal
+// __jsSwitchEq -- strict (SameValueZero-ish) comparison for switch case
+// tests. Oak has no universal equality, so compare by type; int/float are
+// cross-compared as floats (JS 1 === 1.0); everything else requires the
+// same Oak type.
+fn __jsSwitchEq(a, b) {
+	ta := type(a)
+	tb := type(b)
+	if ta = tb {
+		true -> a = b
+		_ -> if (ta = :int | ta = :float) & (tb = :int | tb = :float) {
+			true -> float(a) = float(b)
+			_ -> false
+		}
+	}
+}
+
+fn __jsUnwrapReturn(v) if __jsIsReturn(v) {
+	true -> v.v
+	_ -> v
+}
+
+// function boundary (the single place a JS function's body value is
+// normalized to JS semantics): jsReturn -> payload, another signal ->
+// propagates verbatim, ordinary fall-through -> ? (JS undefined)
+fn __jsFunctionReturn(v) if __jsIsReturn(v) {
+	true -> v.v
+	_ -> if __jsSignal?(v) { true -> v, _ -> ? }
+}
+
+// -- typeof (JS quirk: typeof null === 'object') --
+fn __jsTypeof(v) if type(v) {
+	:null -> 'object'
+	:empty -> 'undefined'
+	:bool -> 'boolean'
+	:int, :float -> 'number'
+	:string -> 'string'
+	:function -> 'function'
+	_ -> 'object'
+}
+
+// -- delete: Oak objects have no key deletion; returns true (JS semantics
+// for configurable properties) and performs no mutation
+fn __jsDelete(obj, key) true
+
+// -- RegExp: transpiled JS regex literals become real JS RegExp objects
+// (tagged with __t: 'jsRegExp' for the few consumers that inspect it).
+// The web prelude provides __js_RegExp; it delegates to the host's
+// native RegExp so .test()/.exec()/String.replace()/match() all behave
+// like JavaScript, capture groups included.
+fn __jsRegExp(pattern, flags) __js_RegExp(pattern, flags)
+
+// -- loops: JS loops lower to tail-recursive Oak closures that consume
+// control-flow signals. `break` stops the loop with an empty value;
+// `continue` re-enters (after `update` for jsFor); any other signal
+// (:jsReturn / :jsThrow) propagates verbatim.
+fn __jsWhile(test, body) {
+	fn sub() if __jsTruthy(test()) {
+		true -> {
+			r := body()
+			tag := __jsSignalTag(r)
+			if tag {
+				'' -> sub()
+				'jsContinue' -> sub()
+				'jsBreak' -> ?
+				_ -> r
+			}
+		}
+		_ -> ?
+	}
+	sub()
+}
+
+fn __jsDoWhile(body, test) {
+	fn sub() {
+		r := body()
+		tag := __jsSignalTag(r)
+		if tag {
+			'jsBreak' -> ?
+			'' -> if __jsTruthy(test()) {
+				true -> sub()
+				_ -> ?
+			}
+			'jsContinue' -> if __jsTruthy(test()) {
+				true -> sub()
+				_ -> ?
+			}
+			_ -> r
+		}
+	}
+	sub()
+}
+
+fn __jsFor(test, update, body) {
+	fn sub() if __jsTruthy(test()) {
+		true -> {
+			r := body()
+			tag := __jsSignalTag(r)
+			if tag {
+				'jsBreak' -> ?
+				_ -> {
+					update()
+					if tag {
+						'' -> sub()
+						'jsContinue' -> sub()
+						_ -> r
+					}
+				}
+			}
+		}
+		_ -> ?
+	}
+	sub()
+}
+
+fn __jsForIn(obj, body) {
+	fn sub(i) if i < len(keys(obj)) {
+		true -> {
+			r := body(keys(obj).(i))
+			tag := __jsSignalTag(r)
+			if tag {
+				'jsBreak' -> ?
+				'' -> sub(i + 1)
+				'jsContinue' -> sub(i + 1)
+				_ -> r
+			}
+		}
+		_ -> ?
+	}
+	sub(0)
+}
+
+fn __jsForOf(obj, body) {
+	fn sub(i, items) if i < len(items) {
+		true -> {
+			r := body(items.(i))
+			tag := __jsSignalTag(r)
+			if tag {
+				'jsBreak' -> ?
+				'' -> sub(i + 1, items)
+				'jsContinue' -> sub(i + 1, items)
+				_ -> r
+			}
+		}
+		_ -> ?
+	}
+	if type(obj) {
+		:list -> sub(0, obj)
+		:string -> sub(0, keys(obj) |> map(fn(i) obj.(i)))
+		:object -> sub(0, values(obj))
+		_ -> ?
+	}
+}
+
+// -- globals referenced by transpiled output --
+join := import('str').join
+fn _consoleLog(xs...) print(join(xs |> map(string), ' ') + '\n')
+
+__console := {
+	log: _consoleLog
+	info: _consoleLog
+	warn: _consoleLog
+	error: _consoleLog
+	debug: _consoleLog
+}
+
+__Math := {
+	abs: abs
+	sqrt: sqrt
+	sign: sign
+	floor: fn(x) int(x)
+	ceil: fn(x) if x = int(x) { true -> int(x), _ -> int(x) + 1 }
+	round: fn(x) int(x + 0.5)
+	min: fn(a, b) if a < b { true -> a, _ -> b }
+	max: fn(a, b) if a > b { true -> a, _ -> b }
+	power: fn(x, y) pow(x, y)
+	PI: 3.141592653589793
+	E: 2.718281828459045
+}
+
+__JSON := {
+	stringify: fn(x) string(x)
+	parse: fn(s) { __t: 'jsJsonParse', source: s }
+}
+
+// intentionally not implemented in pure Oak (web build maps these to the
+// real JS runtime): __Array, __Object, __String, __Number, __Date,
+// __Promise

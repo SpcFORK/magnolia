@@ -4,6 +4,7 @@
 
 `libcompression` provides multiple lossless string codecs:
 
+- **ANS** for context-adaptive entropy coding (strongest on text — see below)
 - RLE for repeated character runs
 - Huffman coding for frequency-based bit packing
 - LZW for dictionary-based phrase compression
@@ -12,6 +13,7 @@ The default `compress()` and `decompress()` functions keep using RLE for backwar
 The implementation is split internally across `compression-rle`, `compression-huffman`, and `compression-lzw`, while `compression` remains the public facade.
 
 Codec-specific docs:
+- [ANS codec](compression-ans.md) — context-adaptive, beats LZW by 70–85% on text
 - [RLE codec](compression-rle.md)
 - [Huffman codec](compression-huffman.md)
 - [LZW codec](compression-lzw.md)
@@ -41,6 +43,7 @@ Supported algorithms:
 - `:rle` or `'rle'`
 - `:huffman` or `'huffman'`
 - `:lzw` or `'lzw'`
+- `:ans` or `'ans'`
 
 If `algorithm` is omitted, RLE is used.
 
@@ -48,7 +51,19 @@ If `algorithm` is omitted, RLE is used.
 compression.compress('aaaaabbbb')
 compression.compress('BANANA BANDANA', :huffman)
 compression.compress('TOBEORNOTTOBEORTOBEORNOT', :lzw)
+compression.compress('the quick brown fox jumps over the lazy dog', :ans)
 ```
+
+Codec choice, measured on this repository's benchmark corpus:
+
+| data | best codec |
+|---|---|
+| natural language, source code, JSON | `:ans` |
+| long runs of one byte | `:rle` |
+| strings under ~100 bytes | `:rle` (ANS has a 31-byte frame header) |
+
+ANS output carries a checksum and a length field; a malformed frame returns
+`:error` rather than decoding to a wrong string.
 
 ### `decompress(encoded, algorithm?)`
 

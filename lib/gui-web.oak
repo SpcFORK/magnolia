@@ -1,6 +1,10 @@
 // gui-web contains Canvas/WebGL middleware state and command queue helpers.
 
-{ _default: _default, _err: _err } := import('gui-common')
+{
+	_default: _default
+	_err: _err
+	_screenPositionFor: _screenPositionFor
+} := import('gui-common')
 guiThread := import('gui-thread')
 { filter: filter } := import('std')
 
@@ -136,6 +140,41 @@ fn resizeWindow(window, width, height) if window.type {
 		_ -> _err('resizeWindow is only available on web backend', window.backend)
 	}
 	_ -> window
+}
+
+// ─── Easy window positioning ────────────────────────────────────────────────
+//
+// Web positioning is best-effort: the browser owns the canvas placement, so the
+// helpers here record the logical position and keep width/height in sync.  The
+// "screen" is treated as the canvas bounds (left/top = 0,0).
+
+// getPrimaryScreenSize(window) -> { type: :ok, width, height, left, top }
+fn getPrimaryScreenSize(window) {
+	{
+		type: :ok
+		width: _default(window.width, 0)
+		height: _default(window.height, 0)
+		left: 0
+		top: 0
+	}
+}
+
+// centerWindow(window) — "screen middle" on web records a move to the canvas
+// origin offset by half the canvas size (typically 0,0 for a full-canvas app).
+fn centerWindow(window) {
+	size := getPrimaryScreenSize(window)
+	coords := _screenPositionFor(size, window.width, window.height, :center, 0)
+	moveWindow(window, coords.x, coords.y)
+	window
+}
+
+// positionWindow(window, position, options) — best-effort logical positioning.
+fn positionWindow(window, position, options) {
+	size := getPrimaryScreenSize(window)
+	margin := _default(_default(options, {}).margin, 0)
+	coords := _screenPositionFor(size, window.width, window.height, position, margin)
+	moveWindow(window, coords.x, coords.y)
+	window
 }
 
 fn setFullscreen(window, enabled) if window.type {
@@ -435,6 +474,24 @@ fn pollEvents(window) if window.type = :ok {
 fn setAlpha(window, alpha) if window.type = :ok {
 	true -> _webRecord(window, { type: :alpha, alpha: alpha })
 	_ -> window
+}
+
+// A bounded pixel command for trusted CPU raster producers (including the
+// original-bytecode Applet GUI). Pixels are signed 32-bit ARGB words; a bridge
+// must explicitly recognize :argb32 and convert each word to Canvas RGBA.
+// Do not expose this as a generic browser-input or unbounded image decoder.
+fn drawPackedImageData(window, x, y, w, h, pixels) if window.type = :ok {
+    true -> if window.backend != :web | type(w) != :int |
+        type(h) != :int | w < 1 | h < 1 | w > 4096 | h > 4096 |
+        w * h > 81920 | type(pixels) != :list | len(pixels) != w * h {
+        true -> _err('invalid bounded ARGB image data', window)
+        _ -> {
+            _webRecord(window, {type: :image_data, format: :argb32,
+                x: x, y: y, width: w, height: h, data: pixels})
+            window
+        }
+    }
+    _ -> window
 }
 
 // drawImageData records a :image_data command for blitting a pixel byte string

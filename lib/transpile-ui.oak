@@ -29,29 +29,16 @@ fn emptyState() {
 }
 
 // collect(node) → CollectState from one AST root (or list of nodes).
+// The style-bake collectors already return unique, first-seen-order lists, so
+// we only rebuild the lookup sets here instead of deduping twice.
 fn collect(node) {
 	state := emptyState()
 	classes := styleBake.collectClassesFromAst(node)
-	classes |> each(fn(c) {
-		if state.classSet.(c) {
-			? -> {
-				state.classSet.(c) := true
-				state.classes := state.classes << c
-			}
-			_ -> ?
-		}
-	})
+	state.classes := classes
+	classes |> each(fn(c) state.classSet.(c) := true)
 	cps := styleBake.collectCodepointsFromAst(node)
-	cps |> each(fn(cp) {
-		k := string(cp)
-		if state.codeSet.(k) {
-			? -> {
-				state.codeSet.(k) := true
-				state.codepoints := state.codepoints << cp
-			}
-			_ -> ?
-		}
-	})
+	state.codepoints := cps
+	cps |> each(fn(cp) state.codeSet.(string(cp)) := true)
 	// validate each class (all-or-nothing)
 	state.classes |> each(fn(c) {
 		compiled := styleBake.compileClassString(c)

@@ -1,0 +1,114 @@
+// Benchmark for parallel transform+project with proper trig caching.
+// Tests:
+//   1. parallelTransformAndProjectVertices with varying rotation (cache misses)
+//   2. parallelTransformAndProjectVertices with reused transform (cache hits)
+//   3. transformAndProjectVertices sequential baseline (no caching)
+
+std := import('std')
+gui3d := import('gui-3dmath')
+
+fn buildGrid(gridN, step) {
+	fn buildRow(x, z, verts) if x >= gridN {
+		true -> verts
+		_ -> {
+			h := 0
+			vx := gui3d.Vec3((x - gridN / 2) * step, h, (z - gridN / 2) * step)
+			buildRow(x + 1, z, verts << vx)
+		}
+	}
+	fn buildAll(z, verts) if z >= gridN {
+		true -> verts
+		_ -> buildAll(z + 1, buildRow(0, z, verts))
+	}
+	buildAll(0, [])
+}
+
+gridN := 50
+step := 0.6
+iterations := 30
+
+std.println('Building grid: ' + string(gridN) + 'x' + string(gridN))
+verts := buildGrid(gridN, step)
+
+projParams := {
+	halfW: 960
+	halfH: 540
+	camZ: 5
+	mode: 'perspective'
+	focal: 960
+	orthoScale: 4
+}
+
+// Benchmark 1: parallel, varying rotation (cache always misses)
+std.println('--- Benchmark 1: parallelTransformAndProjectVertices (varying rotation, cache misses) ---')
+start := nanotime()
+
+fn run1(i) if i >= iterations {
+	true -> {
+		elapsed := nanotime() - start
+		std.println('Avg ms: ' + string((elapsed / iterations) / 1000000))
+	}
+	_ -> {
+		transform := { rx: i % 360, ry: i % 360 }
+		gui3d.parallelTransformAndProjectVertices(verts, transform, projParams, 4)
+		run1(i + 1)
+	}
+}
+
+run1(0)
+
+// Benchmark 2: parallel, reused transform (cache hits after first call)
+std.println('--- Benchmark 2: parallelTransformAndProjectVertices (same transform, cache hits) ---')
+transform2 := { rx: 45, ry: 90 }
+start2 := nanotime()
+
+fn run2(i) if i >= iterations {
+	true -> {
+		elapsed := nanotime() - start2
+		std.println('Avg ms: ' + string((elapsed / iterations) / 1000000))
+	}
+	_ -> {
+		gui3d.parallelTransformAndProjectVertices(verts, transform2, projParams, 4)
+		run2(i + 1)
+	}
+}
+
+run2(0)
+
+// Benchmark 3: sequential baseline (no caching, no parallelism)
+std.println('--- Benchmark 3: transformAndProjectVertices (sequential, no caching) ---')
+start3 := nanotime()
+
+fn run3(i) if i >= iterations {
+	true -> {
+		elapsed := nanotime() - start3
+		std.println('Avg ms: ' + string((elapsed / iterations) / 1000000))
+	}
+	_ -> {
+		transform := { rx: i % 360, ry: i % 360 }
+		gui3d.transformAndProjectVertices(verts, transform, projParams)
+		run3(i + 1)
+	}
+}
+
+run3(0)
+
+// Benchmark 4: sequential with reused transform (no trig caching in sequential fn)
+std.println('--- Benchmark 4: parallelTransformAndProjectScreen (wireframe path) ---')
+start4 := nanotime()
+
+fn run4(i) if i >= iterations {
+	true -> {
+		elapsed := nanotime() - start4
+		std.println('Avg ms: ' + string((elapsed / iterations) / 1000000))
+	}
+	_ -> {
+		transform := { rx: i % 360, ry: i % 360 }
+		gui3d.parallelTransformAndProjectScreen(verts, transform, projParams, 4)
+		run4(i + 1)
+	}
+}
+
+run4(0)
+
+std.println('All benchmarks complete.')

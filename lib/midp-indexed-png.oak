@@ -1,0 +1,237 @@
+// Native, bounded PNG pixel decoder for selected local indexed-color
+// MIDP assets. A separate library, NOT an Image model
+// or Java ME runtime yet. Validates every PNG chunk/CRC, zlib/Adler32, IDAT
+// length, palette/transparency and scanlines before returning ARGB pixels.
+// No AWT, JVM, URL, ImageIO, zlib native library, embedded game assets or
+// unbounded allocation. Indexed type 3, depth 1/2/4/8, noninterlaced only.
+
+std := import('std')
+str := import('str')
+zip := import('./applet-zip.oak')
+bytes := import('bytes')
+
+fn _error(message) std.error('indexed PNG: ' + message)
+fn _at(raw, pos) bytes.at(raw, pos)
+fn _be(raw, pos) (_at(raw, pos) << 24) + (_at(raw, pos + 1) << 16) +
+    (_at(raw, pos + 2) << 8) + _at(raw, pos + 3)
+fn _abs(n) if n < 0 {true -> 0 - n, _ -> n}
+fn _paeth(a, b, c) {
+    p := a + b - c
+    da := _abs(p - a)
+    db := _abs(p - b)
+    dc := _abs(p - c)
+    if da <= db & da <= dc {true -> a, _ -> if db <= dc {true -> b, _ -> c}}
+}
+fn _adler(raw) {
+    a := 1
+    b := 0
+    std.range(len(raw)) |> std.each(fn(i) {
+        a <- (a + _at(raw, i)) % 65521
+        b <- (b + a) % 65521
+    })
+    (b << 16) + a
+}
+
+fn decode(raw) if type(raw) != :string | len(raw) < 70 |
+    len(raw) > 65536 |
+    std.slice(raw, 0, 8) != (char(137) + 'PNG' + char(13) +
+        char(10) + char(26) + char(10)) {
+    true -> _error('missing signature or image exceeds 64 KiB')
+    _ -> {
+        position := 8
+        stage := 0  // 0: IHDR, 1: PLTE, 2: optional tRNS, 3: IDAT, 4: IEND
+        width := 0
+        height := 0
+        depth := 0
+        palette := ?
+        transparency := ''
+        idats := []
+        compressed := 0
+        chunkCount := 0
+        problem := ?
+        fn consume() if problem = ? & position < len(raw) {
+            true -> {
+                chunkCount <- chunkCount + 1
+                if position + 12 > len(raw) | chunkCount > 32 {
+                    true -> problem <- 'truncated PNG chunk or more than 32 chunks'
+                    _ -> {
+                        size := _be(raw, position)
+                        if size > len(raw) - position - 12 |
+                            size > 65536 {
+                            true -> problem <- 'PNG chunk exceeds input/size cap'
+                            _ -> {
+                                tag := std.slice(raw, position + 4, position + 8)
+                                data := std.slice(raw, position + 8,
+                                    position + 8 + size)
+                                crc := _be(raw, position + 8 + size)
+                                if zip.crc32(tag + data) != crc {
+                                    true -> problem <- 'PNG chunk CRC differs: ' + tag
+                                    _ -> if tag {
+                                        'IHDR' -> if stage != 0 | size != 13 {
+                                            true -> problem <- 'misordered PNG IHDR'
+                                            _ -> {
+                                                width <- _be(data, 0)
+                                                height <- _be(data, 4)
+                                                depth <- _at(data, 8)
+                                                if width < 1 | width > 512 |
+                                                    height < 1 | height > 256 |
+                                                    width * height > 65536 |
+                                                    !(depth = 1 | depth = 2 |
+                                                      depth = 4 | depth = 8) |
+                                                    _at(data, 9) != 3 |
+                                                    _at(data, 10) != 0 |
+                                                    _at(data, 11) != 0 |
+                                                    _at(data, 12) != 0 {
+                                                    true -> problem <- 'unsupported indexed size, depth, method or interlace'
+                                                    _ -> stage <- 1
+                                                }
+                                            }
+                                        }
+                                        'PLTE' -> if stage != 1 | size < 3 |
+                                            size > 768 | size % 3 != 0 |
+                                            size / 3 > (1 << depth) {
+                                            true -> problem <- 'missing or invalid indexed PLTE'
+                                            _ -> {
+                                                palette <- data
+                                                stage <- 2
+                                            }
+                                        }
+                                        'tRNS' -> if stage != 2 | size < 1 |
+                                            size > len(palette) / 3 {
+                                            true -> problem <- 'invalid indexed transparency'
+                                            _ -> {
+                                                transparency <- data
+                                                stage <- 3
+                                            }
+                                        }
+                                        'IDAT' -> if (stage != 2 & stage != 3 &
+                                            stage != 4) | compressed + size > 65536 {
+                                            true -> problem <- 'out-of-order or oversized IDAT'
+                                            _ -> {
+                                                idats << data
+                                                compressed <- compressed + size
+                                                stage <- 4
+                                            }
+                                        }
+                                        'IEND' -> if stage != 4 | size != 0 |
+                                            position + 12 != len(raw) {
+                                            true -> problem <- 'missing IDAT or trailing PNG bytes'
+                                            _ -> stage <- 5
+                                        }
+                                        _ -> problem <- 'unsupported PNG chunk: ' + tag
+                                    }
+                                }
+                                position <- position + size + 12
+                                if problem = ? & position < len(raw) -> consume()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        consume()
+        if problem != ? {
+            true -> _error(problem)
+            _ -> if stage != 5 | position != len(raw) |
+                len(idats) < 1 {
+                true -> _error('incomplete indexed PNG')
+                _ -> {
+                    zlib := str.join(idats, '')
+                    if len(zlib) < 6 {
+                        true -> _error('truncated zlib stream')
+                        _ -> {
+                            cmf := _at(zlib, 0)
+                            flg := _at(zlib, 1)
+                            if (cmf & 15) != 8 | (cmf >> 4) > 7 |
+                                ((cmf << 8) + flg) % 31 != 0 |
+                                (flg & 32) != 0 {
+                                true -> _error('unsupported zlib header or dictionary')
+                                _ -> {
+                                    stride := (width * depth + 7) >> 3
+                                    expected := (stride + 1) * height
+                                    scan := zip.inflate(std.slice(zlib, 2,
+                                        len(zlib) - 4), expected, 262144)
+                                    if scan.type = :error {
+                                        true -> _error(scan.message)
+                                        _ -> if scan.consumed != len(zlib) - 6 {
+                                            true -> _error('trailing DEFLATE data before Adler32')
+                                            _ -> if _adler(scan.value) != _be(zlib, len(zlib) - 4) {
+                                                true -> _error('zlib Adler32 differs')
+                                                _ -> _pixels(scan.value, width, height,
+                                                    depth, stride, palette, transparency)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn _pixels(scan, width, height, depth, stride, palette, transparency) {
+    prior := std.range(stride) |> std.map(fn(_) 0)
+    chunks := []
+    pixels := []
+    transparent := 0
+    problem := ?
+    std.range(height) |> std.each(fn(y) if problem = ? {
+        true -> {
+            start := y * (stride + 1)
+            filter := _at(scan, start)
+            if filter > 4 {
+                true -> problem <- 'unsupported PNG scanline filter'
+                _ -> {
+                    current := []
+                    std.range(stride) |> std.each(fn(i) {
+                        left := if i > 0 {true -> current.(i - 1), _ -> 0}
+                        up := prior.(i)
+                        upperLeft := if i > 0 {true -> prior.(i - 1), _ -> 0}
+                        predict := if filter {
+                            0 -> 0
+                            1 -> left
+                            2 -> up
+                            3 -> (left + up) >> 1
+                            4 -> _paeth(left, up, upperLeft)
+                        }
+                        current << ((_at(scan, start + i + 1) + predict) & 255)
+                    })
+                    std.range(width) |> std.each(fn(x) if problem = ? {
+                        true -> {
+                            offset := x * depth
+                            byte := current.(offset >> 3)
+                            index := (byte >> (8 - depth - (offset & 7))) &
+                                ((1 << depth) - 1)
+                            if index * 3 + 2 >= len(palette) {
+                                true -> problem <- 'PNG palette index exceeds PLTE'
+                                _ -> {
+                                    alpha := if index < len(transparency) {
+                                        true -> _at(transparency, index), _ -> 255
+                                    }
+                                    red := _at(palette, index * 3)
+                                    green := _at(palette, index * 3 + 1)
+                                    blue := _at(palette, index * 3 + 2)
+                                    pixels << ((alpha << 24) | (red << 16) |
+                                        (green << 8) | blue)
+                                    chunks << (char(alpha) + char(red) +
+                                        char(green) + char(blue))
+                                    if alpha = 0 -> transparent <- transparent + 1
+                                }
+                            }
+                        }
+                    })
+                    prior <- current
+                }
+            }
+        }
+    })
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {type: :ok, width: width, height: height,
+            pixels: pixels, argb: str.join(chunks, ''),
+            transparent: transparent}
+    }
+}

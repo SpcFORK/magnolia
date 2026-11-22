@@ -52,7 +52,7 @@ The script outputs a line every second that looks like this:
 3924req/s       latency = 247.317µs (163-1257µs)
 ```
 
-Here, the benchmarked server handled about 4,000 requests every second, with an average latency of 247µs, but latencies as low as 163µs and as high as 1.3ms were observed. You can take a look at the full output I gathered for every benchmark in the [raw output text file](/http-perf-data.txt).
+Here, the benchmarked server handled about 4,000 requests every second, with an average latency of 247µs, but latencies as low as 163µs and as high as 1.3ms were observed. You can take a look at the full output I gathered for every benchmark in the raw output text file.
 
 ## The subjects
 
@@ -116,7 +116,7 @@ Lastly, all of these tests were done on a 2013 15" MacBook Pro with an Intel Cor
 
 ## The results
 
-We can take in the high-level conclusions from the benchmark in two charts, which I'll share here. I've also made the full data for all of these benchmarks available in [this text file](/http-perf-data.txt) if you want to take a closer look yourself.
+We can take in the high-level conclusions from the benchmark in two charts, which I'll share here. I've also made the full data for all of these benchmarks available in this text file if you want to take a closer look yourself.
 
 First, let's look at the throughput measurements.
 

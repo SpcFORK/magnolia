@@ -94,3 +94,38 @@ Legacy `GUI` / `gui-form` immediate-mode drawing is unchanged. New apps opt into
 ## Drift guard
 
 `surface.fingerprint()` encodes the surface revision. Tests assert op/prop knowledge and encode/decode roundtrips for `styles.bin`. When extending the surface, **append only** and update tests.
+
+## Implementation notes
+
+### Prop resolution cache (ui-core)
+
+`_resolveProps` merges defaults ← style-bake table entry ← node props. It is called
+several times per node per layout/draw/hitTest pass (measure, place, emit, test),
+so the core keeps an `epoch` counter and a per-node-id `resolveCache`. Every
+mutating op (`createNode`, `destroyNode`, `insertBefore`, `removeChild`,
+`setStyle`, `setProp`, `setText`, `loadStyles`) bumps the epoch and clears the
+cache. Property resolution is therefore computed at most once per node per
+quiescent frame, and guest mirrors can rely on stable object identity within a
+frame.
+
+### Text measurement cache (ui-core)
+
+`_measureText(text, fontSize)` uses a bounded module-level memo (256 entries,
+flush-when-full). The advance model is a pure function of `(fontSize, text)`,
+so sharing the cache across cores is safe; it exists because flex measure
+passes call it for every text node twice per frame.
+
+### Pointer hit testing (ui-core)
+
+`hitTest` walks in paint order (parent, then children in order, last sibling
+paints last). The node under the pointer that was painted last wins, matching
+the emission order used by `draw`. Cache/layout state is not required for
+correctness, only for speed; `layoutDirty?` still forces a re-layout before
+testing.
+
+### Perf expectations
+
+The reference hot path (flex column of N view/text children, M setProps per
+frame) performs one `_resolveProps` per node per epoch instead of
+O(passes × nodes). `drawListHash` remains the source of truth for golden
+comparisons and is intentionally unchanged.

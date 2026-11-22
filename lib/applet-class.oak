@@ -1,0 +1,476 @@
+// applet-class — bounded JVM class-file reader, implemented entirely in Magnolia.
+// This module parses CLASS files; it does not execute Java or load Java libraries.
+
+std := import('std')
+slice := std.slice
+join := std.join
+fmt := import('fmt')
+format := fmt.format
+bytes := import('bytes')
+
+MAX_CLASS_BYTES := 8388608
+MAX_POOL := 8192
+MAX_MEMBERS := 2048
+MAX_CODE := 65535
+MAX_HANDLERS := 64
+MAX_STACKMAP_FRAMES := 8192
+MAX_STACKMAP_TYPES := 8192
+
+// Read byte offsets, not Unicode character positions. Magnolia's native
+// file strings expose each raw byte via codepoint(raw.(index)). Class files
+// are parsed before generating Oak/JS/Java output; the generated program only
+// contains normalized, textual instructions, never raw binary source strings.
+// Reader is a shared byte-order cursor abstracted onto lib/bytes.oak.
+fn Reader(raw) bytes.Reader(raw)
+
+fn _cp(pool, index, tag) {
+	if index <= 0 | index >= len(pool) {
+		true -> ?
+		_ -> if pool.(index).tag = tag {
+			true -> pool.(index)
+			_ -> ?
+		}
+	}
+}
+fn utf(pool, index) if entry := _cp(pool, index, 1) {
+	? -> ?
+	_ -> entry.text
+}
+fn className(pool, index) if entry := _cp(pool, index, 7) {
+	? -> ?
+	_ -> utf(pool, entry.a)
+}
+fn member(pool, index, tag) if entry := _cp(pool, index, tag) {
+	? -> ?
+	_ -> {
+		pair := _cp(pool, entry.b, 12)
+		if pair = ? {
+			true -> ?
+			_ -> {
+				owner: className(pool, entry.a)
+				name: utf(pool, pair.a)
+				desc: utf(pool, pair.b)
+			}
+		}
+	}
+}
+fn literal(pool, index) if index <= 0 | index >= len(pool) {
+	true -> ?
+	_ -> if pool.(index).tag {
+		3 -> {
+			n := pool.(index).n
+			if n >= 2147483648 { true -> n - 4294967296, _ -> n }
+		}
+        4 -> {jvmFloat: true, bits: pool.(index).n}
+        5 -> {
+            // Preserve both 32-bit limbs: JavaScript Numbers cannot exactly
+            // represent all signed JVM longs (notably values above 2^53).
+            hi := pool.(index).hi
+            {jvmLong: true, hi: if hi >= 2147483648 {
+                true -> hi - 4294967296, _ -> hi}, lo: pool.(index).lo}
+        }
+        6 -> {jvmDouble: true, hi: pool.(index).hi, lo: pool.(index).lo}
+		8 -> utf(pool, pool.(index).a)
+		_ -> ?
+	}
+}
+
+fn _attrs(r, pool) {
+	count := r.u2()
+	if count > MAX_MEMBERS -> r.fail('too many attributes')
+	fn scan(i) if i < count & r.problem() = ? {
+		true -> {
+			nameIndex := r.u2()
+			size := r.u4()
+			if utf(pool, nameIndex) = ? -> r.fail('invalid attribute name')
+			r.skip(size)
+			scan(i + 1)
+		}
+	}
+	scan(0)
+}
+
+// StackMapTable structure for version 50+ only. This checks encoding and
+// bounds, not the declared frame types against inferred verifier frames.
+// Versions through 49 use the legacy inference verifier and can ignore it.
+fn _stackMapType(r, pool, code, newPcs) {
+    tag := r.u1()
+    if tag = 7 {
+        true -> {
+            index := r.u2()
+            if className(pool, index) = ? ->
+                r.fail('invalid StackMapTable Object constant-pool index')
+        }
+        _ -> if tag = 8 {
+            true -> {
+                offset := r.u2()
+                if offset >= len(code) |
+                    codepoint(code.(offset)) != 187 {
+                    true -> r.fail('invalid StackMapTable uninitialized new offset')
+                    _ -> newPcs << offset
+                }
+            }
+            _ -> if tag > 8 ->
+                r.fail('invalid StackMapTable verification type')
+        }
+    }
+}
+
+fn _stackMapTable(raw, pool, code, maxLocals) {
+    r := Reader(raw)
+    framePcs := []
+    newPcs := []
+    count := r.u2()
+    if count > MAX_STACKMAP_FRAMES -> r.fail('too many StackMapTable frames')
+    fn readTypes(i, count) if i < count & r.problem() = ? {
+        true -> {
+            _stackMapType(r, pool, code, newPcs)
+            readTypes(i + 1, count)
+        }
+    }
+    fn readFrames(i, last) if i < count & r.problem() = ? {
+        true -> {
+            kind := r.u1()
+            delta := 0
+            stackCount := 0
+            appended := 0
+            if kind <= 63 {
+                true -> delta <- kind
+                _ -> if kind <= 127 {
+                    true -> {
+                        delta <- kind - 64
+                        stackCount <- 1
+                    }
+                    _ -> if kind = 247 {
+                        true -> {
+                            delta <- r.u2()
+                            stackCount <- 1
+                        }
+                        _ -> if kind >= 248 & kind <= 251 {
+                            true -> delta <- r.u2()
+                            _ -> if kind >= 252 & kind <= 254 {
+                                true -> {
+                                    delta <- r.u2()
+                                    appended <- kind - 251
+                                }
+                                _ -> if kind = 255 {
+                                    true -> {
+                                        delta <- r.u2()
+                                        appended <- r.u2()
+                                        if appended > maxLocals |
+                                            appended > MAX_STACKMAP_TYPES ->
+                                            r.fail('too many StackMapTable locals')
+                                    }
+                                    _ -> r.fail('reserved StackMapTable frame type')
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            offset := last + delta + 1
+            if offset >= len(code) {
+                true -> r.fail('StackMapTable frame beyond Code')
+                _ -> framePcs << offset
+            }
+            readTypes(0, appended)
+            if kind = 255 -> stackCount <- r.u2()
+            if stackCount > MAX_STACKMAP_TYPES ->
+                r.fail('too many StackMapTable stack types')
+            readTypes(0, stackCount)
+            readFrames(i + 1, offset)
+        }
+    }
+    readFrames(0, -1)
+    if r.remaining() != 0 -> r.fail('invalid StackMapTable length')
+    {problem: r.problem(), framePcs: framePcs, newPcs: newPcs}
+}
+
+fn _codeAttribute(raw, pool, major) {
+	r := Reader(raw)
+	stackSize := r.u2()
+	locals := r.u2()
+	length := r.u4()
+	if length > MAX_CODE -> r.fail('Code exceeds 65535 bytes')
+	code := r.take(length)
+    catches := r.u2()
+    if catches > MAX_HANDLERS -> r.fail('too many exception handlers (64 per method)')
+    handlers := []
+    fn readHandlers(i) if i < catches & r.problem() = ? {
+        true -> {
+            start := r.u2()
+            end := r.u2()
+            target := r.u2()
+            typeIndex := r.u2()
+            catchName := if typeIndex = 0 {true -> ?, _ -> className(pool, typeIndex)}
+            if start >= end | end > length | target >= length |
+                (typeIndex != 0 & catchName = ?) {
+                true -> r.fail('invalid exception table range, target or catch class')
+                _ -> handlers << {start: start, end: end,
+                    target: target, catch: catchName}
+            }
+            readHandlers(i + 1)
+        }
+    }
+    readHandlers(0)
+    attributes := r.u2()
+    if attributes > MAX_MEMBERS -> r.fail('too many Code attributes')
+    seenStackMap := false
+    framePcs := []
+    newPcs := []
+    fn readCodeAttrs(i) if i < attributes & r.problem() = ? {
+        true -> {
+            name := utf(pool, r.u2())
+            size := r.u4()
+            payload := r.take(size)
+            if name = ? -> r.fail('invalid Code attribute name')
+            if major >= 50 & name = 'StackMapTable' & payload != ? {
+                true -> {
+                    if seenStackMap -> r.fail('duplicate StackMapTable attribute')
+                    seenStackMap <- true
+                    frames := _stackMapTable(payload, pool, code, locals)
+                    if frames.problem != ? {
+                        true -> r.fail('StackMapTable: ' + frames.problem)
+                        _ -> {
+                            framePcs <- frames.framePcs
+                            newPcs <- frames.newPcs
+                        }
+                    }
+                }
+            }
+            readCodeAttrs(i + 1)
+        }
+    }
+    readCodeAttrs(0)
+    if r.remaining() != 0 -> r.fail('trailing bytes in Code attribute')
+    if r.problem() != ? {
+        true -> {type: :error, message: r.problem()}
+        _ -> {type: :ok, code: code, stack: stackSize, locals: locals,
+            catches: catches, handlers: handlers, framePcs: framePcs,
+            newPcs: newPcs}
+    }
+}
+
+fn _safeName?(name) path.safeEntryName?(name)
+
+// parseClass returns {type: :ok, value: {...}} or {type: :error, message}.
+// It never fetches dependencies or interprets bytecode.
+fn parseClass(raw) if type(raw) {
+	:string -> if len(raw) > MAX_CLASS_BYTES {
+		true -> {type: :error, message: 'class exceeds 8 MiB limit'}
+		_ -> _parseClass(raw)
+	}
+	_ -> {type: :error, message: 'expected binary class-file string'}
+}
+fn _parseClass(raw) {
+	r := Reader(raw)
+	if r.u4() != 3405691582 -> r.fail('not a JVM class file (CAFEBABE missing)')
+	minor := r.u2()
+	major := r.u2()
+	if major < 45 | major > 70 -> r.fail(format('unsupported class version {{0}}.{{1}}', major, minor))
+	count := r.u2()
+	if count <= 1 | count > MAX_POOL -> r.fail('invalid or oversized constant pool')
+	pool := [?]
+	fn readPool(i) if i < count & r.problem() = ? {
+		true -> {
+			tag := r.u1()
+			entry := {tag: tag}
+			if tag {
+				1 -> {
+					length := r.u2()
+					entry.text := r.take(length)
+				}
+				3, 4 -> entry.n := r.u4()
+                5 -> {
+                    entry.hi := r.u4()
+                    entry.lo := r.u4()
+                }
+                6 -> {
+                    // Preserve the exact payload, including NaN and -0.0.
+                    entry.hi := r.u4()
+                    entry.lo := r.u4()
+                }
+				7, 8, 16, 19, 20 -> entry.a := r.u2()
+				9, 10, 11, 12, 17, 18 -> {
+					entry.a := r.u2()
+					entry.b := r.u2()
+				}
+				15 -> {
+					entry.a := r.u1()
+					entry.b := r.u2()
+				}
+				_ -> r.fail(format('unknown constant-pool tag {{0}}', tag))
+			}
+			pool << entry
+			if tag {
+				5, 6 -> {
+					pool << ? // LONG/DOUBLE consume the following slot
+					readPool(i + 2)
+				}
+				_ -> readPool(i + 1)
+			}
+		}
+	}
+		readPool(1)
+        poolEnd := r.pos()
+		flags := r.u2()
+	thisIndex := r.u2()
+	superIndex := r.u2()
+	name := className(pool, thisIndex)
+	superName := if superIndex = 0 { true -> ?, _ -> className(pool, superIndex) }
+	if !_safeName?(name) -> r.fail('invalid this_class name')
+	if superIndex != 0 & !_safeName?(superName) -> r.fail('invalid super_class name')
+	interfaceCount := r.u2()
+	if interfaceCount > MAX_MEMBERS -> r.fail('too many interfaces')
+	interfaces := []
+	fn readInterfaces(i) if i < interfaceCount & r.problem() = ? {
+		true -> {
+			iface := className(pool, r.u2())
+			if !_safeName?(iface) -> r.fail('invalid interface name')
+			interfaces << iface
+			readInterfaces(i + 1)
+		}
+	}
+	readInterfaces(0)
+	fieldCount := r.u2()
+	if fieldCount > MAX_MEMBERS -> r.fail('too many fields')
+	fields := []
+	fn readFields(i) if i < fieldCount & r.problem() = ? {
+		true -> {
+			access := r.u2()
+			fname := utf(pool, r.u2())
+			desc := utf(pool, r.u2())
+				if fname = ? | desc = ? -> r.fail('invalid field name or descriptor')
+                // ConstantValue is assigned during class preparation, before
+                // <clinit>. The generic attribute skipper loses this value.
+                attributes := r.u2()
+                if attributes > MAX_MEMBERS -> r.fail('too many field attributes')
+                constant := ?
+                hasConstant? := false
+                fn readFieldAttrs(j) if j < attributes & r.problem() = ? {
+                    true -> {
+                        attrName := utf(pool, r.u2())
+                        size := r.u4()
+                        payload := r.take(size)
+                        if attrName = ? -> r.fail('invalid field attribute name')
+                        if attrName = 'ConstantValue' {
+                            true -> {
+                                if hasConstant? | size != 2 | payload = ? ->
+                                    r.fail('invalid or duplicate ConstantValue attribute')
+                                hasConstant? <- true
+                                if payload != ? & size = 2 {
+                                    true -> {
+                                        index := (codepoint(payload.(0)) & 255) * 256 +
+                                            (codepoint(payload.(1)) & 255)
+                                        constant <- literal(pool, index)
+                                        if constant = ? & (desc.(0) = 'I' | desc.(0) = 'Z' |
+                                            desc.(0) = 'B' | desc.(0) = 'C' | desc.(0) = 'S' |
+                                            desc = 'J' | desc = 'F' | desc = 'D' |
+                                            desc = 'Ljava/lang/String;') ->
+                                            r.fail('invalid or unsupported ConstantValue for ' + fname)
+                                        if (desc = 'I' | desc = 'Z' | desc = 'B' |
+                                            desc = 'C' | desc = 'S') &
+                                            type(constant) != :int ->
+                                            r.fail('ConstantValue for integer field has wrong pool type')
+                                        if desc = 'Ljava/lang/String;' &
+                                            type(constant) != :string ->
+                                            r.fail('ConstantValue for String has wrong pool type')
+                                        if desc = 'J' & (type(constant) != :object |
+                                            constant.jvmLong != true) ->
+                                            r.fail('ConstantValue for long must reference a JVM long')
+                                        if desc = 'F' & (type(constant) != :object |
+                                            constant.jvmFloat != true) ->
+                                            r.fail('ConstantValue for float must reference a JVM float')
+                                        if desc = 'D' & (type(constant) != :object |
+                                            constant.jvmDouble != true) ->
+                                            r.fail('ConstantValue for double must reference a JVM double')
+                                    }
+                                }
+                            }
+                        }
+                        readFieldAttrs(j + 1)
+                    }
+                }
+                readFieldAttrs(0)
+				fields << {name: fname, desc: desc, flags: access, constant: constant}
+				readFields(i + 1)
+		}
+	}
+	readFields(0)
+	methodCount := r.u2()
+	if methodCount > MAX_MEMBERS -> r.fail('too many methods')
+	methods := []
+	fn readMethods(i) if i < methodCount & r.problem() = ? {
+		true -> {
+			access := r.u2()
+			mname := utf(pool, r.u2())
+			desc := utf(pool, r.u2())
+			if mname = ? | desc = ? -> r.fail('invalid method name or descriptor')
+			attributes := r.u2()
+			if attributes > MAX_MEMBERS -> r.fail('too many method attributes')
+            m := {name: mname, desc: desc, flags: access, code: ?,
+                locals: 0, stack: 0, catches: 0, handlers: []}
+			fn readAttrs(j) if j < attributes & r.problem() = ? {
+				true -> {
+						attrName := utf(pool, r.u2())
+						length := r.u4()
+                        payloadOffset := r.pos()
+						payload := r.take(length)
+						if attrName = ? -> r.fail('invalid method attribute name')
+					if attrName = 'Code' & payload != ? {
+						true -> {
+							if m.code != ? -> r.fail('duplicate Code attribute')
+							code := _codeAttribute(payload, pool, major)
+							if code.type = :error {
+								true -> r.fail(code.message)
+								_ -> {
+									m.code := code.code
+                                    m.codeOffset := payloadOffset + 8
+									m.locals := code.locals
+									m.stack := code.stack
+                                    m.catches := code.catches
+                                    m.handlers := code.handlers
+                                    m.framePcs := code.framePcs
+                                    m.newPcs := code.newPcs
+								}
+							}
+						}
+					}
+					readAttrs(j + 1)
+				}
+			}
+			readAttrs(0)
+			methods << m
+			readMethods(i + 1)
+		}
+	}
+	readMethods(0)
+	_attrs(r, pool)
+	if r.remaining() != 0 -> r.fail('trailing bytes after class file')
+	if r.problem() != ? {
+		true -> {type: :error, message: r.problem()}
+		_ -> {type: :ok, value: {
+			name: name
+			super: superName
+			major: major
+			minor: minor
+			flags: flags
+			pool: pool
+            poolEnd: poolEnd
+			fields: fields
+			methods: methods
+			interfaces: interfaces
+		}}
+	}
+}
+
+fn method(cls, name, desc) {
+	fn scan(i) if i >= len(cls.methods) {
+		true -> ?
+		_ -> {
+			m := cls.methods.(i)
+			if m.name = name & m.desc = desc { true -> m, _ -> scan(i + 1) }
+		}
+	}
+	scan(0)
+}

@@ -1,0 +1,160 @@
+// Exact opaque ARGB blit for Magnolia's native GUI windows. X11 groups
+// horizontal runs by color into XFillRectangles batches; Win32 GDI uses
+// exact FillRect calls (a bounded fallback pending DIB testing). UI fillRect
+// intentionally expands rectangles and must NOT be used for JVM rasters.
+std := import('std')
+linux := import('linux')
+windows := import('windows')
+writes := import('writes')
+guiDraw := import('gui-draw')
+pixels := import('gui-pixels')
+fn _error(text) std.error(text)
+fn _colorRef(argb) {
+    r := (argb >> 16) & 255
+    g := (argb >> 8) & 255
+    b := argb & 255
+    r | (g << 8) | (b << 16)
+}
+fn _xPixel(argb) argb & 16777215
+// XRectangle is 8 bytes: signed x/y and unsigned width/height (uint16).
+// The validator bounds x/y/width/height to <=4096, so every word fits.
+fn rectangleWords(x, y, run) {
+    left := x + run.x
+    top := y + run.y
+    {xy: left | (top << 16), dimensions: run.width | (1 << 16)}
+}
+fn _byColor(runs) {
+    buckets := {}
+    order := []
+    runs |> std.each(fn(run) {
+        key := string(run.argb)
+        if buckets.(key) = ? {
+            true -> {
+                buckets.(key) <- []
+                order << key
+            }
+        }
+        buckets.(key) << run
+    })
+    {buckets: buckets, order: order}
+}
+fn _linux(window, x, y, runs) {
+    gc := window._gcCache |> std.default(0)
+    if gc <= 0 {
+        true -> {
+            created := linux.createGC(window.display, window.window, 0, 0)
+            if linux.callOk?(created) & created.r1 > 0 {
+                true -> {
+                    gc <- created.r1
+                    window._gcCache <- gc
+                }
+            }
+        }
+    }
+    if gc <= 0 {
+        true -> _error('X11 pixel blit needs a live GUI graphics context')
+        _ -> {
+            problem := ?
+            grouped := _byColor(runs)
+            grouped.order |> std.each(fn(key) if problem = ? {
+                true -> {
+                    group := grouped.buckets.(key)
+                    rectangles := bits(std.range(len(group) * 8) |>
+                        std.map(fn(_) 0))
+                    group |> std.each(fn(run, i) {
+                        words := rectangleWords(x, y, run)
+                        writes.writeU32(addr(rectangles) + i * 8, words.xy)
+                        writes.writeU32(addr(rectangles) + i * 8 + 4,
+                            words.dimensions)
+                    })
+                    fg := linux.setForeground(window.display, gc,
+                        _xPixel(int(key)))
+                    painted := linux.x11('XFillRectangles', window.display,
+                        window.window, gc, addr(rectangles), len(group))
+                    if !linux.callOk?(fg) | !linux.callOk?(painted) ->
+                        problem <- 'X11 exact-rectangle batch failed'
+                }
+            })
+            if problem != ? {
+                true -> _error(problem)
+                _ -> {
+                    linux.flush(window.display)
+                    {type: :ok, runs: len(runs), batches: len(grouped.order)}
+                }
+            }
+        }
+    }
+}
+
+fn _windows(window, x, y, runs) {
+    hdc := window.frameHdc |> std.default(0)
+    acquired := false
+    if hdc <= 0 {
+        true -> {
+            handle := windows.getDC(window.hwnd)
+            if windows.callOk?(handle) & handle.r1 > 0 {
+                true -> {
+                    hdc <- handle.r1
+                    acquired <- true
+                }
+            }
+        }
+    }
+    if hdc <= 0 {
+        true -> _error('GDI pixel blit needs a live GUI device context')
+        _ -> {
+            rect := bits([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
+            problem := ?
+            runs |> std.each(fn(run) if problem = ? {
+                true -> {
+                    brush := guiDraw._getCachedBrush(window,
+                        _colorRef(run.argb))
+                    if brush <= 0 {
+                        true -> problem <- 'GDI pixel brush unavailable'
+                        _ -> {
+                            left := x + run.x
+                            top := y + run.y
+                            writes.writeU32(addr(rect), left)
+                            writes.writeU32(addr(rect) + 4, top)
+                            writes.writeU32(addr(rect) + 8, left + run.width)
+                            writes.writeU32(addr(rect) + 12, top + 1)
+                            drawn := windows.user32('FillRect', hdc,
+                                addr(rect), brush)
+                            if !windows.callOk?(drawn) | drawn.r1 = 0 ->
+                                problem <- 'GDI pixel rectangle failed'
+                        }
+                    }
+                }
+            })
+            if acquired -> windows.releaseDC(window.hwnd, hdc)
+            if problem != ? {
+                true -> _error(problem)
+                _ -> {type: :ok, runs: len(runs)}
+            }
+        }
+    }
+}
+
+fn draw(window, x, y, width, height, raster) {
+    if type(window) != :object | window.type != :ok |
+        (window.backend != :linux & window.backend != :windows) {
+        true -> _error('exact native ARGB blit needs a Magnolia GUI window')
+        _ -> {
+            checked := pixels.check(x, y, width, height, raster,
+                window.width, window.height)
+            if checked.type = :error {
+                true -> checked
+                _ -> {
+                    planned := pixels.runs(width, height, raster)
+                    if planned.type = :error {
+                        true -> planned
+                        _ -> if window.backend = :linux {
+                            true -> _linux(window, x, y, planned.value)
+                            _ -> _windows(window, x, y, planned.value)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

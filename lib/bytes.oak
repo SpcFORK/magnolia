@@ -1,0 +1,220 @@
+// libbytes — exact byte-order primitives shared by every language library
+// that encodes or decodes multi-byte integers.
+//
+// This module was abstracted from the binary encoders/decoders of the
+// audio codecs (WAV/OGG/AIFF/AU), the MessagePack codec, the style-bake
+// binary format and the JVM class-file machinery. The local copies each
+// language lib previously carried are now re-stubbed to the primitives
+// below, so encoder and decoder semantics are defined in one place and
+// cannot drift between libs.
+//
+// All encoders return **lists of byte integers** (0 .. 255) and all
+// decoders read from **binary strings** via `codepoint` — the same
+// representation the callers already build and consume. No JS Number
+// precision is lost: 16/32-bit words stay in integral limbs.
+
+std := import('std')
+fmt := import('fmt')
+
+fn _byteStr(blist) blist |> std.map(fn(b) char(b % 256)) |> std.join('')
+
+fn _u8(n) [n % 256]
+
+fn _u16LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256]
+}
+
+fn _u32LE(n) {
+	n := int(n)
+	[n % 256, int(n / 256) % 256, int(n / 65536) % 256, int(n / 16777216) % 256]
+}
+
+fn _i16LE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 65536, _ -> n}
+	_u16LE(u)
+}
+
+fn _i32LE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 4294967296, _ -> n}
+	_u32LE(u)
+}
+
+fn _u16BE(n) {
+	n := int(n)
+	[int(n / 256) % 256, n % 256]
+}
+
+fn _u32BE(n) {
+	n := int(n)
+	[int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256]
+}
+
+fn _i16BE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 65536, _ -> n}
+	_u16BE(u)
+}
+
+fn _i32BE(n) {
+	n := int(n)
+	u := if n < 0 {true -> n + 4294967296, _ -> n}
+	_u32BE(u)
+}
+
+// ---- decoders -----------------------------------------------------------
+
+fn _readU8(s, off) codepoint(s.(off))
+
+fn _readI8(s, off) {
+	u := _readU8(s, off)
+	if u > 127 {true -> u - 256, _ -> u}
+}
+
+fn _readU16LE(s, off) {
+	codepoint(s.(off)) + codepoint(s.(off + 1)) * 256
+}
+
+fn _readI16LE(s, off) {
+	u := _readU16LE(s, off)
+	if u > 32767 {true -> u - 65536, _ -> u}
+}
+
+fn _readU32LE(s, off) {
+	codepoint(s.(off)) +
+		codepoint(s.(off + 1)) * 256 +
+		codepoint(s.(off + 2)) * 65536 +
+		codepoint(s.(off + 3)) * 16777216
+}
+
+fn _readI32LE(s, off) {
+	u := _readU32LE(s, off)
+	if u > 2147483647 {true -> u - 4294967296, _ -> u}
+}
+
+fn _readU16BE(s, off) {
+	codepoint(s.(off)) * 256 + codepoint(s.(off + 1))
+}
+
+fn _readI16BE(s, off) {
+	u := _readU16BE(s, off)
+	if u > 32767 {true -> u - 65536, _ -> u}
+}
+
+fn _readU32BE(s, off) {
+	codepoint(s.(off)) * 16777216 +
+		codepoint(s.(off + 1)) * 65536 +
+		codepoint(s.(off + 2)) * 256 +
+		codepoint(s.(off + 3))
+}
+
+fn _readI32BE(s, off) {
+	u := _readU32BE(s, off)
+	if u > 2147483647 {true -> u - 4294967296, _ -> u}
+}
+
+// ---- signed conversions ---------------------------------------------------
+// Reinterpret an unsigned integer of a given width as a two's-complement
+// signed integer. Abstracted from the JVM class-file machinery and the
+// native GUI input layer, where the same three helpers were duplicated.
+
+fn signed8(n) if n >= 128 { true -> n - 256, _ -> n }
+
+fn signed16(n) if n >= 32768 { true -> n - 65536, _ -> n }
+
+fn signed32(n) if n >= 2147483648 { true -> n - 4294967296, _ -> n }
+
+// ---- binary Reader --------------------------------------------------------
+// A bounded cursor over a binary string. Reads integers of every common
+// width in big-endian order (class files, manifests and most binary
+// formats are big-endian), tracks position and remaining bytes, and
+// records a single problem string that every subsequent read consults.
+// Abstracted from the JVM class-file parser; the local Reader there and
+// in other binary-format parsers now re-stubs to this shared type.
+
+fn Reader(raw) {
+	cursor := 0
+	problem := ?
+
+	fn fail(message) {
+		if problem = ? -> problem <- format('at byte {{0}}: {{1}}', cursor, message)
+		?
+	}
+	fn take(n) if problem != ? {
+		true -> ?
+		_ -> if n < 0 | cursor + n > len(raw) {
+			true -> fail('truncated binary (need ' + string(n) + ' bytes)')
+			_ -> {
+				chunk := std.slice(raw, cursor, cursor + n)
+				cursor <- cursor + n
+				chunk
+			}
+		}
+	}
+	fn u1() if chunk := take(1) {
+		? -> 0
+		_ -> codepoint(chunk.(0)) & 255
+	}
+	fn u2() {
+		a := u1()
+		b := u1()
+		(a * 256) + b
+	}
+	fn u4() {
+		a := u2()
+		b := u2()
+		(a * 65536) + b
+	}
+
+	{
+		take: take
+		skip: fn(n) {
+			take(n)
+			?
+		}
+		u1: u1
+		u2: u2
+		u4: u4
+		pos: fn() cursor
+		remaining: fn() len(raw) - cursor
+		problem: fn() problem
+		fail: fail
+	}
+}
+
+// ---- shared positional readers --------------------------------------------
+// These primitives read integers at a given offset from a binary string.
+// Abstracted from the JVM/ZIP, AVM1/SWF, MIDP and recompile parsers, which
+// each carried local copies of _at/_u16/_u2/_u4. The bounds-checked
+// variants return ? on overrun; the unchecked variants assume valid input.
+
+fn at(raw, pos) codepoint(raw.(pos)) & 255
+
+fn atChecked(raw, pos) if pos >= 0 & pos < len(raw) {
+	true -> codepoint(raw.(pos)) & 255
+	_ -> ?
+}
+
+fn u16(raw, pos) at(raw, pos) + (at(raw, pos + 1) << 8)
+
+fn u16Checked(raw, pos) if pos >= 0 & pos + 2 <= len(raw) {
+	true -> u16(raw, pos)
+	_ -> ?
+}
+
+fn u32(raw, pos) u16(raw, pos) + (u16(raw, pos + 2) << 16)
+
+fn u32Checked(raw, pos) if pos >= 0 & pos + 4 <= len(raw) {
+	true -> u32(raw, pos)
+	_ -> ?
+}
+
+// ---- shared little-endian writers ----------------------------------------
+// Abstracted from the JAR writer's local _le2/_le4. Return a 2- or 4-byte
+// string (for ZIP local file headers and similar binary containers).
+
+fn le2(n) char(n & 255) + char((n >> 8) & 255)
+
+fn le4(n) le2(n & 65535) + le2((n >> 16) & 65535)

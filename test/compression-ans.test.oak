@@ -1,0 +1,134 @@
+// Tests for compression-ans: round-trip correctness, error handling, and the
+// invariant checks that caught real bugs during development.
+
+ans := import('compression-ans')
+std := import('std')
+
+fn roundTrip?(s, order) {
+	e := ans.compress(s, order)
+	if e = :error -> false
+	d := ans.decompress(e)
+	if d = :error -> false
+	d = s
+}
+
+fn repeat(text, n) {
+	acc := ''
+	fn sub(i) if i >= n {
+		true -> acc
+		_ -> {
+			acc <- acc + text
+			sub(i + 1)
+		}
+	}
+	sub(0)
+}
+
+fn run(t) {
+	// --- empty and trivial inputs ---
+	{
+		'compress empty' |> t.assert(ans.compress('') != :error)
+		'restore empty' |> t.eq(ans.decompress(ans.compress('')), '')
+		'restore one byte' |> t.eq(ans.decompress(ans.compress('a')), 'a')
+		'restore abc' |> t.eq(ans.decompress(ans.compress('abc')), 'abc')
+		'compressed? detects frames' |> t.assert(ans.compressed?(ans.compress('hi')))
+		'compressed? rejects plain text' |> t.assert(!ans.compressed?('hello world'))
+	}
+
+	// --- every model order is independently correct ---
+	{
+		source := 'the quick brown fox jumps over the lazy dog'
+		'restore order 0' |> t.assert(roundTrip?(source, 0))
+		'restore order 1' |> t.assert(roundTrip?(source, 1))
+		'restore order 2' |> t.assert(roundTrip?(source, 2))
+	}
+
+	// --- escape valve: bytes with no model support still round-trip ---
+	{
+		weird := char(7) + char(1) + char(200) + char(255) + char(3)
+		'restore control bytes' |> t.eq(ans.decompress(ans.compress(weird)), weird)
+		latin := 'caf' + char(233) + ' na' + char(239) + 've'
+		'restore high bytes' |> t.eq(ans.decompress(ans.compress(latin)), latin)
+	}
+
+	// --- representative English: beats its own order-0 entropy ---
+	{
+		source := 'We the People of the United States, in Order to form a more perfect Union, establish Justice, insure domestic Tranquility, provide for the common defence, promote the general Welfare'
+		frame := ans.compress(source)
+		'english round-trips' |> t.eq(ans.decompress(frame), source)
+		'english frame is smaller than input' |> t.assert(len(frame) < len(source))
+		// A single 182-char sentence spends 31 bytes on the frame header and
+		// gives the adaptive model little to learn from, so the coded payload
+		// runs around 4.7 bits/char and the frame as a whole just under 6.1.
+		// The 1-bit/char figures in the docs are for multi-KB corpora where
+		// that fixed cost amortises away.
+		'english frame beats raw ASCII' |> t.assert(len(frame) * 8 / len(source) < 7.0)
+	}
+
+	// --- statistics side channel ---
+	{
+		st := ans.stats('ababababab')
+		'stats reports byte count' |> t.eq(st.bytes, 10)
+		'stats reports one bit per char for abab' |> t.assert(int(st.shannonBitsPerChar) = 1)
+		'stats frame is positive' |> t.assert(st.frameBytes > 0)
+	}
+
+	// --- corrupt inputs are rejected, never silently decoded ---
+	{
+		'bad magic rejected' |> t.eq(ans.decompress('NOPE:0000'), :error)
+		'plain text rejected' |> t.eq(ans.decompress('hello'), :error)
+		'truncated frame rejected' |> t.eq(ans.decompress(std.slice(ans.compress('hello world'), 0, 20)), :error)
+		'tampered body rejected' |> t.eq(
+			ans.decompress(ans.compress('hello world') + 'X'),
+			:error
+		)
+		'bad hex field rejected' |> t.eq(ans.decompress('ANS1:zz'), :error)
+	}
+
+	// --- table invariant: slot ownership sums exactly to L ---
+	{
+		table := ans._makeTable({97: 10, 98: 5, 99: 1})
+		live := table.freqs |> std.reduce(0, fn(a, b) a + b)
+		'explicit tables account for every non-escape slot' |> t.eq(live + table.esc, table.L)
+		'every live symbol owns at least one slot' |> t.assert(
+			table.freqs |> std.every(fn(f) f >= 1)
+		)
+		'cumulative bounds are ascending' |> t.assert(
+			std.range(1, len(table.cum)) |> std.every(fn(i) table.cum.(i) >= table.cum.(i - 1))
+		)
+	}
+
+	_exhaustive(t)
+
+	// --- larger, strongly ordered corpus ---
+	{
+		doc := repeat('Information theory ties compressibility to predictability. ', 8)
+		frame := ans.compress(doc)
+		'repetitive corpus round-trips' |> t.eq(ans.decompress(frame), doc)
+		'repetitive corpus under 2.5 bits per char' |> t.assert(len(frame) * 8 / len(doc) < 2.5)
+	}
+}
+
+// Exhaustive round-trip over a small alphabet (the property that matters most:
+// every byte string comes back unchanged). This style of check is what caught
+// the renormalisation-threshold bug during development.
+fn _exhaustive(t) {
+	fails := []
+	fn walk(prefix, depth) if depth = 0 {
+		true -> {
+			e := ans.compress(prefix, 0)
+			bad := [e = :error]
+			bad <- bad << (if e = :error { true -> true, _ -> ans.decompress(e) != prefix })
+			if bad.0 | bad.1 {
+				true -> fails <- fails << prefix
+				_ -> ?
+			}
+		}
+		_ -> {
+			alpha := ['a', 'b', 'c', ' ']
+			alpha |> std.each(fn(c) walk(prefix + c, depth - 1))
+		}
+	}
+	walk('', 4)
+	'exhaustive 4-char round trip over 4 symbols' |> t.eq(len(fails), 0)
+}

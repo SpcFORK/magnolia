@@ -694,6 +694,10 @@ type engine struct {
 	// for deduplicating imports
 	importMap  map[string]scope
 	importLock sync.RWMutex
+	// In an explicitly packed source-entry executable, imports resolve only
+	// against these immutable VFS source bytes, never the host filesystem.
+	packedRoot  string
+	packedFiles map[string][]byte
 	// file fd -> Go's File map
 	fileMap map[uintptr]*os.File
 	fdLock  sync.Mutex

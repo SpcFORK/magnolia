@@ -7,11 +7,14 @@
 	last: last
 	filter: filter
 	reduce: reduce
+	each: each
 } := import('std')
 {
 	join: strJoin
 	split: strSplit
 	trimEnd: trimEnd
+	contains?: contains?
+	endsWith?: strEndsWith?
 } := import('str')
 
 // abs? reports whether a path is absolute
@@ -139,5 +142,30 @@ fn split(path) if path |> trimEnd('/') {
 fn resolve(path, base) if abs?(path) {
 	true -> clean(path)
 	_ -> join(base |> default(env().PWD), path)
+}
+
+// safeEntryName? validates an archive entry name (ZIP/JAR path) against
+// path-traversal and ambiguous-separator hazards. Abstracted from the
+// JVM class-file, JAR-writer and ZIP-extractor validators, which each
+// carried local copies. Rejects: empty/oversized names, leading '/',
+// backslashes, NUL bytes, interior empty segments, '.'/'..' segments,
+// and drive-letter colons. Directory entries ending in '/' are allowed.
+fn safeEntryName?(name) {
+	if type(name) != :string | name = '' | len(name) > 1024 |
+		name.(0) = '/' | contains?(name, char(92)) |
+		contains?(name, char(0)) {
+		true -> false
+		_ -> {
+			parts := split(name, '/')
+			directory? := strEndsWith?(name, '/')
+			bad? := false
+			parts |> default([]) |> each(fn(part, i) {
+				if part = '.' | part = '..' | contains?(part, ':') |
+					(part = '' & !(directory? & i = len(parts) - 1)) ->
+					bad? <- true
+			})
+			!bad?
+		}
+	}
 }
 

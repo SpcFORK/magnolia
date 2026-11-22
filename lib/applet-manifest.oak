@@ -1,0 +1,360 @@
+// Bounded local-only HTML <applet> and JNLP launch-descriptor reader.
+// This is intentionally not a general HTML/XML parser, URL fetcher or JNLP
+// security-policy interpreter. Unsupported remote references fail closed.
+
+std := import('std')
+str := import('str')
+path := import('path')
+fs := import('fs')
+zip := import('./applet-zip.oak')
+
+fn _error(message) std.error(message)
+fn _space?(c) c = ' ' | c = '\n' | c = '\r' | c = '\t' | c = '\f'
+fn _decode(value) str.htmlDecode(value)
+
+fn attributes(tag, start) {
+    attrs := {}
+    pos := start
+    fn skip(i) if i >= len(tag) | !_space?(tag.(i)) {true -> i, _ -> skip(i + 1)}
+    fn word(i) if i >= len(tag) | _space?(tag.(i)) | tag.(i) = '=' |
+        tag.(i) = '>' | tag.(i) = '/' {true -> i, _ -> word(i + 1)}
+    fn plain(i) if i >= len(tag) | _space?(tag.(i)) | tag.(i) = '>' {
+        true -> i, _ -> plain(i + 1)
+    }
+    fn quoted(i, quote) if i >= len(tag) | tag.(i) = quote {true -> i, _ -> quoted(i + 1, quote)}
+    fn next(i) {
+        i := skip(i)
+        if i >= len(tag) | tag.(i) = '>' | tag.(i) = '/' {
+            true -> attrs
+            _ -> {
+                end := word(i)
+                if end = i {
+                    true -> next(i + 1)
+                    _ -> {
+                        name := str.lower(std.slice(tag, i, end))
+                        end <- skip(end)
+                        if end < len(tag) & tag.(end) = '=' {
+                            true -> {
+                                end <- skip(end + 1)
+                                quote := tag.(end)
+                                if quote = '"' | quote = char(39) {
+                                    true -> {
+                                        finish := quoted(end + 1, quote)
+                                        attrs.(name) <- _decode(std.slice(tag, end + 1, finish))
+                                        next(finish + 1)
+                                    }
+                                    _ -> {
+                                        finish := plain(end)
+                                        attrs.(name) <- _decode(std.slice(tag, end, finish))
+                                        next(finish)
+                                    }
+                                }
+                            }
+                            _ -> {attrs.(name) <- '', next(end)}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    next(start)
+}
+
+// The scanner respects quoted > characters in tag attributes, but scripts,
+// comments, entities beyond the five basic XML forms and namespaces are not
+// implemented. It never executes content in a launch descriptor.
+fn _tag(text, from, name) {
+    lower := str.lower(text)
+    start := str.indexOf(std.slice(lower, from), '<' + name)
+    if start < 0 {
+        true -> ?
+        _ -> {
+            begin := from + start
+            after := begin + len(name) + 1
+            if after < len(text) & !(_space?(text.(after)) | text.(after) = '>' | text.(after) = '/') {
+                true -> _tag(text, after, name)
+                _ -> {
+                    fn endTag(i, quote) if i >= len(text) {
+                        true -> ?
+                        _ -> if quote != ? {
+                            true -> if text.(i) = quote {true -> endTag(i + 1, ?), _ -> endTag(i + 1, quote)}
+                            _ -> if text.(i) = '"' | text.(i) = char(39) {
+                                true -> endTag(i + 1, text.(i))
+                                _ -> if text.(i) = '>' {true -> i, _ -> endTag(i + 1, ?)}
+                            }
+                        }
+                    }
+                    last := endTag(after, ?)
+                    if last = ? {
+                        true -> _error('unterminated <' + name + '> tag')
+                        _ -> {type: :ok, begin: begin, end: last + 1,
+                            attrs: attributes(std.slice(text, begin, last + 1), len(name) + 1)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn _safeLocal(document, reference) {
+    if type(reference) != :string | reference = '' |
+        str.startsWith?(reference, '/') | str.startsWith?(reference, '\\') |
+        str.contains?(reference, '\\') | str.contains?(reference, ':') |
+        str.contains?(reference, '?') | str.contains?(reference, '#') |
+        str.contains?(reference, char(0)) |
+        (str.split(reference, '/') |> std.some(fn(part) part = '..' | part = '.')) {
+        true -> _error('only safe local-relative applet resources are supported: ' + string(reference))
+        _ -> {
+            base := path.dir(path.resolve(document))
+            resolved := path.resolve(reference, base)
+            if !str.startsWith?(resolved, base + '/') {
+                true -> _error('applet resource escapes launch descriptor directory')
+                _ -> {type: :ok, value: resolved}
+            }
+        }
+    }
+}
+fn _mainClass(name) if type(name) = :string & name != '' {
+    true -> {
+        stem := if str.endsWith?(name, '.class') {
+            true -> std.slice(name, 0, len(name) - 6)
+            _ -> name
+        }
+        str.replace(stem, '.', '/')
+    }
+    _ -> ?
+}
+fn _parameters(text, from, until) {
+    found := {}
+    problem := ?
+    fn walk(i, count) if i >= until | count >= 1024 | problem != ? {
+        true -> if count >= 1024 {true -> _error('too many parameters in descriptor'),
+            _ -> if problem != ? {true -> _error(problem), _ -> {type: :ok, value: found}}}
+        _ -> {
+            tag := _tag(text, i, 'param')
+            if tag = ? | tag.begin >= until {
+                true -> {type: :ok, value: found}
+                _ -> if tag.type = :error {
+                    true -> tag
+                    _ -> {
+                        name := tag.attrs.name
+                        value := tag.attrs.value
+                        if name = ? | value = ? {
+                            true -> problem <- 'param tag requires name and value'
+                            _ -> found.(name) <- value
+                        }
+                        walk(tag.end, count + 1)
+                    }
+                }
+            }
+        }
+    }
+    walk(from, 0)
+}
+
+fn _arguments(text, from, until) {
+    args := []
+    problem := ?
+    fn walk(i) if i >= until | problem != ? {
+        true -> if problem = ? {true -> {type: :ok, value: args}, _ -> _error(problem)}
+        _ -> {
+            tag := _tag(text, i, 'argument')
+            if tag = ? | tag.begin >= until {
+                true -> {type: :ok, value: args}
+                _ -> if tag.type = :error {
+                    true -> tag
+                    _ -> {
+                        rest := std.slice(str.lower(text), tag.end, until)
+                        close := str.indexOf(rest, '</argument>')
+                        if close < 0 {
+                            true -> _error('unterminated JNLP argument')
+                            _ -> {
+                                args << _decode(str.trim(std.slice(text, tag.end, tag.end + close)))
+                                if len(args) > 1024 {
+                                    true -> _error('more than 1024 JNLP arguments')
+                                    _ -> walk(tag.end + close + len('</argument>'))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk(from)
+}
+
+fn _loadResources(file, refs) {
+    classes := []
+    originals := []
+    problem := ?
+    if len(refs) = 0 | len(refs) > 32 -> problem <- 'expected 1..32 local class/JAR resources'
+    refs |> std.each(fn(ref) if problem = ? {
+        true -> {
+            local := _safeLocal(file, ref)
+            if local.type = :error {
+                true -> problem <- local.message
+                _ -> {
+                    raw := fs.readFile(local.value)
+                    if raw = ? {
+                        true -> problem <- 'cannot read local applet resource ' + local.value
+                        _ -> if str.endsWith?(str.lower(ref), '.jar') |
+                            str.endsWith?(str.lower(ref), '.zip') {
+                            true -> {
+                                extracted := zip.entries(raw)
+                                if extracted.type = :error {
+                                    true -> problem <- extracted.message
+                                    _ -> {
+                                        classes <- std.append(classes, extracted.classes)
+                                        originals << raw
+                                    }
+                                }
+                            }
+                            _ -> if str.endsWith?(str.lower(ref), '.class') {
+                                true -> classes << raw
+                                _ -> problem <- 'unsupported applet resource type ' + ref
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if len(classes) > 256 -> problem <- 'more than 256 classes across resources'
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {type: :ok, classes: classes,
+            jar: if len(originals) = 1 & len(refs) = 1 {true -> originals.(0), _ -> ?}}
+    }
+}
+
+fn html(file, text) {
+    tag := _tag(text, 0, 'applet')
+    problem := ?
+    if tag = ? -> problem <- 'HTML has no <applet> tag; object/embed/JNLP markup is not supported here'
+    if tag != ? & tag.type = :error -> problem <- tag.message
+    if problem = ? {
+        true -> {
+            code := tag.attrs.code
+            entry := _mainClass(code)
+            if entry = ? -> problem <- 'applet tag requires a code class'
+            if problem = ? {
+                true -> {
+                    base := tag.attrs.codebase |> std.default('')
+                    if base != '' & !str.endsWith?(base, '/') -> base <- base + '/'
+                    if base != '' & _safeLocal(file, base).type = :error ->
+                        problem <- 'remote or unsafe codebase is not supported'
+                    if problem = ? {
+                        true -> {
+                            archives := tag.attrs.archive
+                            refs := if archives != ? {
+                                true -> str.split(archives, ',') |> std.map(fn(ref) base + str.trim(ref))
+                                _ -> [base + entry + '.class']
+                            }
+                            resources := _loadResources(file, refs)
+                            close := str.indexOf(std.slice(str.lower(text), tag.end), '</applet')
+                            end := if close < 0 {true -> len(text), _ -> tag.end + close}
+                            params := _parameters(text, tag.end, end)
+                            if resources.type = :error | params.type = :error {
+                                true -> if resources.type = :error {true -> resources, _ -> params}
+                                _ -> {type: :ok, classes: resources.classes, entry: entry,
+                                    jar: resources.jar, params: params.value,
+                                    width: int(tag.attrs.width), height: int(tag.attrs.height),
+                                    origin: 'html'}
+                            }
+                        }
+                        _ -> _error(problem)
+                    }
+                }
+                _ -> _error(problem)
+            }
+        }
+        _ -> _error(problem)
+    }
+}
+
+fn jnlp(file, text) {
+    problem := ?
+    if str.contains?(str.lower(text), '<!doctype') |
+        str.contains?(str.lower(text), '<!entity') ->
+        problem <- 'JNLP DTDs/entities are not supported'
+    root := if problem = ? {true -> _tag(text, 0, 'jnlp'), _ -> ?}
+    if problem = ? & root = ? -> problem <- 'missing <jnlp> element'
+    if problem = ? & root.type = :error -> problem <- root.message
+    if problem = ? {
+        true -> {
+            base := root.attrs.codebase |> std.default('')
+            if base != '' & !str.endsWith?(base, '/') -> base <- base + '/'
+            if base != '' & _safeLocal(file, base).type = :error ->
+                problem <- 'remote or unsafe JNLP codebase is not supported'
+            if problem = ? {
+                true -> {
+                    applet := _tag(text, root.end, 'applet-desc')
+                    application := _tag(text, root.end, 'application-desc')
+                    selected := if applet != ? {true -> applet, _ -> application}
+                    if selected = ? -> problem <- 'JNLP has no applet-desc or application-desc'
+                    if problem = ? & selected.type = :error -> problem <- selected.message
+                    if problem = ? {
+                        true -> {
+                            entry := _mainClass(selected.attrs.('main-class'))
+                            if entry = ? -> problem <- 'JNLP description needs main-class'
+                            if problem = ? {
+                                true -> {
+                                    refs := []
+                                    fn collect(i) {
+                                        jar := _tag(text, i, 'jar')
+                                        if jar != ? {
+                                            true -> if jar.type = :error {
+                                                true -> problem <- jar.message
+                                                _ -> {
+                                                    if jar.attrs.href != ? -> refs << base + jar.attrs.href
+                                                    collect(jar.end)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    collect(root.end)
+                                    resources := if problem = ? {
+                                        true -> _loadResources(file, refs)
+                                        _ -> _error(problem)
+                                    }
+                                    close := str.indexOf(std.slice(str.lower(text), selected.end),
+                                        if applet != ? {true -> '</applet-desc', _ -> '</application-desc'})
+                                    end := if close < 0 {true -> len(text), _ -> selected.end + close}
+                                    params := if applet != ? {true -> _parameters(text, selected.end, end),
+                                        _ -> {type: :ok, value: {}}}
+                                    args := if application != ? & applet = ? {
+                                        true -> _arguments(text, selected.end, end)
+                                        _ -> {type: :ok, value: []}
+                                    }
+                                    if resources.type = :error | params.type = :error | args.type = :error {
+                                        true -> if resources.type = :error {
+                                            true -> resources
+                                            _ -> if params.type = :error {true -> params, _ -> args}
+                                        }
+                                        _ -> {type: :ok, classes: resources.classes, entry: entry,
+                                            jar: resources.jar, params: params.value, args: args.value,
+                                            width: int(selected.attrs.width), height: int(selected.attrs.height),
+                                            origin: 'jnlp'}
+                                    }
+                                }
+                                _ -> _error(problem)
+                            }
+                        }
+                        _ -> _error(problem)
+                    }
+                }
+                _ -> _error(problem)
+            }
+        }
+        _ -> _error(problem)
+    }
+}
+
+fn load(file, text) if type(text) = :string & len(text) <= 1048576 {
+    true -> if str.endsWith?(str.lower(file), '.jnlp') {
+        true -> jnlp(file, text)
+        _ -> html(file, text)
+    }
+    _ -> _error('descriptor must be at most 1 MiB')
+}

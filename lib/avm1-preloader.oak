@@ -1,0 +1,444 @@
+// Opt-in AVM1 SWF5 *direct ActionRecord* executor for the uploaded sprite-11
+// preloader's two DoAction bodies. It reads the ORIGINAL binary ActionRecords,
+// not a predecoded JSON listing. All records and branch edges are checked
+// before execution; unsupported types/opcodes/host calls refuse. The only
+// host is a fixed snapshot (_root, bar, loaded/total) plus recorded events.
+// No sprite scheduler, SWF assets, pixels, sound, input, URL, AVM2 or AS3.
+std := import('std')
+bytes := import('bytes')
+
+fn _error(message) std.error('AVM1 preloader: ' + message)
+fn _at(raw, pos) bytes.at(raw, pos)
+fn _u16(raw, pos) bytes.u16(raw, pos)
+fn _u32(raw, pos) _u16(raw, pos) + 65536 * _u16(raw, pos + 2)
+
+fn _z(raw, start, stop) {
+    end := start
+    found? := false
+    bad? := false
+    std.range(stop - start) |> std.each(fn(i) if !found? {
+        true -> {
+            byte := _at(raw, start + i)
+            if byte = 0 {
+                true -> {end <- start + i, found? <- true}
+                _ -> if byte < 32 | byte > 126 -> bad? <- true
+            }
+        }
+    })
+    if !found? | bad? | end - start > 64 {
+        true -> {type: :error,
+            message: 'truncated/non-ASCII/overlong zero-terminated string'}
+        _ -> {type: :ok, value: std.slice(raw, start, end), next: end + 1}
+    }
+}
+
+fn _scan(raw) {
+    pos := 0
+    records := []
+    pool := []
+    problem := ?
+    std.range(64) |> std.each(fn(_) if problem = ? & pos < len(raw) {
+        true -> {
+            start := pos
+            op := _at(raw, pos)
+            pos <- pos + 1
+            record := {offset: start, op: op, next: pos,
+                values: [], target: -1, label: '', number: 0}
+            if op = 0 {
+                true -> if pos != len(raw) {
+                    true -> problem <- 'End must be the last ActionRecord'
+                    _ -> records << record
+                }
+                _ -> if op < 128 {
+                    true -> if op = 6 | op = 12 | op = 13 | op = 18 |
+                        op = 23 | op = 28 | op = 29 | op = 73 |
+                        op = 79 | op = 82 {
+                        true -> records << record
+                        _ -> problem <- 'unsupported short ActionRecord'
+                    }
+                    _ -> if op != 129 & op != 136 & op != 140 &
+                        op != 150 & op != 153 & op != 157 {
+                        true -> problem <- 'unsupported long ActionRecord'
+                        _ -> if len(raw) - pos < 2 {
+                            true -> problem <- 'truncated long ActionRecord header'
+                            _ -> {
+                                n := _u16(raw, pos)
+                                pos <- pos + 2
+                                if n > len(raw) - pos {
+                                    true -> problem <- 'long ActionRecord crosses tag boundary'
+                                    _ -> {
+                                        end := pos + n
+                                        if op = 129 {
+                                            true -> if n != 2 | _u16(raw, pos) != 0 {
+                                                true -> problem <- 'only current-sprite GotoFrame 0 admitted'
+                                                _ -> record.number <- 0
+                                            }
+                                        }
+                                        if op = 140 {
+                                            true -> {
+                                                text := _z(raw, pos, end)
+                                                if text.type != :ok | text.next != end |
+                                                    text.value != 'loaded' {
+                                                    true -> problem <- 'only loaded GotoLabel admitted'
+                                                    _ -> record.label <- text.value
+                                                }
+                                            }
+                                        }
+                                        if op = 136 {
+                                            true -> if len(records) != 0 | n < 2 {
+                                                true -> problem <- 'ConstantPool must be the first record'
+                                                _ -> {
+                                                    count := _u16(raw, pos)
+                                                    q := pos + 2
+                                                    if count < 1 | count > 16 ->
+                                                        problem <- 'ConstantPool count outside 1..16'
+                                                    std.range(if problem = ? {true -> count, _ -> 0}) |>
+                                                        std.each(fn(_) if problem = ? {
+                                                            true -> {
+                                                                text := _z(raw, q, end)
+                                                                if text.type != :ok {
+                                                                    true -> problem <- text.message
+                                                                    _ -> {
+                                                                        pool << text.value
+                                                                        q <- text.next
+                                                                    }
+                                                                }
+                                                            }
+                                                        })
+                                                    if problem = ? & q != end ->
+                                                        problem <- 'ConstantPool has trailing bytes'
+                                                }
+                                            }
+                                        }
+                                        if op = 150 {
+                                            true -> {
+                                                q := pos
+                                                std.range(16) |> std.each(fn(_) if
+                                                    problem = ? & q < end {
+                                                    true -> {
+                                                        kind := _at(raw, q)
+                                                        q <- q + 1
+                                                        if kind = 0 {
+                                                            true -> {
+                                                                text := _z(raw, q, end)
+                                                                if text.type != :ok {
+                                                                    true -> problem <- text.message
+                                                                    _ -> {
+                                                                        record.values << {kind: :string,
+                                                                            value: text.value}
+                                                                        q <- text.next
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if kind = 6 & problem = ? {
+                                                            true -> if end - q < 8 {
+                                                                true -> problem <- 'truncated double Push'
+                                                                _ -> {
+                                                                    // The SWF's only double operands are +0.
+                                                                    // Other IEEE encodings, including -0 and
+                                                                    // NaN, need their own value-model gate.
+                                                                    std.range(8) |> std.each(fn(i) if
+                                                                        _at(raw, q + i) != 0 ->
+                                                                        problem <- 'only positive-zero double Push admitted')
+                                                                    if problem = ? ->
+                                                                        record.values << {kind: :number, value: 0}
+                                                                    q <- q + 8
+                                                                }
+                                                            }
+                                                        }
+                                                        if kind = 7 & problem = ? {
+                                                            true -> if end - q < 4 {
+                                                                true -> problem <- 'truncated int32 Push'
+                                                                _ -> {
+                                                                    value := _u32(raw, q)
+                                                                    if value > 1000000 {
+                                                                        true -> problem <- 'int32 Push outside 0..1000000'
+                                                                        _ -> record.values << {kind: :number,
+                                                                            value: value}
+                                                                    }
+                                                                    q <- q + 4
+                                                                }
+                                                            }
+                                                        }
+                                                        if kind = 8 & problem = ? {
+                                                            true -> if q >= end {
+                                                                true -> problem <- 'truncated constant8 Push'
+                                                                _ -> {
+                                                                    idx := _at(raw, q)
+                                                                    q <- q + 1
+                                                                    if idx >= len(pool) {
+                                                                        true -> problem <- 'constant8 index outside active pool'
+                                                                        _ -> record.values << {kind: :string,
+                                                                            value: pool.(idx)}
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if kind != 0 & kind != 6 & kind != 7 & kind != 8 &
+                                                            problem = ? -> problem <- 'unsupported Push value type'
+                                                    }
+                                                })
+                                                if problem = ? & (q != end |
+                                                    len(record.values) = 0) ->
+                                                    problem <- 'Push payload/value budget differs'
+                                            }
+                                        }
+                                        if op = 153 | op = 157 {
+                                            true -> if n != 2 {
+                                                true -> problem <- 'branch must have signed 16-bit displacement'
+                                                _ -> {
+                                                    delta := _u16(raw, pos)
+                                                    if delta >= 32768 -> delta <- delta - 65536
+                                                    record.target <- end + delta
+                                                }
+                                            }
+                                        }
+                                        pos <- end
+                                        record.next <- end
+                                        if problem = ? -> records << record
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if problem = ? & (pos != len(raw) | len(records) = 0 |
+        records.(len(records) - 1).op != 0) ->
+        problem <- 'missing End or ActionRecord budget exceeded'
+    records |> std.each(fn(rec) if problem = ? &
+        (rec.op = 153 | rec.op = 157) &
+        !(records |> std.some(fn(item) item.offset = rec.target)) ->
+        problem <- 'branch does not land on an ActionRecord boundary')
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {type: :ok, records: records}
+    }
+}
+
+fn run(raw, loaded, total) if type(raw) != :string |
+    len(raw) < 1 | len(raw) > 512 {
+    true -> _error('input outside 1..512-byte direct DoAction cap')
+    _ -> if type(loaded) != :int | type(total) != :int |
+        loaded < 0 | total < 1 | loaded > total | total > 1000000 {
+        true -> _error('host snapshot requires 0 <= loaded <= total <= 1000000')
+        _ -> _execute(raw, loaded, total, false)
+    }
+}
+
+// Separate opt-in for a directly dispatched button action. This does not
+// perform hit testing, enter timeline frames, or render/play sound.
+fn runButton(raw) if type(raw) != :string | len(raw) < 1 | len(raw) > 512 {
+    true -> _error('input outside 1..512-byte direct button ActionRecord cap')
+    _ -> _execute(raw, 0, 1, true)
+}
+
+fn _execute(raw, loaded, total, allowRootPlay?) {
+    parsed := _scan(raw)
+    if parsed.type != :ok {
+        true -> parsed
+        _ -> {
+            records := parsed.records
+            stack := []
+            events := []
+            visited := []
+            pc := 0
+            steps := 0
+            done? := false
+            problem := ?
+            percent := ?
+            xscale := ?
+            fn push(value) if len(stack) >= 16 {
+                true -> problem <- '16-slot stack budget exceeded'
+                _ -> stack << value
+            }
+            fn pop() if len(stack) = 0 {
+                true -> {
+                    problem <- 'stack underflow'
+                    {kind: :bad, value: ?}
+                }
+                _ -> {
+                    value := stack.(len(stack) - 1)
+                    stack <- std.slice(stack, 0, len(stack) - 1)
+                    value
+                }
+            }
+            fn number(value) if value.kind = :number {
+                true -> value.value
+                _ -> {
+                    problem <- 'number operand outside finite profile'
+                    0
+                }
+            }
+            fn text(value) if value.kind = :string {
+                true -> value.value
+                _ -> {
+                    problem <- 'string operand outside finite profile'
+                    ''
+                }
+            }
+            fn goto(target) {
+                index := records |> std.find(fn(item) item.offset = target)
+                if index = ? {
+                    true -> problem <- 'unresolved branch target'
+                    _ -> pc <- index
+                }
+            }
+            std.range(64) |> std.each(fn(_) if problem = ? & !done? {
+                true -> if pc < 0 | pc >= len(records) {
+                    true -> problem <- 'action pointer outside tag'
+                    _ -> {
+                        record := records.(pc)
+                        visited << record.offset
+                        pc <- pc + 1
+                        steps <- steps + 1
+                        if record.op {
+                            0 -> if len(stack) != 0 {
+                                true -> problem <- 'End with nonempty stack'
+                                _ -> done? <- true
+                            }
+                            136 -> ? // ConstantPool already resolved at decode time.
+                            150 -> record.values |> std.each(fn(value) if
+                                problem = ? -> push(value))
+                            28 -> {
+                                name := text(pop())
+                                if problem = ? {
+                                    true -> if name {
+                                        '_root' -> push({kind: :object, value: :root})
+                                        'bar' -> push({kind: :object, value: :bar})
+                                        'PercentLoaded' -> if percent = ? {
+                                            true -> problem <- 'PercentLoaded read before assignment'
+                                            _ -> push({kind: :number, value: percent})
+                                        }
+                                        _ -> problem <- 'unsupported GetVariable host name'
+                                    }
+                                }
+                            }
+                            82 -> {
+                                name := text(pop())
+                                receiver := pop()
+                                argc := number(pop())
+                                if problem = ? {
+                                    true -> if receiver.kind != :object |
+                                        receiver.value != :root | argc != 0 {
+                                        true -> problem <- 'only zero-argument _root methods admitted'
+                                        _ -> if name {
+                                            'stop' -> {
+                                                events << {action: 'call', target: '_root', name: name}
+                                                push({kind: :undefined, value: ?})
+                                            }
+                                            'play' -> if allowRootPlay? {
+                                                true -> {
+                                                    events << {action: 'call', target: '_root', name: name}
+                                                    push({kind: :undefined, value: ?})
+                                                }
+                                                _ -> problem <- 'unsupported _root method'
+                                            }
+                                            'getBytesLoaded' -> {
+                                                events << {action: 'call', target: '_root', name: name}
+                                                push({kind: :number, value: loaded})
+                                            }
+                                            'getBytesTotal' -> {
+                                                events << {action: 'call', target: '_root', name: name}
+                                                push({kind: :number, value: total})
+                                            }
+                                            _ -> problem <- 'unsupported _root method'
+                                        }
+                                    }
+                                }
+                            }
+                            23 -> pop()
+                            13 -> {
+                                divisor := number(pop())
+                                dividend := number(pop())
+                                if problem = ? {
+                                    true -> if divisor = 0 {
+                                        true -> problem <- 'division by zero outside numeric profile'
+                                        _ -> push({kind: :number, value: dividend / divisor})
+                                    }
+                                }
+                            }
+                            12 -> {
+                                a := number(pop())
+                                b := number(pop())
+                                if problem = ? -> push({kind: :number, value: a * b})
+                            }
+                            29 -> {
+                                value := number(pop())
+                                name := text(pop())
+                                if problem = ? {
+                                    true -> if name != 'PercentLoaded' |
+                                        value < 0 | value > 100 {
+                                        true -> problem <- 'only PercentLoaded in 0..100 writable'
+                                        _ -> {
+                                            percent <- value
+                                            events << {action: 'setVariable', name: name, value: value}
+                                        }
+                                    }
+                                }
+                            }
+                            73 -> {
+                                a := number(pop())
+                                b := number(pop())
+                                if problem = ? -> push({kind: :boolean, value: b = a})
+                            }
+                            18 -> {
+                                value := pop()
+                                if problem = ? {
+                                    true -> if value.kind != :boolean {
+                                        true -> problem <- 'Not only admits boolean in this profile'
+                                        _ -> push({kind: :boolean, value: !value.value})
+                                    }
+                                }
+                            }
+                            157 -> {
+                                value := pop()
+                                if problem = ? {
+                                    true -> if value.kind != :boolean {
+                                        true -> problem <- 'If only admits boolean in this profile'
+                                        _ -> if value.value -> goto(record.target)
+                                    }
+                                }
+                            }
+                            153 -> goto(record.target)
+                            79 -> {
+                                value := number(pop())
+                                name := text(pop())
+                                object := pop()
+                                if problem = ? {
+                                    true -> if object.kind != :object |
+                                        object.value != :bar | name != '_xscale' |
+                                        value < 0 | value > 100 {
+                                        true -> problem <- 'only bar._xscale in 0..100 writable'
+                                        _ -> {
+                                            xscale <- value
+                                            events << {action: 'setMember', target: 'bar',
+                                                name: name, value: value}
+                                        }
+                                    }
+                                }
+                            }
+                            140 -> events << {action: 'gotoLabel',
+                                target: 'currentSprite', label: record.label}
+                            129 -> events << {action: 'gotoFrame',
+                                target: 'currentSprite', frameZeroBased: record.number}
+                            6 -> events << {action: 'play', target: 'currentSprite'}
+                            _ -> problem <- 'unsupported ActionRecord at execution'
+                        }
+                    }
+                }
+            })
+            if problem = ? & !done? -> problem <- '64-action execution budget exceeded'
+            if problem != ? {
+                true -> _error(problem)
+                _ -> {type: :ok, actionRecords: len(records), steps: steps,
+                    visitedOffsets: visited, events: events,
+                    percentLoaded: percent, barXScale: xscale,
+                    stackDepth: len(stack)}
+            }
+        }
+    }
+}

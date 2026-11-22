@@ -1,0 +1,54 @@
+// Backend-independent bounded ARGB raster validation and exact horizontal
+// run planning. A native GUI may draw each run with an exact rectangle, while
+// the Web GUI sends the original packed pixels as one image_data command.
+std := import('std')
+fn _error(message) std.error(message)
+fn check(x, y, width, height, pixels, canvasWidth, canvasHeight) {
+    if type(x) != :int | type(y) != :int |
+        type(width) != :int | type(height) != :int |
+        type(canvasWidth) != :int | type(canvasHeight) != :int |
+        width < 1 | height < 1 | width > 4096 | height > 4096 |
+        width * height > 81920 | x < 0 | y < 0 |
+        x + width > canvasWidth | y + height > canvasHeight |
+        type(pixels) != :list | len(pixels) != width * height {
+        true -> _error('invalid bounded GUI ARGB dimensions or viewport')
+        _ -> {
+            bad := pixels |> std.some(fn(pixel) type(pixel) != :int |
+                ((pixel >> 24) & 255) != 255)
+            if bad {
+                true -> _error('GUI raster requires opaque int32 ARGB pixels')
+                _ -> {type: :ok}
+            }
+        }
+    }
+}
+
+// Exact runs: never extend a rectangle beyond its pixel interval. This is
+// deliberately distinct from GUI.fillRect, whose UI-outline convention
+// expands rectangles by one pixel on each side on native backends.
+fn runs(width, height, pixels) {
+    verified := check(0, 0, width, height, pixels, width, height)
+    if verified.type = :error {
+        true -> verified
+        _ -> {
+            rows := []
+            std.range(height) |> std.each(fn(y) {
+                start := 0
+                color := pixels.(y * width)
+                std.range(width) |> std.each(fn(x) {
+                    next := pixels.(y * width + x)
+                    if next != color {
+                        true -> {
+                            rows << {x: start, y: y, width: x - start,
+                                argb: color}
+                            start <- x
+                            color <- next
+                        }
+                    }
+                })
+                rows << {x: start, y: y, width: width - start, argb: color}
+            })
+            {type: :ok, value: rows}
+        }
+    }
+}

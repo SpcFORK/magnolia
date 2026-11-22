@@ -1,0 +1,2039 @@
+<!doctype html>
+<head>
+    <meta charset="utf-8">
+    <title>wasm-vm-runtime.oak | Oak programming language</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/lib.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="overlay">
+            <div class="home">
+                <a href="/">Oak</a>
+            </div>
+            <nav>
+                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
+                <a href="/posts/">blog</a>
+                <a href="/#start">download</a>
+                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
+            </nav>
+        </div>
+    </header>
+    <main aria-role="main">
+        <article class="overlay stdlib">
+            <h1>wasm-vm-runtime.oak</h1>
+            <p class="meta">
+                <a href="/lib/">&larr; Standard library</a>
+                <a href="https://github.com/thesephist/oak/blob/main/lib/wasm-vm-runtime.oak">See on GitHub ↗</a>
+            </p>
+            <pre><code><span class="oak-comment">// wasm-vm-runtime -- WebAssembly Text format VM runtime generator</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Generates a complete, self-contained WAT module that contains a bytecode</span>
+<span class="oak-comment">// interpreter for Oak programs. The module embeds compiled bytecode,</span>
+<span class="oak-comment">// a constant pool, and function templates in linear memory, and implements</span>
+<span class="oak-comment">// a stack-based VM that executes them without requiring an external Oak</span>
+<span class="oak-comment">// interpreter.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Host imports required (minimal I/O only):</span>
+<span class="oak-comment">//   env.print_string(ptr, len)  — write bytes to stdout</span>
+<span class="oak-comment">//   env.exit(code)              — terminate execution</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Memory layout (offsets computed per-program):</span>
+<span class="oak-comment">//   [0x0000 .. VSTACK_END)  Value stack — 8 bytes per entry (type:i32, val:i32)</span>
+<span class="oak-comment">//   [VSTACK_END .. CSTACK_END)  Call/frame stack</span>
+<span class="oak-comment">//   [CSTACK_END .. BYTECODE_END)  Bytecode program</span>
+<span class="oak-comment">//   [BYTECODE_END .. CONSTPOOL_END)  Constant pool</span>
+<span class="oak-comment">//   [CONSTPOOL_END .. FNTABLE_END)  Function template table</span>
+<span class="oak-comment">//   [FNTABLE_END .. )  Heap (bump-allocated, grows upward)</span><span class="oak-newline">
+</span>
+<span class="oak-identifier">std </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">map </span><span class="oak-assign">:= </span><span class="oak-identifier">std</span><span class="oak-dot">.</span><span class="oak-identifier">map</span>
+<span class="oak-identifier">each </span><span class="oak-assign">:= </span><span class="oak-identifier">std</span><span class="oak-dot">.</span><span class="oak-identifier">each</span>
+<span class="oak-identifier">len </span><span class="oak-assign">:= </span><span class="oak-identifier">std</span><span class="oak-dot">.</span><span class="oak-identifier">len</span>
+<span class="oak-identifier">str </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'str'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">join </span><span class="oak-assign">:= </span><span class="oak-identifier">str</span><span class="oak-dot">.</span><span class="oak-identifier">join</span>
+<span class="oak-identifier">fmt </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'fmt'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">format </span><span class="oak-assign">:= </span><span class="oak-identifier">fmt</span><span class="oak-dot">.</span><span class="oak-identifier">format</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Memory region sizes (in bytes)</span>
+<span class="oak-identifier">VSTACK_SIZE  </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">16384   </span><span class="oak-comment">// 16KB = 2048 value slots</span>
+<span class="oak-identifier">CSTACK_SIZE  </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">16384   </span><span class="oak-comment">// 16KB for call frames</span>
+<span class="oak-identifier">PAGE_SIZE    </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">65536   </span><span class="oak-comment">// WASM page = 64KB</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// generateVMWat produces the complete WAT source for the VM module.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Parameters:</span>
+<span class="oak-comment">//   bytecodeWAT   — WAT-escaped bytecode data string</span>
+<span class="oak-comment">//   bytecodeLen   — byte length of bytecode</span>
+<span class="oak-comment">//   constpoolWAT  — WAT-escaped constant pool data string</span>
+<span class="oak-comment">//   constpoolLen  — byte length of constant pool</span>
+<span class="oak-comment">//   fntableWAT    — WAT-escaped function table data string</span>
+<span class="oak-comment">//   fntableLen    — byte length of function table</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">generateVMWat</span><span class="oak-leftParen">(</span><span class="oak-identifier">bytecodeWAT</span><span class="oak-comma">, </span><span class="oak-identifier">bytecodeLen</span><span class="oak-comma">, </span><span class="oak-identifier">constpoolWAT</span><span class="oak-comma">, </span><span class="oak-identifier">constpoolLen</span><span class="oak-comma">, </span><span class="oak-identifier">fntableWAT</span><span class="oak-comma">, </span><span class="oak-identifier">fntableLen</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Compute memory addresses</span><span class="oak-newline">
+	</span><span class="oak-identifier">vstackBase    </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
+	</span><span class="oak-identifier">vstackEnd     </span><span class="oak-assign">:= </span><span class="oak-identifier">vstackBase </span><span class="oak-plus">+ </span><span class="oak-identifier">VSTACK_SIZE</span><span class="oak-newline">
+	</span><span class="oak-identifier">cstackBase    </span><span class="oak-assign">:= </span><span class="oak-identifier">vstackEnd</span><span class="oak-newline">
+	</span><span class="oak-identifier">cstackEnd     </span><span class="oak-assign">:= </span><span class="oak-identifier">cstackBase </span><span class="oak-plus">+ </span><span class="oak-identifier">CSTACK_SIZE</span><span class="oak-newline">
+	</span><span class="oak-identifier">bytecodeBase  </span><span class="oak-assign">:= </span><span class="oak-identifier">cstackEnd</span><span class="oak-newline">
+	</span><span class="oak-identifier">bytecodeEnd   </span><span class="oak-assign">:= </span><span class="oak-identifier">bytecodeBase </span><span class="oak-plus">+ </span><span class="oak-identifier">bytecodeLen</span><span class="oak-newline">
+	</span><span class="oak-identifier">constpoolBase </span><span class="oak-assign">:= </span><span class="oak-identifier">bytecodeEnd</span><span class="oak-newline">
+	</span><span class="oak-identifier">constpoolEnd  </span><span class="oak-assign">:= </span><span class="oak-identifier">constpoolBase </span><span class="oak-plus">+ </span><span class="oak-identifier">constpoolLen</span><span class="oak-newline">
+	</span><span class="oak-identifier">fntableBase   </span><span class="oak-assign">:= </span><span class="oak-identifier">constpoolEnd</span><span class="oak-newline">
+	</span><span class="oak-identifier">fntableEnd    </span><span class="oak-assign">:= </span><span class="oak-identifier">fntableBase </span><span class="oak-plus">+ </span><span class="oak-identifier">fntableLen</span><span class="oak-newline">
+	</span><span class="oak-identifier">heapStart     </span><span class="oak-assign">:= </span><span class="oak-identifier">fntableEnd</span><span class="oak-newline">
+	</span><span class="oak-comment">// Align heap to 16-byte boundary</span><span class="oak-newline">
+	</span><span class="oak-identifier">heapStart </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">heapStart </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">16 </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">heapStart </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">16 </span><span class="oak-minus">- </span><span class="oak-leftParen">(</span><span class="oak-identifier">heapStart </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">heapStart</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">totalBytes  </span><span class="oak-assign">:= </span><span class="oak-identifier">heapStart </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">65536  </span><span class="oak-comment">// 64KB initial heap</span><span class="oak-newline">
+	</span><span class="oak-identifier">memoryPages </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">totalBytes </span><span class="oak-divide">/ </span><span class="oak-identifier">PAGE_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">totalBytes </span><span class="oak-modulus">% </span><span class="oak-identifier">PAGE_SIZE </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">memoryPages </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">memoryPages </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">memoryPages </span><span class="oak-less">&lt; </span><span class="oak-numberLiteral">1 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">memoryPages </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-numberLiteral">1</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Helper to emit i32.const</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-stringLiteral">'i32.const ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Build the WAT module</span><span class="oak-newline">
+	</span><span class="oak-stringLiteral">';; Oak WASM VM — generated by oak build --wasm
+;; Bytecode VM: no external Oak interpreter required
+(module
+
+  ;; ---- Host imports (I/O only) ----
+  (import "env" "print_string" (func $host_print (param i32 i32)))
+  (import "env" "exit" (func $host_exit (param i32)))
+
+  ;; ---- Memory ----
+  (memory (export "memory") ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">memoryPages</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">')
+
+  ;; ---- Data segments ----
+  ;; Bytecode at offset ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">bytecodeBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'
+  (data (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">bytecodeBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">') "' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">bytecodeWAT </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'")
+  ;; Constant pool at offset ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">constpoolBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'
+  (data (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">constpoolBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">') "' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">constpoolWAT </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'")
+  ;; Function table at offset ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">fntableBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'
+  (data (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">fntableBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">') "' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">fntableWAT </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'")
+
+  ;; ---- Globals ----
+  (global $pc  (mut i32) (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">bytecodeBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))   ;; program counter (absolute addr)
+  (global $sp  (mut i32) (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">vstackBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))     ;; value stack pointer
+  (global $csp (mut i32) (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">cstackBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))     ;; call stack pointer
+  (global $hp  (mut i32) (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">heapStart</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))      ;; heap pointer
+
+  ;; Memory layout constants (exported for host inspection)
+  (global $vstack_base   (export "vstack_base")   i32 (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">vstackBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+  (global $cstack_base   (export "cstack_base")   i32 (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">cstackBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+  (global $bytecode_base (export "bytecode_base") i32 (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">bytecodeBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+  (global $constpool_base(export "constpool_base")i32 (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">constpoolBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+  (global $fntable_base  (export "fntable_base")  i32 (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">fntableBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+  (global $heap_start    (export "heap_start")    i32 (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">heapStart</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+
+  ;; ---- Bump allocator ----
+  (func $alloc (param $size i32) (result i32)
+    (local $ptr i32)
+    ;; Align size to 8 bytes
+    (local.set $size (i32.and
+      (i32.add (local.get $size) (i32.const 7))
+      (i32.const -8)))
+    (local.set $ptr (global.get $hp))
+    (global.set $hp (i32.add (global.get $hp) (local.get $size)))
+    ;; Grow memory if needed
+    (if (i32.gt_u (global.get $hp) (i32.mul (memory.size) (i32.const 65536)))
+      (then
+        (drop (memory.grow (i32.const 1)))
+      )
+    )
+    (local.get $ptr)
+  )
+
+  ;; ---- Value stack operations ----
+  ;; Each stack entry is 8 bytes: [type:i32 @ sp+0] [payload:i32 @ sp+4]
+
+  (func $push_val (param $type i32) (param $val i32)
+    (i32.store (global.get $sp) (local.get $type))
+    (i32.store (i32.add (global.get $sp) (i32.const 4)) (local.get $val))
+    (global.set $sp (i32.add (global.get $sp) (i32.const 8)))
+  )
+
+  (func $peek_type (result i32)
+    (i32.load (i32.sub (global.get $sp) (i32.const 8)))
+  )
+
+  (func $peek_val (result i32)
+    (i32.load (i32.sub (global.get $sp) (i32.const 4)))
+  )
+
+  (func $pop_type (result i32)
+    (global.set $sp (i32.sub (global.get $sp) (i32.const 8)))
+    (i32.load (global.get $sp))
+  )
+
+  (func $pop_val (result i32)
+    ;; Must be called immediately after pop_type
+    (i32.load (i32.add (global.get $sp) (i32.const 4)))
+  )
+
+  ;; Pop a full tagged value, returning type in first result
+  ;; We use a global to pass the second value since WASM MVP has single returns
+  (global $tmp_val (mut i32) (i32.const 0))
+
+  (func $pop_tagged (result i32)
+    (local $t i32)
+    (global.set $sp (i32.sub (global.get $sp) (i32.const 8)))
+    (local.set $t (i32.load (global.get $sp)))
+    (global.set $tmp_val (i32.load (i32.add (global.get $sp) (i32.const 4))))
+    (local.get $t)
+  )
+
+  ;; ---- Bytecode fetch helpers ----
+
+  (func $fetch_u8 (result i32)
+    (local $v i32)
+    (local.set $v (i32.load8_u (global.get $pc)))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (local.get $v)
+  )
+
+  (func $fetch_u16 (result i32)
+    (local $lo i32)
+    (local $hi i32)
+    (local.set $lo (i32.load8_u (global.get $pc)))
+    (local.set $hi (i32.load8_u (i32.add (global.get $pc) (i32.const 1))))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 2)))
+    (i32.or (local.get $lo) (i32.shl (local.get $hi) (i32.const 8)))
+  )
+
+  (func $fetch_i32 (result i32)
+    (local $v i32)
+    (local.set $v (i32.load (global.get $pc)))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 4)))
+    (local.get $v)
+  )
+
+  ;; ---- Heap string helpers ----
+  ;; Heap string format: [len:i32][byte0 byte1 ...]
+
+  (func $alloc_string (param $src i32) (param $slen i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.add (local.get $slen) (i32.const 4))))
+    (i32.store (local.get $ptr) (local.get $slen))
+    (call $memcpy
+      (i32.add (local.get $ptr) (i32.const 4))
+      (local.get $src)
+      (local.get $slen))
+    (local.get $ptr)
+  )
+
+  (func $string_len (param $ptr i32) (result i32)
+    (i32.load (local.get $ptr))
+  )
+
+  (func $string_data (param $ptr i32) (result i32)
+    (i32.add (local.get $ptr) (i32.const 4))
+  )
+
+  ;; ---- Memory copy ----
+  (func $memcpy (param $dst i32) (param $src i32) (param $n i32)
+    (local $i i32)
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $copy
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (i32.store8
+          (i32.add (local.get $dst) (local.get $i))
+          (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $copy)
+      )
+    )
+  )
+
+  ;; ---- String comparison ----
+  (func $str_eq (param $a i32) (param $b i32) (result i32)
+    (local $alen i32) (local $blen i32) (local $i i32)
+    (local.set $alen (call $string_len (local.get $a)))
+    (local.set $blen (call $string_len (local.get $b)))
+    (if (i32.ne (local.get $alen) (local.get $blen))
+      (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $cmp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $alen)))
+        (if (i32.ne
+              (i32.load8_u (i32.add (call $string_data (local.get $a)) (local.get $i)))
+              (i32.load8_u (i32.add (call $string_data (local.get $b)) (local.get $i))))
+          (then (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cmp)
+      )
+    )
+    (i32.const 1)
+  )
+
+  ;; ---- String concatenation ----
+  (func $str_concat (param $a i32) (param $b i32) (result i32)
+    (local $alen i32) (local $blen i32) (local $ptr i32) (local $total i32)
+    (local.set $alen (call $string_len (local.get $a)))
+    (local.set $blen (call $string_len (local.get $b)))
+    (local.set $total (i32.add (local.get $alen) (local.get $blen)))
+    (local.set $ptr (call $alloc (i32.add (local.get $total) (i32.const 4))))
+    (i32.store (local.get $ptr) (local.get $total))
+    (call $memcpy
+      (i32.add (local.get $ptr) (i32.const 4))
+      (call $string_data (local.get $a))
+      (local.get $alen))
+    (call $memcpy
+      (i32.add (i32.add (local.get $ptr) (i32.const 4)) (local.get $alen))
+      (call $string_data (local.get $b))
+      (local.get $blen))
+    (local.get $ptr)
+  )
+
+  ;; ---- String append byte ----
+  (func $str_append_byte (param $s i32) (param $byte i32) (result i32)
+    (local $slen i32) (local $ptr i32)
+    (local.set $slen (call $string_len (local.get $s)))
+    (local.set $ptr (call $alloc (i32.add (local.get $slen) (i32.const 5))))
+    (i32.store (local.get $ptr) (i32.add (local.get $slen) (i32.const 1)))
+    (call $memcpy
+      (i32.add (local.get $ptr) (i32.const 4))
+      (call $string_data (local.get $s))
+      (local.get $slen))
+    (i32.store8
+      (i32.add (i32.add (local.get $ptr) (i32.const 4)) (local.get $slen))
+      (i32.and (local.get $byte) (i32.const 255)))
+    (local.get $ptr)
+  )
+
+  ;; ---- String set byte in place ----
+  (func $str_set_byte (param $s i32) (param $idx i32) (param $byte i32)
+    (if (i32.lt_u (local.get $idx) (call $string_len (local.get $s)))
+      (then
+        (i32.store8
+          (i32.add (call $string_data (local.get $s)) (local.get $idx))
+          (i32.and (local.get $byte) (i32.const 255)))
+      )
+    )
+  )
+
+  ;; ---- List push (append value) ----
+  (func $list_push (param $lst i32) (param $vtype i32) (param $vval i32)
+    (local $len i32) (local $cap i32) (local $items i32)
+    (local $new_items i32) (local $new_cap i32)
+    (local.set $len (i32.load (local.get $lst)))
+    (local.set $cap (i32.load (i32.add (local.get $lst) (i32.const 4))))
+    (local.set $items (i32.load (i32.add (local.get $lst) (i32.const 8))))
+    (if (i32.ge_u (local.get $len) (local.get $cap))
+      (then
+        ;; Grow: double capacity
+        (local.set $new_cap (i32.mul (i32.add (local.get $cap) (i32.const 1)) (i32.const 2)))
+        (local.set $new_items (call $alloc (i32.mul (local.get $new_cap) (i32.const 8))))
+        (call $memcpy (local.get $new_items) (local.get $items)
+          (i32.mul (local.get $len) (i32.const 8)))
+        (i32.store (i32.add (local.get $lst) (i32.const 4)) (local.get $new_cap))
+        (i32.store (i32.add (local.get $lst) (i32.const 8)) (local.get $new_items))
+        (local.set $items (local.get $new_items))
+      )
+    )
+    ;; Append at position len
+    (call $list_set (local.get $lst) (local.get $len)
+      (local.get $vtype) (local.get $vval))
+    ;; Increment length
+    (i32.store (local.get $lst) (i32.add (local.get $len) (i32.const 1)))
+  )
+
+  ;; ---- Helper: set local in an explicit locals block ----
+  (func $set_local_at (param $locals_ptr i32) (param $idx i32)
+    (param $type i32) (param $val i32)
+    (local $base i32)
+    (local.set $base (i32.add
+      (local.get $locals_ptr)
+      (i32.mul (local.get $idx) (i32.const 8))))
+    (i32.store (local.get $base) (local.get $type))
+    (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $val))
+  )
+
+  ;; ---- Constant pool access ----
+  ;; Pool format: [count:u32] [entry...]
+  ;; Each entry: [type:u8] [len:u32] [data:bytes]
+
+  (func $constpool_entry (param $idx i32) (result i32)
+    ;; Returns a heap-allocated string pointer for the constant at $idx.
+    ;; Walks the constant pool to find the entry.
+    (local $pos i32) (local $count i32) (local $i i32)
+    (local $etype i32) (local $elen i32) (local $ptr i32)
+    (local.set $pos (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">constpoolBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+    (local.set $count (i32.load (local.get $pos)))
+    (local.set $pos (i32.add (local.get $pos) (i32.const 4)))
+    (local.set $i (i32.const 0))
+    (block $found
+      (loop $scan
+        (br_if $found (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $etype (i32.load8_u (local.get $pos)))
+        (local.set $pos (i32.add (local.get $pos) (i32.const 1)))
+        (local.set $elen (i32.load (local.get $pos)))
+        (local.set $pos (i32.add (local.get $pos) (i32.const 4)))
+        (if (i32.eq (local.get $i) (local.get $idx))
+          (then
+            ;; Allocate a heap string and copy data into it
+            (local.set $ptr (call $alloc_string (local.get $pos) (local.get $elen)))
+            (return (local.get $ptr))
+          )
+        )
+        (local.set $pos (i32.add (local.get $pos) (local.get $elen)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan)
+      )
+    )
+    ;; Not found — return null (0)
+    (i32.const 0)
+  )
+
+  ;; ---- Function table access ----
+  ;; Table format: [count:u32] [entry...], each entry variable-length:
+  ;;   [offset:u32][arity:u16][localCount:u16][hasRestArg:u8]
+  ;;   [nameCount:u16] for each name: [len:u16][data]
+  ;; We walk the table to find the entry at a given index.
+
+  (global $fntable_cache_idx (mut i32) (i32.const -1))
+  (global $fntable_cache_off (mut i32) (i32.const 0))
+  (global $fntable_cache_ar  (mut i32) (i32.const 0))
+  (global $fntable_cache_lc  (mut i32) (i32.const 0))
+
+  (func $fntable_seek (param $idx i32)
+    ;; Walk the function table to entry $idx and cache its fields.
+    (local $pos i32) (local $count i32) (local $i i32)
+    (local $nc i32) (local $j i32) (local $nlen i32)
+    ;; Quick check: already cached?
+    (if (i32.eq (global.get $fntable_cache_idx) (local.get $idx))
+      (then (return)))
+    (local.set $pos (' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">ic</span><span class="oak-leftParen">(</span><span class="oak-identifier">fntableBase</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'))
+    (local.set $count (i32.load (local.get $pos)))
+    (local.set $pos (i32.add (local.get $pos) (i32.const 4)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $scan
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (if (i32.eq (local.get $i) (local.get $idx))
+          (then
+            (global.set $fntable_cache_idx (local.get $idx))
+            (global.set $fntable_cache_off (i32.load (local.get $pos)))
+            (global.set $fntable_cache_ar
+              (i32.load16_u (i32.add (local.get $pos) (i32.const 4))))
+            (global.set $fntable_cache_lc
+              (i32.load16_u (i32.add (local.get $pos) (i32.const 6))))
+            (return)
+          )
+        )
+        ;; Skip fixed header: offset(4) + arity(2) + localCount(2) + hasRestArg(1) = 9
+        (local.set $pos (i32.add (local.get $pos) (i32.const 9)))
+        ;; Skip local names: nameCount(2) then for each: len(2) + data
+        (local.set $nc (i32.load16_u (local.get $pos)))
+        (local.set $pos (i32.add (local.get $pos) (i32.const 2)))
+        (local.set $j (i32.const 0))
+        (block $names_done
+          (loop $names
+            (br_if $names_done (i32.ge_u (local.get $j) (local.get $nc)))
+            (local.set $nlen (i32.load16_u (local.get $pos)))
+            (local.set $pos (i32.add (local.get $pos)
+              (i32.add (i32.const 2) (local.get $nlen))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $names)
+          )
+        )
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan)
+      )
+    )
+  )
+
+  (func $fntable_offset (param $idx i32) (result i32)
+    (call $fntable_seek (local.get $idx))
+    (global.get $fntable_cache_off)
+  )
+
+  (func $fntable_arity (param $idx i32) (result i32)
+    (call $fntable_seek (local.get $idx))
+    (global.get $fntable_cache_ar)
+  )
+
+  (func $fntable_locals (param $idx i32) (result i32)
+    (call $fntable_seek (local.get $idx))
+    (global.get $fntable_cache_lc)
+  )
+
+  ;; ---- Call frame management ----
+  ;; Frame layout on call stack:
+  ;;   [return_pc:i32][saved_sp:i32][locals_ptr:i32][local_count:i32]
+  ;; Total frame header = 16 bytes. Locals are heap-allocated.
+
+  (func $push_frame (param $ret_pc i32) (param $saved_sp i32)
+    (param $locals_ptr i32) (param $local_count i32)
+    (i32.store (global.get $csp) (local.get $ret_pc))
+    (i32.store (i32.add (global.get $csp) (i32.const 4)) (local.get $saved_sp))
+    (i32.store (i32.add (global.get $csp) (i32.const 8)) (local.get $locals_ptr))
+    (i32.store (i32.add (global.get $csp) (i32.const 12)) (local.get $local_count))
+    (global.set $csp (i32.add (global.get $csp) (i32.const 16)))
+  )
+
+  (func $pop_frame
+    (global.set $csp (i32.sub (global.get $csp) (i32.const 16)))
+  )
+
+  (func $frame_ret_pc (result i32)
+    (i32.load (i32.sub (global.get $csp) (i32.const 16)))
+  )
+
+  (func $frame_saved_sp (result i32)
+    (i32.load (i32.sub (global.get $csp) (i32.const 12)))
+  )
+
+  (func $frame_locals_ptr (result i32)
+    (i32.load (i32.sub (global.get $csp) (i32.const 8)))
+  )
+
+  (func $frame_local_count (result i32)
+    (i32.load (i32.sub (global.get $csp) (i32.const 4)))
+  )
+
+  ;; ---- Local variable access (within current frame) ----
+  ;; Locals are 8-byte tagged values on the heap
+  ;; locals_ptr[idx] = [type:i32][val:i32]
+
+  (func $get_local_type (param $idx i32) (result i32)
+    (i32.load (i32.add
+      (call $frame_locals_ptr)
+      (i32.mul (local.get $idx) (i32.const 8))))
+  )
+
+  (func $get_local_val (param $idx i32) (result i32)
+    (i32.load (i32.add
+      (i32.add (call $frame_locals_ptr) (i32.const 4))
+      (i32.mul (local.get $idx) (i32.const 8))))
+  )
+
+  (func $set_local (param $idx i32) (param $type i32) (param $val i32)
+    (local $base i32)
+    (local.set $base (i32.add
+      (call $frame_locals_ptr)
+      (i32.mul (local.get $idx) (i32.const 8))))
+    (i32.store (local.get $base) (local.get $type))
+    (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $val))
+  )
+
+  ;; ---- Allocate locals block ----
+  (func $alloc_locals (param $count i32) (result i32)
+    (local $ptr i32) (local $size i32)
+    (local.set $size (i32.mul (local.get $count) (i32.const 8)))
+    (local.set $ptr (call $alloc (local.get $size)))
+    ;; Zero-initialize (all nulls: type=0, val=0)
+    (call $memzero (local.get $ptr) (local.get $size))
+    (local.get $ptr)
+  )
+
+  (func $memzero (param $dst i32) (param $n i32)
+    (local $i i32)
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $zero
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (i32.store8 (i32.add (local.get $dst) (local.get $i)) (i32.const 0))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $zero)
+      )
+    )
+  )
+
+  ;; ---- Heap list helpers ----
+  ;; List format: [len:i32][cap:i32][items_ptr:i32]
+  ;; Items: array of 8-byte tagged values
+
+  (func $alloc_list (param $count i32) (result i32)
+    (local $ptr i32) (local $items i32)
+    (local.set $items (call $alloc (i32.mul (local.get $count) (i32.const 8))))
+    (local.set $ptr (call $alloc (i32.const 12)))
+    (i32.store (local.get $ptr) (local.get $count))
+    (i32.store (i32.add (local.get $ptr) (i32.const 4)) (local.get $count))
+    (i32.store (i32.add (local.get $ptr) (i32.const 8)) (local.get $items))
+    (local.get $ptr)
+  )
+
+  (func $list_len (param $ptr i32) (result i32)
+    (i32.load (local.get $ptr))
+  )
+
+  (func $list_get_type (param $ptr i32) (param $idx i32) (result i32)
+    (local $items i32)
+    (local.set $items (i32.load (i32.add (local.get $ptr) (i32.const 8))))
+    (i32.load (i32.add (local.get $items) (i32.mul (local.get $idx) (i32.const 8))))
+  )
+
+  (func $list_get_val (param $ptr i32) (param $idx i32) (result i32)
+    (local $items i32)
+    (local.set $items (i32.load (i32.add (local.get $ptr) (i32.const 8))))
+    (i32.load (i32.add
+      (i32.add (local.get $items) (i32.const 4))
+      (i32.mul (local.get $idx) (i32.const 8))))
+  )
+
+  (func $list_set (param $ptr i32) (param $idx i32)
+    (param $type i32) (param $val i32)
+    (local $items i32) (local $base i32)
+    (local.set $items (i32.load (i32.add (local.get $ptr) (i32.const 8))))
+    (local.set $base (i32.add (local.get $items) (i32.mul (local.get $idx) (i32.const 8))))
+    (i32.store (local.get $base) (local.get $type))
+    (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $val))
+  )
+
+  ;; ---- Heap object helpers ----
+  ;; Object format: [count:i32][capacity:i32][entries_ptr:i32]
+  ;; Each entry: [key_str_ptr:i32][val_type:i32][val_payload:i32] = 12 bytes
+
+  (func $alloc_object (param $cap i32) (result i32)
+    (local $ptr i32) (local $entries i32)
+    (local.set $entries (call $alloc (i32.mul (local.get $cap) (i32.const 12))))
+    (call $memzero (local.get $entries) (i32.mul (local.get $cap) (i32.const 12)))
+    (local.set $ptr (call $alloc (i32.const 12)))
+    (i32.store (local.get $ptr) (i32.const 0))
+    (i32.store (i32.add (local.get $ptr) (i32.const 4)) (local.get $cap))
+    (i32.store (i32.add (local.get $ptr) (i32.const 8)) (local.get $entries))
+    (local.get $ptr)
+  )
+
+  (func $object_count (param $ptr i32) (result i32)
+    (i32.load (local.get $ptr))
+  )
+
+  (func $object_set (param $obj i32) (param $key i32)
+    (param $vtype i32) (param $vval i32)
+    (local $count i32) (local $cap i32) (local $entries i32)
+    (local $i i32) (local $base i32) (local $ekey i32)
+    (local.set $count (i32.load (local.get $obj)))
+    (local.set $cap (i32.load (i32.add (local.get $obj) (i32.const 4))))
+    (local.set $entries (i32.load (i32.add (local.get $obj) (i32.const 8))))
+    ;; Search for existing key
+    (local.set $i (i32.const 0))
+    (block $found
+      (loop $search
+        (br_if $found (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $base (i32.add (local.get $entries)
+          (i32.mul (local.get $i) (i32.const 12))))
+        (local.set $ekey (i32.load (local.get $base)))
+        (if (call $str_eq (local.get $ekey) (local.get $key))
+          (then
+            ;; Update existing entry
+            (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $vtype))
+            (i32.store (i32.add (local.get $base) (i32.const 8)) (local.get $vval))
+            (return)
+          )
+        )
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $search)
+      )
+    )
+    ;; Append new entry (simple, no resize for now)
+    (local.set $base (i32.add (local.get $entries)
+      (i32.mul (local.get $count) (i32.const 12))))
+    (i32.store (local.get $base) (local.get $key))
+    (i32.store (i32.add (local.get $base) (i32.const 4)) (local.get $vtype))
+    (i32.store (i32.add (local.get $base) (i32.const 8)) (local.get $vval))
+    (i32.store (local.get $obj) (i32.add (local.get $count) (i32.const 1)))
+  )
+
+  (func $object_get (param $obj i32) (param $key i32) (result i32)
+    ;; Returns: type via result, val via $tmp_val global
+    ;; Returns TAG_NULL (0) if key not found
+    (local $count i32) (local $entries i32)
+    (local $i i32) (local $base i32) (local $ekey i32)
+    (local.set $count (i32.load (local.get $obj)))
+    (local.set $entries (i32.load (i32.add (local.get $obj) (i32.const 8))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $search
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $base (i32.add (local.get $entries)
+          (i32.mul (local.get $i) (i32.const 12))))
+        (local.set $ekey (i32.load (local.get $base)))
+        (if (call $str_eq (local.get $ekey) (local.get $key))
+          (then
+            (global.set $tmp_val
+              (i32.load (i32.add (local.get $base) (i32.const 8))))
+            (return (i32.load (i32.add (local.get $base) (i32.const 4))))
+          )
+        )
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $search)
+      )
+    )
+    ;; Not found
+    (global.set $tmp_val (i32.const 0))
+    (i32.const 0)
+  )
+
+  ;; ---- Closure helpers ----
+  ;; Closure heap format: [fn_idx:i32][scope_csp:i32]
+
+  (func $alloc_closure (param $fn_idx i32) (param $scope_csp i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 8)))
+    (i32.store (local.get $ptr) (local.get $fn_idx))
+    (i32.store (i32.add (local.get $ptr) (i32.const 4)) (local.get $scope_csp))
+    (local.get $ptr)
+  )
+
+  (func $closure_fn_idx (param $ptr i32) (result i32)
+    (i32.load (local.get $ptr))
+  )
+
+  ;; ---- Integer to string conversion ----
+  (func $int_to_string (param $val i32) (result i32)
+    (local $ptr i32) (local $pos i32) (local $n i32)
+    (local $neg i32) (local $digit i32) (local $start i32) (local $end i32)
+    (local $tmp i32)
+    ;; Max 12 chars for i32 (-2147483648)
+    (local.set $ptr (call $alloc (i32.const 16)))
+    (local.set $start (i32.add (local.get $ptr) (i32.const 4)))
+    (local.set $pos (local.get $start))
+    (local.set $n (local.get $val))
+    (local.set $neg (i32.const 0))
+    (if (i32.lt_s (local.get $n) (i32.const 0))
+      (then
+        (local.set $neg (i32.const 1))
+        (local.set $n (i32.sub (i32.const 0) (local.get $n)))
+      )
+    )
+    (if (i32.eqz (local.get $n))
+      (then
+        (i32.store8 (local.get $pos) (i32.const 48))
+        (local.set $pos (i32.add (local.get $pos) (i32.const 1)))
+      )
+      (else
+        (block $digits_done
+          (loop $digits
+            (br_if $digits_done (i32.eqz (local.get $n)))
+            (local.set $digit (i32.rem_u (local.get $n) (i32.const 10)))
+            (i32.store8 (local.get $pos) (i32.add (local.get $digit) (i32.const 48)))
+            (local.set $pos (i32.add (local.get $pos) (i32.const 1)))
+            (local.set $n (i32.div_u (local.get $n) (i32.const 10)))
+            (br $digits)
+          )
+        )
+        (if (local.get $neg)
+          (then
+            (i32.store8 (local.get $pos) (i32.const 45))
+            (local.set $pos (i32.add (local.get $pos) (i32.const 1)))
+          )
+        )
+        ;; Reverse the digits in place
+        (local.set $end (i32.sub (local.get $pos) (i32.const 1)))
+        (block $rev_done
+          (loop $rev
+            (br_if $rev_done (i32.ge_u (local.get $start) (local.get $end)))
+            (local.set $tmp (i32.load8_u (local.get $start)))
+            (i32.store8 (local.get $start) (i32.load8_u (local.get $end)))
+            (i32.store8 (local.get $end) (local.get $tmp))
+            (local.set $start (i32.add (local.get $start) (i32.const 1)))
+            (local.set $end (i32.sub (local.get $end) (i32.const 1)))
+            (br $rev)
+          )
+        )
+      )
+    )
+    ;; Store length
+    (i32.store (local.get $ptr)
+      (i32.sub (local.get $pos) (i32.add (local.get $ptr) (i32.const 4))))
+    (local.get $ptr)
+  )
+
+  ;; ---- Value equality ----
+  (func $val_eq (param $t1 i32) (param $v1 i32)
+    (param $t2 i32) (param $v2 i32) (result i32)
+    ;; Oak empty (_) equals everything
+    (if (i32.or (i32.eq (local.get $t1) (i32.const 1))
+                (i32.eq (local.get $t2) (i32.const 1)))
+      (then (return (i32.const 1))))
+    ;; Types must match for all other comparisons
+    (if (i32.ne (local.get $t1) (local.get $t2))
+      (then (return (i32.const 0))))
+    ;; Same type — compare by type
+    (if (i32.or (i32.eq (local.get $t1) (i32.const 0))   ;; null = null
+                (i32.eq (local.get $t1) (i32.const 1)))   ;; empty = empty
+      (then (return (i32.const 1))))
+    (if (i32.le_u (local.get $t1) (i32.const 4))          ;; int, float, bool: compare payload
+      (then (return (i32.eq (local.get $v1) (local.get $v2)))))
+    (if (i32.or (i32.eq (local.get $t1) (i32.const 5))    ;; string
+                (i32.eq (local.get $t1) (i32.const 6)))    ;; atom
+      (then (return (call $str_eq (local.get $v1) (local.get $v2)))))
+    ;; Lists &amp; objects: reference equality for now
+    (i32.eq (local.get $v1) (local.get $v2))
+  )
+
+  ;; ---- Static string constructors (for builtins) ----
+  (func $make_static_str (param $c0 i32) (param $c1 i32) (param $c2 i32)
+    (param $c3 i32) (param $c4 i32) (param $slen i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.add (local.get $slen) (i32.const 4))))
+    (i32.store (local.get $ptr) (local.get $slen))
+    (if (i32.gt_u (local.get $slen) (i32.const 0))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 4)) (local.get $c0))))
+    (if (i32.gt_u (local.get $slen) (i32.const 1))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 5)) (local.get $c1))))
+    (if (i32.gt_u (local.get $slen) (i32.const 2))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 6)) (local.get $c2))))
+    (if (i32.gt_u (local.get $slen) (i32.const 3))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 7)) (local.get $c3))))
+    (if (i32.gt_u (local.get $slen) (i32.const 4))
+      (then (i32.store8 (i32.add (local.get $ptr) (i32.const 8)) (local.get $c4))))
+    (local.get $ptr)
+  )
+  ;; "true"
+  (func $make_static_str_true (result i32)
+    (call $make_static_str (i32.const 116)(i32.const 114)(i32.const 117)(i32.const 101)(i32.const 0)(i32.const 4)))
+  ;; "false"
+  (func $make_static_str_false (result i32)
+    (call $make_static_str (i32.const 102)(i32.const 97)(i32.const 108)(i32.const 115)(i32.const 101)(i32.const 5)))
+  ;; "?"
+  (func $make_static_str_qmark (result i32)
+    (call $make_static_str (i32.const 63)(i32.const 0)(i32.const 0)(i32.const 0)(i32.const 0)(i32.const 1)))
+
+  ;; Type name string constructors
+  (func $make_type_name_null (result i32)
+    (call $make_static_str (i32.const 110)(i32.const 117)(i32.const 108)(i32.const 108)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_empty (result i32)
+    (call $make_static_str (i32.const 101)(i32.const 109)(i32.const 112)(i32.const 116)(i32.const 121)(i32.const 5)))
+  (func $make_type_name_int (result i32)
+    (call $make_static_str (i32.const 105)(i32.const 110)(i32.const 116)(i32.const 0)(i32.const 0)(i32.const 3)))
+  (func $make_type_name_float (result i32)
+    (call $make_static_str (i32.const 102)(i32.const 108)(i32.const 111)(i32.const 97)(i32.const 116)(i32.const 5)))
+  (func $make_type_name_bool (result i32)
+    (call $make_static_str (i32.const 98)(i32.const 111)(i32.const 111)(i32.const 108)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_string (result i32)
+    ;; "string" = 6 chars, need extended version
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 10)))
+    (i32.store (local.get $ptr) (i32.const 6))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 4))(i32.const 115))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 5))(i32.const 116))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 6))(i32.const 114))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 7))(i32.const 105))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 8))(i32.const 110))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 9))(i32.const 103))
+    (local.get $ptr))
+  (func $make_type_name_atom (result i32)
+    (call $make_static_str (i32.const 97)(i32.const 116)(i32.const 111)(i32.const 109)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_list (result i32)
+    (call $make_static_str (i32.const 108)(i32.const 105)(i32.const 115)(i32.const 116)(i32.const 0)(i32.const 4)))
+  (func $make_type_name_object (result i32)
+    ;; "object" = 6 chars
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 10)))
+    (i32.store (local.get $ptr) (i32.const 6))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 4))(i32.const 111))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 5))(i32.const 98))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 6))(i32.const 106))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 7))(i32.const 101))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 8))(i32.const 99))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 9))(i32.const 116))
+    (local.get $ptr))
+  (func $make_type_name_function (result i32)
+    ;; "function" = 8 chars
+    (local $ptr i32)
+    (local.set $ptr (call $alloc (i32.const 12)))
+    (i32.store (local.get $ptr) (i32.const 8))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 4))(i32.const 102))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 5))(i32.const 117))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 6))(i32.const 110))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 7))(i32.const 99))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 8))(i32.const 116))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 9))(i32.const 105))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 10))(i32.const 111))
+    (i32.store8 (i32.add (local.get $ptr)(i32.const 11))(i32.const 110))
+    (local.get $ptr))
+
+  ;; ---- Object keys/values helpers ----
+  (func $object_keys_list (param $obj i32) (result i32)
+    (local $count i32) (local $entries i32) (local $lst i32)
+    (local $i i32) (local $base i32)
+    (local.set $count (i32.load (local.get $obj)))
+    (local.set $entries (i32.load (i32.add (local.get $obj) (i32.const 8))))
+    (local.set $lst (call $alloc_list (local.get $count)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $iter
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $base (i32.add (local.get $entries)
+          (i32.mul (local.get $i) (i32.const 12))))
+        ;; Key is a string pointer at base+0
+        (call $list_set (local.get $lst) (local.get $i)
+          (i32.const 5) (i32.load (local.get $base)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $iter)
+      )
+    )
+    (local.get $lst)
+  )
+
+  (func $object_values_list (param $obj i32) (result i32)
+    (local $count i32) (local $entries i32) (local $lst i32)
+    (local $i i32) (local $base i32)
+    (local.set $count (i32.load (local.get $obj)))
+    (local.set $entries (i32.load (i32.add (local.get $obj) (i32.const 8))))
+    (local.set $lst (call $alloc_list (local.get $count)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $iter
+        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+        (local.set $base (i32.add (local.get $entries)
+          (i32.mul (local.get $i) (i32.const 12))))
+        ;; Value type at base+4, value payload at base+8
+        (call $list_set (local.get $lst) (local.get $i)
+          (i32.load (i32.add (local.get $base) (i32.const 4)))
+          (i32.load (i32.add (local.get $base) (i32.const 8))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $iter)
+      )
+    )
+    (local.get $lst)
+  )
+
+  ;; ---- String slice ----
+  (func $string_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
+    (local $slen i32) (local $slice_len i32)
+    (local.set $slen (call $string_len (local.get $s)))
+    ;; Clamp bounds
+    (if (i32.lt_s (local.get $start) (i32.const 0))
+      (then (local.set $start (i32.const 0))))
+    (if (i32.gt_s (local.get $end) (local.get $slen))
+      (then (local.set $end (local.get $slen))))
+    (if (i32.gt_s (local.get $start) (local.get $end))
+      (then (local.set $start (local.get $end))))
+    (local.set $slice_len (i32.sub (local.get $end) (local.get $start)))
+    (call $alloc_string
+      (i32.add (call $string_data (local.get $s)) (local.get $start))
+      (local.get $slice_len))
+  )
+
+  ;; ---- List slice ----
+  (func $list_slice (param $lst i32) (param $start i32) (param $end i32) (result i32)
+    (local $llen i32) (local $new_lst i32) (local $slice_len i32)
+    (local $i i32) (local $items i32) (local $base i32)
+    (local.set $llen (call $list_len (local.get $lst)))
+    ;; Clamp bounds
+    (if (i32.lt_s (local.get $start) (i32.const 0))
+      (then (local.set $start (i32.const 0))))
+    (if (i32.gt_s (local.get $end) (local.get $llen))
+      (then (local.set $end (local.get $llen))))
+    (if (i32.gt_s (local.get $start) (local.get $end))
+      (then (local.set $start (local.get $end))))
+    (local.set $slice_len (i32.sub (local.get $end) (local.get $start)))
+    (local.set $new_lst (call $alloc_list (local.get $slice_len)))
+    (local.set $items (i32.load (i32.add (local.get $lst) (i32.const 8))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $copy
+        (br_if $done (i32.ge_u (local.get $i) (local.get $slice_len)))
+        (local.set $base (i32.add (local.get $items)
+          (i32.mul (i32.add (local.get $start) (local.get $i)) (i32.const 8))))
+        (call $list_set (local.get $new_lst) (local.get $i)
+          (i32.load (local.get $base))
+          (i32.load (i32.add (local.get $base) (i32.const 4))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $copy)
+      )
+    )
+    (local.get $new_lst)
+  )
+
+  ;; ---- List append (non-mutating, returns new list) ----
+  (func $list_append (param $lst i32) (param $vtype i32) (param $vval i32) (result i32)
+    (local $llen i32) (local $new_lst i32) (local $items i32)
+    (local $new_items i32) (local $i i32) (local $base i32)
+    (local.set $llen (call $list_len (local.get $lst)))
+    (local.set $new_lst (call $alloc_list (i32.add (local.get $llen) (i32.const 1))))
+    (local.set $items (i32.load (i32.add (local.get $lst) (i32.const 8))))
+    (local.set $new_items (i32.load (i32.add (local.get $new_lst) (i32.const 8))))
+    ;; Copy existing elements
+    (call $memcpy (local.get $new_items) (local.get $items)
+      (i32.mul (local.get $llen) (i32.const 8)))
+    ;; Append new element
+    (call $list_set (local.get $new_lst) (local.get $llen)
+      (local.get $vtype) (local.get $vval))
+    (local.get $new_lst)
+  )
+
+  ;; ===================================================================
+  ;; ---- VM DISPATCH LOOP ----
+  ;; ===================================================================
+
+  (func $vm_run (export "run")
+    (local $op i32)
+    (local $t1 i32) (local $v1 i32)
+    (local $t2 i32) (local $v2 i32)
+    (local $idx i32) (local $tmp i32) (local $tmp2 i32)
+    (local $fn_idx i32) (local $arity i32) (local $expected i32)
+    (local $locals_ptr i32) (local $i i32)
+    (local $key_ptr i32) (local $obj_ptr i32) (local $list_ptr i32)
+    (local $ret_type i32) (local $ret_val i32)
+
+    ;; Push an initial frame for the top-level program
+    (call $push_frame
+      (i32.const 0)                     ;; no return address
+      (global.get $sp)                  ;; saved sp
+      (call $alloc_locals (i32.const 256)) ;; generous top-level locals
+      (i32.const 256))
+
+    (block $halt
+      (loop $dispatch
+        ;; ---- Fetch opcode ----
+        (local.set $op (call $fetch_u8))
+
+        ;; ---- Dispatch via nested blocks + br_table ----
+' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">generateDispatchTable</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'
+        (br $dispatch)
+      ) ;; end loop
+    ) ;; end halt block
+  ) ;; end $vm_run
+
+  ;; ---- Built-in function dispatcher ----
+  (func $call_builtin (param $bi i32) (param $arity i32)
+    (local $t1 i32) (local $v1 i32)
+    (local $t2 i32) (local $v2 i32)
+    (local $t3 i32) (local $v3 i32)
+    (local $tmp i32) (local $i i32)
+    ;; Dispatch by builtin index
+    (if (i32.eqz (local.get $bi))
+      (then
+        ;; BUILTIN_PRINT (0): print(value)
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 5))   ;; TAG_STRING
+          (then
+            (call $host_print
+              (call $string_data (local.get $v1))
+              (call $string_len (local.get $v1)))
+          )
+          (else
+            ;; Convert to string first
+            (if (i32.eq (local.get $t1) (i32.const 2))  ;; TAG_INT
+              (then
+                (local.set $v1 (call $int_to_string (local.get $v1)))
+                (call $host_print
+                  (call $string_data (local.get $v1))
+                  (call $string_len (local.get $v1)))
+              )
+              (else
+                (if (i32.eq (local.get $t1) (i32.const 4))  ;; TAG_BOOL
+                  (then
+                    (if (local.get $v1)
+                      (then (call $host_print (call $string_data (call $make_static_str_true)) (i32.const 4)))
+                      (else (call $host_print (call $string_data (call $make_static_str_false)) (i32.const 5)))
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+        (call $push_val (i32.const 0) (i32.const 0))  ;; return null
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 1))
+      (then
+        ;; BUILTIN_LEN (1): len(value) -> int
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 5))           ;; string
+          (then (call $push_val (i32.const 2) (call $string_len (local.get $v1))))
+          (else (if (i32.eq (local.get $t1) (i32.const 7))   ;; list
+            (then (call $push_val (i32.const 2) (call $list_len (local.get $v1))))
+            (else (if (i32.eq (local.get $t1) (i32.const 8)) ;; object
+              (then (call $push_val (i32.const 2) (call $object_count (local.get $v1))))
+              (else (call $push_val (i32.const 2) (i32.const 0)))
+            ))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 2))
+      (then
+        ;; BUILTIN_TYPE (2): type(value) -> atom
+        (local.set $t1 (call $pop_tagged))
+        (drop (global.get $tmp_val))
+        ;; Return atom with type name string
+        (if (i32.eq (local.get $t1) (i32.const 0))
+          (then (call $push_val (i32.const 6) (call $make_type_name_null)))
+          (else (if (i32.eq (local.get $t1) (i32.const 1))
+            (then (call $push_val (i32.const 6) (call $make_type_name_empty)))
+            (else (if (i32.eq (local.get $t1) (i32.const 2))
+              (then (call $push_val (i32.const 6) (call $make_type_name_int)))
+              (else (if (i32.eq (local.get $t1) (i32.const 3))
+                (then (call $push_val (i32.const 6) (call $make_type_name_float)))
+                (else (if (i32.eq (local.get $t1) (i32.const 4))
+                  (then (call $push_val (i32.const 6) (call $make_type_name_bool)))
+                  (else (if (i32.eq (local.get $t1) (i32.const 5))
+                    (then (call $push_val (i32.const 6) (call $make_type_name_string)))
+                    (else (if (i32.eq (local.get $t1) (i32.const 6))
+                      (then (call $push_val (i32.const 6) (call $make_type_name_atom)))
+                      (else (if (i32.eq (local.get $t1) (i32.const 7))
+                        (then (call $push_val (i32.const 6) (call $make_type_name_list)))
+                        (else (if (i32.eq (local.get $t1) (i32.const 8))
+                          (then (call $push_val (i32.const 6) (call $make_type_name_object)))
+                          (else (if (i32.eq (local.get $t1) (i32.const 9))
+                            (then (call $push_val (i32.const 6) (call $make_type_name_function)))
+                            (else (call $push_val (i32.const 6) (call $make_type_name_null)))
+                          ))
+                        ))
+                      ))
+                    ))
+                  ))
+                ))
+              ))
+            ))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 3))
+      (then
+        ;; BUILTIN_STRING (3): string(value) -> string
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 5))  ;; already string
+          (then (call $push_val (i32.const 5) (local.get $v1)))
+          (else (if (i32.eq (local.get $t1) (i32.const 2)) ;; int
+            (then (call $push_val (i32.const 5) (call $int_to_string (local.get $v1))))
+            (else (if (i32.eq (local.get $t1) (i32.const 6)) ;; atom
+              (then (call $push_val (i32.const 5) (local.get $v1)))
+              (else (if (i32.eq (local.get $t1) (i32.const 4)) ;; bool
+                (then
+                  (if (local.get $v1)
+                    (then (call $push_val (i32.const 5) (call $make_static_str_true)))
+                    (else (call $push_val (i32.const 5) (call $make_static_str_false)))
+                  )
+                )
+                (else (if (i32.eq (local.get $t1) (i32.const 0)) ;; null
+                  (then (call $push_val (i32.const 5) (call $make_static_str_qmark)))
+                  (else (call $push_val (i32.const 5)
+                    (call $int_to_string (local.get $v1)))) ;; fallback
+                ))
+              ))
+            ))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 4))
+      (then
+        ;; BUILTIN_INT (4): int(value) -> int
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 2))  ;; already int
+          (then (call $push_val (i32.const 2) (local.get $v1)))
+          (else (if (i32.eq (local.get $t1) (i32.const 3)) ;; float → truncate
+            (then (call $push_val (i32.const 2) (local.get $v1)))
+            (else (call $push_val (i32.const 0) (i32.const 0)))  ;; null
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 5))
+      (then
+        ;; BUILTIN_FLOAT (5): float(value) -> float
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 3))  ;; already float
+          (then (call $push_val (i32.const 3) (local.get $v1)))
+          (else (if (i32.eq (local.get $t1) (i32.const 2)) ;; int → float
+            (then (call $push_val (i32.const 3) (local.get $v1)))
+            (else (call $push_val (i32.const 0) (i32.const 0)))  ;; null
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 6))
+      (then
+        ;; BUILTIN_CODEPOINT (6): codepoint(string) -> int
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                     (i32.gt_u (call $string_len (local.get $v1)) (i32.const 0)))
+          (then (call $push_val (i32.const 2)
+            (i32.load8_u (call $string_data (local.get $v1)))))
+          (else (call $push_val (i32.const 0) (i32.const 0)))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 7))
+      (then
+        ;; BUILTIN_CHAR (7): char(int) -> string
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 2))
+          (then
+            (local.set $tmp (call $alloc (i32.const 5)))
+            (i32.store (local.get $tmp) (i32.const 1))
+            (i32.store8 (i32.add (local.get $tmp) (i32.const 4))
+              (i32.and (local.get $v1) (i32.const 255)))
+            (call $push_val (i32.const 5) (local.get $tmp))
+          )
+          (else (call $push_val (i32.const 5) (call $alloc_string (i32.const 0) (i32.const 0))))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 8))
+      (then
+        ;; BUILTIN_KEYS (8): keys(object) -> list of strings
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 8))  ;; object
+          (then
+            (local.set $tmp (call $object_keys_list (local.get $v1)))
+            (call $push_val (i32.const 7) (local.get $tmp))
+          )
+          (else
+            (call $push_val (i32.const 7) (call $alloc_list (i32.const 0)))
+          )
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 9))
+      (then
+        ;; BUILTIN_VALUES (9): values(object) -> list
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 8))  ;; object
+          (then
+            (local.set $tmp (call $object_values_list (local.get $v1)))
+            (call $push_val (i32.const 7) (local.get $tmp))
+          )
+          (else
+            (call $push_val (i32.const 7) (call $alloc_list (i32.const 0)))
+          )
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 10))
+      (then
+        ;; BUILTIN_SLICE (10): slice(collection, start, end) -> sliced value
+        (local.set $t3 (call $pop_tagged))  ;; end
+        (local.set $v3 (global.get $tmp_val))
+        (local.set $t2 (call $pop_tagged))  ;; start
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))  ;; collection
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 5))  ;; string
+          (then
+            (call $push_val (i32.const 5)
+              (call $string_slice (local.get $v1) (local.get $v2) (local.get $v3)))
+          )
+          (else (if (i32.eq (local.get $t1) (i32.const 7))  ;; list
+            (then
+              (call $push_val (i32.const 7)
+                (call $list_slice (local.get $v1) (local.get $v2) (local.get $v3)))
+            )
+            (else (call $push_val (i32.const 0) (i32.const 0)))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 11))
+      (then
+        ;; BUILTIN_APPEND (11): append(list, value) -> new list
+        (local.set $t2 (call $pop_tagged))  ;; value to append
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))  ;; base list
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 7))  ;; list
+          (then
+            (local.set $tmp (call $list_append (local.get $v1)
+              (local.get $t2) (local.get $v2)))
+            (call $push_val (i32.const 7) (local.get $tmp))
+          )
+          (else (if (i32.eq (local.get $t1) (i32.const 5))  ;; string
+            (then
+              (if (i32.eq (local.get $t2) (i32.const 5))  ;; append string
+                (then (call $push_val (i32.const 5)
+                  (call $str_concat (local.get $v1) (local.get $v2))))
+                (else (call $push_val (i32.const 0) (i32.const 0)))
+              )
+            )
+            (else (call $push_val (i32.const 0) (i32.const 0)))
+          ))
+        )
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 12))
+      (then
+        ;; BUILTIN_WAIT (12): wait() -> null (no-op in WASM)
+        ;; Pop args based on arity
+        (local.set $i (i32.const 0))
+        (block $wait_pop_done
+          (loop $wait_pop
+            (br_if $wait_pop_done (i32.ge_u (local.get $i) (local.get $arity)))
+            (drop (call $pop_tagged))
+            (drop (global.get $tmp_val))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $wait_pop)
+          )
+        )
+        (call $push_val (i32.const 0) (i32.const 0))
+        (return)
+      )
+    )
+    (if (i32.eq (local.get $bi) (i32.const 13))
+      (then
+        ;; BUILTIN_EXIT (13)
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $host_exit (local.get $v1))
+        (return)
+      )
+    )
+    ;; Unknown builtin — pop all args and push null
+    (local.set $i (i32.const 0))
+    (block $unk_done
+      (loop $unk_pop
+        (br_if $unk_done (i32.ge_u (local.get $i) (local.get $arity)))
+        (drop (call $pop_tagged))
+        (drop (global.get $tmp_val))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $unk_pop)
+      )
+    )
+    (call $push_val (i32.const 0) (i32.const 0))
+  )
+
+  ;; ---- Entry point ----
+  (func (export "main") (result i32)
+    (call $vm_run)
+    (i32.const 0)
+  )
+
+  (func (export "bytecode_base") (result i32)
+    (global.get $bytecode_base)
+  )
+
+  (func (export "constpool_base") (result i32)
+    (global.get $constpool_base)
+  )
+)
+'</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ---------------------------------------------------------------------------</span>
+<span class="oak-comment">// Generate the br_table dispatch block for all opcodes</span>
+<span class="oak-comment">// ---------------------------------------------------------------------------</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">generateDispatchTable</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-comment">// Each opcode handler is a block of WAT instructions.</span><span class="oak-newline">
+	</span><span class="oak-comment">// The br_table jumps to the right block, then each block</span><span class="oak-newline">
+	</span><span class="oak-comment">// falls through to the handler code.</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">handlers </span><span class="oak-assign">:= </span><span class="oak-leftBracket">[</span><span class="oak-newline">
+		</span><span class="oak-comment">// 0: HALT</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(br $halt)'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 1: NOP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(nop)'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 2: CONST_NULL</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(call $push_val (i32.const 0) (i32.const 0))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 3: CONST_EMPTY</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(call $push_val (i32.const 1) (i32.const 0))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 4: CONST_TRUE</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(call $push_val (i32.const 4) (i32.const 1))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 5: CONST_FALSE</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(call $push_val (i32.const 4) (i32.const 0))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 6: CONST_INT — fetch i32 operand, push as int</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(call $push_val (i32.const 2) (call $fetch_i32))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 7: CONST_FLOAT — fetch u16 pool index, resolve</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (call $push_val (i32.const 3) (call $constpool_entry (local.get $idx)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 8: CONST_STRING — fetch u16 pool index, resolve</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (call $push_val (i32.const 5) (call $constpool_entry (local.get $idx)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 9: CONST_ATOM — fetch u16 pool index, resolve</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (call $push_val (i32.const 6) (call $constpool_entry (local.get $idx)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 10: POP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(drop (call $pop_tagged))
+        (drop (global.get $tmp_val))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 11: DUP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(call $push_val (call $peek_type) (call $peek_val))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 12: LOAD_LOCAL</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (call $push_val
+          (call $get_local_type (local.get $idx))
+          (call $get_local_val (local.get $idx)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 13: STORE_LOCAL</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $set_local (local.get $idx) (local.get $t1) (local.get $v1))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 14: LOAD_UPVAL — u16 name constant index; push null (scope chain NYI)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(drop (call $fetch_u16))
+        (call $push_val (i32.const 0) (i32.const 0))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 15: STORE_UPVAL — u16 name constant index; pop and discard (scope chain NYI)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(drop (call $fetch_u16))
+        (drop (call $pop_tagged))
+        (drop (global.get $tmp_val))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 16: ADD</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                     (i32.eq (local.get $t2) (i32.const 2)))
+          (then (call $push_val (i32.const 2)
+            (i32.add (local.get $v1) (local.get $v2))))
+          (else (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                             (i32.eq (local.get $t2) (i32.const 5)))
+            (then (call $push_val (i32.const 5)
+              (call $str_concat (local.get $v1) (local.get $v2))))
+            (else (call $push_val (i32.const 2)
+              (i32.add (local.get $v1) (local.get $v2))))
+          ))
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 17: SUB</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 2)
+          (i32.sub (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 18: MUL</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 2)
+          (i32.mul (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 19: DIV</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eqz (local.get $v2))
+          (then (call $push_val (i32.const 0) (i32.const 0)))
+          (else (call $push_val (i32.const 2)
+            (i32.div_s (local.get $v1) (local.get $v2))))
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 20: MOD</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eqz (local.get $v2))
+          (then (call $push_val (i32.const 0) (i32.const 0)))
+          (else (call $push_val (i32.const 2)
+            (i32.rem_s (local.get $v1) (local.get $v2))))
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 21: POW (simplified: use multiplication loop for small exponents)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (local.set $tmp (i32.const 1))
+        (local.set $i (i32.const 0))
+        (block $pow_done
+          (loop $pow_loop
+            (br_if $pow_done (i32.ge_s (local.get $i) (local.get $v2)))
+            (local.set $tmp (i32.mul (local.get $tmp) (local.get $v1)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $pow_loop)
+          )
+        )
+        (call $push_val (i32.const 2) (local.get $tmp))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 22: NEG</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (local.get $t1)
+          (i32.sub (i32.const 0) (local.get $v1)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 23: BAND</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 2)
+          (i32.and (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 24: BOR</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 2)
+          (i32.or (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 25: BXOR</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 2)
+          (i32.xor (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 26: BRSHIFT</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 2)
+          (i32.shr_u (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 27: EQ</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (call $val_eq
+            (local.get $t1) (local.get $v1)
+            (local.get $t2) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 28: NEQ</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (i32.eqz (call $val_eq
+            (local.get $t1) (local.get $v1)
+            (local.get $t2) (local.get $v2))))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 29: GT</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (i32.gt_s (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 30: LT</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (i32.lt_s (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 31: GEQ</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (i32.ge_s (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 32: LEQ</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (i32.le_s (local.get $v1) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 33: NOT</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 4))  ;; TAG_BOOL
+          (then (call $push_val (i32.const 4)
+            (i32.eqz (local.get $v1))))
+          (else (call $push_val (i32.const 4) (i32.const 1)))  ;; non-bool → true
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 34: CONCAT (&lt;&lt;)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                     (i32.eq (local.get $t2) (i32.const 2)))
+          (then
+            ;; int &lt;&lt; int → bitwise left shift (negative shift → null)
+            (if (i32.lt_s (local.get $v2) (i32.const 0))
+              (then (call $push_val (i32.const 0) (i32.const 0)))
+              (else (call $push_val (i32.const 2)
+                (i32.shl (local.get $v1) (local.get $v2))))
+            )
+          )
+          (else (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                             (i32.eq (local.get $t2) (i32.const 5)))
+            (then
+              ;; string &lt;&lt; string → append bytes (mutable concat)
+              (call $push_val (i32.const 5)
+                (call $str_concat (local.get $v1) (local.get $v2)))
+            )
+            (else (if (i32.and (i32.eq (local.get $t1) (i32.const 5))
+                               (i32.eq (local.get $t2) (i32.const 2)))
+              (then
+                ;; string &lt;&lt; int → append single byte
+                (call $push_val (i32.const 5)
+                  (call $str_append_byte (local.get $v1) (local.get $v2)))
+              )
+              (else (if (i32.eq (local.get $t1) (i32.const 7))
+                (then
+                  ;; list &lt;&lt; value → push value onto list
+                  (call $list_push (local.get $v1) (local.get $t2) (local.get $v2))
+                  (call $push_val (i32.const 7) (local.get $v1))
+                )
+                (else (call $push_val (i32.const 0) (i32.const 0)))  ;; null
+              ))
+            ))
+          ))
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 35: MAKE_LIST</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (local.set $list_ptr (call $alloc_list (local.get $idx)))
+        ;; Pop elements in reverse order and store
+        (local.set $i (i32.sub (local.get $idx) (i32.const 1)))
+        (block $list_done
+          (loop $list_fill
+            (br_if $list_done (i32.lt_s (local.get $i) (i32.const 0)))
+            (local.set $t1 (call $pop_tagged))
+            (local.set $v1 (global.get $tmp_val))
+            (call $list_set (local.get $list_ptr) (local.get $i)
+              (local.get $t1) (local.get $v1))
+            (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+            (br $list_fill)
+          )
+        )
+        (call $push_val (i32.const 7) (local.get $list_ptr))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 36: MAKE_OBJECT</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (local.set $obj_ptr (call $alloc_object
+          (if (result i32) (i32.eqz (local.get $idx))
+            (then (i32.const 4))
+            (else (local.get $idx)))))
+        ;; Pop pairs in reverse order (key, val)
+        (local.set $i (i32.sub (local.get $idx) (i32.const 1)))
+        (block $obj_done
+          (loop $obj_fill
+            (br_if $obj_done (i32.lt_s (local.get $i) (i32.const 0)))
+            ;; Pop value first (it was pushed last)
+            (local.set $t2 (call $pop_tagged))
+            (local.set $v2 (global.get $tmp_val))
+            ;; Pop key
+            (local.set $t1 (call $pop_tagged))
+            (local.set $v1 (global.get $tmp_val))
+            (call $object_set (local.get $obj_ptr)
+              (local.get $v1)    ;; key (string ptr)
+              (local.get $t2) (local.get $v2))
+            (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+            (br $obj_fill)
+          )
+        )
+        (call $push_val (i32.const 8) (local.get $obj_ptr))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 37: GET_PROP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))   ;; key
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))   ;; obj/list
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.eq (local.get $t1) (i32.const 8))   ;; object
+          (then
+            (local.set $tmp (call $object_get (local.get $v1) (local.get $v2)))
+            (call $push_val (local.get $tmp) (global.get $tmp_val))
+          )
+          (else (if (i32.eq (local.get $t1) (i32.const 7))   ;; list
+            (then
+              (if (i32.eq (local.get $t2) (i32.const 2))  ;; int index
+                (then
+                  (if (i32.lt_u (local.get $v2) (call $list_len (local.get $v1)))
+                    (then
+                      (call $push_val
+                        (call $list_get_type (local.get $v1) (local.get $v2))
+                        (call $list_get_val (local.get $v1) (local.get $v2)))
+                    )
+                    (else (call $push_val (i32.const 0) (i32.const 0)))
+                  )
+                )
+                (else (call $push_val (i32.const 0) (i32.const 0)))
+              )
+            )
+            (else (if (i32.eq (local.get $t1) (i32.const 5))  ;; string
+              (then
+                ;; String indexing: s.(i) returns single char
+                (if (i32.and
+                      (i32.eq (local.get $t2) (i32.const 2))
+                      (i32.lt_u (local.get $v2) (call $string_len (local.get $v1))))
+                  (then
+                    (local.set $tmp (call $alloc_string
+                      (i32.add (call $string_data (local.get $v1)) (local.get $v2))
+                      (i32.const 1)))
+                    (call $push_val (i32.const 5) (local.get $tmp))
+                  )
+                  (else (call $push_val (i32.const 0) (i32.const 0)))
+                )
+              )
+              (else (call $push_val (i32.const 0) (i32.const 0)))
+            ))
+          ))
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 38: SET_PROP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))    ;; value
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))    ;; key
+        (local.set $v1 (global.get $tmp_val))
+        (local.set $tmp (call $pop_tagged))   ;; object type
+        (local.set $tmp2 (global.get $tmp_val)) ;; object ptr
+        (if (i32.eq (local.get $tmp) (i32.const 8))
+          (then
+            (call $object_set (local.get $tmp2) (local.get $v1)
+              (local.get $t2) (local.get $v2))
+          )
+          (else (if (i32.eq (local.get $tmp) (i32.const 7))
+            (then
+              ;; list[idx] = val
+              (if (i32.eq (local.get $t1) (i32.const 2))
+                (then
+                  (call $list_set (local.get $tmp2) (local.get $v1)
+                    (local.get $t2) (local.get $v2))
+                )
+              )
+            )
+            (else (if (i32.eq (local.get $tmp) (i32.const 5))
+              (then
+                ;; string[idx] = int → update byte in place
+                (if (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                             (i32.eq (local.get $t2) (i32.const 2)))
+                  (then
+                    (call $str_set_byte (local.get $tmp2) (local.get $v1)
+                      (local.get $v2))
+                  )
+                )
+              )
+            ))
+          ))
+        )
+        (call $push_val (local.get $t2) (local.get $v2))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 39: JUMP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(global.set $pc (i32.add
+          (global.get $bytecode_base)
+          (call $fetch_i32)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 40: JUMP_FALSE</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_i32))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (if (i32.or
+              (i32.or
+                (i32.and (i32.eq (local.get $t1) (i32.const 4))
+                         (i32.eqz (local.get $v1)))      ;; bool false
+                (i32.eq (local.get $t1) (i32.const 0)))   ;; null
+              (i32.or
+                (i32.eq (local.get $t1) (i32.const 1))    ;; empty
+                (i32.and (i32.eq (local.get $t1) (i32.const 2))
+                         (i32.eqz (local.get $v1)))))      ;; int 0
+          (then
+            (global.set $pc (i32.add
+              (global.get $bytecode_base)
+              (local.get $idx)))
+          )
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 41: CLOSURE</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (call $push_val (i32.const 9)
+          (call $alloc_closure (local.get $idx) (global.get $csp)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 42: CALL</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $arity (call $fetch_u8))
+        ;; Peek at the function value below the arguments
+        ;; Stack: ... fn arg0 arg1 ... argN
+        (local.set $tmp (i32.sub (global.get $sp)
+          (i32.mul (i32.add (local.get $arity) (i32.const 1)) (i32.const 8))))
+        (local.set $t1 (i32.load (local.get $tmp)))
+        (local.set $v1 (i32.load (i32.add (local.get $tmp) (i32.const 4))))
+        (if (i32.eq (local.get $t1) (i32.const 9))   ;; TAG_FUNCTION
+          (then
+            (local.set $fn_idx (call $closure_fn_idx (local.get $v1)))
+            (local.set $expected (call $fntable_arity (local.get $fn_idx)))
+            ;; Allocate new locals
+            (local.set $locals_ptr
+              (call $alloc_locals (call $fntable_locals (local.get $fn_idx))))
+            ;; Copy arguments into locals
+            (local.set $i (i32.const 0))
+            (block $copy_done
+              (loop $copy_args
+                (br_if $copy_done (i32.ge_u (local.get $i) (local.get $arity)))
+                ;; Read arg from stack (after function slot)
+                (local.set $tmp2 (i32.add (local.get $tmp)
+                  (i32.mul (i32.add (local.get $i) (i32.const 1)) (i32.const 8))))
+                (call $set_local_at (local.get $locals_ptr) (local.get $i)
+                  (i32.load (local.get $tmp2))
+                  (i32.load (i32.add (local.get $tmp2) (i32.const 4))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $copy_args)
+              )
+            )
+            ;; Restore SP to before function + args
+            (global.set $sp (local.get $tmp))
+            ;; Push call frame
+            (call $push_frame
+              (global.get $pc)
+              (global.get $sp)
+              (local.get $locals_ptr)
+              (call $fntable_locals (local.get $fn_idx)))
+            ;; Jump to function body
+            (global.set $pc (i32.add
+              (global.get $bytecode_base)
+              (call $fntable_offset (local.get $fn_idx))))
+          )
+          (else
+            ;; Not a function — push null
+            ;; Pop the args + fn off the stack
+            (global.set $sp (local.get $tmp))
+            (call $push_val (i32.const 0) (i32.const 0))
+          )
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 43: RETURN</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $ret_type (call $peek_type))
+        (local.set $ret_val (call $peek_val))
+        ;; Restore caller state
+        (global.set $pc (call $frame_ret_pc))
+        (global.set $sp (call $frame_saved_sp))
+        (call $pop_frame)
+        ;; Push return value
+        (call $push_val (local.get $ret_type) (local.get $ret_val))
+        ;; If pc = 0, this was the top-level program — halt
+        (if (i32.eqz (global.get $pc))
+          (then (br $halt))
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 44: TAIL_CALL — same as CALL for now</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $arity (call $fetch_u8))
+        (local.set $tmp (i32.sub (global.get $sp)
+          (i32.mul (i32.add (local.get $arity) (i32.const 1)) (i32.const 8))))
+        (local.set $t1 (i32.load (local.get $tmp)))
+        (local.set $v1 (i32.load (i32.add (local.get $tmp) (i32.const 4))))
+        (if (i32.eq (local.get $t1) (i32.const 9))
+          (then
+            (local.set $fn_idx (call $closure_fn_idx (local.get $v1)))
+            (local.set $locals_ptr
+              (call $alloc_locals (call $fntable_locals (local.get $fn_idx))))
+            (local.set $i (i32.const 0))
+            (block $tc_done
+              (loop $tc_args
+                (br_if $tc_done (i32.ge_u (local.get $i) (local.get $arity)))
+                (local.set $tmp2 (i32.add (local.get $tmp)
+                  (i32.mul (i32.add (local.get $i) (i32.const 1)) (i32.const 8))))
+                (call $set_local_at (local.get $locals_ptr) (local.get $i)
+                  (i32.load (local.get $tmp2))
+                  (i32.load (i32.add (local.get $tmp2) (i32.const 4))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $tc_args)
+              )
+            )
+            ;; Reuse current frame (tail call optimization)
+            (global.set $sp (local.get $tmp))
+            (i32.store (i32.sub (global.get $csp) (i32.const 8)) (local.get $locals_ptr))
+            (i32.store (i32.sub (global.get $csp) (i32.const 4))
+              (call $fntable_locals (local.get $fn_idx)))
+            (global.set $pc (i32.add
+              (global.get $bytecode_base)
+              (call $fntable_offset (local.get $fn_idx))))
+          )
+          (else
+            (global.set $sp (local.get $tmp))
+            (call $push_val (i32.const 0) (i32.const 0))
+          )
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 45: BUILTIN</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $idx (call $fetch_u16))
+        (local.set $arity (call $fetch_u8))
+        (call $call_builtin (local.get $idx) (local.get $arity))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 46: IMPORT — u16 constant pool index; push null (modules pre-bundled)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(drop (call $fetch_u16))
+        (call $push_val (i32.const 0) (i32.const 0))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 47: IMPORT_DYN — pop string from stack; push null (modules pre-bundled)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(drop (call $pop_tagged))
+        (drop (global.get $tmp_val))
+        (call $push_val (i32.const 0) (i32.const 0))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 48: DEEP_EQ — structural equality (uses val_eq for now)</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (i32.const 4)
+          (call $val_eq (local.get $t1) (local.get $v1)
+                        (local.get $t2) (local.get $v2)))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 49: SWAP</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $t1 (call $pop_tagged))
+        (local.set $v1 (global.get $tmp_val))
+        (call $push_val (local.get $t2) (local.get $v2))
+        (call $push_val (local.get $t1) (local.get $v1))'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 50: MATCH_JUMP — pop pattern, peek condition, jump i32 if no match</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $t2 (call $pop_tagged))
+        (local.set $v2 (global.get $tmp_val))
+        (local.set $idx (call $fetch_i32))
+        ;; Compare with TOS (condition on top of stack, without popping)
+        (if (i32.eqz (call $val_eq
+              (call $peek_type) (call $peek_val)
+              (local.get $t2) (local.get $v2)))
+          (then
+            (global.set $pc (i32.add
+              (global.get $bytecode_base)
+              (local.get $idx)))
+          )
+        )'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 51: SCOPE_PUSH — no-op in frame-based approach</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(nop)'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 52: SCOPE_POP — no-op in frame-based approach</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(nop)'</span><span class="oak-newline">
+</span><span class="oak-newline">
+		</span><span class="oak-comment">// 53: CALL_SPREAD — u8 arity; last arg is list to spread</span><span class="oak-newline">
+		</span><span class="oak-stringLiteral">'(local.set $arity (call $fetch_u8))
+        ;; For now, treat as a regular call (spread not yet implemented in WASM)
+        (local.set $tmp (i32.sub (global.get $sp)
+          (i32.mul (i32.add (local.get $arity) (i32.const 1)) (i32.const 8))))
+        (local.set $t1 (i32.load (local.get $tmp)))
+        (local.set $v1 (i32.load (i32.add (local.get $tmp) (i32.const 4))))
+        (if (i32.eq (local.get $t1) (i32.const 9))
+          (then
+            (local.set $fn_idx (call $closure_fn_idx (local.get $v1)))
+            (local.set $locals_ptr
+              (call $alloc_locals (call $fntable_locals (local.get $fn_idx))))
+            (local.set $i (i32.const 0))
+            (block $cs_done
+              (loop $cs_args
+                (br_if $cs_done (i32.ge_u (local.get $i) (local.get $arity)))
+                (local.set $tmp2 (i32.add (local.get $tmp)
+                  (i32.mul (i32.add (local.get $i) (i32.const 1)) (i32.const 8))))
+                (call $set_local_at (local.get $locals_ptr) (local.get $i)
+                  (i32.load (local.get $tmp2))
+                  (i32.load (i32.add (local.get $tmp2) (i32.const 4))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $cs_args)
+              )
+            )
+            (global.set $sp (local.get $tmp))
+            (call $push_frame
+              (global.get $pc)
+              (global.get $sp)
+              (local.get $locals_ptr)
+              (call $fntable_locals (local.get $fn_idx)))
+            (global.set $pc (i32.add
+              (global.get $bytecode_base)
+              (call $fntable_offset (local.get $fn_idx))))
+          )
+          (else
+            (global.set $sp (local.get $tmp))
+            (call $push_val (i32.const 0) (i32.const 0))
+          )
+        )'</span><span class="oak-newline">
+	</span><span class="oak-rightBracket">]</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">numOps </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">handlers</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Build the WAT block structure for br_table dispatch</span><span class="oak-newline">
+	</span><span class="oak-comment">// Pattern: nested blocks, one per opcode, with br_table at the innermost level</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-stringLiteral">''</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Open all blocks (outermost = $op_default, innermost = $op_0)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        (block $op_default\n'</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">openBlocks</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">numOps </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        (block $op_' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+			</span><span class="oak-fnName">openBlocks</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">openBlocks</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// br_table instruction</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'          (br_table'</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">addLabels</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">numOps </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">' $op_' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">addLabels</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">addLabels</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">' $op_default (local.get $op))\n'</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Close blocks and add handlers</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">closeBlocks</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">numOps </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        ) ;; $op_' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+			</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        ;; -- ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">OpcodeName</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">OpcodeName</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-stringLiteral">'???' </span><span class="oak-rightBrace">} </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">' --\n'</span><span class="oak-newline">
+			</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        ' </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">handlers</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+			</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        (br $dispatch)\n'</span><span class="oak-newline">
+			</span><span class="oak-fnName">closeBlocks</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">closeBlocks</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-comment">// Close $op_default block</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        ) ;; $op_default — unknown opcode\n'</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-stringLiteral">'        (br $halt)\n'</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// (generateSetLocalAtHelper removed: $set_local_at is now defined inline in the WAT module)</span></code></pre>
+        </article>
+    </main>
+    <footer>
+        <div class="split overlay">
+            <div class="left">
+            </div>
+            <div class="right">
+                - <a href="https://thesephist.com/">Linus</a>
+            </div>
+        </div>
+    </footer>
+</body>

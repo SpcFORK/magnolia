@@ -1,0 +1,20 @@
+# MIDP two-request repaint probe — reference only; exact case still blocked in Magnolia
+
+**Result of this probe: reference-side characterization, not an implementation of repeated repaint scheduling.** A [later distinct opt-in one-frame owned-fixture Canvas paint](midlet-paint-reference.md) does exist in Magnolia; it does **not** run this exact probe, deliver `serviceRepaints()` or paint the unchanged Acotel game. On the pinned MicroEmulator 2.0.4 default 176×176 device, JDK 11 `-Xverify:all` ran the *owned* `RepaintProbeMIDlet` compiled once against the real MIDP API. Three separate runs each observed: a detached repaint with **0** callbacks; `setCurrent` followed by `showNotify` and one `paint(Graphics)` on the emulator's `event-thread` (clip width **176**); two explicit repaint requests on the selected Canvas followed by `serviceRepaints` and **one more** paint callback (total **2**). This bounded observation does **not** promise that requests always coalesce under another device/thread schedule. The harness publishes its volatile counters *after* each trace line and permits the second paint to race the caller's `requests-returned` print; it does not impose a false total order across threads.
+
+[Hash-pinned harness](../midlet-repaint-reference.py), [fixture source](../test/fixtures/midlet-repaint/RepaintProbeMIDlet.java), real-emulator observer, [saved three-run trace, class/source hashes and refusals](midlet-repaint-reference.json). The MicroEmulator JAR (643,996 bytes; SHA-256 `dbd5f3eb8365d3e839d6a203149e0e3776fc1a0585e16ac1fc23f76c9fcae1c6`) and unchanged original Acotel game (50,594 bytes; SHA-256 `c24e61a416616a036b537957ec9b0687ad08f9fceae18e4d06336883ec8c3040`) stay outside source delivery.
+
+Magnolia's **default no-paint route still refuses before guest output**. This exact owned fixture fails selected preflight at `RepaintProbeMIDlet$View.repaint()V`; the unchanged Acotel JAR without an opt-in virtual memory snapshot stops earlier at `java/lang/Runtime`, and with the *measured, explicitly supplied* 31,119,560-byte snapshot stops at `javax/microedition/lcdui/Canvas.repaint()V`. With the **additional one-frame paint opt-in**, that original game's first refusal becomes `Canvas.serviceRepaints()V`, still before construction or any paint. The updated *separate Java SE all-method static decoder* reports Acotel `DS_Effects.run()` at byte 27 (`Canvas.repaint()`), **23/48 decoded bodies and 43 entries**; it is **not** the MIDP linker or a game run. [Cross-media census](media-blockers-current.json) keeps these measures apart.
+
+The [later one-frame fixture gate](midlet-paint-reference.md) has **real paint bytecode and full-surface pixels**, not a no-op `repaint()`. A later [separate two-frame owned fixture](midlet-service-reference.md) now compares one **synchronous** selected `serviceRepaints()` call and two complete Canvas frames to the real emulator, but it does **not** execute this earlier exact two-request probe, model a concurrent `event-thread`, or run the unchanged game. The next implementation gate is still a bounded `Display`/Canvas **repeated event queue** with selection transitions, ordering/coalescing, clipping, resource preflight, metered work and independent comparisons on the **original reachable callback profile**. Preserve the distinct finite offscreen `ImageBridge` contract and refuse unknown member variants, devices or callback paths before guest output. Only then revisit the unchanged game's original `run()` and independent frame/input/gameplay parity; this reference alone does not complete any open JVM TODO.
+
+Reproduce from Magnolia root with local separately obtained pinned inputs and JDK 11:
+
+```sh
+MAGNOLIA=/path/to/magnolia
+MICROEMU=/path/to/microemulator-2.0.4.jar
+ACOTEL=/path/to/ACO_XmasGifts_s.jar
+timeout --signal=TERM --kill-after=3s 100s python3 midlet-repaint-reference.py \
+  --microemu "$MICROEMU" --original-jar "$ACOTEL" --magnolia "$MAGNOLIA" \
+  --output midlet-repaint-reference.json
+```

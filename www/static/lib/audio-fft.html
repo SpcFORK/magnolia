@@ -1,0 +1,221 @@
+<!doctype html>
+<head>
+    <meta charset="utf-8">
+    <title>audio-fft.oak | Oak programming language</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/lib.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="overlay">
+            <div class="home">
+                <a href="/">Oak</a>
+            </div>
+            <nav>
+                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
+                <a href="/posts/">blog</a>
+                <a href="/#start">download</a>
+                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
+            </nav>
+        </div>
+    </header>
+    <main aria-role="main">
+        <article class="overlay stdlib">
+            <h1>audio-fft.oak</h1>
+            <p class="meta">
+                <a href="/lib/">&larr; Standard library</a>
+                <a href="https://github.com/thesephist/oak/blob/main/lib/audio-fft.oak">See on GitHub ↗</a>
+            </p>
+            <pre><code><span class="oak-comment">// libaudio-fft provides FFT/IFFT and frequency-domain helpers for libaudio.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Functions here are factored out of audio.oak to keep heavier complex-number</span>
+<span class="oak-comment">// math and radix-2 implementation details isolated in a focused module.</span>
+
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">range</span><span class="oak-colon">: </span><span class="oak-identifier">range</span><span class="oak-newline">
+	</span><span class="oak-identifier">map</span><span class="oak-colon">: </span><span class="oak-identifier">map</span><span class="oak-newline">
+	</span><span class="oak-identifier">each</span><span class="oak-colon">: </span><span class="oak-identifier">each</span><span class="oak-newline">
+	</span><span class="oak-identifier">clone</span><span class="oak-colon">: </span><span class="oak-identifier">clone</span><span class="oak-newline">
+	</span><span class="oak-identifier">default</span><span class="oak-colon">: </span><span class="oak-identifier">default</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">sin</span><span class="oak-colon">: </span><span class="oak-identifier">sin</span><span class="oak-newline">
+	</span><span class="oak-identifier">cos</span><span class="oak-colon">: </span><span class="oak-identifier">cos</span><span class="oak-newline">
+	</span><span class="oak-identifier">Pi</span><span class="oak-colon">: </span><span class="oak-identifier">Pi</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'math'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">complexMag</span><span class="oak-colon">: </span><span class="oak-identifier">_complexMag</span><span class="oak-newline">
+	</span><span class="oak-identifier">phaseAt</span><span class="oak-colon">: </span><span class="oak-identifier">_phaseAt</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'audio-complex'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">pmap</span><span class="oak-colon">: </span><span class="oak-identifier">pmap</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'thread'</span><span class="oak-rightParen">)</span>
+
+<span class="oak-comment">// TwoPi is 2π, a commonly needed constant for angular calculations.</span>
+<span class="oak-identifier">TwoPi </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2 </span><span class="oak-times">* </span><span class="oak-identifier">Pi</span>
+
+<span class="oak-comment">// _nextPow2 returns the smallest power of 2 >= n.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_nextPow2</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">p </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-times">* </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _log2Floor returns floor(log2(n)) for positive integers.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_log2Floor</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">x </span><span class="oak-leq">&lt;= </span><span class="oak-numberLiteral">1 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-divide">/ </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _bitrev reverses the low `bits` bits of integer `x`.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_bitrev</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">bits</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">bits</span><span class="oak-comma">, </span><span class="oak-identifier">r</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">bits </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">r</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-divide">/ </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">bits </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">r </span><span class="oak-times">* </span><span class="oak-numberLiteral">2 </span><span class="oak-plus">+ </span><span class="oak-identifier">x </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">bits</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _fftSwap swaps real/imag values at two indices.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_fftSwap</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">tmp </span><span class="oak-assign">:= </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">tmp</span><span class="oak-newline">
+	</span><span class="oak-identifier">tmp2 </span><span class="oak-assign">:= </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">tmp2</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _fftTwiddle computes the twiddle factor for stage position j.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_fftTwiddle</span><span class="oak-leftParen">(</span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">angle </span><span class="oak-assign">:= </span><span class="oak-identifier">sign </span><span class="oak-times">* </span><span class="oak-identifier">TwoPi </span><span class="oak-times">* </span><span class="oak-identifier">j </span><span class="oak-divide">/ </span><span class="oak-identifier">step</span><span class="oak-newline">
+	</span><span class="oak-leftBrace">{ </span><span class="oak-identifier">wr</span><span class="oak-colon">: </span><span class="oak-fnName">cos</span><span class="oak-leftParen">(</span><span class="oak-identifier">angle</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">wi</span><span class="oak-colon">: </span><span class="oak-fnName">sin</span><span class="oak-leftParen">(</span><span class="oak-identifier">angle</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _fftButterflyApply applies one radix-2 butterfly operation.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_fftButterflyApply</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">u</span><span class="oak-comma">, </span><span class="oak-identifier">v</span><span class="oak-comma">, </span><span class="oak-identifier">wr</span><span class="oak-comma">, </span><span class="oak-identifier">wi</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">tr </span><span class="oak-assign">:= </span><span class="oak-identifier">wr </span><span class="oak-times">* </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">wi </span><span class="oak-times">* </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">ti </span><span class="oak-assign">:= </span><span class="oak-identifier">wr </span><span class="oak-times">* </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-identifier">wi </span><span class="oak-times">* </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">u</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">tr</span><span class="oak-newline">
+	</span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">u</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">ti</span><span class="oak-newline">
+	</span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">u</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">u</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-identifier">tr</span><span class="oak-newline">
+	</span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">u</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">u</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-identifier">ti</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _fftButterflyRange runs all butterfly operations for one group.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_fftButterflyRange</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">k</span><span class="oak-comma">, </span><span class="oak-identifier">half</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">j </span><span class="oak-geq">>= </span><span class="oak-identifier">half </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-qmark">?</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">tw </span><span class="oak-assign">:= </span><span class="oak-fnName">_fftTwiddle</span><span class="oak-leftParen">(</span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-identifier">u </span><span class="oak-assign">:= </span><span class="oak-identifier">k </span><span class="oak-plus">+ </span><span class="oak-identifier">j</span><span class="oak-newline">
+		</span><span class="oak-identifier">v </span><span class="oak-assign">:= </span><span class="oak-identifier">u </span><span class="oak-plus">+ </span><span class="oak-identifier">half</span><span class="oak-newline">
+		</span><span class="oak-fnName">_fftButterflyApply</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">u</span><span class="oak-comma">, </span><span class="oak-identifier">v</span><span class="oak-comma">, </span><span class="oak-identifier">tw</span><span class="oak-dot">.</span><span class="oak-identifier">wr</span><span class="oak-comma">, </span><span class="oak-identifier">tw</span><span class="oak-dot">.</span><span class="oak-identifier">wi</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-fnName">_fftButterflyRange</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">k</span><span class="oak-comma">, </span><span class="oak-identifier">half</span><span class="oak-comma">, </span><span class="oak-identifier">j </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _fftGroupPass runs grouped butterflies for one FFT stage.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_fftGroupPass</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">k</span><span class="oak-comma">, </span><span class="oak-identifier">half</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">k </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-qmark">?</span><span class="oak-newline">
+	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-fnName">_fftButterflyRange</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">k</span><span class="oak-comma">, </span><span class="oak-identifier">half</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-fnName">_fftGroupPass</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">k </span><span class="oak-plus">+ </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">half</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// _fftCore is the shared forward/inverse implementation.</span>
+<span class="oak-comment">// sign = -1 for forward FFT; sign = +1 for inverse.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_fftCore</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">re </span><span class="oak-assign">:= </span><span class="oak-fnName">clone</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">im </span><span class="oak-assign">:= </span><span class="oak-fnName">clone</span><span class="oak-leftParen">(</span><span class="oak-identifier">im</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">bits </span><span class="oak-assign">:= </span><span class="oak-fnName">_log2Floor</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">)</span>
+<span class="oak-newline">
+	</span><span class="oak-comment">// Bit-reversal permutation</span><span class="oak-newline">
+	</span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">j </span><span class="oak-assign">:= </span><span class="oak-fnName">_bitrev</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">bits</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">j </span><span class="oak-greater">> </span><span class="oak-identifier">i </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_fftSwap</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span>
+<span class="oak-newline">
+	</span><span class="oak-comment">// Cooley-Tukey butterfly passes</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">pass</span><span class="oak-leftParen">(</span><span class="oak-identifier">step</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">step </span><span class="oak-greater">> </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">re</span><span class="oak-colon">: </span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-colon">: </span><span class="oak-identifier">im </span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">half </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">step </span><span class="oak-divide">/ </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">_fftGroupPass</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-identifier">sign</span><span class="oak-comma">, </span><span class="oak-identifier">step</span><span class="oak-comma">, </span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">half</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">pass</span><span class="oak-leftParen">(</span><span class="oak-identifier">step </span><span class="oak-times">* </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-newline">
+	</span><span class="oak-fnName">pass</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// fft computes the forward DFT of a real (or complex) signal.</span>
+<span class="oak-comment">// `im` may be omitted and will default to zeros.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">fft</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">im </span><span class="oak-assign">:= </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-underscore">_</span><span class="oak-rightParen">) </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_fftCore</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-minus">-</span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// ifft computes the inverse DFT. Output is scaled by 1/N.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">ifft</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">_fftCore</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">re</span><span class="oak-colon">: </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">re </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-rightParen">) </span><span class="oak-identifier">s </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-identifier">im</span><span class="oak-colon">: </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">im </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-rightParen">) </span><span class="oak-identifier">s </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// magnitude computes complex magnitude per FFT bin.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">magnitude</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-rightParen">) </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">r </span><span class="oak-assign">:= </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">g </span><span class="oak-assign">:= </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_complexMag</span><span class="oak-leftParen">(</span><span class="oak-identifier">r</span><span class="oak-comma">, </span><span class="oak-identifier">g</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span>
+
+<span class="oak-comment">// phase computes phase angle in radians per FFT bin.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">phase</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">im</span><span class="oak-rightParen">) </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">re</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">x </span><span class="oak-assign">:= </span><span class="oak-identifier">re</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">y </span><span class="oak-assign">:= </span><span class="oak-identifier">im</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_phaseAt</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span>
+
+<span class="oak-comment">// powerSpectrum computes magnitude bins from a real signal.</span>
+<span class="oak-comment">// The signal is zero-padded to the next power of 2 if needed.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">powerSpectrum</span><span class="oak-leftParen">(</span><span class="oak-identifier">samples</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">sLen </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">samples</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">_nextPow2</span><span class="oak-leftParen">(</span><span class="oak-identifier">sLen</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">padded </span><span class="oak-assign">:= </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">sLen </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">samples</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0 </span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">fft</span><span class="oak-leftParen">(</span><span class="oak-identifier">padded</span><span class="oak-comma">, </span><span class="oak-qmark">?</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">magnitude</span><span class="oak-leftParen">(</span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">re</span><span class="oak-comma">, </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">im</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+
+<span class="oak-comment">// pbatchFFT computes forward FFT on multiple signals in parallel.</span>
+<span class="oak-comment">// Each signal is an independent real-valued sample list.</span>
+<span class="oak-comment">//   pbatchFFT([signal1, signal2, signal3])</span>
+<span class="oak-comment">//   // => [{ re: [...], im: [...] }, ...]</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">pbatchFFT</span><span class="oak-leftParen">(</span><span class="oak-identifier">signals</span><span class="oak-rightParen">) </span><span class="oak-fnName">pmap</span><span class="oak-leftParen">(</span><span class="oak-identifier">signals</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-rightParen">) </span><span class="oak-fnName">fft</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-comma">, </span><span class="oak-qmark">?</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
+
+<span class="oak-comment">// pbatchPowerSpectrum computes power spectrum for multiple signals in parallel.</span>
+<span class="oak-comment">//   pbatchPowerSpectrum([signal1, signal2])</span>
+<span class="oak-comment">//   // => [[mag1, mag2, ...], [mag1, mag2, ...]]</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">pbatchPowerSpectrum</span><span class="oak-leftParen">(</span><span class="oak-identifier">signals</span><span class="oak-rightParen">) </span><span class="oak-fnName">pmap</span><span class="oak-leftParen">(</span><span class="oak-identifier">signals</span><span class="oak-comma">, </span><span class="oak-identifier">powerSpectrum</span><span class="oak-rightParen">)</span>
+</code></pre>
+        </article>
+    </main>
+    <footer>
+        <div class="split overlay">
+            <div class="left">
+            </div>
+            <div class="right">
+                - <a href="https://thesephist.com/">Linus</a>
+            </div>
+        </div>
+    </footer>
+</body>

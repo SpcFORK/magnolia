@@ -1,0 +1,447 @@
+<!doctype html>
+<head>
+    <meta charset="utf-8">
+    <title>gui-test.oak | Oak programming language</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/lib.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="overlay">
+            <div class="home">
+                <a href="/">Oak</a>
+            </div>
+            <nav>
+                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
+                <a href="/posts/">blog</a>
+                <a href="/#start">download</a>
+                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
+            </nav>
+        </div>
+    </header>
+    <main aria-role="main">
+        <article class="overlay stdlib">
+            <h1>gui-test.oak</h1>
+            <p class="meta">
+                <a href="/lib/">&larr; Standard library</a>
+                <a href="https://github.com/thesephist/oak/blob/main/lib/gui-test.oak">See on GitHub ↗</a>
+            </p>
+            <pre><code><span class="oak-comment">// gui-test — Automated GUI test harness for Magnolia.</span>
+<span class="oak-comment">//</span>
+<span class="oak-comment">// Provides synthetic input injection (mouse, keyboard, touch) for</span>
+<span class="oak-comment">// regression testing of GUI applications without manual interaction.</span>
+<span class="oak-comment">// Uses Win32 SendInput API for realistic event simulation.</span><span class="oak-newline">
+</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">default</span><span class="oak-colon">: </span><span class="oak-identifier">default</span><span class="oak-newline">
+	</span><span class="oak-identifier">map</span><span class="oak-colon">: </span><span class="oak-identifier">map</span><span class="oak-newline">
+	</span><span class="oak-identifier">each</span><span class="oak-colon">: </span><span class="oak-identifier">each</span><span class="oak-newline">
+	</span><span class="oak-identifier">slice</span><span class="oak-colon">: </span><span class="oak-identifier">slice</span><span class="oak-newline">
+	</span><span class="oak-identifier">range</span><span class="oak-colon">: </span><span class="oak-identifier">range</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">threadLib </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'thread'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">floor</span><span class="oak-colon">: </span><span class="oak-identifier">floor</span><span class="oak-newline">
+	</span><span class="oak-identifier">max</span><span class="oak-colon">: </span><span class="oak-identifier">max</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'math'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">windows </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'windows'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">guiInput </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'gui-input'</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── SendInput constants ─────────────────────────────────────────────────────</span>
+<span class="oak-identifier">INPUT_MOUSE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span>
+<span class="oak-identifier">INPUT_KEYBOARD </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
+<span class="oak-identifier">INPUT_HARDWARE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Mouse event flags</span>
+<span class="oak-identifier">MOUSEEVENTF_MOVE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
+<span class="oak-identifier">MOUSEEVENTF_LEFTDOWN </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span>
+<span class="oak-identifier">MOUSEEVENTF_LEFTUP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">4</span>
+<span class="oak-identifier">MOUSEEVENTF_RIGHTDOWN </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">8</span>
+<span class="oak-identifier">MOUSEEVENTF_RIGHTUP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">16</span>
+<span class="oak-identifier">MOUSEEVENTF_MIDDLEDOWN </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">32</span>
+<span class="oak-identifier">MOUSEEVENTF_MIDDLEUP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">64</span>
+<span class="oak-identifier">MOUSEEVENTF_WHEEL </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2048</span>
+<span class="oak-identifier">MOUSEEVENTF_ABSOLUTE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">32768</span>
+<span class="oak-identifier">MOUSEEVENTF_VIRTUALDESK </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">16384</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Keyboard event flags</span>
+<span class="oak-identifier">KEYEVENTF_KEYDOWN </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span>
+<span class="oak-identifier">KEYEVENTF_KEYUP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span>
+<span class="oak-identifier">KEYEVENTF_UNICODE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">4</span>
+<span class="oak-identifier">KEYEVENTF_SCANCODE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">8</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Virtual-key codes for common keys (from gui-input)</span>
+<span class="oak-identifier">VK_RETURN </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_RETURN</span>
+<span class="oak-identifier">VK_ESCAPE </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_ESCAPE</span>
+<span class="oak-identifier">VK_TAB </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_TAB</span>
+<span class="oak-identifier">VK_BACK </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_BACK</span>
+<span class="oak-identifier">VK_SPACE </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_SPACE</span>
+<span class="oak-identifier">VK_LEFT </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_LEFT</span>
+<span class="oak-identifier">VK_UP </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_UP</span>
+<span class="oak-identifier">VK_RIGHT </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_RIGHT</span>
+<span class="oak-identifier">VK_DOWN </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_DOWN</span>
+<span class="oak-identifier">VK_SHIFT </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_SHIFT</span>
+<span class="oak-identifier">VK_CONTROL </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_CONTROL</span>
+<span class="oak-identifier">VK_MENU </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_ALT</span>
+<span class="oak-identifier">VK_DELETE </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_DELETE</span>
+<span class="oak-identifier">VK_HOME </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_HOME</span>
+<span class="oak-identifier">VK_END </span><span class="oak-assign">:= </span><span class="oak-identifier">guiInput</span><span class="oak-dot">.</span><span class="oak-identifier">VK_END</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// INPUT struct sizes (x64)</span>
+<span class="oak-identifier">_INPUT_SIZE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">40  </span><span class="oak-comment">// sizeof(INPUT) on x64</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Low-level input injection ───────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// _buildMouseInput(dx, dy, flags, data) — build an INPUT struct for mouse.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">dx</span><span class="oak-comma">, </span><span class="oak-identifier">dy</span><span class="oak-comma">, </span><span class="oak-identifier">flags</span><span class="oak-comma">, </span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">_INPUT_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// type = INPUT_MOUSE (0) at offset 0 (4 bytes)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">INPUT_MOUSE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// MOUSEINPUT at offset 8 (after alignment)</span><span class="oak-newline">
+	</span><span class="oak-comment">// dx (i32) at 8</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">8</span><span class="oak-comma">, </span><span class="oak-identifier">dx</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// dy (i32) at 12</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">12</span><span class="oak-comma">, </span><span class="oak-identifier">dy</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// mouseData (u32) at 16</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">16</span><span class="oak-comma">, </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// dwFlags (u32) at 20</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">20</span><span class="oak-comma">, </span><span class="oak-identifier">flags</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// time (u32) at 24 — 0 = system provided</span><span class="oak-newline">
+	</span><span class="oak-comment">// dwExtraInfo at 28 — 0</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// _buildKeyboardInput(vk, scan, flags) — build an INPUT struct for keyboard.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-comma">, </span><span class="oak-identifier">scan</span><span class="oak-comma">, </span><span class="oak-identifier">flags</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">_INPUT_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// type = INPUT_KEYBOARD (1) at offset 0</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">INPUT_KEYBOARD</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// KEYBDINPUT at offset 8</span><span class="oak-newline">
+	</span><span class="oak-comment">// wVk (u16) at 8</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-identifier">vk </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">9</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-leftParen">(</span><span class="oak-identifier">vk </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+	</span><span class="oak-comment">// wScan (u16) at 10</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">10</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">scan</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">11</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-leftParen">(</span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">scan</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+	</span><span class="oak-comment">// dwFlags (u32) at 12</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">12</span><span class="oak-comma">, </span><span class="oak-identifier">flags</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// _sendInputs(inputs) — call SendInput with array of INPUT structs.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-identifier">inputs</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">count </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">inputs</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// Concatenate all input buffers</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-stringLiteral">''</span><span class="oak-newline">
+	</span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-identifier">inputs</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">inp</span><span class="oak-rightParen">) </span><span class="oak-identifier">buf </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">buf </span><span class="oak-plus">+ </span><span class="oak-identifier">inp</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'SendInput'</span><span class="oak-comma">, </span><span class="oak-identifier">count</span><span class="oak-comma">, </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">_INPUT_SIZE</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Mouse simulation ────────────────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testMouseMove(x, y) — move cursor to absolute screen position.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testMouseMove</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-comment">// Normalize to 0..65535 range for absolute positioning</span><span class="oak-newline">
+	</span><span class="oak-comment">// Get screen size via GetSystemMetrics</span><span class="oak-newline">
+	</span><span class="oak-identifier">screenW </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetSystemMetrics'</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-comment">// SM_CXSCREEN</span><span class="oak-newline">
+	</span><span class="oak-identifier">screenH </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetSystemMetrics'</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-comment">// SM_CYSCREEN</span><span class="oak-newline">
+	</span><span class="oak-identifier">nx </span><span class="oak-assign">:= </span><span class="oak-fnName">floor</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-times">* </span><span class="oak-numberLiteral">65535 </span><span class="oak-divide">/ </span><span class="oak-fnName">max</span><span class="oak-leftParen">(</span><span class="oak-identifier">screenW</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">ny </span><span class="oak-assign">:= </span><span class="oak-fnName">floor</span><span class="oak-leftParen">(</span><span class="oak-identifier">y </span><span class="oak-times">* </span><span class="oak-numberLiteral">65535 </span><span class="oak-divide">/ </span><span class="oak-fnName">max</span><span class="oak-leftParen">(</span><span class="oak-identifier">screenH</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">inp </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">nx</span><span class="oak-comma">, </span><span class="oak-identifier">ny</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_MOVE </span><span class="oak-or">| </span><span class="oak-identifier">MOUSEEVENTF_ABSOLUTE</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">inp</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testMouseClick(x, y) — move to (x,y) and perform a left click.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testMouseClick</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnName">testMouseMove</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">down </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_LEFTDOWN</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">up </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_LEFTUP</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">down</span><span class="oak-comma">, </span><span class="oak-identifier">up</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testMouseRightClick(x, y) — move to (x,y) and perform a right click.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testMouseRightClick</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnName">testMouseMove</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">down </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_RIGHTDOWN</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">up </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_RIGHTUP</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">down</span><span class="oak-comma">, </span><span class="oak-identifier">up</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testMouseDoubleClick(x, y) — double left click at (x,y).</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testMouseDoubleClick</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnName">testMouseClick</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">testMouseClick</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-identifier">y</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testMouseDrag(x1, y1, x2, y2) — drag from (x1,y1) to (x2,y2).</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testMouseDrag</span><span class="oak-leftParen">(</span><span class="oak-identifier">x1</span><span class="oak-comma">, </span><span class="oak-identifier">y1</span><span class="oak-comma">, </span><span class="oak-identifier">x2</span><span class="oak-comma">, </span><span class="oak-identifier">y2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnName">testMouseMove</span><span class="oak-leftParen">(</span><span class="oak-identifier">x1</span><span class="oak-comma">, </span><span class="oak-identifier">y1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">down </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_LEFTDOWN</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">down</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">testMouseMove</span><span class="oak-leftParen">(</span><span class="oak-identifier">x2</span><span class="oak-comma">, </span><span class="oak-identifier">y2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">up </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_LEFTUP</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">up</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testMouseWheel(delta) — scroll the mouse wheel. delta>0 scrolls up.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testMouseWheel</span><span class="oak-leftParen">(</span><span class="oak-identifier">delta</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-comment">// WHEEL_DELTA is 120</span><span class="oak-newline">
+	</span><span class="oak-identifier">inp </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildMouseInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">MOUSEEVENTF_WHEEL</span><span class="oak-comma">, </span><span class="oak-identifier">delta </span><span class="oak-times">* </span><span class="oak-numberLiteral">120</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">inp</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Keyboard simulation ─────────────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testKeyDown(vk) — press a key down.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testKeyDown</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">inp </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_KEYDOWN</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">inp</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testKeyUp(vk) — release a key.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testKeyUp</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">inp </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_KEYUP</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">inp</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testKeyPress(vk) — press and release a key.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testKeyPress</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">down </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_KEYDOWN</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">up </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_KEYUP</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">down</span><span class="oak-comma">, </span><span class="oak-identifier">up</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testTypeText(text) — type a string character by character using Unicode input.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testTypeText</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">ch </span><span class="oak-assign">:= </span><span class="oak-fnName">codepoint</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-identifier">down </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">ch</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_UNICODE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-identifier">up </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">ch</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_UNICODE </span><span class="oak-or">| </span><span class="oak-identifier">KEYEVENTF_KEYUP</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">down</span><span class="oak-comma">, </span><span class="oak-identifier">up</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testKeyCombo(keys) — press a key combination (e.g. Ctrl+C).</span>
+<span class="oak-comment">// keys: list of VK codes, e.g. [VK_CONTROL, 67] for Ctrl+C</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testKeyCombo</span><span class="oak-leftParen">(</span><span class="oak-identifier">keys</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-comment">// Press all down</span><span class="oak-newline">
+	</span><span class="oak-identifier">downs </span><span class="oak-assign">:= </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-identifier">keys</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-rightParen">) </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">vk</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_KEYDOWN</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-identifier">downs</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// Release in reverse</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">up </span><span class="oak-assign">:= </span><span class="oak-fnName">_buildKeyboardInput</span><span class="oak-leftParen">(</span><span class="oak-identifier">keys</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">KEYEVENTF_KEYUP</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">_sendInputs</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-identifier">up</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">keys</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Test harness / assertion framework ──────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testSuite(name) — create a test suite for organizing GUI tests.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testSuite</span><span class="oak-leftParen">(</span><span class="oak-identifier">name</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">name</span><span class="oak-colon">: </span><span class="oak-identifier">name</span><span class="oak-newline">
+		</span><span class="oak-identifier">tests</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
+		</span><span class="oak-identifier">passed</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
+		</span><span class="oak-identifier">failed</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
+		</span><span class="oak-identifier">errors</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testCase(suite, name, fn) — add a test case to the suite.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testCase</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-comma">, </span><span class="oak-identifier">name</span><span class="oak-comma">, </span><span class="oak-identifier">testFn</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">tests </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">tests </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">name</span><span class="oak-colon">: </span><span class="oak-identifier">name</span><span class="oak-newline">
+		</span><span class="oak-identifier">testFn</span><span class="oak-colon">: </span><span class="oak-identifier">testFn</span><span class="oak-newline">
+		</span><span class="oak-identifier">status</span><span class="oak-colon">: </span><span class="oak-stringLiteral">'pending'</span><span class="oak-newline">
+		</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-qmark">?</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-identifier">suite</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testRun(suite) — run all tests in the suite, return results.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testRun</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">tests</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">tc</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">ok?</span><span class="oak-colon">: </span><span class="oak-trueLiteral">true</span><span class="oak-newline">
+			</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-qmark">?</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-comment">// Execute test function — it should call testAssert helpers</span><span class="oak-newline">
+		</span><span class="oak-identifier">tc</span><span class="oak-dot">.</span><span class="oak-fnName">testFn</span><span class="oak-leftParen">(</span><span class="oak-identifier">result</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">ok? </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">tc</span><span class="oak-dot">.</span><span class="oak-identifier">status </span><span class="oak-assign">:= </span><span class="oak-stringLiteral">'passed'</span><span class="oak-newline">
+				</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">passed </span><span class="oak-assign">:= </span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">passed </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">tc</span><span class="oak-dot">.</span><span class="oak-identifier">status </span><span class="oak-assign">:= </span><span class="oak-stringLiteral">'failed'</span><span class="oak-newline">
+				</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">failed </span><span class="oak-assign">:= </span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">failed </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-newline">
+				</span><span class="oak-identifier">tc</span><span class="oak-dot">.</span><span class="oak-identifier">error </span><span class="oak-assign">:= </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">error</span><span class="oak-newline">
+				</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">errors </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">errors </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+					</span><span class="oak-identifier">test</span><span class="oak-colon">: </span><span class="oak-identifier">tc</span><span class="oak-dot">.</span><span class="oak-identifier">name</span><span class="oak-newline">
+					</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">error</span><span class="oak-newline">
+				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">suite</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testAssert(result, condition, message) — assert a condition is true.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testAssert</span><span class="oak-leftParen">(</span><span class="oak-identifier">result</span><span class="oak-comma">, </span><span class="oak-identifier">condition</span><span class="oak-comma">, </span><span class="oak-identifier">message</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-exclam">!</span><span class="oak-identifier">condition </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">ok? </span><span class="oak-assign">:= </span><span class="oak-falseLiteral">false</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">error </span><span class="oak-assign">:= </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">message</span><span class="oak-comma">, </span><span class="oak-stringLiteral">'Assertion failed'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testAssertEqual(result, actual, expected, message) — assert equality.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testAssertEqual</span><span class="oak-leftParen">(</span><span class="oak-identifier">result</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">expected</span><span class="oak-comma">, </span><span class="oak-identifier">message</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">actual </span><span class="oak-neq">!= </span><span class="oak-identifier">expected </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">ok? </span><span class="oak-assign">:= </span><span class="oak-falseLiteral">false</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">error </span><span class="oak-assign">:= </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">message</span><span class="oak-comma">, </span><span class="oak-stringLiteral">'Expected ' </span><span class="oak-plus">+ </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">expected</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">' but got ' </span><span class="oak-plus">+ </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">actual</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testReport(suite) — generate a text report of test results.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testReport</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">report </span><span class="oak-assign">:= </span><span class="oak-stringLiteral">'=== Test Suite: ' </span><span class="oak-plus">+ </span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">name </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">' ===\n'</span><span class="oak-newline">
+	</span><span class="oak-identifier">report </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">report </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'Passed: ' </span><span class="oak-plus">+ </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">passed</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+	</span><span class="oak-identifier">report </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">report </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'Failed: ' </span><span class="oak-plus">+ </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">failed</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+	</span><span class="oak-identifier">report </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">report </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'Total: ' </span><span class="oak-plus">+ </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">tests</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">errors</span><span class="oak-rightParen">) </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">report </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">report </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'\nFailures:\n'</span><span class="oak-newline">
+		</span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-identifier">suite</span><span class="oak-dot">.</span><span class="oak-identifier">errors</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">e</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">report </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">report </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'  - ' </span><span class="oak-plus">+ </span><span class="oak-identifier">e</span><span class="oak-dot">.</span><span class="oak-identifier">test </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">': ' </span><span class="oak-plus">+ </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">e</span><span class="oak-dot">.</span><span class="oak-identifier">error</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-stringLiteral">'\n'</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-identifier">report</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Window introspection for tests ──────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testGetWindowRect(hwnd) — get window position and size {x, y, w, h}.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testGetWindowRect</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">)  </span><span class="oak-comment">// RECT: left, top, right, bottom (4x i32)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetWindowRect'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">left </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">top </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">4</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">right </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">bottom </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">12</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">x</span><span class="oak-colon">: </span><span class="oak-identifier">left</span><span class="oak-newline">
+		</span><span class="oak-identifier">y</span><span class="oak-colon">: </span><span class="oak-identifier">top</span><span class="oak-newline">
+		</span><span class="oak-identifier">w</span><span class="oak-colon">: </span><span class="oak-identifier">right </span><span class="oak-minus">- </span><span class="oak-identifier">left</span><span class="oak-newline">
+		</span><span class="oak-identifier">h</span><span class="oak-colon">: </span><span class="oak-identifier">bottom </span><span class="oak-minus">- </span><span class="oak-identifier">top</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testGetWindowText(hwnd) — get the window title text.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testGetWindowText</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">512</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetWindowTextW'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-numberLiteral">256</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// Read UTF-16 until null</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-stringLiteral">''</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-numberLiteral">512 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">lo </span><span class="oak-assign">:= </span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-identifier">hi </span><span class="oak-assign">:= </span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-identifier">ch </span><span class="oak-assign">:= </span><span class="oak-identifier">lo </span><span class="oak-plus">+ </span><span class="oak-identifier">hi </span><span class="oak-times">* </span><span class="oak-numberLiteral">256</span><span class="oak-newline">
+			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">ch </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+					</span><span class="oak-identifier">result </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">result </span><span class="oak-plus">+ </span><span class="oak-fnName">char</span><span class="oak-leftParen">(</span><span class="oak-identifier">ch</span><span class="oak-rightParen">)</span><span class="oak-newline">
+					</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testIsWindowVisible?(hwnd) — check if a window is visible.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testIsWindowVisible?</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'IsWindowVisible'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">) </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testGetForegroundWindow() — get the currently focused window handle.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testGetForegroundWindow </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetForegroundWindow'</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testFindWindow(className, windowName) — find a window by class/title.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testFindWindow</span><span class="oak-leftParen">(</span><span class="oak-identifier">className</span><span class="oak-comma">, </span><span class="oak-identifier">windowName</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">clsBuf </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">className </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">b </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">className</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-times">* </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">className</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">b</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-times">* </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-fnName">codepoint</span><span class="oak-leftParen">(</span><span class="oak-identifier">className</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+				</span><span class="oak-identifier">b</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-times">* </span><span class="oak-numberLiteral">2 </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-leftParen">(</span><span class="oak-fnName">codepoint</span><span class="oak-leftParen">(</span><span class="oak-identifier">className</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+				</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-identifier">namBuf </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windowName </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">b </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">windowName</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-times">* </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">windowName</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+				</span><span class="oak-identifier">b</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-times">* </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-fnName">codepoint</span><span class="oak-leftParen">(</span><span class="oak-identifier">windowName</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+				</span><span class="oak-identifier">b</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-times">* </span><span class="oak-numberLiteral">2 </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-assign">:= </span><span class="oak-leftParen">(</span><span class="oak-fnName">codepoint</span><span class="oak-leftParen">(</span><span class="oak-identifier">windowName</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
+				</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'FindWindowW'</span><span class="oak-comma">, </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">clsBuf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">namBuf</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testScreenshot(hwnd) — capture a bitmap of a window (returns raw pixel data).</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testScreenshot</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">rect </span><span class="oak-assign">:= </span><span class="oak-fnName">testGetWindowRect</span><span class="oak-leftParen">(</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">w </span><span class="oak-assign">:= </span><span class="oak-identifier">rect</span><span class="oak-dot">.</span><span class="oak-identifier">w</span><span class="oak-newline">
+	</span><span class="oak-identifier">h </span><span class="oak-assign">:= </span><span class="oak-identifier">rect</span><span class="oak-dot">.</span><span class="oak-identifier">h</span><span class="oak-newline">
+	</span><span class="oak-identifier">hdcScreen </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetDC'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">hdcMem </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'CreateCompatibleDC'</span><span class="oak-comma">, </span><span class="oak-identifier">hdcScreen</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">hBmp </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'CreateCompatibleBitmap'</span><span class="oak-comma">, </span><span class="oak-identifier">hdcScreen</span><span class="oak-comma">, </span><span class="oak-identifier">w</span><span class="oak-comma">, </span><span class="oak-identifier">h</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'SelectObject'</span><span class="oak-comma">, </span><span class="oak-identifier">hdcMem</span><span class="oak-comma">, </span><span class="oak-identifier">hBmp</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-comment">// BitBlt: copy window contents</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'BitBlt'</span><span class="oak-comma">, </span><span class="oak-identifier">hdcMem</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">w</span><span class="oak-comma">, </span><span class="oak-identifier">h</span><span class="oak-comma">, </span><span class="oak-identifier">hdcScreen</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">13369376</span><span class="oak-rightParen">) </span><span class="oak-comment">// SRCCOPY</span><span class="oak-newline">
+	</span><span class="oak-comment">// Read pixels via GetDIBits would be complex — return handle for now</span><span class="oak-newline">
+	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">hdc</span><span class="oak-colon">: </span><span class="oak-identifier">hdcMem</span><span class="oak-newline">
+		</span><span class="oak-identifier">hBitmap</span><span class="oak-colon">: </span><span class="oak-identifier">hBmp</span><span class="oak-newline">
+		</span><span class="oak-identifier">width</span><span class="oak-colon">: </span><span class="oak-identifier">w</span><span class="oak-newline">
+		</span><span class="oak-identifier">height</span><span class="oak-colon">: </span><span class="oak-identifier">h</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ReleaseDC'</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-identifier">hdcScreen</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">result</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// testFreeScreenshot(ss) — free a captured screenshot.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">testFreeScreenshot</span><span class="oak-leftParen">(</span><span class="oak-identifier">ss</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'DeleteObject'</span><span class="oak-comma">, </span><span class="oak-identifier">ss</span><span class="oak-dot">.</span><span class="oak-identifier">hBitmap</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'DeleteDC'</span><span class="oak-comma">, </span><span class="oak-identifier">ss</span><span class="oak-dot">.</span><span class="oak-identifier">hdc</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span>
+</code></pre>
+        </article>
+    </main>
+    <footer>
+        <div class="split overlay">
+            <div class="left">
+            </div>
+            <div class="right">
+                - <a href="https://thesephist.com/">Linus</a>
+            </div>
+        </div>
+    </footer>
+</body>

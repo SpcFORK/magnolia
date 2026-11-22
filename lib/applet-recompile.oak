@@ -1,0 +1,754 @@
+// applet-recompile — conservative, genuine edited Oak -> JVM class output.
+// This is NOT a general Oak-to-Java compiler: it assembles same-layout edits
+// to the verified JVM methods embedded in Magnolia's standalone Oak output.
+// It parses the method-list AST as inert data. The supplied Oak is never run.
+// Code attributes, offsets and stack maps stay intact; only verified
+// same-width opcodes/operands change. New small ldc constants may append to
+// the pool without changing any existing constant-pool indexes.
+
+std := import('std')
+str := import('str')
+syntax := import('syntax')
+json := import('json')
+crypto := import('crypto')
+app := import('./applet.oak')
+oakEmitter := import('./applet-oak.oak')
+classfile := import('./applet-class.oak')
+bytecode := import('./applet-bytecode.oak')
+vmLib := import('./jvm-vm-libs.oak')
+
+fn _error(message) std.error(message)
+// Class-file long limbs and emitted Oak objects may have different insertion
+// orders. Compare parsed literal data structurally, with a recursion bound;
+// a JSON serialization comparison would mistake identical fields for edits.
+fn _same(a, b) _sameData(a, b, 0)
+fn _sameData(a, b, depth) if depth > 32 | type(a) != type(b) {
+    true -> false
+    _ -> if type(a) {
+        :list -> {
+            equal? := len(a) = len(b)
+            if equal? -> std.range(len(a)) |> std.each(fn(i) if equal? &
+                !_sameData(a.(i), b.(i), depth + 1) -> equal? <- false)
+            equal?
+        }
+        :object -> {
+            equal? := len(keys(a)) = len(keys(b))
+            if equal? -> keys(a) |> std.each(fn(key) if equal? {
+                true -> {
+                    found? := keys(b) |> std.some(fn(other) other = key)
+                    if !found? | !_sameData(a.(key), b.(key), depth + 1) ->
+                        equal? <- false
+                }
+            })
+            equal?
+        }
+        _ -> a = b
+    }
+}
+fn _byte(raw, index) codepoint(raw.(index)) & 255
+fn _u1(n) char(n & 255)
+fn _u2(n) _u1(n >> 8) + _u1(n)
+fn _u4(n) _u2(n >> 16) + _u2(n)
+fn _replace(raw, at, length, bytes) std.slice(raw, 0, at) + bytes +
+    std.slice(raw, at + length)
+fn _defaultField(desc) vmLib._defaultField(desc)
+
+// The only permitted calls in this AST are zero-arg calls to generated
+// applet_method_* functions whose bodies are literal lists. Never eval Oak.
+fn _value(node, methods, context, depth) {
+    if depth > 32 | type(node) != :object {
+        true -> {context.error <- 'invalid or deeply nested Oak method data', ?}
+        _ -> if node.type {
+            :null -> ?
+            :int, :float, :string, :bool -> node.val
+            :unary -> if (node.op = :minus | node.op = 'minus') & node.right.type = :int {
+                true -> 0 - node.right.val
+                _ -> {context.error <- 'only negative integer literals may use unary minus', ?}
+            }
+            :list -> {
+                if len(node.elems) > 65535 -> context.error <- 'oversized Oak method list'
+                values := []
+                node.elems |> std.each(fn(child) if context.error = ? ->
+                    values << _value(child, methods, context, depth + 1))
+                values
+            }
+            :object -> {
+                if len(node.entries) > 8192 -> context.error <- 'oversized Oak object literal'
+                result := {}
+                seen := {}
+                node.entries |> std.each(fn(item) if context.error = ? {
+                    true -> {
+                        key := item.key
+                        if key.type != :identifier & key.type != :string {
+                            true -> context.error <- 'Oak data keys must be literal names'
+                            _ -> if seen.(key.val) != ? {
+                                true -> context.error <- 'duplicate Oak data key ' + key.val
+                                _ -> {
+                                    seen.(key.val) <- true
+                                    result.(key.val) <- _value(item.val, methods, context, depth + 1)
+                                }
+                            }
+                        }
+                    }
+                })
+                result
+            }
+            :fnCall -> {
+                callee := node.function
+                if callee.type != :identifier | len(node.args) != 0 |
+                    methods.(callee.val) = ? {
+                    true -> {context.error <- 'Oak method data contains a non-literal call', ?}
+                    _ -> if context.used.(callee.val) != ? {
+                        true -> {context.error <- 'generated Oak method is referenced more than once', ?}
+                        _ -> {
+                            context.used.(callee.val) <- true
+                            methods.(callee.val)
+                        }
+                    }
+                }
+            }
+            _ -> {context.error <- 'Oak method data contains a non-literal expression', ?}
+        }
+    }
+}
+
+fn _program(source, archive) {
+    // Keep the original archive/header and the inline runtime separate from
+    // the editable method list. The invocation is fixed too: silently
+    // ignoring changes to params/options/output would misrepresent the new
+    // class's behavior. All source parsing below is inert AST inspection.
+    runtimeMarker := '// @magnolia-applet-runtime-sha256-v1:'
+    invocationMarker := '// @magnolia-applet-invocation-sha256-v1:'
+    recorded := str.cut(source, runtimeMarker).(1)
+    // Older standalone Oak has the same signed runtime/invocation contract
+    // but exported only run. Keep checked edits of old source possible.
+    runtimeBoundary := if str.contains?(source,
+        '\nruntime := {run: run, valueText: valueText}\n') {
+        true -> '\nruntime := {run: run, valueText: valueText}\n'
+        _ -> '\nruntime := {run: run}\n'
+    }
+    tail := str.cut(source, runtimeBoundary).(1)
+    problem := ?
+    if recorded = '' -> problem <- 'Oak source has no runtime integrity marker; retranspile with current Magnolia'
+    if problem = ? & str.cut(source, runtimeMarker).(0) != oakEmitter.header(archive) ->
+        problem <- 'standalone Oak header changed; only named method instructions are recompilable'
+    if problem = ? {
+        true -> {
+            digest := str.cut(recorded, '\n').(0)
+            embedded := str.cut(str.cut(recorded, '\n').(1), runtimeBoundary).(0)
+            if len(digest) != 64 | crypto.sha256(embedded) != digest ->
+                problem <- 'inline Oak runtime was edited; only named method instructions can become class bytes'
+        }
+    }
+    if tail = '' & problem = ? -> problem <- 'not a standalone Magnolia applet Oak source'
+    if problem = ? & !str.startsWith?(tail, invocationMarker) ->
+        problem <- 'Oak source has no invocation integrity marker; retranspile with current Magnolia'
+    first := str.cut(tail, '\n')
+    body := first.(1)
+    split := str.cut(body, '\nparams := ')
+    section := split.(0)
+    invocation := 'params := ' + split.(1)
+    if problem = ? & (split.(1) = '' | len(section) > 8388608 |
+        len(invocation) > 8388608) ->
+        problem <- 'missing or oversized editable Oak method/invocation section'
+    if problem = ? {
+        true -> {
+            digest := std.slice(first.(0), len(invocationMarker))
+            if len(digest) != 64 | crypto.sha256(invocation) != digest ->
+                problem <- 'standalone Oak invocation changed; edit named method instructions only'
+        }
+    }
+    invocationData := str.cut(invocation, '\ndrawEncoder := ')
+    if problem = ? & invocationData.(1) = '' -> problem <- 'missing generated Oak invocation'
+    assignments := if problem = ? {true -> syntax.parse(invocationData.(0)), _ -> ?}
+    if problem = ? & (type(assignments) != :list | len(assignments) != 2) ->
+        problem <- 'Oak invocation options have invalid syntax'
+    if problem = ? -> assignments |> std.each(fn(node, i) if problem = ? {
+        true -> if node.type != :assignment | node.left.type != :identifier |
+            node.left.val != if i = 0 {true -> 'params', _ -> 'options'} ->
+            problem <- 'generated Oak invocation has unexpected assignments'
+    })
+    options := ?
+    if problem = ? {
+        true -> {
+            context := {error: ?, used: {}}
+            params := _value(assignments.(0).right, {}, context, 0)
+            options <- _value(assignments.(1).right, {}, context, 0)
+            if context.error != ? | type(params) != :object | type(options) != :object ->
+                problem <- 'generated Oak invocation must contain literal parameters and options'
+        }
+    }
+    nodes := if problem = ? {true -> syntax.parse(section), _ -> ?}
+    if problem = ? & type(nodes) != :list -> problem <- 'Oak method section has invalid syntax'
+    functions := {}
+    programNode := ?
+    if problem = ? -> nodes |> std.each(fn(node) if problem = ? {
+        true -> if node.type {
+            :function -> {
+                if !str.startsWith?(node.name, 'applet_method_') |
+                    len(node.args) != 0 | node.body.type != :list |
+                    functions.(node.name) != ? {
+                    true -> problem <- 'invalid or duplicate generated Oak method'
+                    _ -> functions.(node.name) <- node.body
+                }
+            }
+            :assignment -> if node.left.type = :identifier &
+                node.left.val = 'program' & programNode = ? {
+                true -> programNode <- node.right
+                _ -> problem <- 'unexpected Oak assignment in editable section'
+            }
+            _ -> problem <- 'unexpected Oak expression in editable section'
+        }
+    })
+    if problem = ? & programNode = ? -> problem <- 'generated Oak has no program data'
+    ctx := {error: ?, used: {}}
+    // Resolve the literal functions first; a malicious function containing
+    // arbitrary Oak statements fails instead of executing those statements.
+    resolved := {}
+    if problem = ? -> keys(functions) |> std.each(fn(name) if ctx.error = ? ->
+        resolved.(name) <- _value(functions.(name), {}, ctx, 0))
+    program := if problem = ? & ctx.error = ? {
+        true -> _value(programNode, resolved, ctx, 0)
+        _ -> ?
+    }
+    if ctx.error != ? -> problem <- ctx.error
+    if problem = ? & len(keys(ctx.used)) != len(keys(functions)) ->
+        problem <- 'generated Oak has an unused method function'
+    if problem = ? & (type(program) != :object | type(program.classes) != :object |
+        len(keys(program)) != 3) ->
+        problem <- 'Oak program is not the generated entry/kind/class map'
+    if problem != ? {true -> _error(problem), _ -> {type: :ok,
+        value: program, options: options}}
+
+}
+
+// Recover each ORIGINAL instruction width, including aligned switches and
+// wide locals. Equal-width edits keep branch offsets, exception/debug data
+// and StackMapTable positions unchanged; the assembled image is re-linked.
+fn _signed4(raw, offset) if offset + 4 > len(raw) {
+    true -> ?
+    _ -> {
+        n := _byte(raw, offset) * 16777216 + _byte(raw, offset + 1) * 65536 +
+            _byte(raw, offset + 2) * 256 + _byte(raw, offset + 3)
+        if n >= 2147483648 {true -> n - 4294967296, _ -> n}
+    }
+}
+fn _width(op, raw, offset) if {
+    op = 16 | op = 18 | (op >= 21 & op <= 25) |
+        (op >= 54 & op <= 58) | op = 188 -> 2
+    op = 17 | op = 19 | op = 20 | op = 132 | (op >= 153 & op <= 166) |
+        op = 167 | op = 198 | op = 199 | (op >= 178 & op <= 184) |
+        op = 187 | op = 189 | op = 192 | op = 193 -> 3
+    op = 185 -> 5
+    op = 197 -> 4 // class_index u2 + dimensions u1
+    op = 196 -> if offset + 4 > len(raw) {
+        true -> ?
+        _ -> if _byte(raw, offset + 1) {
+            132 -> if offset + 6 <= len(raw) {true -> 6, _ -> ?}
+            21, 22, 23, 24, 25, 54, 55, 56, 57, 58 -> 4
+            _ -> ?
+        }
+    }
+    op = 170 | op = 171 -> {
+        padding := (4 - ((offset + 1) % 4)) % 4
+        start := offset + 1 + padding
+        first := _signed4(raw, start + 4)
+        last := if op = 170 {true -> _signed4(raw, start + 8), _ -> ?}
+        header := if op = 170 {true -> 12, _ -> 8}
+        size := if op = 170 {true -> 4, _ -> 8}
+        if first = ? | (op = 170 & last = ?) {
+            true -> ?
+            _ -> {
+                count := if op = 170 {true -> last - first + 1, _ -> first}
+                if count < 0 | (op = 170 & last < first) |
+                    count > (len(raw) - start - header) / size {
+                    true -> ?
+                    _ -> start + header + count * size - offset
+                }
+            }
+        }
+    }
+    _ -> 1
+}
+fn _binaryInt?(op) op = 96 | op = 100 | op = 104 | op = 108 | op = 112 |
+    op = 120 | op = 122 | op = 124 | op = 126 | op = 128 | op = 130
+
+fn _existingLiteral(cls, needle, limit) {
+    index := ?
+    std.range(1, len(cls.pool)) |> std.each(fn(i) if index = ? & i < limit {
+        true -> {
+            entry := cls.pool.(i)
+            if entry != ? & (entry.tag = 3 | entry.tag = 4 |
+                entry.tag = 5 | entry.tag = 6 | entry.tag = 8) {
+                true -> {
+                    candidate := classfile.literal(cls.pool, i)
+                    if candidate != ? & _same(candidate, needle) -> index <- i
+                }
+            }
+        }
+    })
+    index
+}
+
+// Reuse existing constants where possible; append correctly tagged pool
+// entries only when the same-width opcode index and two-slot pool count fit.
+// Floating payloads are always raw bits, never decimal re-encoded values.
+fn _constantKey(value) if type(value) = :object {
+    true -> if value.jvmFloat = true {
+        true -> 'F:' + string(value.bits)
+        _ -> if value.jvmDouble = true {
+            true -> 'D:' + string(value.hi) + ':' + string(value.lo)
+            _ -> if value.jvmLong = true {
+                true -> 'J:' + string(value.hi) + ':' + string(value.lo)
+                _ -> 'invalid'
+            }
+        }
+    }
+    _ -> string(type(value)) + ':' + string(value)
+}
+fn _constantIndex(cls, value, limit, added) {
+    existing := _existingLiteral(cls, value, limit)
+    key := _constantKey(value)
+    if existing != ? {
+        true -> existing
+        _ -> if cached := added.indices.(key) {
+            ? -> {
+                candidate := added.count
+                if type(value) = :int {
+                    true -> if value >= -2147483648 & value <= 2147483647 &
+                        candidate < limit & candidate + 1 <= classfile.MAX_POOL {
+                        true -> {
+                            added.bytes <- added.bytes + _u1(3) + _u4(value)
+                            added.count <- candidate + 1
+                            added.indices.(key) <- candidate
+                            candidate
+                        }
+                        _ -> ?
+                    }
+                    _ -> if type(value) = :string {
+                        true -> {
+                            ascii? := len(value) < 65536
+                            std.range(len(value)) |> std.each(fn(i) if codepoint(value.(i)) < 1 |
+                                codepoint(value.(i)) >= 128 -> ascii? <- false)
+                            if ascii? & candidate + 1 < limit & candidate + 2 <= classfile.MAX_POOL {
+                                true -> {
+                                    added.bytes <- added.bytes + _u1(1) + _u2(len(value)) + value +
+                                        _u1(8) + _u2(candidate)
+                                    added.count <- candidate + 2
+                                    added.indices.(key) <- candidate + 1
+                                    candidate + 1
+                                }
+                                _ -> ?
+                            }
+                        }
+                        _ -> if type(value) = :object & candidate < limit {
+                            true -> {
+                                tag := if value.jvmFloat = true {true -> 4,
+                                    _ -> if value.jvmLong = true {true -> 5,
+                                        _ -> if value.jvmDouble = true {true -> 6, _ -> ?}}}
+                                width := if tag = 5 | tag = 6 {true -> 2, _ -> 1}
+                                if tag != ? & candidate + width <= classfile.MAX_POOL {
+                                    true -> {
+                                        bytes := if tag = 4 {
+                                            true -> if type(value.bits) = :int &
+                                                value.bits >= 0 & value.bits <= 4294967295 {
+                                                true -> _u4(value.bits), _ -> ?}
+                                            _ -> if type(value.hi) = :int &
+                                                type(value.lo) = :int &
+                                                value.hi >= -2147483648 &
+                                                value.hi <= 4294967295 &
+                                                value.lo >= 0 & value.lo <= 4294967295 {
+                                                true -> _u4(value.hi) + _u4(value.lo)
+                                                _ -> ?
+                                            }
+                                        }
+                                        if bytes != ? {
+                                            true -> {
+                                                added.bytes <- added.bytes + _u1(tag) + bytes
+                                                added.count <- candidate + width
+                                                added.indices.(key) <- candidate
+                                                candidate
+                                            }
+                                            _ -> ?
+                                        }
+                                    }
+                                    _ -> ?
+                                }
+                            }
+                            _ -> ?
+                        }
+                    }
+                }
+            }
+            _ -> if cached < limit {true -> cached, _ -> ?}
+        }
+    }
+}
+
+fn _patchMethod(cls, original, edited, lowered, added) {
+    name := cls.name + '.' + original.name + original.desc
+    issue := ?
+    if type(edited) != :list | len(edited) != len(lowered.code) ->
+        issue <- 'changed instruction count/layout; rebuild Oak with --no-optimize and keep instruction widths'
+    offset := 0
+    raw := original.code
+    changes := 0
+    lowered.code |> std.each(fn(was, i) if issue = ? {
+        true -> {
+            now := edited.(i)
+            if type(now) != :list | len(now) != 3 | type(now.(0)) != :int {
+                true -> issue <- 'instruction ' + string(i) + ' is not a literal [opcode, operand, reference]'
+                _ -> {
+                    op := was.(0)
+                    width := _width(op, raw, offset)
+                    if width = ? -> {
+                        issue <- 'invalid variable-width bytecode layout'
+                        width <- len(raw) + 1
+                    }
+                    if offset + width > len(raw) | _byte(raw, offset) != op {
+                        true -> issue <- 'original bytecode layout does not match decoded method'
+                        _ -> if !_same(was, now) {
+                            true -> {
+                                editedOp := now.(0)
+                                arg := now.(1)
+                                replacement := ?
+                                if editedOp = op & _same(was.(2), now.(2)) &
+                                    op = 16 & type(arg) = :int & arg >= -128 & arg <= 127 {
+                                    true -> replacement <- _u1(op) + _u1(arg)
+                                }
+                                if editedOp = op & _same(was.(2), now.(2)) &
+                                    op = 17 & type(arg) = :int & arg >= -32768 & arg <= 32767 {
+                                    true -> replacement <- _u1(op) + _u2(arg)
+                                }
+                                if editedOp = op & _same(was.(1), arg) &
+                                    op = 132 & type(now.(2)) = :int &
+                                    now.(2) >= -128 & now.(2) <= 127 {
+                                    true -> replacement <- _u1(op) + _u1(arg) + _u1(now.(2))
+                                }
+                                if op = 196 & editedOp = op & _same(was.(1), arg) &
+                                    type(now.(2)) = :list & len(now.(2)) = 2 &
+                                    was.(2).(0) = 132 & now.(2).(0) = 132 &
+                                    type(now.(2).(1)) = :int &
+                                    now.(2).(1) >= -32768 & now.(2).(1) <= 32767 {
+                                    true -> replacement <- _u1(196) + _u1(132) +
+                                        _u2(arg) + _u2(now.(2).(1))
+                                }
+                                if editedOp = op & _same(was.(2), now.(2)) &
+                                    (op = 18 | op = 19 | op = 20) &
+                                    type(arg) = type(was.(1)) &
+                                    (type(arg) != :object |
+                                        (arg.jvmFloat = true & was.(1).jvmFloat = true) |
+                                        (arg.jvmLong = true & was.(1).jvmLong = true) |
+                                        (arg.jvmDouble = true & was.(1).jvmDouble = true)) {
+                                    true -> {
+                                        index := _constantIndex(cls, arg, if op = 18 {
+                                            true -> 256, _ -> 65536}, added)
+                                        if index != ? -> replacement <- _u1(op) +
+                                            if op = 18 {true -> _u1(index), _ -> _u2(index)}
+                                    }
+                                }
+                                if _same(was.(1), arg) & _same(was.(2), now.(2)) & (
+                                    (op >= 2 & op <= 8 & editedOp >= 2 & editedOp <= 8) |
+                                    ((op = 9 | op = 10) & (editedOp = 9 | editedOp = 10)) |
+                                    ((op >= 11 & op <= 13) &
+                                        (editedOp >= 11 & editedOp <= 13)) |
+                                    ((op = 14 | op = 15) &
+                                        (editedOp = 14 | editedOp = 15)) |
+                                    ((op = 98 | op = 102 | op = 106 |
+                                        op = 110 | op = 114) &
+                                        (editedOp = 98 | editedOp = 102 |
+                                        editedOp = 106 | editedOp = 110 | editedOp = 114)) |
+                                    ((op = 99 | op = 103 | op = 107 |
+                                        op = 111 | op = 115) &
+                                        (editedOp = 99 | editedOp = 103 |
+                                        editedOp = 107 | editedOp = 111 | editedOp = 115)) |
+                                    ((op = 149 | op = 150) &
+                                        (editedOp = 149 | editedOp = 150)) |
+                                    ((op = 151 | op = 152) &
+                                        (editedOp = 151 | editedOp = 152)) |
+                                    ((op = 97 | op = 101 | op = 105 | op = 109 |
+                                        op = 113 | op = 127 | op = 129 | op = 131) &
+                                        (editedOp = 97 | editedOp = 101 |
+                                        editedOp = 105 | editedOp = 109 |
+                                        editedOp = 113 | editedOp = 127 |
+                                        editedOp = 129 | editedOp = 131)) |
+                                    (_binaryInt?(op) & _binaryInt?(editedOp)) |
+                                    (op >= 153 & op <= 158 & editedOp >= 153 & editedOp <= 158) |
+                                    (op >= 159 & op <= 164 & editedOp >= 159 & editedOp <= 164) |
+                                    ((op = 165 | op = 166) & (editedOp = 165 | editedOp = 166)) |
+                                    ((op = 198 | op = 199) & (editedOp = 198 | editedOp = 199))) {
+                                    true -> replacement <- _u1(editedOp) + std.slice(raw, offset + 1, offset + width)
+                                }
+                                if replacement = ? {
+                                    true -> issue <- 'instruction ' + string(i) + ' is not a safe same-width edit (supported: bounded constants/ldc/ldc2, iinc, same-type int/long/float/double arithmetic and comparisons, condition and reference equality branches)'
+                                    _ -> {
+                                        raw <- _replace(raw, offset, width, replacement)
+                                        changes <- changes + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    offset <- offset + width
+                }
+            }
+        }
+    })
+    if issue = ? & offset != len(raw) -> issue <- 'trailing or truncated raw bytecode'
+    if issue != ? {
+        true -> _error(name + ': ' + issue)
+        _ -> {type: :ok, value: raw, edits: changes}
+    }
+}
+
+// The verifier canonicalizes inherited fields and static methods to their
+// declaring class. Mirror that when comparing inert Oak IR with raw bytes.
+fn _normalizeFields(code, classes) {
+    code |> std.each(fn(inst) {
+        op := inst.(0)
+        if (op >= 178 & op <= 181) | op = 184 {
+            true -> {
+                ref := inst.(2)
+                owner := ref.(0)
+                fn find(current, depth) if depth >= 64 | classes.(current) = ? {
+                    true -> ?
+                    _ -> {
+                        cls := classes.(current)
+                        if op = 184 {
+                            true -> if classfile.method(cls, ref.(1), ref.(2)) != ? {
+                                true -> current
+                                _ -> find(cls.super, depth + 1)
+                            }
+                            _ -> {
+                                index := cls.fields |> std.find(fn(f) f.name = ref.(1) & f.desc = ref.(2))
+                                if index != -1 {true -> current, _ -> find(cls.super, depth + 1)}
+                            }
+                        }
+                    }
+                }
+                resolved := find(owner, 0)
+                if resolved != ? -> ref.(0) <- resolved
+            }
+        }
+    })
+    code
+}
+
+fn _matchingFields(cls, shown) {
+    expected := {}
+    statics := {}
+    cls.fields |> std.each(fn(field) {
+        key := cls.name + '.' + field.name + ':' + field.desc
+        if field.flags & 8 {
+            0 -> expected.(key) <- _defaultField(field.desc)
+            _ -> statics.(key) <- field.constant |> std.default(_defaultField(field.desc))
+        }
+    })
+    if type(shown.fields) != :object | type(shown.static) != :object |
+        type(shown.interfaces) != :list | len(keys(shown)) != 5 {
+        true -> false
+        _ -> {
+            matches? := len(keys(shown.fields)) = len(keys(expected)) &
+                len(keys(shown.static)) = len(keys(statics)) & shown.super = cls.super &
+                _same(shown.interfaces, cls.interfaces)
+            keys(expected) |> std.each(fn(key) {
+                if !(keys(shown.fields) |> std.some(fn(k) k = key)) |
+                    !_same(expected.(key), shown.fields.(key)) -> matches? <- false
+            })
+            keys(statics) |> std.each(fn(key) {
+                if !(keys(shown.static) |> std.some(fn(k) k = key)) |
+                    !_same(statics.(key), shown.static.(key)) -> matches? <- false
+            })
+            matches?
+        }
+    }
+}
+
+// Input is standalone Oak text with a verified original-class archive.
+// Return NEW class-file bytes in original archive order, or a diagnostic.
+// The existing app.fromOak path remains separate and returns original bytes.
+fn fromOak(source) {
+    restored := app.fromOak(source)
+    if restored.type = :error {
+        true -> restored
+        _ -> {
+            decoded := _program(source, restored.archive)
+            if decoded.type = :error {
+                true -> decoded
+                _ -> _recompile(restored, decoded.value, decoded.options)
+            }
+        }
+    }
+}
+fn _recompile(restored, program, options) {
+    selection := {entry: restored.entry, method: options.method,
+        desc: options.desc |> std.default('()V'), paint?: options.paint? = true,
+        optimize?: false}
+    baseline := app.compile(restored.value, selection)
+    if baseline.type = :error {
+        true -> baseline
+        _ -> _assemble(restored, program, baseline.value, selection)
+    }
+}
+fn _assemble(restored, program, expected, selection) {
+    classes := {}
+    originals := {}
+    problem := ?
+    if program.entry != restored.entry | program.kind != expected.kind ->
+        problem <- 'Oak program entry/kind does not match verified original class image'
+    restored.value |> std.each(fn(raw) if problem = ? {
+        true -> {
+            parsed := classfile.parseClass(raw)
+            if parsed.type = :error {
+                true -> problem <- parsed.message
+                _ -> {
+                    classes.(parsed.value.name) <- parsed.value
+                    originals.(parsed.value.name) <- raw
+                }
+            }
+        }
+    })
+    if problem = ? & len(keys(program.classes)) != len(keys(classes)) ->
+        problem <- 'Oak class list differs from embedded original archive'
+    result := {}
+    edits := 0
+    keys(program.classes) |> std.each(fn(owner) if problem = ? {
+        true -> {
+            cls := classes.(owner)
+            shown := program.classes.(owner)
+            if cls = ? | type(shown) != :object | type(shown.methods) != :object {
+                true -> problem <- 'unknown or malformed edited Oak class ' + owner
+                _ -> if !_matchingFields(cls, shown) {
+                    true -> problem <- 'class fields/supertype/interfaces changed in Oak (only method instructions are recompilable): ' + owner
+                    _ -> {
+                        // The linker determines the complete reachable method
+                        // set for this invocation. Never treat a removed method
+                        // or an unreferenced generated function as a zero edit.
+                        required := expected.classes.(owner).methods
+                        if len(keys(shown.methods)) != len(keys(required)) ->
+                            problem <- 'Oak method list differs from original class image: ' + owner
+                        keys(required) |> std.each(fn(signature) if problem = ? &
+                            !(keys(shown.methods) |> std.some(fn(name) name = signature)) ->
+                            problem <- 'missing generated Oak method ' + owner + '.' + signature)
+                        raw := originals.(owner)
+                        added := {count: len(cls.pool), bytes: '', indices: {}}
+                        keys(shown.methods) |> std.each(fn(signature) if problem = ? {
+                            true -> {
+                                parts := str.cut(signature, '(')
+                                selected := if parts.(1) = '' {true -> ?, _ ->
+                                    classfile.method(cls, parts.(0), '(' + parts.(1))}
+                                ir := shown.methods.(signature)
+                                if selected = ? | type(ir) != :object | type(ir.code) != :list |
+                                    (len(keys(ir)) != 4 & len(keys(ir)) != 5 &
+                                        len(keys(ir)) != 6) {
+                                    true -> problem <- 'unknown or malformed Oak method ' + owner + '.' + signature
+                                    _ -> {
+                                        expectedWidths := bytecode.argWidths(selected.desc)
+                                        legacyWide? := expectedWidths |>
+                                            std.some(fn(width) width = 2)
+                                        expectedHandlers := required.(signature).handlers |>
+                                            std.default([])
+                                        if ir.locals != selected.locals | ir.stack != selected.stack |
+                                            ir.('static?') != ((selected.flags & 8) != 0) |
+                                            (len(keys(ir)) >= 5 & ir.argWidths != expectedWidths) |
+                                            (len(keys(ir)) = 4 & legacyWide?) |
+                                            (len(keys(ir)) = 6 &
+                                                !_same(ir.handlers, expectedHandlers)) |
+                                            (len(keys(ir)) < 6 & len(expectedHandlers) > 0) {
+                                        true -> problem <- 'method stack/locals/flags/argument slots changed in Oak: ' + owner + '.' + signature
+                                        _ -> {
+                                            plain := bytecode.lowerMethod(cls, selected, classes, false)
+                                            if plain.type = :error {
+                                                true -> problem <- plain.message
+                                                _ -> {
+                                                    _normalizeFields(plain.code, classes)
+                                                    if !_same(ir.code, plain.code) {
+                                                    true -> {
+                                                        optimized := bytecode.lowerMethod(cls, selected, classes, true)
+                                                        if optimized.type = :ok -> _normalizeFields(optimized.code, classes)
+                                                        if optimized.type = :error | !_same(ir.code, optimized.code) {
+                                                            true -> {
+                                                                patched := _patchMethod(cls, selected, ir.code, plain, added)
+                                                                if patched.type = :error {
+                                                                    true -> problem <- patched.message
+                                                                    _ -> {
+                                                                        raw <- _replace(raw, selected.codeOffset,
+                                                                            len(selected.code), patched.value)
+                                                                        edits <- edits + patched.edits
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                }
+                            }
+                            }
+                        })
+                        if problem = ? & added.bytes != '' {
+                            true -> {
+                                raw <- _replace(raw, 8, 2, _u2(added.count))
+                                raw <- std.slice(raw, 0, cls.poolEnd) + added.bytes +
+                                    std.slice(raw, cls.poolEnd)
+                            }
+                        }
+                        result.(owner) <- raw
+                    }
+                }
+            }
+        }
+    })
+    output := []
+    if problem = ? -> restored.value |> std.each(fn(raw) if problem = ? {
+        true -> {
+            original := classfile.parseClass(raw).value
+            compiled := result.(original.name)
+            verified := classfile.parseClass(compiled)
+            if verified.type = :error | verified.value.name != original.name ->
+                problem <- 'recompiled class did not parse: ' + original.name
+            if problem = ? -> output << compiled
+        }
+    })
+    // Parsing the container alone is not bytecode verification. Re-link the
+    // assembled classes and compare EVERY shown method against its decoded
+    // instructions (allowing the emitter's original constant folding). This
+    // also ensures newly appended ldc entries decode to the requested value.
+    if problem = ? {
+        true -> {
+            checked := app.compile(output, selection)
+            if checked.type = :error {
+                true -> problem <- 'recompiled bytecode failed preflight: ' + checked.message
+                _ -> {
+                    optimized := ?
+                    keys(program.classes) |> std.each(fn(owner) if problem = ? ->
+                        keys(program.classes.(owner).methods) |> std.each(fn(signature) if problem = ? {
+                            true -> {
+                                wanted := program.classes.(owner).methods.(signature).code
+                                plain := checked.value.classes.(owner).methods.(signature).code
+                                if !_same(wanted, plain) {
+                                    true -> {
+                                        if optimized = ? -> {
+                                            other := std.clone(selection)
+                                            other.('optimize?') <- true
+                                            optimized <- app.compile(output, other)
+                                        }
+                                        if optimized.type = :error |
+                                            !_same(wanted, optimized.value.classes.(owner).methods.(signature).code) ->
+                                            problem <- 'edited Oak method does not match assembled bytecode: ' +
+                                                owner + '.' + signature
+                                    }
+                                }
+                            }
+                        })
+                    )
+                }
+            }
+        }
+    }
+    if problem != ? {true -> _error(problem), _ -> {type: :ok, entry: restored.entry,
+        value: output, changedInstructions: edits, originalJar: restored.jar}}
+}

@@ -61,6 +61,9 @@ var libcompressionhuffman string
 //go:embed lib/compression-lzw.oak
 var libcompressionlzw string
 
+//go:embed lib/compression-ans.oak
+var libcompressionans string
+
 //go:embed lib/dataprot.oak
 var libdataprot string
 
@@ -114,6 +117,30 @@ var libcrypto string
 
 //go:embed lib/bitwise.oak
 var libbitwise string
+
+//go:embed lib/rmqr.oak
+var librmqr string
+
+//go:embed lib/bytes.oak
+var libbytes string
+
+//go:embed lib/sample.oak
+var libsample string
+
+//go:embed lib/beam-vm.oak
+var libbeamvm string
+
+//go:embed lib/hex.oak
+var libhex string
+
+//go:embed lib/ieee754.oak
+var libieee754 string
+
+//go:embed lib/int64.oak
+var libint64 string
+
+//go:embed lib/unicode-units.oak
+var libunicodeunits string
 
 //go:embed lib/image-bmp.oak
 var libimagebmp string
@@ -181,6 +208,42 @@ var libastanalyze string
 //go:embed lib/ast-js.oak
 var libastjs string
 
+//go:embed lib/js-runtime.oak
+var libjsrtn string
+
+//go:embed lib/estree.oak
+var libestree string
+
+//go:embed lib/js-tokenize.oak
+var libjstok string
+
+//go:embed lib/js-parse.oak
+var libjsparse string
+
+//go:embed lib/ui-surface.oak
+var libuisurface string
+
+//go:embed lib/ui-core.oak
+var libuicore string
+
+//go:embed lib/ui-sdk.oak
+var libuisdk string
+
+//go:embed lib/ui-sim.oak
+var libuisim string
+
+//go:embed lib/style-bake.oak
+var libstylebake string
+
+//go:embed lib/font-bake.oak
+var libfontbake string
+
+//go:embed lib/transpile-ui.oak
+var libtranspileui string
+
+//go:embed lib/gui-drawlist.oak
+var libguidrawlist string
+
 //go:embed lib/ast-ts.oak
 var libastts string
 
@@ -195,6 +258,66 @@ var libastgo string
 
 //go:embed lib/ast-ir.oak
 var libastir string
+
+//go:embed lib/applet.oak
+var libapplet string
+
+//go:embed lib/applet-api.oak
+var libappletapi string
+
+//go:embed lib/applet-bytecode.oak
+var libappletbytecode string
+
+//go:embed lib/applet-class.oak
+var libappletclass string
+
+//go:embed lib/applet-host.oak
+var libapplethost string
+
+//go:embed lib/applet-java.oak
+var libappletjava string
+
+//go:embed lib/applet-js-host.oak
+var libappletjshost string
+
+//go:embed lib/applet-manifest.oak
+var libappletmanifest string
+
+//go:embed lib/applet-oak.oak
+var libappletoak string
+
+//go:embed lib/applet-recompile.oak
+var libappletrecompile string
+
+//go:embed lib/applet-runtime.oak
+var libappletruntime string
+
+//go:embed lib/applet-zip.oak
+var libappletzip string
+
+//go:embed lib/build-applet.oak
+var libbuildapplet string
+
+//go:embed lib/jvm-bridge.oak
+var libjvmbridge string
+
+//go:embed lib/jvm-jar-manifest.oak
+var libjvmjarmanifest string
+
+//go:embed lib/jvm-jar-write.oak
+var libjvmjarwrite string
+
+//go:embed lib/jvm-java-input.oak
+var libjvmjavainput string
+
+//go:embed lib/jvm-java-subset.oak
+var libjvmjavasubset string
+
+//go:embed lib/jvm-fp.oak
+var libjvmfp string
+
+//go:embed lib/jvm-vm-libs.oak
+var libjvmvmlibs string
 
 //go:embed lib/codegen-go.oak
 var libcodegengo string
@@ -604,6 +727,140 @@ var libb64 string
 //go:embed lib/b64-hex.oak
 var libb64hex string
 
+// Opt-in, separately preflighted JVM/MIDP and media helpers. The auto-load list is unchanged.
+//
+//go:embed lib/applet.oak
+var libapplet string
+
+//go:embed lib/applet-api.oak
+var libappletapi string
+
+//go:embed lib/applet-bytecode.oak
+var libappletbytecode string
+
+//go:embed lib/applet-class.oak
+var libappletclass string
+
+//go:embed lib/applet-gui.oak
+var libappletgui string
+
+//go:embed lib/applet-host.oak
+var libapplethost string
+
+//go:embed lib/applet-java.oak
+var libappletjava string
+
+//go:embed lib/applet-js-host.oak
+var libappletjshost string
+
+//go:embed lib/applet-manifest.oak
+var libappletmanifest string
+
+//go:embed lib/applet-oak.oak
+var libappletoak string
+
+//go:embed lib/applet-recompile.oak
+var libappletrecompile string
+
+//go:embed lib/applet-runtime.oak
+var libappletruntime string
+
+//go:embed lib/applet-zip.oak
+var libappletzip string
+
+//go:embed lib/build-applet.oak
+var libbuildapplet string
+
+//go:embed lib/fliplay-control.oak
+var libfliplaycontrol string
+
+//go:embed lib/font-bake.oak
+var libfontbake string
+
+//go:embed lib/gui-bounded-input.oak
+var libguiboundedinput string
+
+//go:embed lib/gui-drawlist.oak
+var libguidrawlist string
+
+//go:embed lib/gui-image.oak
+var libguiimage string
+
+//go:embed lib/gui-pixels.oak
+var libguipixels string
+
+//go:embed lib/jvm-bridge.oak
+var libjvmbridge string
+
+//go:embed lib/jvm-fp.oak
+var libjvmfp string
+
+//go:embed lib/jvm-jar-manifest.oak
+var libjvmjarmanifest string
+
+//go:embed lib/jvm-jar-write.oak
+var libjvmjarwrite string
+
+//go:embed lib/jvm-java-input.oak
+var libjvmjavainput string
+
+//go:embed lib/jvm-java-subset.oak
+var libjvmjavasubset string
+
+//go:embed lib/jvm-vm-libs.oak
+var libjvmvmlibs string
+
+//go:embed lib/midlet.oak
+var libmidlet string
+
+//go:embed lib/midp-device-profile.oak
+var libmidpdeviceprofile string
+
+//go:embed lib/midp-indexed-png.oak
+var libmidpindexedpng string
+
+//go:embed lib/style-bake.oak
+var libstylebake string
+
+//go:embed lib/swf-as3-cws.oak
+var libswfas3cws string
+
+//go:embed lib/swf-as3-abc-pool.oak
+var libswfas3abcpool string
+
+//go:embed lib/swf-as3-abc-signatures.oak
+var libswfas3abcsignatures string
+
+//go:embed lib/swf-as3-abc-structure.oak
+var libswfas3abcstructure string
+
+//go:embed lib/swf-tag-scan.oak
+var libswftagscan string
+
+//go:embed lib/avm1-preloader.oak
+var libavm1preloader string
+
+//go:embed lib/avm1-swf-timeline-prefix.oak
+var libavm1swftimelineprefix string
+
+//go:embed lib/avm1-swf-button-prefix.oak
+var libavm1swfbuttonprefix string
+
+//go:embed lib/transpile-ui.oak
+var libtranspileui string
+
+//go:embed lib/ui-core.oak
+var libuicore string
+
+//go:embed lib/ui-sdk.oak
+var libuisdk string
+
+//go:embed lib/ui-sim.oak
+var libuisim string
+
+//go:embed lib/ui-surface.oak
+var libuisurface string
+
 var stdlibs = map[string]string{
 	"std":                             libstd,
 	"str":                             libstr,
@@ -628,6 +885,7 @@ var stdlibs = map[string]string{
 	"compression-rle":                 libcompressionrle,
 	"compression-huffman":             libcompressionhuffman,
 	"compression-lzw":                 libcompressionlzw,
+	"compression-ans":                 libcompressionans,
 	"dataprot":                        libdataprot,
 	"http":                            libhttp,
 	"socket":                          libsocket,
@@ -645,11 +903,19 @@ var stdlibs = map[string]string{
 	"mermaid":                         libmermaid,
 	"crypto":                          libcrypto,
 	"bitwise":                         libbitwise,
+	"bytes":                           libbytes,
+	"sample":                          libsample,
+	"beam-vm":                         libbeamvm,
+	"hex":                             libhex,
+	"ieee754":                         libieee754,
+	"int64":                           libint64,
+	"unicode-units":                   libunicodeunits,
 	"bmp":                             libimagebmp,
 	"ico":                             libimageico,
 	"ppm":                             libimageppm,
 	"tga":                             libimagetga,
 	"qoi":                             libimageqoi,
+	"rmqr":                            librmqr,
 	"image-bmp":                       libimagebmp,
 	"image-ico":                       libimageico,
 	"image-ppm":                       libimageppm,
@@ -673,11 +939,43 @@ var stdlibs = map[string]string{
 	"ast-analyze":                     libastanalyze,
 	"ast-transform":                   libasttransform,
 	"ast-js":                          libastjs,
+	"js-runtime":                       libjsrtn,
+	"estree":                           libestree,
+	"js-tokenize":                      libjstok,
+	"js-parse":                         libjsparse,
+	"ui-surface":                       libuisurface,
+	"ui-core":                          libuicore,
+	"ui-sdk":                           libuisdk,
+	"ui-sim":                           libuisim,
+	"style-bake":                       libstylebake,
+	"font-bake":                        libfontbake,
+	"transpile-ui":                     libtranspileui,
+	"gui-drawlist":                     libguidrawlist,
 	"ast-ts":                          libastts,
 	"ast-lua":                         libastlua,
 	"ast-java":                        libastjava,
 	"ast-go":                          libastgo,
 	"ast-ir":                          libastir,
+	"applet":                          libapplet,
+	"applet-api":                          libappletapi,
+	"applet-bytecode":                          libappletbytecode,
+	"applet-class":                          libappletclass,
+	"applet-host":                          libapplethost,
+	"applet-java":                          libappletjava,
+	"applet-js-host":                          libappletjshost,
+	"applet-manifest":                          libappletmanifest,
+	"applet-oak":                          libappletoak,
+	"applet-recompile":                          libappletrecompile,
+	"applet-runtime":                          libappletruntime,
+	"applet-zip":                          libappletzip,
+	"build-applet":                          libbuildapplet,
+	"jvm-bridge":                          libjvmbridge,
+	"jvm-jar-manifest":                          libjvmjarmanifest,
+	"jvm-jar-write":                          libjvmjarwrite,
+	"jvm-java-input":                          libjvmjavainput,
+	"jvm-java-subset":                          libjvmjavasubset,
+	"jvm-fp":                           libjvmfp,
+	"jvm-vm-libs":                          libjvmvmlibs,
 	"codegen-go":                      libcodegengo,
 	"codegen-native":                  libcodegennative,
 	"assembler":                       libassembler,
@@ -811,6 +1109,50 @@ var stdlibs = map[string]string{
 	"web-runtime":                     libwebruntime,
 	"b64":                             libb64,
 	"b64-hex":                         libb64hex,
+	"applet":                          libapplet,
+	"applet-api":                      libappletapi,
+	"applet-bytecode":                 libappletbytecode,
+	"applet-class":                    libappletclass,
+	"applet-gui":                      libappletgui,
+	"applet-host":                     libapplethost,
+	"applet-java":                     libappletjava,
+	"applet-js-host":                  libappletjshost,
+	"applet-manifest":                 libappletmanifest,
+	"applet-oak":                      libappletoak,
+	"applet-recompile":                libappletrecompile,
+	"applet-runtime":                  libappletruntime,
+	"applet-zip":                      libappletzip,
+	"build-applet":                    libbuildapplet,
+	"fliplay-control":                 libfliplaycontrol,
+	"font-bake":                       libfontbake,
+	"gui-bounded-input":               libguiboundedinput,
+	"gui-drawlist":                    libguidrawlist,
+	"gui-image":                       libguiimage,
+	"gui-pixels":                      libguipixels,
+	"jvm-bridge":                      libjvmbridge,
+	"jvm-fp":                          libjvmfp,
+	"jvm-jar-manifest":                libjvmjarmanifest,
+	"jvm-jar-write":                   libjvmjarwrite,
+	"jvm-java-input":                  libjvmjavainput,
+	"jvm-java-subset":                 libjvmjavasubset,
+	"jvm-vm-libs":                     libjvmvmlibs,
+	"midlet":                          libmidlet,
+	"midp-device-profile":             libmidpdeviceprofile,
+	"midp-indexed-png":                libmidpindexedpng,
+	"style-bake":                      libstylebake,
+	"swf-as3-cws":                     libswfas3cws,
+	"swf-as3-abc-pool":                libswfas3abcpool,
+	"swf-as3-abc-signatures":          libswfas3abcsignatures,
+	"swf-as3-abc-structure":           libswfas3abcstructure,
+	"swf-tag-scan":                    libswftagscan,
+	"avm1-preloader":                  libavm1preloader,
+	"avm1-swf-timeline-prefix":        libavm1swftimelineprefix,
+	"avm1-swf-button-prefix":          libavm1swfbuttonprefix,
+	"transpile-ui":                    libtranspileui,
+	"ui-core":                         libuicore,
+	"ui-sdk":                          libuisdk,
+	"ui-sim":                          libuisim,
+	"ui-surface":                      libuisurface,
 }
 
 var stdlibAutoLoadOrder = []string{
@@ -832,6 +1174,7 @@ var stdlibAutoLoadOrder = []string{
 	"compression-rle",
 	"compression-huffman",
 	"compression-lzw",
+	"compression-ans",
 	"dataprot",
 	"http",
 	"socket",
@@ -846,6 +1189,8 @@ var stdlibAutoLoadOrder = []string{
 	"md",
 	"crypto",
 	"bitwise",
+	"rmqr",
+	"hex",
 	"image",
 	"image-bmp",
 	"image-ico",
@@ -868,6 +1213,8 @@ var stdlibAutoLoadOrder = []string{
 	"ast-transform",
 	"ast-analyze",
 	"ast-js",
+	"js-runtime",
+	"estree",
 	"ast-ts",
 	"ast-lua",
 	"ast-java",

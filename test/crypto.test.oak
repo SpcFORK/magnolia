@@ -3,6 +3,29 @@ str := import('str')
 crypto := import('crypto')
 
 fn run(t) {
+	// SHA-256's unsigned rotates and 64-bit length trailer must work in
+	// bundled JS as well as native Oak. The binary pattern crosses padding and
+	// block boundaries; digests are independent Python hashlib vectors.
+	fn pattern(n) std.range(n) |>
+		std.map(fn(i) char((i * 37 + 179) & 255)) |> str.join('')
+	[
+		{name: 'empty', data: '', digest: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}
+		{name: 'abc', data: 'abc', digest: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'}
+		{name: 'NIST two-block', data: 'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', digest: '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1'}
+		{name: 'binary 00 ff 80', data: char(0) + char(255) + char(128), digest: 'f742b965f156c10374bc23aea96e3a8aff8facd6fc079defeaa30219ad86f211'}
+		{name: 'binary 55', data: pattern(55), digest: '65a3509fb421d1d56ea1a63c4f3a0c527893b01801e12d73ae9d84332b8bfc56'}
+		{name: 'binary 56', data: pattern(56), digest: '29c232a2f574ff47fae2a485b82d42f396ce41b0ca8935283a4c2a59feccc918'}
+		{name: 'binary 63', data: pattern(63), digest: '5214664045d296a5497973b8638b7010edba1b55beea208bf8d24bec725a0b93'}
+		{name: 'binary 64', data: pattern(64), digest: '9060ae0484fdce2994db15b79cdf0930ed76f9f38ab952bc92b0ac1c435f77f1'}
+		{name: 'binary 65', data: pattern(65), digest: 'f7877ef546e783f27f741ec921259c3530b46c84738783ca5270a6c068cc8948'}
+		{name: 'binary 127', data: pattern(127), digest: '40ac4b5ecfba157a90dbbd04b9b4d78f6a3a09395b7107a113f965297373d54a'}
+		{name: 'binary 128', data: pattern(128), digest: '9fdfe2aabd8c041ed8cb3d64340b73b125db12091ac9f7b99946d8ccda0a0c3c'}
+		{name: 'binary 129', data: pattern(129), digest: 'f9d4421af53f4d82cef85056bbf7a0322adb93b6f11ee44b4f19d0040aed7199'}
+		{name: 'binary 1024', data: pattern(1024), digest: '2898911e29129399bf6716edbbcf415b5271a79d26d78c5ecd55c54c46cfbf0c'}
+	] |> std.each(fn(sample) {
+		('sha256 ' + sample.name) |> t.assert(crypto.sha256(sample.data) = sample.digest)
+	})
+
 	// uuid
 	{
 		{ uuid: uuid } := crypto

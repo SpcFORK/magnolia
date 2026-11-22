@@ -1,0 +1,199 @@
+// Opt-in ABC 16/46 constant-pool STRUCTURAL preflight, not AVM2 verification.
+// This intentionally stops at the exact end of the constant-pool sections:
+// method signatures, traits, scripts, exception tables and opcodes are NEVER
+// parsed or admitted. ASCII-only strings and observed namespace/multiname
+// kinds are a deliberately finite profile, not the full ABC specification.
+std := import('std')
+
+fn _error(message) std.error('ABC16/46 pool: ' + message)
+fn _byte(s) if s.problem != ? | s.pos >= len(s.raw) {
+    true -> {
+        if s.problem = ? -> s.problem <- 'truncated pool'
+        0
+    }
+    _ -> {
+        b := codepoint(s.raw.(s.pos)) & 255
+        s.pos <- s.pos + 1
+        b
+    }
+}
+fn _u16(s) {
+    a := _byte(s)
+    b := _byte(s)
+    a + 256 * b
+}
+// Canonical U30/U32: high bits and continuation on byte 5 are forbidden.
+// The counted variables (not just the byte input) are capped before loops.
+fn _var(s, bits) {
+    value := 0
+    done? := false
+    std.range(5) |> std.each(fn(i) if s.problem = ? & !done? {
+        true -> {
+            b := _byte(s)
+            part := b & 127
+            if s.problem = ? {
+                true -> {
+                    value <- value + (part << (7 * i))
+                    if i = 4 & (part > if bits = 30 {true -> 3, _ -> 15} |
+                        (b & 128) != 0) ->
+                        s.problem <- 'oversized or unterminated ABC variable integer'
+                    if (b & 128) = 0 {
+                        true -> {
+                            done? <- true
+                            if i > 0 & value < (1 << (7 * i)) ->
+                                s.problem <- 'noncanonical ABC variable integer'
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if s.problem = ? & !done? -> s.problem <- 'unterminated ABC variable integer'
+    value
+}
+fn _count(s, kind) {
+    n := _var(s, 30)
+    if s.problem = ? & n > 4096 -> s.problem <- kind + ' count exceeds 4096'
+    n
+}
+fn _items(n) if n = 0 {true -> 0, _ -> n - 1}
+fn _index(s, count, kind) {
+    value := _var(s, 30)
+    if s.problem = ? & (value < 1 | value >= count) ->
+        s.problem <- 'invalid ' + kind + ' pool index'
+    value
+}
+fn _strings(s, count) {
+    bytes := 0
+    std.range(_items(count)) |> std.each(fn(_) if s.problem = ? {
+        true -> {
+            n := _var(s, 30)
+            if n > 4096 | n > 32768 - bytes | n > len(s.raw) - s.pos {
+                true -> s.problem <- 'string length/budget overflows ABC pool'
+                _ -> {
+                    // Oak raw strings are byte-oriented; do not pretend that
+                    // modified/JVM or JS UTF-16 strings implement ABC UTF-8.
+                    std.range(n) |> std.each(fn(i) if s.problem = ? &
+                        (codepoint(s.raw.(s.pos + i)) & 255) > 127 ->
+                        s.problem <- 'non-ASCII ABC string outside pool profile')
+                    if s.problem = ? {
+                        true -> {
+                            s.pos <- s.pos + n
+                            bytes <- bytes + n
+                        }
+                    }
+                }
+            }
+        }
+    })
+    bytes
+}
+fn scan(raw) if type(raw) != :string | len(raw) < 12 |
+    len(raw) > 65536 {
+    true -> _error('input outside 12..65536-byte ABC cap')
+    _ -> _scan(raw)
+}
+fn _scan(raw) {
+    s := {raw: raw, pos: 0, problem: ?}
+    minor := _u16(s)
+    major := _u16(s)
+    if minor != 16 | major != 46 ->
+        s.problem <- 'only ABC 16/46 constant-pool metadata admitted'
+    counts := {}
+    names := []
+    if s.problem = ? {
+        true -> {
+            counts.int <- _count(s, 'int')
+            std.range(_items(counts.int)) |> std.each(fn(_) if s.problem = ? ->
+                _var(s, 32))
+            counts.uint <- _count(s, 'uint')
+            std.range(_items(counts.uint)) |> std.each(fn(_) if s.problem = ? ->
+                _var(s, 32))
+            counts.double <- _count(s, 'double')
+            if s.problem = ? {
+                true -> {
+                    bytes := 8 * _items(counts.double)
+                    if bytes > len(raw) - s.pos {
+                        true -> s.problem <- 'double pool exceeds ABC input'
+                        _ -> s.pos <- s.pos + bytes
+                    }
+                }
+            }
+            counts.string <- _count(s, 'string')
+            stringBytes := _strings(s, counts.string)
+            counts.namespace <- _count(s, 'namespace')
+            std.range(_items(counts.namespace)) |> std.each(fn(_) if s.problem = ? {
+                true -> {
+                    kind := _byte(s)
+                    if kind != 5 & kind != 8 & kind != 22 &
+                        kind != 23 & kind != 24 & kind != 26 {
+                        true -> s.problem <- 'unsupported ABC namespace kind'
+                        _ -> if kind = 5 {
+                            true -> {
+                                idx := _var(s, 30)
+                                if idx >= counts.string ->
+                                    s.problem <- 'invalid private namespace string index'
+                            }
+                            _ -> _index(s, counts.string, 'namespace string')
+                        }
+                    }
+                }
+            })
+            counts.namespaceSet <- _count(s, 'namespace set')
+            std.range(_items(counts.namespaceSet)) |> std.each(fn(_) if s.problem = ? {
+                true -> {
+                    n := _var(s, 30)
+                    if n < 1 | n > 256 {
+                        true -> s.problem <- 'namespace set outside 1..256-member profile'
+                        _ -> std.range(n) |> std.each(fn(_) if s.problem = ? ->
+                            _index(s, counts.namespace, 'namespace set member'))
+                    }
+                }
+            })
+            counts.multiname <- _count(s, 'multiname')
+            qnames := 0
+            multinames := 0
+            lateNames := 0
+            std.range(_items(counts.multiname)) |> std.each(fn(_) if s.problem = ? {
+                true -> {
+                    kind := _byte(s)
+                    if kind = 7 {
+                        true -> {
+                            qnames <- qnames + 1
+                            _index(s, counts.namespace, 'QName namespace')
+                            _index(s, counts.string, 'QName string')
+                        }
+                        _ -> if kind = 9 {
+                            true -> {
+                                multinames <- multinames + 1
+                                _index(s, counts.string, 'Multiname string')
+                                _index(s, counts.namespaceSet, 'Multiname set')
+                            }
+                            _ -> if kind = 27 {
+                                true -> {
+                                    lateNames <- lateNames + 1
+                                    _index(s, counts.namespaceSet, 'MultinameL set')
+                                }
+                                _ -> s.problem <- 'unsupported ABC multiname kind'
+                            }
+                        }
+                    }
+                }
+            })
+            if s.problem = ? & s.pos >= len(raw) ->
+                s.problem <- 'ABC method/trait/code tail is missing (unverified)'
+            if s.problem = ? {
+                true -> {type: :ok, profile: 'ABC16/46-ASCII-pool-only',
+                    minor: minor, major: major, abcBytes: len(raw),
+                    constantPoolEndOffset: s.pos,
+                    postPoolUnverifiedBytes: len(raw) - s.pos,
+                    poolCounts: counts, asciiStringBytes: stringBytes,
+                    qnameCount: qnames, multinameCount: multinames,
+                    multinameLCount: lateNames,
+                    methodTraitOrOpcodeVerified: false, AVM2Executed: false}
+                _ -> _error(s.problem)
+            }
+        }
+        _ -> _error(s.problem)
+    }
+}

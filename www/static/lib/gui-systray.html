@@ -1,0 +1,249 @@
+<!doctype html>
+<head>
+    <meta charset="utf-8">
+    <title>gui-systray.oak | Oak programming language</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/lib.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="overlay">
+            <div class="home">
+                <a href="/">Oak</a>
+            </div>
+            <nav>
+                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
+                <a href="/posts/">blog</a>
+                <a href="/#start">download</a>
+                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
+            </nav>
+        </div>
+    </header>
+    <main aria-role="main">
+        <article class="overlay stdlib">
+            <h1>gui-systray.oak</h1>
+            <p class="meta">
+                <a href="/lib/">&larr; Standard library</a>
+                <a href="https://github.com/thesephist/oak/blob/main/lib/gui-systray.oak">See on GitHub ↗</a>
+            </p>
+            <pre><code><span class="oak-comment">// gui-systray provides Win32 system tray (notification area) icon support.</span>
+<span class="oak-comment">// Shell_NotifyIconW with NOTIFYICONDATAW struct.</span><span class="oak-newline">
+</span>
+<span class="oak-identifier">std </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">windows </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'windows'</span><span class="oak-rightParen">)</span>
+<span class="oak-identifier">guiThread </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'gui-thread'</span><span class="oak-rightParen">)</span>
+<span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">writeU32</span><span class="oak-colon">: </span><span class="oak-identifier">writeU32</span><span class="oak-newline">
+	</span><span class="oak-identifier">readU32</span><span class="oak-colon">: </span><span class="oak-identifier">readU32</span>
+<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'writes'</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Shell_NotifyIcon actions</span>
+<span class="oak-identifier">NIM_ADD </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span>
+<span class="oak-identifier">NIM_MODIFY </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
+<span class="oak-identifier">NIM_DELETE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span>
+<span class="oak-identifier">NIM_SETVERSION </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">4</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// NOTIFYICONDATAW flags (uFlags)</span>
+<span class="oak-identifier">NIF_MESSAGE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
+<span class="oak-identifier">NIF_ICON </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span>
+<span class="oak-identifier">NIF_TIP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">4</span>
+<span class="oak-identifier">NIF_INFO </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">16</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Fixed size for NOTIFYICONDATAW (Version 3, no GUID) on x64:</span>
+<span class="oak-comment">// We use the full 956-byte extended struct to support balloon tips.</span>
+<span class="oak-identifier">_NOTIFYICONDATA_SIZE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">956</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Tray callback message id (arbitrary, > WM_USER)</span>
+<span class="oak-identifier">WM_TRAYICON </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">32769</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Helpers ────────────────────────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Write a UTF-16LE string into a buffer at a given address, up to maxBytes.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_writeUtf16At</span><span class="oak-leftParen">(</span><span class="oak-identifier">baseAddr</span><span class="oak-comma">, </span><span class="oak-identifier">text</span><span class="oak-comma">, </span><span class="oak-identifier">maxBytes</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">wide </span><span class="oak-assign">:= </span><span class="oak-fnName">utf16</span><span class="oak-leftParen">(</span><span class="oak-identifier">text</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-fnName">char</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-fnName">char</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">copy</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">wide</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">maxBytes </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-fnName">memwrite</span><span class="oak-leftParen">(</span><span class="oak-fnName">pointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">baseAddr </span><span class="oak-plus">+ </span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-identifier">wide</span><span class="oak-rightParen">)</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+			</span><span class="oak-fnName">copy</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+	</span><span class="oak-fnName">copy</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── NOTIFYICONDATAW layout (x64) ──────────────────────────────────────────</span>
+<span class="oak-comment">// Offset  Field</span>
+<span class="oak-comment">// 0       cbSize (DWORD)</span>
+<span class="oak-comment">// 4       hWnd (HWND) — at 8 due to alignment on x64</span>
+<span class="oak-comment">// 16      uID (UINT)</span>
+<span class="oak-comment">// 20      uFlags (UINT)</span>
+<span class="oak-comment">// 24      uCallbackMessage (UINT)</span>
+<span class="oak-comment">// 28      (pad)</span>
+<span class="oak-comment">// 32      hIcon (HICON ptr)</span>
+<span class="oak-comment">// 40      szTip[128] (WCHAR, 256 bytes)</span>
+<span class="oak-comment">// 296     dwState (DWORD)</span>
+<span class="oak-comment">// 300     dwStateMask (DWORD)</span>
+<span class="oak-comment">// 304     szInfo[256] (WCHAR, 512 bytes)</span>
+<span class="oak-comment">// 816     union { uTimeout, uVersion } (UINT)</span>
+<span class="oak-comment">// 820     szInfoTitle[64] (WCHAR, 128 bytes)</span>
+<span class="oak-comment">// 948     dwInfoFlags (DWORD)</span>
+<span class="oak-comment">// 952     (for GUID — not used)</span><span class="oak-newline">
+</span>
+<span class="oak-identifier">_NID_OFF_HWND </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">8</span>
+<span class="oak-identifier">_NID_OFF_UID </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">16</span>
+<span class="oak-identifier">_NID_OFF_FLAGS </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">20</span>
+<span class="oak-identifier">_NID_OFF_CALLBACKMSG </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">24</span>
+<span class="oak-identifier">_NID_OFF_HICON </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">32</span>
+<span class="oak-identifier">_NID_OFF_TIP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">40</span>
+<span class="oak-identifier">_NID_OFF_INFO </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">304</span>
+<span class="oak-identifier">_NID_OFF_INFOTITLE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">820</span>
+<span class="oak-identifier">_NID_OFF_INFOFLAGS </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">948</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Tray icon management ───────────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// addTrayIcon(window, id, tooltip, hIcon) -> bool</span>
+<span class="oak-comment">// Adds a tray icon. id should be a unique uint for this window.</span>
+<span class="oak-comment">// hIcon: icon handle (HICON). Pass 0 or ? for no icon.</span>
+<span class="oak-comment">// tooltip: up to 127 characters.</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">addTrayIcon</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-comma">, </span><span class="oak-identifier">tooltip</span><span class="oak-comma">, </span><span class="oak-identifier">hIcon</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writePtr</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_HWND</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_UID</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">flags </span><span class="oak-assign">:= </span><span class="oak-identifier">NIF_MESSAGE </span><span class="oak-or">| </span><span class="oak-identifier">NIF_TIP</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">hIcon </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-and">&amp; </span><span class="oak-identifier">hIcon </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">flags </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">flags </span><span class="oak-or">| </span><span class="oak-identifier">NIF_ICON</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_FLAGS</span><span class="oak-comma">, </span><span class="oak-identifier">flags</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_CALLBACKMSG</span><span class="oak-comma">, </span><span class="oak-identifier">WM_TRAYICON</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">hIcon </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-and">&amp; </span><span class="oak-identifier">hIcon </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writePtr</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_HICON</span><span class="oak-comma">, </span><span class="oak-identifier">hIcon</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">tooltip </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_writeUtf16At</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_TIP</span><span class="oak-comma">, </span><span class="oak-identifier">tooltip</span><span class="oak-comma">, </span><span class="oak-numberLiteral">254</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">res </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">shell32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'Shell_NotifyIconW'</span><span class="oak-comma">, </span><span class="oak-identifier">NIM_ADD</span><span class="oak-comma">, </span><span class="oak-identifier">p</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">res</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">res</span><span class="oak-dot">.</span><span class="oak-identifier">r1 </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_trayId </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">id</span><span class="oak-newline">
+			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_trayBuf </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">buf</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-falseLiteral">false</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// removeTrayIcon(window, id) -> bool</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">removeTrayIcon</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writePtr</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_HWND</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_UID</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">res </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">shell32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'Shell_NotifyIconW'</span><span class="oak-comma">, </span><span class="oak-identifier">NIM_DELETE</span><span class="oak-comma">, </span><span class="oak-identifier">p</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">res</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">res</span><span class="oak-dot">.</span><span class="oak-identifier">r1 </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_trayId </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-qmark">?</span><span class="oak-newline">
+			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_trayBuf </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-qmark">?</span><span class="oak-newline">
+			</span><span class="oak-trueLiteral">true</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-falseLiteral">false</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// updateTrayTooltip(window, id, tooltip) -> bool</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">updateTrayTooltip</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-comma">, </span><span class="oak-identifier">tooltip</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writePtr</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_HWND</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_UID</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_FLAGS</span><span class="oak-comma">, </span><span class="oak-identifier">NIF_TIP</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">_writeUtf16At</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_TIP</span><span class="oak-comma">, </span><span class="oak-identifier">tooltip</span><span class="oak-comma">, </span><span class="oak-numberLiteral">254</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">res </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">shell32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'Shell_NotifyIconW'</span><span class="oak-comma">, </span><span class="oak-identifier">NIM_MODIFY</span><span class="oak-comma">, </span><span class="oak-identifier">p</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">res</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">res</span><span class="oak-dot">.</span><span class="oak-identifier">r1 </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// showBalloonTip(window, id, title, message, iconFlag) -> bool</span>
+<span class="oak-comment">// iconFlag: 0 = none, 1 = info, 2 = warning, 3 = error</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">showBalloonTip</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-comma">, </span><span class="oak-identifier">title</span><span class="oak-comma">, </span><span class="oak-identifier">message</span><span class="oak-comma">, </span><span class="oak-identifier">iconFlag</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-fnName">_zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-identifier">_NOTIFYICONDATA_SIZE</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writePtr</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_HWND</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_UID</span><span class="oak-comma">, </span><span class="oak-identifier">id</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_FLAGS</span><span class="oak-comma">, </span><span class="oak-identifier">NIF_INFO</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">message </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_writeUtf16At</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_INFO</span><span class="oak-comma">, </span><span class="oak-identifier">message</span><span class="oak-comma">, </span><span class="oak-numberLiteral">510</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">title </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_writeUtf16At</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_INFOTITLE</span><span class="oak-comma">, </span><span class="oak-identifier">title</span><span class="oak-comma">, </span><span class="oak-numberLiteral">126</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">_NID_OFF_INFOFLAGS</span><span class="oak-comma">, </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">iconFlag </span><span class="oak-leftBrace">{ </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">iconFlag </span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
+</span><span class="oak-newline">
+	</span><span class="oak-identifier">res </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">shell32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'Shell_NotifyIconW'</span><span class="oak-comma">, </span><span class="oak-identifier">NIM_MODIFY</span><span class="oak-comma">, </span><span class="oak-identifier">p</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">res</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">res</span><span class="oak-dot">.</span><span class="oak-identifier">r1 </span><span class="oak-neq">!= </span><span class="oak-numberLiteral">0</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Tray event handling ────────────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// Tray callback lParam values</span>
+<span class="oak-identifier">TRAY_WM_LBUTTONDOWN </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">513</span>
+<span class="oak-identifier">TRAY_WM_LBUTTONUP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">514</span>
+<span class="oak-identifier">TRAY_WM_RBUTTONDOWN </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">516</span>
+<span class="oak-identifier">TRAY_WM_RBUTTONUP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">517</span>
+<span class="oak-identifier">TRAY_WM_LBUTTONDBLCLK </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">515</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// onTrayEvent(window, handler) — handler receives (eventType) when tray icon is interacted.</span>
+<span class="oak-comment">// eventType: :lbuttondown, :lbuttonup, :rbuttondown, :rbuttonup, :lbuttondblclk</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">onTrayEvent</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-comma">, </span><span class="oak-identifier">handler</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">guiEvents </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'gui-events'</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">guiEvents</span><span class="oak-dot">.</span><span class="oak-fnName">on</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-comma">, </span><span class="oak-colon">:</span><span class="oak-identifier">dispatch</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-underscore">_</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">guiEvents</span><span class="oak-dot">.</span><span class="oak-fnName">formMsgType</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">WM_TRAYICON </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+		</span><span class="oak-identifier">lp </span><span class="oak-assign">:= </span><span class="oak-identifier">guiEvents</span><span class="oak-dot">.</span><span class="oak-fnName">formMsgLParam</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">)</span><span class="oak-newline">
+		</span><span class="oak-identifier">evtName </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">lp </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+			</span><span class="oak-identifier">TRAY_WM_LBUTTONDOWN </span><span class="oak-branchArrow">-> </span><span class="oak-colon">:</span><span class="oak-identifier">lbuttondown</span><span class="oak-newline">
+			</span><span class="oak-identifier">TRAY_WM_LBUTTONUP </span><span class="oak-branchArrow">-> </span><span class="oak-colon">:</span><span class="oak-identifier">lbuttonup</span><span class="oak-newline">
+			</span><span class="oak-identifier">TRAY_WM_RBUTTONDOWN </span><span class="oak-branchArrow">-> </span><span class="oak-colon">:</span><span class="oak-identifier">rbuttondown</span><span class="oak-newline">
+			</span><span class="oak-identifier">TRAY_WM_RBUTTONUP </span><span class="oak-branchArrow">-> </span><span class="oak-colon">:</span><span class="oak-identifier">rbuttonup</span><span class="oak-newline">
+			</span><span class="oak-identifier">TRAY_WM_LBUTTONDBLCLK </span><span class="oak-branchArrow">-> </span><span class="oak-colon">:</span><span class="oak-identifier">lbuttondblclk</span><span class="oak-newline">
+			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-qmark">?</span><span class="oak-newline">
+		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
+		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">evtName </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">handler</span><span class="oak-leftParen">(</span><span class="oak-identifier">evtName</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// ─── Minimize-to-tray helpers ───────────────────────────────────────────────</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// minimizeToTray(window) — hide the window (ShowWindow SW_HIDE).</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">minimizeToTray</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ShowWindow'</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_minimizedToTray </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-trueLiteral">true</span><span class="oak-newline">
+	</span><span class="oak-identifier">window</span>
+<span class="oak-rightBrace">}</span><span class="oak-newline">
+</span>
+<span class="oak-comment">// restoreFromTray(window) — show the window (ShowWindow SW_SHOW + SetForegroundWindow).</span>
+<span class="oak-fnKeyword">fn </span><span class="oak-fnName">restoreFromTray</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ShowWindow'</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-comma">, </span><span class="oak-numberLiteral">5</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">user32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'SetForegroundWindow'</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
+	</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_minimizedToTray </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-falseLiteral">false</span><span class="oak-newline">
+	</span><span class="oak-identifier">window</span>
+<span class="oak-rightBrace">}</span>
+</code></pre>
+        </article>
+    </main>
+    <footer>
+        <div class="split overlay">
+            <div class="left">
+            </div>
+            <div class="right">
+                - <a href="https://thesephist.com/">Linus</a>
+            </div>
+        </div>
+    </footer>
+</body>

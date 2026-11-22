@@ -512,6 +512,7 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 
 	var (
 		file     *os.File
+		source   io.Reader
 		err      error
 		filePath string
 	)
@@ -527,18 +528,35 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 			}
 		}
 
+		if c.eng.packedRoot != "" {
+			// An embedded-source pack must never import an unpinned host file,
+			// even when the host happens to have a matching relative path.
+			rel, relErr := filepath.Rel(c.eng.packedRoot, resolved)
+			if relErr == nil && rel != ".." &&
+				!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				if data, exists := c.eng.packedFiles[filepath.ToSlash(rel)]; exists {
+					source = bytes.NewReader(data)
+					filePath = resolved
+					break
+				}
+			}
+			continue
+		}
 		file, err = os.Open(resolved)
 		if err == nil {
+			source = file
 			filePath = resolved
 			break
 		}
 	}
-	if file == nil {
+	if source == nil {
 		return nil, &runtimeError{
 			reason: fmt.Sprintf("Could not open %s (%s)", pathStr, strings.Join(supportedExts, ", ")),
 		}
 	}
-	defer file.Close()
+	if file != nil {
+		defer file.Close()
+	}
 
 	c.eng.importLock.RLock()
 	imported, ok := c.eng.importMap[filePath]
@@ -555,7 +573,7 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 	ctx.LoadBuiltins()
 
 	ctx.Unlock()
-	_, err = ctx.Eval(file)
+	_, err = ctx.Eval(source)
 	ctx.Lock()
 	if err != nil {
 		if runtimeErr, ok := err.(*runtimeError); ok {

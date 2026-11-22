@@ -21,6 +21,8 @@ guiLighting := import('gui-lighting')
 _guiImportT2 := nanotime()
 
 guiWeb := import('gui-web')
+webPipeline := import('web-pipeline')
+webRuntime := import('web-runtime')
 guiNativeWin := import('gui-native-win')
 guiNativeLinux := import('gui-native-linux')
 _guiImportT3 := nanotime()
@@ -67,21 +69,42 @@ _importTimings := {
 
 fn getImportTimings() _importTimings
 
-fn backend() if ___runtime_sys_info().os {
-	'windows' -> :windows
-	'linux' -> :linux
-	'js' -> :web
-	'web' -> :web
-	'browser' -> :web
-	'wasm' -> :web
-	_ -> :unknown
+// The Builder JS runtime reports the host OS under Node (e.g. 'linux').
+// It is still JavaScript, not an X11/Win32 process. Keep native branches
+// only for the Oak executable; both Node and browsers use GUI's web backend.
+fn backend() if __Is_Oak_Node != ? {
+	true -> :web
+	_ -> if ___runtime_sys_info().os {
+		'windows' -> :windows
+		'linux' -> :linux
+		'js' -> :web
+		'web' -> :web
+		'browser' -> :web
+		'wasm' -> :web
+		_ -> :unknown
+	}
 }
 
 fn isWindows?() backend() = :windows
 fn isLinux?() backend() = :linux
 fn isWeb?() backend() = :web
 
-{ _default: _default, _err: _err } := import('gui-common')
+{
+	_default: _default
+	_err: _err
+	_screenPositionFor: _screenPositionFor
+	POSITION_CENTER: POSITION_CENTER
+	POSITION_PRIMARY_CENTER: POSITION_PRIMARY_CENTER
+	POSITION_MONITOR_CENTER: POSITION_MONITOR_CENTER
+	POSITION_TOP_LEFT: POSITION_TOP_LEFT
+	POSITION_TOP_RIGHT: POSITION_TOP_RIGHT
+	POSITION_BOTTOM_LEFT: POSITION_BOTTOM_LEFT
+	POSITION_BOTTOM_RIGHT: POSITION_BOTTOM_RIGHT
+	POSITION_TOP_CENTER: POSITION_TOP_CENTER
+	POSITION_BOTTOM_CENTER: POSITION_BOTTOM_CENTER
+	POSITION_LEFT_CENTER: POSITION_LEFT_CENTER
+	POSITION_RIGHT_CENTER: POSITION_RIGHT_CENTER
+} := import('gui-common')
 
 fn _ensureEventBus(window) guiEvents._ensureEventBus(window)
 fn eventBus(window) guiEvents.eventBus(window)
@@ -391,6 +414,67 @@ fn getMonitorInfo(hMonitor) windows.getMonitorInfo(hMonitor)
 fn monitorFromPoint(x, y, flags) windows.monitorFromPoint(x, y, flags)
 fn monitorFromRect(left, top, right, bottom, flags) windows.monitorFromRect(left, top, right, bottom, flags)
 
+// ─── Easy window positioning ────────────────────────────────────────────────
+// Position atoms accepted by positionWindow() / centerWindow(): see
+// _screenPositionFor in gui-common for the full set.  The POSITION_*
+// constants are re-exported here (e.g. gui.POSITION_CENTER) for convenience,
+// but the raw atoms (:center, :topLeft, …) work identically.
+// ─── getScreenCenter / centerWindow / positionWindow ──────────────────────
+
+// getPrimaryScreenSize(window) -> { type: :ok, width, height, left, top } | error
+// Usable (taskbar-excluded) bounds of the primary monitor in screen coords.
+fn getPrimaryScreenSize(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.getPrimaryScreenSize(window)
+		:linux -> guiNativeLinux.getPrimaryScreenSize(window)
+		:web -> guiWeb.getPrimaryScreenSize(window)
+		_ -> _err('Unsupported window backend', window.backend)
+	}
+	_ -> _err('getPrimaryScreenSize requires a valid window', window)
+}
+
+// getScreenCenter(window) -> { type: :ok, x, y } | error
+// Coordinates that would center `window` on the primary screen.
+fn getScreenCenter(window) {
+	size := getPrimaryScreenSize(window)
+	if size.type = :ok {
+		true -> {
+			coords := _screenPositionFor(size, _default(window.width, 0), _default(window.height, 0), :center, 0)
+			{ type: :ok, x: coords.x, y: coords.y }
+		}
+		_ -> _err('getScreenCenter failed', size)
+	}
+}
+
+// centerWindow(window) — move window to the center of the primary monitor's
+// work area (the "screen middle").  Returns the window on success.
+fn centerWindow(window) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.centerWindow(window)
+		:linux -> guiNativeLinux.centerWindow(window)
+		:web -> guiWeb.centerWindow(window)
+		_ -> _err('Unsupported window backend', window)
+	}
+	_ -> window
+}
+
+// positionWindow(window, position, options) — move window to a named screen
+// position.  position is a POSITION_* atom (POSITION_CENTER = screen middle,
+// POSITION_TOP_LEFT, POSITION_BOTTOM_RIGHT, …).  options.margin insets the
+// window from the work-area edge in pixels (default 0).
+//
+// POSITION_MONITOR_CENTER centers on the monitor the window currently sits on
+// (Windows); on other platforms it behaves like POSITION_CENTER.
+fn positionWindow(window, position, options) if window.type {
+	:ok -> if window.backend {
+		:windows -> guiNativeWin.positionWindow(window, position, options)
+		:linux -> guiNativeLinux.positionWindow(window, position, options)
+		:web -> guiWeb.positionWindow(window, position, options)
+		_ -> _err('Unsupported window backend', window)
+	}
+	_ -> window
+}
+
 // ─── Custom window chrome ───────────────────────────────────────────────────
 fn extendFrameIntoClientArea(window, margins) guiNativeWin.extendFrameIntoClientArea(window, margins)
 fn enableGlassSheet(window) guiNativeWin.enableGlassSheet(window)
@@ -460,7 +544,35 @@ fn resolutionOffsetY(window) guiResolution.offsetY(window)
 fn physicalToLogical(window, px, py) guiResolution.physicalToLogical(window, px, py)
 fn logicalToPhysical(window, lx, ly) guiResolution.logicalToPhysical(window, lx, ly)
 
-fn createCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
+// Explicitly named: the later native createCanvas overload is a different
+// API. A caller of the full GUI facade can use these bounded web services
+// without reaching into gui-web directly.
+fn createWebCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
+fn queueWebInput(window, event) guiWeb.dispatchEvent(window, event)
+fn pollWebInput(window) guiWeb.pollEvents(window)
+
+// Pixel-exact shared GUI operation. Web sends one packed image command;
+// native X11/GDI use the exact (not GUI.fillRect's expanded) row-run fallback.
+// The latter is intentionally a slower, display-dependent implementation.
+fn drawPackedImageData(window, x, y, width, height, raster) {
+	if type(window) != :object | window.type != :ok {
+		true -> _err('packed image requires a GUI window', window)
+		_ -> {
+			checked := guiPixels.check(x, y, width, height, raster,
+				window.width, window.height)
+			if checked.type = :error {
+				true -> checked
+				_ -> if window.backend {
+					:web -> guiWeb.drawPackedImageData(window, x, y,
+						width, height, raster)
+					:linux -> guiImage.draw(window, x, y, width, height, raster)
+					:windows -> guiImage.draw(window, x, y, width, height, raster)
+					_ -> _err('unsupported GUI packed image backend', window.backend)
+				}
+			}
+		}
+	}
+}
 fn initWebGL(window, contextName, attrs) guiWeb.initWebGL(window, contextName, attrs)
 fn webglCreateShader(window, shaderType, source) guiWeb.webglCreateShader(window, shaderType, source)
 fn webglCreateProgram(window, vertexShader, fragmentShader) guiWeb.webglCreateProgram(window, vertexShader, fragmentShader)
@@ -470,6 +582,29 @@ fn webglViewport(window, x, y, width, height) guiWeb.webglViewport(window, x, y,
 fn webglClear(window, mask) guiWeb.webglClear(window, mask, GL_COLOR_BUFFER_BIT)
 fn webglDrawArrays(window, mode, first, count) guiWeb.webglDrawArrays(window, mode, first, count, GL_TRIANGLES)
 fn webglFlush(window) guiWeb.webglFlush(window)
+
+// ─── Web Pipeline (integrated web rendering pipeline) ───────────────────────
+//
+// These re-exports expose the web-pipeline module through the GUI facade.
+// GUI.oak imports web-pipeline, so web-pipeline must NOT import GUI at the
+// top level (to avoid circular imports). The WebPipeline's submitShader/render/
+// draw methods lazily import GUI at call-time.
+
+fn createWebContext(window, options) webPipeline.createContext(window, options)
+fn newWebPipeline(window, options) webPipeline.WebPipeline(window, options)
+fn fetchWebResource(url, options) webPipeline.loadResource(url, options)
+fn fetchWebText(url, options) webPipeline.fetchText(url, options)
+fn fetchWebJson(url, options) webPipeline.fetchJson(url, options)
+fn loadWebShader(window, url, shaderType) webPipeline.loadShader(window, url, shaderType)
+fn loadWebProgram(window, vertUrl, fragUrl) webPipeline.loadProgram(window, vertUrl, fragUrl)
+fn connectWebSocket(url, headers, onMessage?) webPipeline.connectWebSocket(url, headers, onMessage?)
+fn pipelineResources(window, specs) webPipeline.pipelineResources(window, specs)
+fn destroyWebContext(ctx) webPipeline.destroyContext(ctx)
+fn webPipelineOpcode() webPipeline.Opcode
+fn webPipelineCloseCode() webPipeline.CloseCode
+fn isWebBackend?() webRuntime.jsRuntime?()
+fn isNode?() webRuntime.node?()
+fn isBrowser?() webRuntime.browser?()
 
 fn setTitle(window, title) if window.type {
 	:ok -> if window.backend {
@@ -495,6 +630,7 @@ fn setIcon(window, iconSpec) if window.type {
 fn beginFrame(window) if window.type {
 	:ok -> if window.backend {
 		:windows -> guiNativeWin.beginFrame(window)
+		:web -> guiWeb.beginFrame(window)
 		_ -> { type: :ok }
 	}
 	_ -> window
@@ -502,6 +638,7 @@ fn beginFrame(window) if window.type {
 
 fn endFrame(window) if window.type {
 	:ok -> if window.backend {
+		:web -> guiWeb.endFrame(window)
 		:windows -> {
 			res := guiNativeWin.endFrame(window)
 			if window._frameStart {
@@ -525,6 +662,7 @@ fn endFrame(window) if window.type {
 			}
 			res
 		}
+		:web -> guiWeb.endFrame(window)
 		_ -> 0
 	}
 	_ -> 0
@@ -1500,6 +1638,11 @@ fn poll(window) if window.type {
 	_ -> window
 }
 
+// Poll exactly one native message and normalize its selected printable-key,
+// left-button, motion, or expose data. Web input enters through queueWebInput.
+// The JVM adapter still validates its bounds before dispatching bytecode.
+fn pollBoundedInput(window) guiBoundedInput.decode(window, poll(window))
+
 fn _frameIntervalNt(window) guiLoop.frameIntervalNt(window)
 
 fn _frameMaxDtNt(window) guiLoop.frameMaxDtNt(window)
@@ -1569,6 +1712,12 @@ fn close(window) if window.type {
 				type: :closing
 			})
 			guiDraw.releaseResources(window)
+			if window.backend = :linux & _default(window._gcCache, 0) > 0 {
+				true -> {
+					linux.freeGC(window.display, window._gcCache)
+					window._gcCache <- 0
+				}
+			}
 			result := if window.backend {
 				:windows -> guiNativeWin.close(window)
 				:linux -> guiNativeLinux.close(window)

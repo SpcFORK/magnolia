@@ -1,0 +1,245 @@
+obj := import('obj')
+{
+	join: join
+	reduce: reduce
+	slice: slice
+	map: map
+} := import('std')
+{
+	trim: trim
+	split: split
+} := import('str')
+
+// Helper to convert string to bytes for comparison
+fn bytesOf(s) s |> reduce([], fn(acc, c) acc << codepoint(c))
+
+nl := char(10)
+
+fn run(t) {
+
+// -------------------------------------------------------
+// Vertex tests
+// -------------------------------------------------------
+
+'vertex: parse single vertex' |> t.eq(
+	obj.parse('v 1.0 2.0 3.0').vertices
+	[[1.0, 2.0, 3.0]]
+)
+
+'vertex: parse multiple vertices' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 0 1 0').vertices
+	[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+)
+
+'vertex: parse negative coordinates' |> t.eq(
+	obj.parse('v -1.5 -2.5 -3.5').vertices
+	[[-1.5, -2.5, -3.5]]
+)
+
+// -------------------------------------------------------
+// Texture coordinate tests
+// -------------------------------------------------------
+
+'texCoord: parse single vt' |> t.eq(
+	obj.parse('vt 0.5 0.5').texCoords
+	[[0.5, 0.5]]
+)
+
+'texCoord: parse vt with w' |> t.eq(
+	obj.parse('vt 0.5 0.5 1.0').texCoords
+	[[0.5, 0.5, 1.0]]
+)
+
+'texCoord: parse multiple vt' |> t.eq(
+	obj.parse('vt 0 0' + nl + 'vt 1 1').texCoords
+	[[0.0, 0.0], [1.0, 1.0]]
+)
+
+// -------------------------------------------------------
+// Normal tests
+// -------------------------------------------------------
+
+'normal: parse single vn' |> t.eq(
+	obj.parse('vn 0 0 1').normals
+	[[0.0, 0.0, 1.0]]
+)
+
+'normal: parse multiple vn' |> t.eq(
+	obj.parse('vn 0 0 1' + nl + 'vn 1 0 0').normals
+	[[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]
+)
+
+// -------------------------------------------------------
+// Face tests
+// -------------------------------------------------------
+
+'face: parse single triangle vertex index' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 0 1 0' + nl + 'f 1 2 3').faces.0.vertices.0.v,
+	0
+)
+
+'face: parse vertex texture normal reference' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'vt 0 0' + nl + 'vn 0 0 1' + nl + 'f 1/1/1').faces.0.vertices.0,
+	obj.VertRef(0, 0, 0)
+)
+
+'face: parse vertex/texture coord only' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'vt 0.5 0.5' + nl + 'f 1/1').faces.0.vertices.0,
+	obj.VertRef(0, 0, ?)
+)
+
+'face: parse vertex//normal (no texture)' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'vn 0 0 1' + nl + 'f 1//1').faces.0.vertices.0,
+	obj.VertRef(0, ?, 0)
+)
+
+'face: parse triangle with 3 vertices' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 0 1 0' + nl + 'f 1 2 3').faces.0.vertices |> map(fn(vr) vr.v),
+	[0, 1, 2]
+)
+
+'face: parse quad with 4 vertices' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 1 1 0' + nl + 'v 0 1 0' + nl + 'f 1 2 3 4').faces.0.vertices |> map(fn(vr) vr.v),
+	[0, 1, 2, 3]
+)
+
+'face: negative indices wrap correctly' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 0 1 0' + nl + 'f -3 -2 -1').faces.0.vertices |> map(fn(vr) vr.v),
+	[0, 1, 2]
+)
+
+// -------------------------------------------------------
+// Line tests
+// -------------------------------------------------------
+
+'line: parse simple line' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 1 1' + nl + 'l 1 2').lines.0.vertices,
+	[0, 1]
+)
+
+'line: parse polyline' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 0 1 0' + nl + 'l 1 2 3').lines.0.vertices |> map(fn(vri) vri),
+	[0, 1, 2]
+)
+
+'line: negative indices wrap correctly' |> t.eq(
+	obj.parse('v 0 0 0' + nl + 'v 1 0 0' + nl + 'l -2 -1').lines.0.vertices,
+	[0, 1]
+)
+
+// -------------------------------------------------------
+// Comment tests
+// -------------------------------------------------------
+
+'comments: parse with comments' |> t.eq(
+	obj.parse('# comment' + nl + 'v 1 2 3' + nl + '# another comment' + nl + 'v 4 5 6').vertices |> len(),
+	2
+)
+
+'comments: inline comments' |> t.eq(
+	obj.parse('v 1 2 3 # inline comment').vertices,
+	[[1.0, 2.0, 3.0]]
+)
+
+// -------------------------------------------------------
+// Mixed content tests
+// -------------------------------------------------------
+
+'mixed: parse complete model' |> t.assert({
+	model := obj.parse('
+# A simple triangle
+v 0.0 0.0 0.0
+v 1.0 0.0 0.0
+v 0.5 1.0 0.0
+vn 0 0 1
+vt 0 0
+vt 1 0
+vt 0.5 1
+f 1/1/1 2/2/2 3/3/1
+')
+	model.vertices |> len() = 3 &
+	model.normals |> len() = 1 &
+	model.texCoords |> len() = 3 &
+	model.faces |> len() = 1
+})
+
+// -------------------------------------------------------
+// Encoder tests
+// -------------------------------------------------------
+
+'encode: write vertices' |> t.eq(
+	obj.encode(obj.Model([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]], [], [], [], [])),
+	'v 0 0 0' + nl + 'v 1 2 3'
+)
+
+'encode: write texture coords' |> t.eq(
+	obj.encode(obj.Model([], [[0.5, 0.5]], [], [], [])),
+	'vt 0.5 0.5'
+)
+
+'encode: write normals' |> t.eq(
+	obj.encode(obj.Model([], [], [[0.0, 0.0, 1.0]], [], [])),
+	'vn 0 0 1'
+)
+
+'encode: write face with vertex only' |> t.eq(
+	obj.encode(obj.Model([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [], [], [{ vertices: [obj.VertRef(0, ?, ?), obj.VertRef(1, ?, ?), obj.VertRef(2, ?, ?)] }], [])),
+	'v 0 0 0' + nl + 'v 1 0 0' + nl + 'v 0 1 0' + nl + 'f 1 2 3'
+)
+
+'encode: write face with v/vt/vn' |> t.eq(
+	obj.encode(obj.Model([[0, 0, 0]], [[0.5, 0.5]], [[0, 0, 1]], [{ vertices: [obj.VertRef(0, 0, 0)] }], [])),
+	'v 0 0 0' + nl + 'vt 0.5 0.5' + nl + 'vn 0 0 1' + nl + 'f 1/1/1'
+)
+
+'encode: write face with v//vn' |> t.eq(
+	obj.encode(obj.Model([[0, 0, 0]], [], [[0, 0, 1]], [{ vertices: [obj.VertRef(0, ?, 0)] }], [])),
+	'v 0 0 0' + nl + 'vn 0 0 1' + nl + 'f 1//1'
+)
+
+'encode: write line' |> t.eq(
+	obj.encode(obj.Model([[0, 0, 0], [1, 1, 1]], [], [], [], [{ vertices: [0, 1] }])),
+	'v 0 0 0' + nl + 'v 1 1 1' + nl + 'l 1 2'
+)
+
+// -------------------------------------------------------
+// Roundtrip tests
+// -------------------------------------------------------
+
+'roundtrip: single vertex' |> t.eq(
+	obj.parse(obj.encode(obj.Model([[1.0, 2.0, 3.0]], [], [], [], []))).vertices,
+	[[1.0, 2.0, 3.0]]
+)
+
+'roundtrip: single normal' |> t.eq(
+	obj.parse(obj.encode(obj.Model([], [], [[0.5, 0.5, 1.0]], [], []))).normals,
+	[[0.5, 0.5, 1.0]]
+)
+
+'roundtrip: face' |> t.eq({
+	model1 := obj.Model([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [], [], [{ vertices: [obj.VertRef(0, ?, ?), obj.VertRef(1, ?, ?), obj.VertRef(2, ?, ?)] }], [])
+	model2 := obj.parse(obj.encode(model1))
+	model2.faces.0.vertices |> map(fn(vr) vr.v),
+	[0, 1, 2]
+})
+
+'roundtrip: complete model' |> t.assert({
+	// Create a model
+	model1 := obj.Model(
+		[[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+		[[0, 0], [1, 0], [0.5, 1]]
+		[[0, 0, 1]]
+		[{ vertices: [obj.VertRef(0, 0, 0), obj.VertRef(1, 1, 0), obj.VertRef(2, 2, 0)] }]
+		[]
+	)
+	// Encode and parse
+	model2 := obj.parse(obj.encode(model1))
+	// Check all parts
+	model2.vertices |> len() = 3 &
+	model2.texCoords |> len() = 3 &
+	model2.normals |> len() = 1 &
+	model2.faces |> len() = 1 &
+	model2.faces.0.vertices |> len() = 3
+})
+
+}

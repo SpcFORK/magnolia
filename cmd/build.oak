@@ -1,27 +1,563 @@
-// oak build -- CLI adapter
+// oak build -- unified CLI adapter: Builder's Oak/JS/HTML bundler plus the
+// JVM-input adapter and the applet subcommands (inspect, coverage, build,
+// run, transpile, restore, recompile), folded into the build command.
 
-{
-	default: default
-} := import('std')
+std := import('std')
+default := std.default
 cli := import('cli')
 build := import('build')
+json := import('json')
+fs := import('fs')
+str := import('str')
+path := import('path')
+app := import('applet')
 
 Cli := cli.parse()
+cli := Cli  // alias for the parsed CLI, used by the applet subcommand helpers
 
-build.run({
-	entry: Cli.opts.entry
-	output: Cli.opts.output |> default(Cli.opts.o)
-	includes: Cli.opts.include
-	includeVFS: Cli.opts.includeVFS
-	web?: Cli.opts.web != ?
-	wasm?: Cli.opts.wasm != ?
-	ast?: Cli.opts.ast != ?
-	bin?: Cli.opts.bin != ?
-	doc?: Cli.opts.doc != ?
-	ts?: Cli.opts.ts != ?
-	lua?: Cli.opts.lua != ?
-	java?: Cli.opts.java != ?
-	go?: Cli.opts.go != ?
-	native?: Cli.opts.native != ?
-	graph?: Cli.opts.graph != ?
+
+usage := 'Usage: magnolia build <inspect|coverage|build|run|transpile|restore|recompile> --entry FILE.class|FILE.jar|FILE.java|FILE.applet.json|FILE.html|FILE.jnlp [options]\n' +
+    '  inspect   Show class metadata and, with --check, executable-subset diagnostic\n' +
+    '  coverage  Inventory EVERY input method/field, including unreachable blockers; exit 1 if blocked\n' +
+    '  build     Package class files as a verified .applet.json (or .applet) archive\n' +
+    '  run       Run verified applet init/start and optional paint(Graphics)\n' +
+    '  transpile  Route conversion through Magnolia Builder: standalone .oak (default), .js, .html or .java\n' +
+    '  restore   Losslessly restore original .class, .jar/.zip, or .applet.json from .oak\n' +
+    '  recompile Assemble checked Oak instructions into NEW .class, .jar or class directory\n' +
+    'Options: --output FILE, --target oak|js|html|java, --class JVM/name,\n' +
+    '         --select-class JVM/name (JAR: inspect ONE class; no whole-JAR build),\n' +
+    '         --include file.class[,more.class], --java-files file.java[,more.java],\n' +
+    '         --java-backend auto|javac|oak, --javac-path EXEC, --java-release 8,\n' +
+    '         --param name=value, --params params.json, --method NAME --desc (I)I,\n' +
+    '         --args [1,2], --paint [--width 320 --height 200],\n' +
+    '         --max-steps 100000, --no-optimize, --no-original-jar\n' +
+    '         --json (coverage output), (run --paint --output drawing.svg)\n'
+
+fn die(message) {
+    println('[applet] ' + message)
+    exit(1)
+}
+fn requireFile(file) if data := fs.readFile(file) {
+    ? -> die('cannot read ' + string(file))
+    _ -> data
+}
+
+fn parseInputs(requireEntry?) {
+    filename := cli.opts.entry |> std.default(cli.args.0)
+    if filename = ? -> die('missing --entry\n' + usage)
+    more := if cli.opts.entry != ? {true -> cli.args, _ -> std.slice(cli.args, 1)}
+    if cli.opts.include != ? -> more <- std.append(more, str.split(cli.opts.include, ','))
+    suffix := str.lower(filename)
+    archive? := str.endsWith?(suffix, '.applet.json') | str.endsWith?(suffix, '.applet')
+    jar? := str.endsWith?(suffix, '.jar') | str.endsWith?(suffix, '.zip')
+    java? := str.endsWith?(suffix, '.java')
+    descriptor? := str.endsWith?(suffix, '.html') | str.endsWith?(suffix, '.htm') |
+        str.endsWith?(suffix, '.jnlp')
+    if cli.opts.('select-class') != ? & !jar? ->
+        die('--select-class requires a .jar or .zip input')
+    if java? {
+        true -> {
+            version := if cli.opts.('java-release') != ? {
+                true -> int(cli.opts.('java-release'))
+                _ -> 8
+            }
+            if version = ? -> die('--java-release must be an integer')
+            javaFiles := if cli.opts.('java-files') != ? {
+                true -> str.split(cli.opts.('java-files'), ',')
+                _ -> []
+            }
+            loaded := import('jvm-bridge').load({entry: filename}, {
+                javaBackend: cli.opts.('java-backend') |> std.default('auto')
+                javaRelease: version
+                javacPath: cli.opts.('javac-path') |> std.default('javac')
+                javaFiles: javaFiles
+                classFiles: more
+            })
+            if loaded.type = :error -> die(loaded.message)
+            more |> std.each(fn(file) loaded.classes << requireFile(file))
+            selected := cli.opts.class |> std.default(loaded.entry)
+            if selected = ? {
+                true -> {
+                    chosen := import('build-applet').chooseEntry(loaded.classes)
+                    if chosen.type = :error -> die(chosen.message)
+                    selected <- chosen.value
+                }
+            }
+            if selected = ? & requireEntry? != false ->
+                die('Java source has no runnable entry; choose --class JVM/name')
+            {classes: loaded.classes, entry: selected, archive?: false, sourceJar: ?}
+        }
+        _ -> if descriptor? {
+        true -> {
+            if len(more) != 0 -> die('descriptor does not accept extra class files; use --class with its declared resources')
+            loaded := import('applet-manifest').load(filename, requireFile(filename))
+            if loaded.type = :error -> die(loaded.message)
+            {classes: loaded.classes, entry: cli.opts.class |> std.default(loaded.entry),
+                archive?: false, sourceJar: if cli.opts.('no-original-jar') != ? {
+                    true -> ?, _ -> loaded.jar},
+                params: loaded.params, width: loaded.width, height: loaded.height,
+                args: loaded.args}
+        }
+        _ -> if archive? | jar? {
+        true -> {
+            if len(more) != 0 -> die('class files may not be mixed with an archive')
+            if jar? {
+                true -> {
+                    raw := requireFile(filename)
+                    if cli.opts.('select-class') != ? {
+                        true -> {
+                            selected := import('applet-zip').selectClass(raw, cli.opts.('select-class'))
+                            if selected.type = :error -> die(selected.message)
+                            if cli.opts.class != ? & cli.opts.class != selected.name ->
+                                die('--class must match --select-class in selective JAR mode')
+                            {classes: [selected.value], entry: selected.name,
+                                archive?: false, sourceJar: ?}
+                        }
+                        _ -> {
+                            parsed := import('applet-zip').entries(raw)
+                            if parsed.type = :error -> die(parsed.message)
+                            {classes: parsed.classes, entry: cli.opts.class |> std.default(parsed.entry), archive?: false,
+                                sourceJar: if cli.opts.('no-original-jar') != ? {true -> ?, _ -> raw}}
+                        }
+                    }
+                }
+                _ -> {
+                    archive := app.unbundle(requireFile(filename))
+                    if archive.type = :error -> die(archive.message)
+                    {classes: archive.value, entry: cli.opts.class |> std.default(archive.entry), archive?: true,
+                        sourceJar: if cli.opts.('no-original-jar') != ? {true -> ?, _ -> archive.jar}}
+                }
+            }
+        }
+        _ -> {
+            paths := [filename] |> std.append(more)
+            if len(paths) > 256 -> die('too many class files')
+            {classes: paths |> std.map(requireFile), entry: cli.opts.class, archive?: false}
+        }
+        }
+    }
+    }
+}
+fn params(data) {
+    p := std.clone(data.params |> std.default({}))
+    if cli.opts.params != ? {
+        true -> {
+            overrides := json.parse(requireFile(cli.opts.params))
+            if type(overrides) != :object -> die('--params must be a JSON object')
+            keys(overrides) |> std.each(fn(key) p.(key) <- overrides.(key))
+        }
+    }
+    if type(p) != :object -> die('--params must be a JSON object')
+    if cli.opts.param != ? {
+        true -> {
+            pair := str.cut(cli.opts.param, '=')
+            if pair.(0) = '' -> die('--param needs name=value')
+            p.(pair.(0)) <- pair.(1)
+        }
+    }
+    keys(p) |> std.each(fn(key) {
+        value := p.(key)
+        if value != ? {
+            true -> if type(value) = :string | type(value) = :int | type(value) = :float | type(value) = :bool {
+                true -> p.(key) <- string(value)
+                _ -> die('parameter ' + key + ' must be a scalar JSON value')
+            }
+        }
+    })
+    p
+}
+fn options(data) {
+    if cli.opts.paint != ? & cli.opts.method != ? -> die('--paint and --method are mutually exclusive')
+    parsedArgs := if cli.opts.args != ? {
+        true -> json.parse(cli.opts.args)
+        _ -> data.args |> std.default([])
+    }
+    if type(parsedArgs) != :list -> die('--args must be a JSON list')
+    steps := if cli.opts.('max-steps') != ? {true -> int(cli.opts.('max-steps')), _ -> 100000}
+    if steps = ? | steps < 1 | steps > 10000000 -> die('--max-steps must be 1..10000000')
+    width := if cli.opts.width != ? {true -> int(cli.opts.width),
+        _ -> data.width |> std.default(320)}
+    height := if cli.opts.height != ? {true -> int(cli.opts.height),
+        _ -> data.height |> std.default(200)}
+    if width = ? | height = ? | width < 1 | height < 1 | width > 4096 | height > 4096 ->
+        die('--width and --height must be 1..4096')
+    {
+        method: cli.opts.method
+        desc: cli.opts.desc |> std.default('()V')
+        args: parsedArgs
+        paint?: cli.opts.paint != ?
+        emitDraw?: cli.opts.('emit-draw') != ? | cli.opts.paint != ?
+        width: width
+        height: height
+        maxSteps: steps
+    }
+}
+fn config(entry) {
+    if cli.opts.paint != ? & cli.opts.method != ? -> die('--paint and --method are mutually exclusive')
+    {
+    entry: entry
+    method: cli.opts.method
+    desc: cli.opts.desc |> std.default('()V')
+    optimize?: cli.opts.('no-optimize') = ?
+    paint?: cli.opts.paint != ?
+    }
+}
+fn target(output) if cli.opts.target {
+    ? -> if {
+        str.endsWith?(output, '.oak') -> 'oak'
+        str.endsWith?(output, '.js') -> 'js'
+        str.endsWith?(output, '.html') -> 'html'
+        str.endsWith?(output, '.java') -> 'java'
+        _ -> die('cannot infer target; use --target oak|js|html|java')
+    }
+    _ -> cli.opts.target
+}
+
+
+
+// --- Unified JVM/applet subcommands ---
+// When the verb is an applet operation, dispatch to it and exit; the
+// Builder build path below handles ordinary Oak/JS/HTML builds and the
+// JVM-input transpile/recompile adapter.
+if cli.verb {
+    'help', ? -> println(usage)
+    'inspect' -> {
+        data := parseInputs()
+        data.classes |> std.each(fn(raw) {
+            info := app.inspect(raw)
+            if info.type = :error -> die(info.message)
+            cls := info.value
+            println(cls.name + ' extends ' + string(cls.super) + ' (JVM ' + string(cls.major) + '.' + string(cls.minor) + ')')
+            cls.methods |> std.each(fn(m) println('  ' + m.name + m.desc + ' (' + string(len(m.code |> std.default(''))) + ' bytecode bytes)'))
+        })
+        if cli.opts.check != ? {
+            true -> {
+                checked := app.compile(data.classes, config(data.entry))
+                if checked.type = :error {true -> println('Unsupported: ' + checked.message), _ -> println('Executable subset: yes')}
+            }
+        }
+    }
+    'coverage' -> {
+        data := parseInputs(false)
+        report := import('jvm-bridge').coverage({
+            type: :ok, classes: data.classes, entry: data.entry})
+        if report.type = :error -> die(report.message)
+        if cli.opts.json != ? {
+            true -> println(json.serialize(report))
+            _ -> {
+                println('Whole-input decoder inventory: ' + string(report.classes) +
+                    ' classes, ' + string(report.fields) + ' fields, ' +
+                    string(report.methods) + ' methods (' +
+                    string(report.decodedBodies) + ' decoded bodies, ' +
+                    string(report.abstractDeclarations) + ' abstract declarations)')
+                report.blockers |> std.each(fn(item) {
+                    println('Blocked ' + item.member + ': ' + item.message)
+                })
+                if report.allBodiesPreflighted? ->
+                    println('All bodies decoded by the bounded subset; JVM parity is not certified.')
+            }
+        }
+        if len(report.blockers) != 0 -> exit(1)
+    }
+    'build' -> {
+        data := parseInputs()
+        output := cli.opts.output |> std.default(cli.opts.o)
+        if output = ? -> die('missing --output')
+        if data.archive? -> die('build expects .class inputs, not an existing archive')
+        result := if data.sourceJar != ? {
+            true -> app.bundleJar(data.classes, data.entry, data.sourceJar)
+            _ -> app.bundle(data.classes, data.entry)
+        }
+        if result.type = :error -> die(result.message)
+        if fs.writeFile(output, result.value) = ? -> die('could not write ' + output)
+        println('Built ' + output)
+    }
+    'restore' -> {
+        input := cli.opts.entry |> std.default(cli.args.0)
+        output := cli.opts.output |> std.default(cli.opts.o)
+        if input = ? | output = ? -> die('restore needs --entry converted.oak --output FILE.class|FILE.jar|FILE.applet.json|DIRECTORY')
+        restored := app.fromOak(requireFile(input))
+        if restored.type = :error -> die(restored.message)
+        if str.endsWith?(output, '.applet.json') | str.endsWith?(output, '.applet') {
+            true -> {
+                if fs.statFile(output) != ? -> die('refusing to overwrite ' + output)
+                if fs.writeFile(output, restored.archive) = ? -> die('could not write ' + output)
+                println('Restored archive ' + output)
+            }
+            _ -> if str.endsWith?(output, '.jar') | str.endsWith?(output, '.zip') {
+                true -> {
+                    if restored.jar = ? -> die('Oak archive has no original JAR/ZIP container; restore classes instead')
+                    if fs.statFile(output) != ? -> die('refusing to overwrite ' + output)
+                    if fs.writeFile(output, restored.jar) = ? -> die('could not write ' + output)
+                    println('Restored original ZIP/JAR ' + output)
+                }
+                _ -> if str.endsWith?(output, '.class') {
+                    true -> {
+                        if len(restored.value) != 1 -> die('restore to .class requires an Oak file with exactly one class; use a directory')
+                        if fs.statFile(output) != ? -> die('refusing to overwrite ' + output)
+                        if fs.writeFile(output, restored.value.(0)) = ? -> die('could not write ' + output)
+                        println('Restored class ' + output)
+                    }
+                    _ -> {
+                        directory := path.resolve(output)
+                        names := restored.value |> std.map(fn(raw) app.inspect(raw).value.name)
+                        files := names |> std.map(fn(name) path.resolve(name + '.class', directory))
+                        files |> std.each(fn(file) {
+                            if !str.startsWith?(file, directory + '/') -> die('unsafe class output path ' + file)
+                            if fs.statFile(file) != ? -> die('refusing to overwrite ' + file)
+                        })
+                        fn makeParents(location) {
+                            parent := path.dir(location)
+                            if parent != '' & parent != location -> makeParents(parent)
+                            if location != '' & location != '/' {
+                                true -> {
+                                    stat := fs.statFile(location)
+                                    if stat != ? & !stat.dir -> die('not a directory: ' + location)
+                                    if stat = ? & mkdir(location).type = :error -> die('cannot make directory ' + location)
+                                }
+                            }
+                        }
+                        makeParents(directory)
+                        files |> std.each(fn(file, i) {
+                            makeParents(path.dir(file))
+                            if fs.writeFile(file, restored.value.(i)) = ? -> die('could not write ' + file)
+                            println('Restored class ' + file)
+                        })
+                    }
+                }
+            }
+        }
+    }
+    'recompile' -> {
+        input := cli.opts.entry |> std.default(cli.args.0)
+        output := cli.opts.output |> std.default(cli.opts.o)
+        if input = ? | output = ? -> die('recompile needs --entry converted.oak --output NEW.class|NEW.jar|DIRECTORY')
+        edited := import('applet-api').recompileTo(requireFile(input), output)
+        if edited.type = :error -> die(edited.message)
+        println('Recompiled ' + string(len(edited.files)) + ' output file(s) to ' + output +
+            ' (' + string(edited.changedInstructions) + ' changed instructions)')
+    }
+    'run', 'transpile' -> {
+        data := parseInputs()
+        opts := options(data)
+        p := params(data)
+        compiled := app.compile(data.classes, config(data.entry))
+        if compiled.type = :error -> die(compiled.message)
+        if cli.verb = 'run' {
+            true -> {
+                result := app.run(compiled.value, p, opts)
+                if result.output != '' -> print(result.output)
+                if result.type = :error -> die(result.message)
+                if result.value != ? -> {
+                    shown := import('applet-runtime').valueText(result.value)
+                    if shown.type = :error -> die(shown.message)
+                    println(shown.value)
+                }
+                if opts.paint? = true {
+                    true -> {
+                        drawing := cli.opts.output |> std.default(cli.opts.o)
+                        if drawing != ? {
+                            true -> {
+                                if !str.endsWith?(drawing, '.svg') -> die('paint output must end in .svg')
+                                if fs.writeFile(drawing, app.svg(result.draw, opts.width, opts.height)) = ? ->
+                                    die('could not write ' + drawing)
+                                println('Drew ' + string(len(result.draw)) + ' AWT commands to ' + drawing)
+                            }
+                            _ -> println('Drew ' + string(len(result.draw)) + ' AWT commands; use --output drawing.svg to save')
+                        }
+                    }
+                }
+            }
+            _ -> {
+                output := cli.opts.output |> std.default(cli.opts.o)
+                if output = ? {
+                    true -> {
+                        if cli.opts.target != ? & cli.opts.target != 'oak' -> die('non-Oak target requires --output')
+                        output <- path.base(compiled.value.entry) + '.oak'
+                        if fs.statFile(output) != ? -> die('refusing to overwrite default ' + output + '; use --output')
+                    }
+                }
+                format := target(output)
+                if !(format = 'oak' | format = 'js' | format = 'html' | format = 'java') ->
+                    die('unsupported target ' + string(format))
+                expected := '.' + format
+                if !str.endsWith?(output, expected) ->
+                    die('target ' + format + ' requires a ' + expected + ' output filename')
+                // All conversion targets now go through Magnolia Builder's
+                // JVM input adapter. It uses an in-memory Oak entrypoint for
+                // JS/HTML and no longer stages intermediate files.
+                made := import('build').run({
+                    entry: cli.opts.entry |> std.default(cli.args.0)
+                    output: output
+                    web?: format = 'js' | format = 'html'
+                    java?: format = 'java'
+                    applet: {
+                        classes: data.classes
+                        entryClass: compiled.value.entry
+                        originalJar: data.sourceJar
+                        params: p
+                        options: opts
+                        optimize?: cli.opts.('no-optimize') = ?
+                    }
+                })
+                if made.type = :error -> die(made.message)
+                println('Transpiled ' + output + ' (' + string(compiled.stats.before) + ' -> ' + string(compiled.stats.after) + ' instructions)')
+            }
+        }
+    }
+    _ -> die('unknown command\n' + usage)
+}
+
+// --- Builder build path (ordinary Oak/JS/HTML + JVM-input adapter) ---
+input := Cli.opts.entry
+suffix := if type(input) = :string {true -> str.lower(input), _ -> ''}
+applet? := (
+    str.endsWith?(suffix, '.class') | str.endsWith?(suffix, '.jar') |
+    str.endsWith?(suffix, '.zip') | str.endsWith?(suffix, '.java') |
+    str.endsWith?(suffix, '.applet.json') |
+    str.endsWith?(suffix, '.applet') | str.endsWith?(suffix, '.html') |
+    str.endsWith?(suffix, '.htm') | str.endsWith?(suffix, '.jnlp')
+)
+recompile? := str.endsWith?(suffix, '.oak') &
+    (str.endsWith?(str.lower(Cli.opts.output |> default(Cli.opts.o) |> default('')), '.class') |
+     str.endsWith?(str.lower(Cli.opts.output |> default(Cli.opts.o) |> default('')), '.jar'))
+// Builder's existing Oak/JS/etc flags are unchanged. JVM-specific settings
+// can be supplied inline with --applet '{...}', or through named flags.
+settings := if (applet? | recompile?) & Cli.opts.applet != ? {
+    true -> json.parse(Cli.opts.applet)
+    _ -> {}
+}
+if type(settings) != :object {
+    true -> {
+        std.println('--applet expects a JSON object')
+        exit(1)
+    }
+    _ -> ?
+}
+if recompile? -> settings.adapterPath <- Cli.opts.('applet-adapter') |>
+    default(settings.adapterPath)
+if applet? {
+    true -> {
+        settings.entryClass <- Cli.opts.('entry-class') |> default(settings.entryClass)
+        settings.selectClass <- Cli.opts.('select-class') |> default(settings.selectClass)
+        settings.adapterPath <- Cli.opts.('applet-adapter') |> default(settings.adapterPath)
+        settings.preserveJar? <- if Cli.opts.('no-original-jar') != ? {
+            true -> false
+            _ -> settings.preserveJar?
+        }
+        if Cli.opts.('class-files') != ? ->
+            settings.classFiles <- str.split(Cli.opts.('class-files'), ',')
+        if Cli.opts.('java-files') != ? ->
+            settings.javaFiles <- str.split(Cli.opts.('java-files'), ',')
+        if Cli.opts.('java-backend') != ? ->
+            settings.javaBackend <- Cli.opts.('java-backend')
+        if Cli.opts.('javac-path') != ? ->
+            settings.javacPath <- Cli.opts.('javac-path')
+        if Cli.opts.('java-release') != ? ->
+            settings.javaRelease <- int(Cli.opts.('java-release'))
+        params := settings.params |> default({})
+        if Cli.opts.params != ? {
+            true -> {
+                text := fs.readFile(Cli.opts.params)
+                if text = ? {
+                    true -> {
+                        std.println('Cannot read ' + Cli.opts.params)
+                        exit(1)
+                    }
+                }
+                parsed := json.parse(text)
+                if type(parsed) != :object {
+                    true -> {
+                        std.println('--params file must contain a JSON object')
+                        exit(1)
+                    }
+                    _ -> params <- parsed
+                }
+            }
+        }
+        if Cli.opts.param != ? {
+            true -> {
+                pair := str.cut(Cli.opts.param, '=')
+                if pair.(0) = '' {
+                    true -> {
+                        std.println('--param requires name=value')
+                        exit(1)
+                    }
+                }
+                params.(pair.(0)) <- pair.(1)
+            }
+        }
+        settings.params <- params
+        opts := settings.options |> default({})
+        if Cli.opts.args != ? -> opts.args <- json.parse(Cli.opts.args)
+        if Cli.opts.method != ? -> opts.method <- Cli.opts.method
+        if Cli.opts.desc != ? -> opts.desc <- Cli.opts.desc
+        if Cli.opts.paint != ? -> opts.paint? <- true
+        if Cli.opts.width != ? {
+            true -> {
+                opts.width <- int(Cli.opts.width)
+                if opts.width = ? {
+                    true -> {
+                        std.println('--width must be an integer')
+                        exit(1)
+                    }
+                }
+            }
+        }
+        if Cli.opts.height != ? {
+            true -> {
+                opts.height <- int(Cli.opts.height)
+                if opts.height = ? {
+                    true -> {
+                        std.println('--height must be an integer')
+                        exit(1)
+                    }
+                }
+            }
+        }
+        if Cli.opts.('max-steps') != ? {
+            true -> {
+                opts.maxSteps <- int(Cli.opts.('max-steps'))
+                if opts.maxSteps = ? {
+                    true -> {
+                        std.println('--max-steps must be an integer')
+                        exit(1)
+                    }
+                }
+            }
+        }
+        settings.options <- opts
+        if Cli.opts.('no-optimize') != ? -> settings.optimize? <- false
+    }
+}
+
+result := build.run({
+    entry: input
+    output: Cli.opts.output |> default(Cli.opts.o)
+    includes: Cli.opts.include
+    includeVFS: Cli.opts.includeVFS
+    web?: Cli.opts.web != ?
+    wasm?: Cli.opts.wasm != ?
+    ast?: Cli.opts.ast != ?
+    bin?: Cli.opts.bin != ?
+    doc?: Cli.opts.doc != ?
+    ts?: Cli.opts.ts != ?
+    lua?: Cli.opts.lua != ?
+    java?: Cli.opts.java != ?
+    go?: Cli.opts.go != ?
+    native?: Cli.opts.native != ?
+    graph?: Cli.opts.graph != ?
+    applet: settings
 })
+if result.type = :error {
+    true -> {
+        std.println('[oak build] ' + result.message)
+        exit(1)
+    }
+    _ -> {
+        if applet? -> std.println('[oak build] Wrote ' + string(Cli.opts.output |> default(Cli.opts.o)) +
+            ' (' + result.kind + ', ' + string(result.stats.methods) + ' verified methods)')
+        if recompile? -> std.println('[oak build] Wrote ' + string(Cli.opts.output |> default(Cli.opts.o)) +
+            ' (' + string(result.changedInstructions) + ' recompiled instruction edits)')
+    }
+}

@@ -6,7 +6,7 @@
 //   shaderFbm     — fractal Brownian motion for natural terrain height
 //   shaderDEG2RAD — constant for degree→radian conversion
 //   each          — mutate PlaneMesh vertices in-place with height displacement
-//   DirectionalLight + Material + renderMeshLit — per-face lit rendering
+//   renderMeshSolid — lightweight per-face directional terrain shading
 
 { println: println, string: string, int: int, each: each } := import('std')
 
@@ -23,34 +23,17 @@ window := gui.createWindow('Rugged Grass Plains', 1024, 720, {
 
 if window.type {
 	:ok -> {
-		// Structured lighting: directional sun + grass material
-		lightScene := gui.LightScene({
-			lights: [gui.DirectionalLight({
-				x: 0.4, y: 0.8, z: -0.6
-				intensity: 1.0
-				colorR: 255, colorG: 250, colorB: 230
-			})]
-		})
-		grassMaterial := gui.Material({
-			ambient: 0.35
-			diffuse: 0.65
-			specular: 0.05
-			shininess: 8
-		})
-
 		renderer := gui.Renderer3D(window, {
 			camera: { z: 0, fov: 88, backfaceCulling: true }
 			drawDistance: 40
 			background: gui.rgb(135, 206, 235)
 			lineColor: gui.rgb(80, 200, 90)
 			light: { x: 0.4, y: 0.8, z: -0.6, ambient: 0.35, diffuse: 0.65 }
-			lightScene: lightScene
-			material: grassMaterial
 		})
 
 		// Build terrain: PlaneMesh for topology, fbm for natural height
 		terrainSize := 28.8
-		terrainSubs := 47
+		terrainSubs := 35
 		terrain := gui.PlaneMesh(terrainSize, terrainSize, terrainSubs, terrainSubs)
 		amp := 1.6
 		freq := 0.25
@@ -65,6 +48,11 @@ if window.type {
 		colTerrain := gui.rgb(80, 180, 90)
 		colMarker := gui.rgb(255, 220, 120)
 		xfMarker := { tx: 0, ty: 0, tz: 0 }
+		worldTransform := { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 }
+		hudTitle := 'Rugged Grass Plains - WASD move, Q/E or arrows turn'
+		hudPos := ''
+		hudYaw := ''
+		hudNextUpdate := 0
 
 		// Camera / player state
 		cam := { x: 0.0, y: 1.4, z: 8.0, yaw: 180.0, pitch: 0.0 }
@@ -153,15 +141,12 @@ if window.type {
 			if cam.yaw >= 360 -> cam.yaw <- cam.yaw - 360
 			if cam.yaw < 0 -> cam.yaw <- cam.yaw + 360
 
-			// Build a single world transform that represents the inverse of the camera
-			worldTransform := {
-				tx: 0 - cam.x
-				ty: 0 - cam.y
-				tz: 0 - cam.z
-				rx: 0 - cam.pitch
-				ry: 0 - cam.yaw
-				rz: 0
-			}
+			// Reuse the inverse-camera transform object to avoid per-frame allocation.
+			worldTransform.tx <- 0 - cam.x
+			worldTransform.ty <- 0 - cam.y
+			worldTransform.tz <- 0 - cam.z
+			worldTransform.rx <- 0 - cam.pitch
+			worldTransform.ry <- 0 - cam.yaw
 
 			frame := gui.beginFrame(win)
 			if frame.type = :ok -> {
@@ -170,17 +155,24 @@ if window.type {
 				// ground plane grid (wireframe) for reference
 				renderer.renderGrid(40, 1, worldTransform, colGrid)
 
-				// render terrain with per-face lit shading
-				renderer.renderMeshLit(terrain, worldTransform, colTerrain)
+				// render terrain with lightweight per-face directional shading
+				renderer.renderMeshSolid(terrain, worldTransform, colTerrain)
 
 				// small marker at player's feet
 				xfMarker.ty <- 0 - cam.y + 0.12
 				renderer.renderCubeSolid(0.2, xfMarker, colMarker)
 
+				nowNs := nanotime()
+				if nowNs >= hudNextUpdate -> {
+					hudPos <- 'Position: ' + string(int(cam.x * 10) / 10) + ', ' + string(int(cam.y * 10) / 10) + ', ' + string(int(cam.z * 10) / 10)
+					hudYaw <- 'Yaw: ' + string(int(cam.yaw))
+					hudNextUpdate <- nowNs + 250000000
+				}
+
 				// HUD
-				gui.draw(win, { shape: :text, x: 16, y: 18, text: 'Rugged Grass Plains - WASD move, Q/E or arrows turn' })
-				gui.draw(win, { shape: :text, x: 16, y: 40, text: 'Position: ' + string(cam.x) + ', ' + string(cam.y) + ', ' + string(cam.z) })
-				gui.draw(win, { shape: :text, x: 16, y: 62, text: 'Yaw: ' + string(int(cam.yaw)) })
+				gui.draw(win, { shape: :text, x: 16, y: 18, text: hudTitle })
+				gui.draw(win, { shape: :text, x: 16, y: 40, text: hudPos })
+				gui.draw(win, { shape: :text, x: 16, y: 62, text: hudYaw })
 			}
 
 			gui.endFrame(win)

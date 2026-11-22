@@ -1,6 +1,7 @@
 // gui-raster contains scanline fill, shading, culling, and mesh raster routines.
 
 { _default: _default, _clamp: _clamp } := import('gui-common')
+{ flatten: flatten } := import('std')
 guiLighting := import('gui-lighting')
 gui3dmath := import('gui-3dmath')
 guiThread := import('gui-thread')
@@ -314,10 +315,6 @@ fn drawTriangleFilledAA(deps, window, p0, p1, p2, color, borderColor, bgColor) {
 	}
 }
 
-fn _concatLists(left, right, i, out) if i {
-	len(right) -> out
-	_ -> _concatLists(left, right, i + 1, out << right.(i))
-}
 
 // In-place compaction: shifts valid (non-?) entries to the front, returns count.
 fn _compactTrisInPlace(tris) {
@@ -441,6 +438,84 @@ fn _sortDepthInPlace(tris, count) {
 		true -> _sortDepthRange(tris, 0, count - 1)
 	}
 	tris
+}
+
+// ─── Parallel depth sort ─────────────────────────────────────────────────────────
+// Sorts triangles by depth using parallel batch quicksort + k-way merge.
+//
+// Strategy:
+//   1. Split the triangle list into worker-sized batches
+//   2. Sort each batch in parallel via threadLib.pmap + _sortDepthRange
+//   3. K-way merge the sorted batches (bottom-up 2-way merge)
+//   4. Copy merged result back to the original list (in-place semantics)
+//
+// Falls back to sequential quicksort for small lists (< workers * 16 triangles).
+
+fn _mergeByDepth(a, b, i, j, out) if i >= len(a) {
+	true -> _appendRest(out, b, j)
+	_ -> if j >= len(b) {
+		true -> _appendRest(out, a, i)
+		_ -> if a.(i).depth <= b.(j).depth {
+			true -> _mergeByDepth(a, b, i + 1, j, out << a.(i))
+			_ -> _mergeByDepth(a, b, i, j + 1, out << b.(j))
+		}
+	}
+}
+
+fn _appendRest(dst, src, j) if j >= len(src) {
+	true -> dst
+	_ -> _appendRest(dst << src.(j), src, j + 1)
+}
+
+fn _mergeSorted(lists, idx, acc) if idx >= len(lists) {
+	true -> acc
+	_ -> _mergeSorted(lists, idx + 1, _mergeByDepth(acc, lists.(idx), 0, 0, []))
+}
+
+fn _copyBack(src, dst, i) if i >= len(src) {
+	true -> dst
+	_ -> {
+		dst.(i) <- src.(i)
+		_copyBack(src, dst, i + 1)
+	}
+}
+
+fn parallelSortDepth(tris, count, numWorkers) {
+	workers := _default(numWorkers, 4)
+	if count < workers * 16 {
+		// Too few triangles — sequential quicksort is faster than parallel overhead.
+		true -> {
+			_sortDepthRange(tris, 0, count - 1)
+			tris
+		}
+		_ -> {
+			batchSize := int(count / workers) + 1
+
+			fn buildRanges(i, acc) if i >= count {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > count -> end <- count
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			sortedBatches := threadLib.pmap(ranges, fn(r) {
+				batch := _slice(tris, r.start, r.end, [])
+				_sortDepthRange(batch, 0, len(batch) - 1)
+				batch
+			})
+
+			// K-way merge of sorted batches
+			merged := _mergeSorted(sortedBatches, 0, [])
+
+			// Copy sorted result back into original list (in-place semantics)
+			_copyBack(merged, tris, 0)
+			tris
+		}
+	}
 }
 
 fn _sortDepth(tris) {
@@ -788,6 +863,38 @@ fn _collectFacesRange(deps, window, faces, faceColors, verts, projected, default
 	_ -> _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, start + 1, end, _processFace(deps, window, start, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, acc))
 }
 
+// Parallel face collection: splits faces into worker-sized batches and
+// processes each batch in its own goroutine via threadLib.pmap.
+// Only enabled when the mesh has enough faces to offset goroutine overhead.
+fn parallelCollectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, numWorkers) {
+	n := len(faces)
+	workers := _default(numWorkers, 4)
+	if n < workers * 4 {
+		// Too few faces — sequential is faster than parallel overhead.
+		true -> _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, [])
+		_ -> {
+			batchSize := int(n / workers) + 1
+
+			fn buildRanges(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > n -> end <- n
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			batchResults := threadLib.pmap(ranges, fn(r) {
+				_collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, r.start, r.end, [])
+			})
+
+			flatten(batchResults)
+		}
+	}
+}
+
 fn _drawTriangles(deps, window, tris, i, count, drawn) if i >= count {
 	true -> drawn
 	_ -> {
@@ -813,35 +920,24 @@ fn drawMeshSolid(deps, window, mesh, transform, camera, color, light, borderColo
 		true -> { type: :ok, triangles: 0, culled: true }
 		_ -> {
 			// Combined transform + project: one pass over vertices instead of two
-			combo := gui3dmath.transformAndProjectVertices(mesh.vertices, transform, params)
+			combo := gui3dmath.parallelTransformAndProjectVertices(mesh.vertices, transform, params, 4)
 			verts := combo.world
 			projected := combo.screen
 			faces := _default(mesh.faces, [])
 			faceColors := _default(mesh.faceColors, [])
 			backfaceCulling := _default(cam.backfaceCulling, true)
-			parallelFaces := _default(cam.parallelFaces, false)
+			parallelFaces := _default(cam.parallelFaces, true)
 			parallelFaceThreshold := _default(cam.parallelFaceThreshold, 32)
 			lightParams := computeLightParams(deps, light)
 			faceShade := fn(pa3, pb3, pc3) faceShadeGeneric(deps, lightParams, pa3, pb3, pc3)
 			defaultFaceColor := _default(color, deps.rgb(150, 200, 255))
 
 			trisRaw := if parallelFaces & (len(faces) >= parallelFaceThreshold) {
-				true -> {
-					mid := int(len(faces) / 2)
-					rightCh := make_chan(1)
-					go(fn() chan_send(rightCh, _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, mid, len(faces), [])))
-					left := _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, mid, [])
-					rightRaw := chan_recv(rightCh)
-					right := if rightRaw {
-						? -> _collectFacesRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, mid, len(faces), [])
-						_ -> rightRaw
-					}
-					_concatLists(left, right, 0, left)
-				}
+				true -> parallelCollectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 4)
 				_ -> _collectFaces(deps, window, faces, faceColors, verts, projected, defaultFaceColor, faceShade, backfaceCulling, 0, [])
 			}
 			trisCount := _compactTrisInPlace(trisRaw)
-			_sortDepthInPlace(trisRaw, trisCount)
+			parallelSortDepth(trisRaw, trisCount, 4)
 			drawn := _drawTriangles(deps, window, trisRaw, 0, trisCount, 0)
 
 			if borderColor != ? {
@@ -891,9 +987,8 @@ fn drawMeshWireframe(deps, window, mesh, transform, camera, color) {
 	if !_sphereInFrustum?(worldBounds, params, farPlane) {
 		true -> { type: :ok, lines: 0, culled: true }
 		_ -> {
-			// Wireframe only needs screen-space vertices
-			combo := gui3dmath.transformAndProjectVertices(mesh.vertices, transform, params)
-			projected := combo.screen
+			// Wireframe only needs screen-space vertices.
+			projected := gui3dmath.parallelTransformAndProjectScreen(mesh.vertices, transform, params, 4)
 			edges := mesh.edges
 
 			fn sub(i, drawn) if i {
@@ -986,6 +1081,34 @@ fn _collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defa
 	_ -> _collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, start + 1, end, _processFaceLit(deps, window, start, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, acc))
 }
 
+fn parallelCollectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, numWorkers) {
+	n := len(faces)
+	workers := _default(numWorkers, 4)
+	if n < workers * 4 {
+		true -> _collectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, 0, [])
+		_ -> {
+			batchSize := int(n / workers) + 1
+
+			fn buildRanges(i, acc) if i >= n {
+				true -> acc
+				_ -> {
+					end := i + batchSize
+					if end > n -> end <- n
+					buildRanges(i + batchSize, acc << { start: i, end: end })
+				}
+			}
+
+			ranges := buildRanges(0, [])
+
+			batchResults := threadLib.pmap(ranges, fn(r) {
+				_collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, r.start, r.end, [])
+			})
+
+			flatten(batchResults)
+		}
+	}
+}
+
 fn drawMeshLit(deps, window, mesh, transform, camera, color, scene, material, borderColor) {
 	cam := _default(camera, {})
 	farPlane := _default(cam.farPlane, 0)
@@ -995,13 +1118,13 @@ fn drawMeshLit(deps, window, mesh, transform, camera, color, scene, material, bo
 	if !_sphereInFrustum?(worldBounds, params, farPlane) {
 		true -> { type: :ok, triangles: 0, culled: true }
 		_ -> {
-			combo := gui3dmath.transformAndProjectVertices(mesh.vertices, transform, params)
+			combo := gui3dmath.parallelTransformAndProjectVertices(mesh.vertices, transform, params, 4)
 			verts := combo.world
 			projected := combo.screen
 			faces := _default(mesh.faces, [])
 			faceColors := _default(mesh.faceColors, [])
 			backfaceCulling := _default(cam.backfaceCulling, true)
-			parallelFaces := _default(cam.parallelFaces, false)
+			parallelFaces := _default(cam.parallelFaces, true)
 			parallelFaceThreshold := _default(cam.parallelFaceThreshold, 32)
 			defaultFaceColor := _default(color, deps.rgb(150, 200, 255))
 			camPos := { x: 0, y: 0, z: 0 - _default(cam.z, 5) }
@@ -1012,22 +1135,11 @@ fn drawMeshLit(deps, window, mesh, transform, camera, color, scene, material, bo
 
 			// Skip _compactTris — _processFaceLit never inserts ? values
 			trisRaw := if parallelFaces & (len(faces) >= parallelFaceThreshold) {
-				true -> {
-					mid := int(len(faces) / 2)
-					rightCh := make_chan(1)
-					go(fn() chan_send(rightCh, _collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, mid, len(faces), [])))
-					left := _collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, 0, mid, [])
-					rightRaw := chan_recv(rightCh)
-					right := if rightRaw {
-						? -> _collectFacesLitRange(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, mid, len(faces), [])
-						_ -> rightRaw
-					}
-					_concatLists(left, right, 0, left)
-				}
+				true -> parallelCollectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, 4)
 				_ -> _collectFacesLit(deps, window, faces, faceColors, verts, projected, defaultFaceColor, colorFn, backfaceCulling, 0, [])
 			}
 			trisCount := len(trisRaw)
-			_sortDepthInPlace(trisRaw, trisCount)
+			parallelSortDepth(trisRaw, trisCount, 4)
 			drawn := _drawTriangles(deps, window, trisRaw, 0, trisCount, 0)
 
 			if borderColor != ? {

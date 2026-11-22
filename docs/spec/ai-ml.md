@@ -136,6 +136,22 @@ _Auto-generated from Magnolia source._
 
 ### `round(n, decimals)`
 
+- `__math_builtin_sin` — constant
+- `__math_builtin_cos` — constant
+- `__math_builtin_tan` — constant
+- `__math_builtin_asin` — constant
+- `__math_builtin_acos` — constant
+- `__math_builtin_atan` — constant
+- `__math_builtin_pow` — constant
+- `__math_builtin_log` — constant
+- `sin` — constant
+- `cos` — constant
+- `tan` — constant
+- `asin` — constant
+- `acos` — constant
+- `atan` — constant
+- `pow` — constant
+- `log` — constant
 ## Module: `math-base`
 
 - `Pi` · `3.141592653589793`
@@ -324,6 +340,82 @@ _Auto-generated from Magnolia source._
 
 ### `println(xs...)`
 
+- `__std_builtin_int` — constant
+- `__std_builtin_float` — constant
+- `__std_builtin_string` — constant
+- `__std_builtin_type` — constant
+- `__std_builtin_len` — constant
+- `__std_builtin_char` — constant
+- `__std_builtin_codepoint` — constant
+- `__std_builtin_print` — constant
+- `__std_builtin_keys` — constant
+- `__std_builtin_atom` — constant
+- `__std_builtin_name` — constant
+- `__std_builtin_rand` — constant
+- `__std_builtin_srand` — constant
+- `__std_builtin_input` — constant
+- `__std_builtin_exit` — constant
+- `__std_builtin_args` — constant
+- `__std_builtin_addr` — constant
+- `__std_builtin_bits` — constant
+- `__std_builtin_memread` — constant
+- `__std_builtin_memwrite` — constant
+- `__std_builtin_utf16` — constant
+- `__std_builtin_go` — constant
+- `__std_builtin_wait` — constant
+- `__std_builtin_exec` — constant
+- `__std_builtin_env` — constant
+- `__std_builtin_write` — constant
+- `__std_builtin_read` — constant
+- `__std_builtin_interpreter` — constant
+- `__std_builtin_pointer` — constant
+- `__std_builtin_log` — constant
+- `__std_builtin_time` — constant
+- `__std_builtin_nanotime` — constant
+- `int` — constant
+- `float` — constant
+- `string` — constant
+- `type` — constant
+- `len` — constant
+- `print` — constant
+- `time` — constant
+- `nanotime` — constant
+- `char` — constant
+- `codepoint` — constant
+- `keys` — constant
+- `atom` — constant
+- `name` — constant
+- `rand` — constant
+- `srand` — constant
+- `input` — constant
+- `args` — constant
+- `addr` — constant
+- `bits` — constant
+- `memread` — constant
+- `memwrite` — constant
+- `utf16` — constant
+- `exec` — constant
+- `env` — constant
+- `write` — constant
+- `read` — constant
+- `interpreter` — constant
+- `pointer` — constant
+- `log` — constant
+- `wait` — constant
+- `__std_builtin_sin` — constant
+- `__std_builtin_cos` — constant
+- `__std_builtin_tan` — constant
+- `__std_builtin_asin` — constant
+- `__std_builtin_acos` — constant
+- `__std_builtin_atan` — constant
+- `__std_builtin_pow` — constant
+- `sin` — constant
+- `cos` — constant
+- `tan` — constant
+- `asin` — constant
+- `acos` — constant
+- `atan` — constant
+- `pow` — constant
 ## Module: `thread`
 
 ### `spawn(fnToRun, args...)`
@@ -363,6 +455,8 @@ _Auto-generated from Magnolia source._
 ### `pmap(list, fnToRun)`
 
 ### `pmapConcurrent(list, fnToRun, maxConcurrent)`
+
+### `pmapWithPool(list, fnToRun, pool)`
 
 ### `race(fns)`
 
