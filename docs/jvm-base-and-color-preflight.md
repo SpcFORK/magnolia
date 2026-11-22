@@ -9,7 +9,7 @@ fixture and JDK 11 `-Xverify:all` provide the behavioral comparison.
 
 ## `Applet.getDocumentBase()` without giving applets network access
 
-The independent [`AppletBasesJdk.java`](../test/historical/AppletBasesJdk.java)
+The independent `AppletBasesJdk.java`
 attaches a real `java.applet.AppletStub` to the owned
 [`AppletBaseResource.class`](../test/fixtures/AppletBaseResource.java). Its
 **document base** is a local `file:` URL for `document/page.html`; its
