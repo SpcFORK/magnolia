@@ -1289,9 +1289,28 @@ function req(data, cb) {
 }
 
 // Raw sockets
-// The JS runtime currently does not expose Magnolia\'s synchronous stream
-// socket model. Define explicit builtins anyway so socket-backed stdlibs fail
-// with structured IO errors instead of crashing with ReferenceError.
+// Implemented on Node.js using the net/tls modules. Browsers lack raw TCP
+// stream access, so socket-backed stdlibs on browsers receive structured
+// IO errors instead of crashing with ReferenceError.
+
+let __Oak_Socket_NextID = 1;
+const __Oak_Socket_Map = new Map();
+
+function __oak_socket_obj(id) {
+	return { type: Symbol.for(\'socket\'), id: int(id) };
+}
+
+function __oak_socket_get(socket, fnName) {
+	if (socket == null || typeof socket !== \'object\' || socket.type !== Symbol.for(\'socket\')) {
+		return [null, __oak_io_error(fnName + \'() expects a socket\')];
+	}
+	const entry = __Oak_Socket_Map.get(socket.id);
+	if (!entry) {
+		return [null, __oak_io_error(fnName + \'() invalid socket\')];
+	}
+	return [entry, null];
+}
+
 function __oak_socket_unavailable(fnName, cb) {
 	const err = __oak_io_error(fnName + \'() unavailable in this runtime\');
 	if (typeof cb === \'function\') {
@@ -1300,36 +1319,314 @@ function __oak_socket_unavailable(fnName, cb) {
 	}
 	return err;
 }
+
+function __oak_socket_opts(options) {
+	if (options == null || typeof options !== \'object\' || Array.isArray(options)) {
+		return {};
+	}
+	return options;
+}
+
 function socket_connect(address, options, cb) {
-	if (typeof options === \'function\') {
-		cb = options;
+	if (typeof options === \'function\') { cb = options; options = {}; }
+	if (!__Is_Oak_Node) {
+		return __oak_socket_unavailable(\'socket_connect\', cb);
 	}
-	return __oak_socket_unavailable(\'socket_connect\', cb);
+	const addr = __oak_to_string_value(address);
+	const opts = __oak_socket_opts(options);
+	const useTLS = !!opts.tls;
+	try {
+		const net = require(\'net\');
+		let conn;
+		if (useTLS) {
+			const tls = require(\'tls\');
+			const config = {};
+			if (opts.serverName) config.servername = __oak_to_string_value(opts.serverName);
+			if (opts.insecureSkipVerify) config.rejectUnauthorized = false;
+			conn = tls.connect(addr, config);
+		} else {
+			conn = net.connect(addr);
+		}
+		const id = __Oak_Socket_NextID++;
+		const entry = { conn, isTLS: useTLS, serverTLS: false, reader: null, buffer: \'\' };
+		__Oak_Socket_Map.set(id, entry);
+		if (typeof cb === \'function\') {
+			conn.once(\'error\', e => {
+				__Oak_Socket_Map.delete(id);
+				cb(__oak_io_error(\'Could not connect socket: \' + e));
+			});
+			conn.once(\'connect\', () => {
+				cb({
+					type: Symbol.for(\'ok\'),
+					socket: __oak_socket_obj(id),
+					remote: __as_oak_string(conn.remoteAddress + \':\' + conn.remotePort),
+					local: __as_oak_string(conn.localAddress + \':\' + conn.localPort),
+					tls: useTLS,
+				});
+			});
+			return null;
+		}
+		conn.on(\'error\', e => __Oak_Socket_Map.delete(id));
+		return {
+			type: Symbol.for(\'ok\'),
+			socket: __oak_socket_obj(id),
+			remote: __as_oak_string(\'\'),
+			local: __as_oak_string(\'\'),
+			tls: useTLS,
+		};
+	} catch (e) {
+		return __oak_io_error(\'Could not connect socket: \' + e);
+	}
 }
+
 function socket_send(socket, data, cb) {
-	return __oak_socket_unavailable(\'socket_send\', cb);
-}
-function socket_recv(socket, size, cb) {
-	return __oak_socket_unavailable(\'socket_recv\', cb);
-}
-function socket_recv_exact(socket, size, cb) {
-	return __oak_socket_unavailable(\'socket_recv_exact\', cb);
-}
-function socket_recv_line(socket, cb) {
-	return __oak_socket_unavailable(\'socket_recv_line\', cb);
-}
-function socket_starttls(socket, options, cb) {
-	if (typeof options === \'function\') {
-		cb = options;
+	const [entry, err] = __oak_socket_get(socket, \'socket_send\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
 	}
-	return __oak_socket_unavailable(\'socket_starttls\', cb);
+	const payload = __oak_to_string_value(data);
+	try {
+		const written = entry.conn.write(payload, \'latin1\');
+		const result = { type: Symbol.for(\'sent\'), bytes: int(written) };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		const ferr = __oak_io_error(\'Could not write socket data: \' + e);
+		if (typeof cb === \'function\') { cb(ferr); return null; }
+		return ferr;
+	}
 }
+
+function socket_recv(socket, size, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_recv\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	const count = int(size) ?? 0;
+	if (count === 0) {
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(\'\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	}
+	if (typeof cb !== \'function\') {
+		return __oak_io_error(\'socket_recv() requires a callback in this runtime\');
+	}
+	const buf = Buffer.alloc(count);
+	entry.conn.once(\'data\', chunk => {
+		const readLen = Math.min(chunk.length, count);
+		chunk.copy(buf, 0, 0, readLen);
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(buf.toString(\'latin1\', 0, readLen)) };
+		cb(result);
+	});
+	entry.conn.once(\'end\', () => {
+		const result = { type: Symbol.for(\'closed\') };
+		__Oak_Socket_Map.delete(socket.id);
+		cb(result);
+	});
+	entry.conn.once(\'error\', e => {
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read socket data: \' + e));
+	});
+	return null;
+}
+
+function socket_recv_exact(socket, size, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_recv_exact\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	const count = int(size) ?? 0;
+	if (count === 0) {
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(\'\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	}
+	if (typeof cb !== \'function\') {
+		return __oak_io_error(\'socket_recv_exact() requires a callback in this runtime\');
+	}
+	const buf = Buffer.alloc(count);
+	let received = 0;
+	const onData = chunk => {
+		const remaining = count - received;
+		const take = Math.min(chunk.length, remaining);
+		chunk.copy(buf, received, 0, take);
+		received += take;
+		if (received >= count) {
+			entry.conn.removeListener(\'data\', onData);
+			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(buf.toString(\'latin1\')) };
+			cb(result);
+		}
+	};
+	entry.conn.on(\'data\', onData);
+	entry.conn.once(\'end\', () => {
+		entry.conn.removeListener(\'data\', onData);
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read exact socket data: connection closed\'));
+	});
+	entry.conn.once(\'error\', e => {
+		entry.conn.removeListener(\'data\', onData);
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read exact socket data: \' + e));
+	});
+	return null;
+}
+
+function socket_recv_line(socket, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_recv_line\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	if (typeof cb !== \'function\') {
+		return __oak_io_error(\'socket_recv_line() requires a callback in this runtime\');
+	}
+	entry.buffer = entry.buffer || \'\';
+	const onData = chunk => {
+		entry.buffer += chunk.toString(\'latin1\');
+		const idx = entry.buffer.indexOf(\'\n\');
+		if (idx >= 0) {
+			entry.conn.removeListener(\'data\', onData);
+			const line = entry.buffer.slice(0, idx).replace(/\r$/, \'\');
+			entry.buffer = entry.buffer.slice(idx + 1);
+			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(line) };
+			cb(result);
+		}
+	};
+	entry.conn.on(\'data\', onData);
+	entry.conn.once(\'end\', () => {
+		entry.conn.removeListener(\'data\', onData);
+		const line = entry.buffer.replace(/\r?\n$/, \'\');
+		if (line !== \'\') {
+			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(line) };
+			cb(result);
+		} else {
+			__Oak_Socket_Map.delete(socket.id);
+			cb({ type: Symbol.for(\'closed\') });
+		}
+	});
+	entry.conn.once(\'error\', e => {
+		entry.conn.removeListener(\'data\', onData);
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read socket line: \' + e));
+	});
+	return null;
+}
+
+function socket_starttls(socket, options, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_starttls\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	if (!__Is_Oak_Node) {
+		return __oak_socket_unavailable(\'socket_starttls\', cb);
+	}
+	const opts = __oak_socket_opts(options);
+	try {
+		const tls = require(\'tls\');
+		const config = {};
+		if (opts.serverName) config.servername = __oak_to_string_value(opts.serverName);
+		if (opts.insecureSkipVerify) config.rejectUnauthorized = false;
+		const tlsConn = new tls.TLSSocket(entry.conn, config);
+		if (typeof cb === \'function\') {
+			tlsConn.once(\'secureConnect\', () => {
+				entry.conn = tlsConn;
+				entry.isTLS = true;
+				entry.buffer = \'\';
+				cb({
+					type: Symbol.for(\'ok\'),
+					socket: __oak_socket_obj(socket.id),
+					remote: __as_oak_string(tlsConn.remoteAddress + \':\' + tlsConn.remotePort),
+					local: __as_oak_string(tlsConn.localAddress + \':\' + tlsConn.localPort),
+					tls: true,
+				});
+			});
+			tlsConn.once(\'error\', e => {
+				cb(__oak_io_error(\'Could not upgrade socket to TLS: \' + e));
+			});
+			return null;
+		}
+		tlsConn.on(\'error\', () => __Oak_Socket_Map.delete(socket.id));
+		entry.conn = tlsConn;
+		entry.isTLS = true;
+		entry.buffer = \'\';
+		return {
+			type: Symbol.for(\'ok\'),
+			socket: __oak_socket_obj(socket.id),
+			remote: __as_oak_string(\'\'),
+			local: __as_oak_string(\'\'),
+			tls: true,
+		};
+	} catch (e) {
+		return __oak_io_error(\'Could not upgrade socket to TLS: \' + e);
+	}
+}
+
 function socket_close(socket, cb) {
-	return __oak_socket_unavailable(\'socket_close\', cb);
+	const [entry, err] = __oak_socket_get(socket, \'socket_close\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	try {
+		entry.conn.end();
+		entry.conn.destroy();
+		__Oak_Socket_Map.delete(socket.id);
+		const result = { type: Symbol.for(\'closed\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		__Oak_Socket_Map.delete(socket.id);
+		const ferr = __oak_io_error(\'Could not close socket: \' + e);
+		if (typeof cb === \'function\') { cb(ferr); return null; }
+		return ferr;
+	}
 }
+
 function socket_listen(address, handler, options) {
-	return __oak_socket_unavailable(\'socket_listen\');
+	if (!__Is_Oak_Node) {
+		return __oak_socket_unavailable(\'socket_listen\');
+	}
+	const opts = __oak_socket_opts(options);
+	const useTLS = !!opts.tls;
+	try {
+		const net = require(\'net\');
+		const addr = __oak_to_string_value(address);
+		const server = net.createServer();
+		if (useTLS) {
+			const tls = require(\'tls\');
+			const config = {};
+			if (opts.certFile && opts.keyFile) {
+				const fs = require(\'fs\');
+				config.cert = fs.readFileSync(__oak_to_string_value(opts.certFile));
+				config.key = fs.readFileSync(__oak_to_string_value(opts.keyFile));
+			}
+			server.on(\'tlsClientError\', () => {});
+		}
+		server.on(\'connection\', conn => {
+			const id = __Oak_Socket_NextID++;
+			const entry = { conn, isTLS: useTLS, serverTLS: useTLS, reader: null, buffer: \'\' };
+			__Oak_Socket_Map.set(id, entry);
+			if (typeof handler === \'function\') {
+				handler({
+					type: Symbol.for(\'connect\'),
+					socket: __oak_socket_obj(id),
+					remote: __as_oak_string(conn.remoteAddress + \':\' + conn.remotePort),
+					local: __as_oak_string(conn.localAddress + \':\' + conn.localPort),
+					tls: useTLS,
+				});
+			}
+		});
+		server.listen(addr);
+		return (...args) => { server.close(); return null; };
+	} catch (e) {
+		return __oak_io_error(\'Could not listen on socket: \' + e);
+	}
 }
+
 
 // WebSocket
 let __Oak_WS_NextID = 1;
