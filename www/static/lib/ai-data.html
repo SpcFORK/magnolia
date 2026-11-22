@@ -1,577 +1,0 @@
-<!doctype html>
-<head>
-    <meta charset="utf-8">
-    <title>ai-data.oak | Oak programming language</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <link rel="stylesheet" href="/css/main.css">
-    <link rel="stylesheet" href="/css/lib.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header>
-        <div class="overlay">
-            <div class="home">
-                <a href="/">Oak</a>
-            </div>
-            <nav>
-                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
-                <a href="/posts/">blog</a>
-                <a href="/#start">download</a>
-                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
-            </nav>
-        </div>
-    </header>
-    <main aria-role="main">
-        <article class="overlay stdlib">
-            <h1>ai-data.oak</h1>
-            <p class="meta">
-                <a href="/lib/">&larr; Standard library</a>
-                <a href="https://github.com/thesephist/oak/blob/main/lib/ai-data.oak">See on GitHub ↗</a>
-            </p>
-            <pre><code><span class="oak-comment">// libai-data implements data preprocessing, batching, encoding, augmentation,</span>
-<span class="oak-comment">// quantization, and model configuration for the ai module.</span><span class="oak-newline">
-</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">default</span><span class="oak-colon">: </span><span class="oak-identifier">default</span><span class="oak-newline">
-	</span><span class="oak-identifier">map</span><span class="oak-colon">: </span><span class="oak-identifier">map</span><span class="oak-newline">
-	</span><span class="oak-identifier">slice</span><span class="oak-colon">: </span><span class="oak-identifier">slice</span><span class="oak-newline">
-	</span><span class="oak-identifier">range</span><span class="oak-colon">: </span><span class="oak-identifier">range</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">abs</span><span class="oak-colon">: </span><span class="oak-identifier">abs</span><span class="oak-newline">
-	</span><span class="oak-identifier">pow</span><span class="oak-colon">: </span><span class="oak-identifier">pow</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'math'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">minMaxScale</span><span class="oak-colon">: </span><span class="oak-identifier">minMaxScale</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ai-vec'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">matZeros</span><span class="oak-colon">: </span><span class="oak-identifier">matZeros</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'ai-linalg'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Model Configuration &amp; Metadata</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ModelConfig creates a configuration object for an AI model.</span>
-<span class="oak-comment">// Works with any model type: language models, vision models, audio models,</span>
-<span class="oak-comment">// reinforcement learning agents, diffusion models, multimodal systems, etc.</span>
-<span class="oak-comment">// Only 'name' and 'task' are populated by default; all other fields come from</span>
-<span class="oak-comment">// the caller's params object and are passed through as-is.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example (language model):</span>
-<span class="oak-comment">//   ModelConfig({</span>
-<span class="oak-comment">//     name: 'gpteehee-4-turbo'</span>
-<span class="oak-comment">//     task: :language</span>
-<span class="oak-comment">//     vocabSize: 100000</span>
-<span class="oak-comment">//     hiddenSize: 8192</span>
-<span class="oak-comment">//     numLayers: 96</span>
-<span class="oak-comment">//     numHeads: 64</span>
-<span class="oak-comment">//     maxSequenceLength: 128000</span>
-<span class="oak-comment">//   })</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example (vision model):</span>
-<span class="oak-comment">//   ModelConfig({</span>
-<span class="oak-comment">//     name: 'resnet-50'</span>
-<span class="oak-comment">//     task: :vision</span>
-<span class="oak-comment">//     inputShape: [3, 224, 224]</span>
-<span class="oak-comment">//     numClasses: 1000</span>
-<span class="oak-comment">//     numLayers: 50</span>
-<span class="oak-comment">//   })</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example (reinforcement learning):</span>
-<span class="oak-comment">//   ModelConfig({</span>
-<span class="oak-comment">//     name: 'ppo-agent'</span>
-<span class="oak-comment">//     task: :rl</span>
-<span class="oak-comment">//     observationSize: 84</span>
-<span class="oak-comment">//     actionSize: 6</span>
-<span class="oak-comment">//     gamma: 0.99</span>
-<span class="oak-comment">//   })</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">ModelConfig</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-comment">// Start with caller's full params, then overlay defaults for core fields</span><span class="oak-newline">
-	</span><span class="oak-identifier">base </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">name</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">name</span><span class="oak-comma">, </span><span class="oak-stringLiteral">'unnamed-model'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">task</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">task</span><span class="oak-comma">, </span><span class="oak-colon">:</span><span class="oak-identifier">generic</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">learningRate</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">learningRate</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0.0001</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">batchSize</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">batchSize</span><span class="oak-comma">, </span><span class="oak-numberLiteral">32</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">trainable</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">trainable</span><span class="oak-comma">, </span><span class="oak-trueLiteral">true</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">precision</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">precision</span><span class="oak-comma">, </span><span class="oak-stringLiteral">'float32'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">dropoutRate</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-identifier">dropoutRate</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0.1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Merge all user-provided params on top of base defaults.</span><span class="oak-newline">
-	</span><span class="oak-comment">// This lets callers add any domain-specific keys (vocabSize, inputShape,</span><span class="oak-newline">
-	</span><span class="oak-comment">// numClasses, gamma, actionSize, etc.) without the library needing to</span><span class="oak-newline">
-	</span><span class="oak-comment">// know about them in advance.</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">mergeKeys</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">out</span><span class="oak-comma">, </span><span class="oak-identifier">keys</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">keys</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">out</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">k </span><span class="oak-assign">:= </span><span class="oak-identifier">keys</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnName">mergeKeys</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">out</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">k</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">params</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">k</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">keys</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">mergeKeys</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">base</span><span class="oak-comma">, </span><span class="oak-fnName">keys</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Data Preprocessing</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// oneHotEncode encodes an integer label as a one-hot vector of given length.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   oneHotEncode(2, 5)  // => [0, 0, 1, 0, 0]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">oneHotEncode</span><span class="oak-leftParen">(</span><span class="oak-identifier">label</span><span class="oak-comma">, </span><span class="oak-identifier">numClasses</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">numClasses </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-eq">= </span><span class="oak-identifier">label </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0 </span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// oneHotDecode returns the index of the maximum value in a one-hot vector.</span>
-<span class="oak-comment">// Works as argmax for any numeric vector.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   oneHotDecode([0, 0, 1, 0])  // => 2</span>
-<span class="oak-comment">//   oneHotDecode([0.1, 0.7, 0.2])  // => 1</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">oneHotDecode</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">bestIdx</span><span class="oak-comma">, </span><span class="oak-identifier">bestVal</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">bestIdx</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">v</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-greater">> </span><span class="oak-identifier">bestVal </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">v</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">bestIdx</span><span class="oak-comma">, </span><span class="oak-identifier">bestVal</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-qmark">?</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">v</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// shuffleIndices returns a list of indices [0..n-1] in pseudo-random order</span>
-<span class="oak-comment">// using a simple linear congruential generator seeded by seed.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   shuffleIndices(5, 42)  // => [3, 0, 4, 1, 2] (deterministic for seed)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">shuffleIndices</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">seed</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">indices </span><span class="oak-assign">:= </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// Fisher-Yates using LCG: next = (a*prev + c) mod m</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">swap</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">rng</span><span class="oak-comma">, </span><span class="oak-identifier">arr</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-numberLiteral">1 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">arr</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">nextRng </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-fnName">abs</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1103515245 </span><span class="oak-times">* </span><span class="oak-identifier">rng </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">12345</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">) </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">2147483648</span><span class="oak-newline">
-			</span><span class="oak-identifier">j </span><span class="oak-assign">:= </span><span class="oak-identifier">nextRng </span><span class="oak-modulus">% </span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// swap arr[i] and arr[j]</span><span class="oak-newline">
-			</span><span class="oak-identifier">tmp </span><span class="oak-assign">:= </span><span class="oak-identifier">arr</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">arr</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">arr</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">arr</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">tmp</span><span class="oak-newline">
-			</span><span class="oak-fnName">swap</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">nextRng</span><span class="oak-comma">, </span><span class="oak-identifier">arr</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">swap</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">seed</span><span class="oak-comma">, </span><span class="oak-identifier">indices</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// trainTestSplit splits data and labels into train and test sets.</span>
-<span class="oak-comment">// ratio is the fraction used for training (e.g. 0.8).</span>
-<span class="oak-comment">// Returns {trainData, trainLabels, testData, testLabels}.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   trainTestSplit([[1],[2],[3],[4],[5]], [0,1,0,1,0], 0.6, 42)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">trainTestSplit</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-comma">, </span><span class="oak-identifier">labels</span><span class="oak-comma">, </span><span class="oak-identifier">ratio</span><span class="oak-comma">, </span><span class="oak-identifier">seed</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">indices </span><span class="oak-assign">:= </span><span class="oak-fnName">shuffleIndices</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">seed</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">splitIdx </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-times">* </span><span class="oak-identifier">ratio</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">gather</span><span class="oak-leftParen">(</span><span class="oak-identifier">idxList</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">g</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">dAcc</span><span class="oak-comma">, </span><span class="oak-identifier">lAcc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">idxList</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-identifier">dAcc</span><span class="oak-comma">, </span><span class="oak-identifier">labels</span><span class="oak-colon">: </span><span class="oak-identifier">lAcc </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-identifier">idx </span><span class="oak-assign">:= </span><span class="oak-identifier">idxList</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-fnName">g</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">dAcc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">idx</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">lAcc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">labels</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">idx</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-fnName">g</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-identifier">trainIdx </span><span class="oak-assign">:= </span><span class="oak-identifier">indices </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">slice</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">splitIdx</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">testIdx </span><span class="oak-assign">:= </span><span class="oak-identifier">indices </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">slice</span><span class="oak-leftParen">(</span><span class="oak-identifier">splitIdx</span><span class="oak-comma">, </span><span class="oak-identifier">n</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">train </span><span class="oak-assign">:= </span><span class="oak-fnName">gather</span><span class="oak-leftParen">(</span><span class="oak-identifier">trainIdx</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">test </span><span class="oak-assign">:= </span><span class="oak-fnName">gather</span><span class="oak-leftParen">(</span><span class="oak-identifier">testIdx</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">trainData</span><span class="oak-colon">: </span><span class="oak-identifier">train</span><span class="oak-dot">.</span><span class="oak-identifier">data</span><span class="oak-newline">
-		</span><span class="oak-identifier">trainLabels</span><span class="oak-colon">: </span><span class="oak-identifier">train</span><span class="oak-dot">.</span><span class="oak-identifier">labels</span><span class="oak-newline">
-		</span><span class="oak-identifier">testData</span><span class="oak-colon">: </span><span class="oak-identifier">test</span><span class="oak-dot">.</span><span class="oak-identifier">data</span><span class="oak-newline">
-		</span><span class="oak-identifier">testLabels</span><span class="oak-colon">: </span><span class="oak-identifier">test</span><span class="oak-dot">.</span><span class="oak-identifier">labels</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// kFoldIndices generates k folds of train/test index splits for cross-validation.</span>
-<span class="oak-comment">// Returns a list of {train: [...indices], test: [...indices]} objects.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   kFoldIndices(10, 5)  // => [{train: [2..9], test: [0,1]}, ...]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">kFoldIndices</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">k</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">foldSize </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-divide">/ </span><span class="oak-identifier">k</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">makeFold</span><span class="oak-leftParen">(</span><span class="oak-identifier">f</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">f </span><span class="oak-geq">>= </span><span class="oak-identifier">k </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">testStart </span><span class="oak-assign">:= </span><span class="oak-identifier">f </span><span class="oak-times">* </span><span class="oak-identifier">foldSize</span><span class="oak-newline">
-			</span><span class="oak-identifier">testEnd </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">f </span><span class="oak-eq">= </span><span class="oak-identifier">k </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">testStart </span><span class="oak-plus">+ </span><span class="oak-identifier">foldSize </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-identifier">testIdx </span><span class="oak-assign">:= </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">testStart</span><span class="oak-comma">, </span><span class="oak-identifier">testEnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">trainIdx </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-identifier">left </span><span class="oak-assign">:= </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">testStart</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-identifier">right </span><span class="oak-assign">:= </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">testEnd</span><span class="oak-comma">, </span><span class="oak-identifier">n</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">cat</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">out</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">right</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">out</span><span class="oak-newline">
-					</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">cat</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">out </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">right</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-fnName">cat</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">left</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">makeFold</span><span class="oak-leftParen">(</span><span class="oak-identifier">f </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">train</span><span class="oak-colon">: </span><span class="oak-identifier">trainIdx</span><span class="oak-comma">, </span><span class="oak-identifier">test</span><span class="oak-colon">: </span><span class="oak-identifier">testIdx </span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">makeFold</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Batch Processing &amp; Utilities</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// batchify creates batches from a list of items.</span>
-<span class="oak-comment">// Useful for processing data in batches during training/inference.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   batchify([1, 2, 3, 4, 5], 2)  // => [[1, 2], [3, 4], [5]]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">batchify</span><span class="oak-leftParen">(</span><span class="oak-identifier">items</span><span class="oak-comma">, </span><span class="oak-identifier">batchSize</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">makeBatch</span><span class="oak-leftParen">(</span><span class="oak-identifier">idx</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">idx </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">items</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">endIdx </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">idx </span><span class="oak-plus">+ </span><span class="oak-identifier">batchSize </span><span class="oak-greater">> </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">items</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">items</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">idx </span><span class="oak-plus">+ </span><span class="oak-identifier">batchSize</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-identifier">batch </span><span class="oak-assign">:= </span><span class="oak-identifier">items </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">slice</span><span class="oak-leftParen">(</span><span class="oak-identifier">idx</span><span class="oak-comma">, </span><span class="oak-identifier">endIdx</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnName">makeBatch</span><span class="oak-leftParen">(</span><span class="oak-identifier">endIdx</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">batch</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">makeBatch</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// padSequence pads a sequence to a target length with a padding token.</span>
-<span class="oak-comment">// Used in preparing variable-length sequences for models.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   padSequence([1, 2, 3], 5, 0)  // => [1, 2, 3, 0, 0]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">padSequence</span><span class="oak-leftParen">(</span><span class="oak-identifier">sequence</span><span class="oak-comma">, </span><span class="oak-identifier">targetLength</span><span class="oak-comma">, </span><span class="oak-identifier">padToken</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">currentLen </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">sequence</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">currentLen </span><span class="oak-geq">>= </span><span class="oak-identifier">targetLength </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">sequence </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">slice</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">targetLength</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">addPadding</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">targetLength </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">elem </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-less">&lt; </span><span class="oak-identifier">currentLen </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-						</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">sequence</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-						</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">padToken</span><span class="oak-newline">
-					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-					</span><span class="oak-fnName">addPadding</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">elem</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">addPadding</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Feature Scaling &amp; Encoding</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// labelEncode maps a list of category values to integer indices.</span>
-<span class="oak-comment">// Returns {encoded: [int...], classes: {value: index...}}.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   labelEncode([:cat, :dog, :cat, :bird])</span>
-<span class="oak-comment">//   // => {encoded: [0, 1, 0, 2], classes: {cat: 0, dog: 1, bird: 2}}</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">labelEncode</span><span class="oak-leftParen">(</span><span class="oak-identifier">labels</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">classes</span><span class="oak-comma">, </span><span class="oak-identifier">nextIdx</span><span class="oak-comma">, </span><span class="oak-identifier">encoded</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">labels</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">encoded</span><span class="oak-colon">: </span><span class="oak-identifier">encoded</span><span class="oak-comma">, </span><span class="oak-identifier">classes</span><span class="oak-colon">: </span><span class="oak-identifier">classes </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">key </span><span class="oak-assign">:= </span><span class="oak-fnName">string</span><span class="oak-leftParen">(</span><span class="oak-identifier">labels</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">classes</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">key</span><span class="oak-rightParen">) </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">classes</span><span class="oak-comma">, </span><span class="oak-identifier">nextIdx</span><span class="oak-comma">, </span><span class="oak-identifier">encoded </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">classes</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">key</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">classes </span><span class="oak-assign">:= </span><span class="oak-identifier">classes</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">key</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">nextIdx</span><span class="oak-newline">
-					</span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">classes</span><span class="oak-comma">, </span><span class="oak-identifier">nextIdx </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">encoded </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">nextIdx</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBrace">{</span><span class="oak-rightBrace">}</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// polynomialFeatures generates polynomial features up to degree d for a vector.</span>
-<span class="oak-comment">// For a 1D input [x], degree 3 produces [x, x^2, x^3].</span>
-<span class="oak-comment">// For multi-dimensional input, produces all individual powers (no cross terms).</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   polynomialFeatures([2, 3], 3)  // => [2, 4, 8, 3, 9, 27]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">polynomialFeatures</span><span class="oak-leftParen">(</span><span class="oak-identifier">features</span><span class="oak-comma">, </span><span class="oak-identifier">degree</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">f</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">f </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">features</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">powers</span><span class="oak-leftParen">(</span><span class="oak-identifier">d</span><span class="oak-comma">, </span><span class="oak-identifier">acc2</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">d </span><span class="oak-greater">> </span><span class="oak-identifier">degree </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc2</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">powers</span><span class="oak-leftParen">(</span><span class="oak-identifier">d </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc2 </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">pow</span><span class="oak-leftParen">(</span><span class="oak-identifier">features</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">f</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">d</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-identifier">f </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-fnName">powers</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">build</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Classification Metrics</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// accuracy computes the fraction of correct predictions.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   accuracy([1, 0, 1, 1], [1, 0, 0, 1])  // => 0.75</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">accuracy</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">countCorrect</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">correct </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">predicted</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0 </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-					</span><span class="oak-fnName">countCorrect</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">correct</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">countCorrect</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// precisionScore computes precision for a binary classifier.</span>
-<span class="oak-comment">// precision = truePositives / (truePositives + falsePositives)</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   precisionScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.666...</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">precisionScore</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">positiveLabel</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">tp</span><span class="oak-comma">, </span><span class="oak-identifier">fp</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">tp </span><span class="oak-plus">+ </span><span class="oak-identifier">fp </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">tp </span><span class="oak-divide">/ </span><span class="oak-leftParen">(</span><span class="oak-identifier">tp </span><span class="oak-plus">+ </span><span class="oak-identifier">fp</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">predicted</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">positiveLabel </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">positiveLabel </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">tp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">fp</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">tp</span><span class="oak-comma">, </span><span class="oak-identifier">fp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">tp</span><span class="oak-comma">, </span><span class="oak-identifier">fp</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// recallScore computes recall for a binary classifier.</span>
-<span class="oak-comment">// recall = truePositives / (truePositives + falseNegatives)</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   recallScore([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 1.0</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">recallScore</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">positiveLabel</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">tp</span><span class="oak-comma">, </span><span class="oak-identifier">fneg</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">tp </span><span class="oak-plus">+ </span><span class="oak-identifier">fneg </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">tp </span><span class="oak-divide">/ </span><span class="oak-leftParen">(</span><span class="oak-identifier">tp </span><span class="oak-plus">+ </span><span class="oak-identifier">fneg</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">positiveLabel </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">predicted</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">positiveLabel </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">tp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">fneg</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">tp</span><span class="oak-comma">, </span><span class="oak-identifier">fneg </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">tp</span><span class="oak-comma">, </span><span class="oak-identifier">fneg</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// f1Score computes the F1 score (harmonic mean of precision and recall).</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   f1Score([1, 1, 0, 1], [1, 0, 0, 1], 1)  // => 0.8</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">f1Score</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">positiveLabel</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-fnName">precisionScore</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">positiveLabel</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">r </span><span class="oak-assign">:= </span><span class="oak-fnName">recallScore</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">positiveLabel</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">r </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">2 </span><span class="oak-times">* </span><span class="oak-identifier">p </span><span class="oak-times">* </span><span class="oak-identifier">r </span><span class="oak-divide">/ </span><span class="oak-leftParen">(</span><span class="oak-identifier">p </span><span class="oak-plus">+ </span><span class="oak-identifier">r</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// confusionMatrix builds a confusion matrix for integer class labels 0..numClasses-1.</span>
-<span class="oak-comment">// Returns a numClasses x numClasses matrix where mat[actual][predicted] = count.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   confusionMatrix([0, 1, 1, 2], [0, 1, 2, 2], 3)</span>
-<span class="oak-comment">//   // => [[1,0,0],[0,1,0],[0,1,1]]  (rows=actual, cols=predicted)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">confusionMatrix</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-comma">, </span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">numClasses</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">mat </span><span class="oak-assign">:= </span><span class="oak-fnName">matZeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">numClasses</span><span class="oak-comma">, </span><span class="oak-identifier">numClasses</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">fill</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">mat</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">a </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">predicted</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">mat</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">a</span><span class="oak-rightParen">)</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">mat</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">a</span><span class="oak-rightParen">)</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">p</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-newline">
-			</span><span class="oak-fnName">fill</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">fill</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// rSquared computes the R² (coefficient of determination) for regression.</span>
-<span class="oak-comment">// 1 = perfect fit, 0 = no better than mean, negative = worse than mean.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   rSquared([1, 2, 3], [1.1, 2.0, 2.9])  // => ~0.99</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">rSquared</span><span class="oak-leftParen">(</span><span class="oak-identifier">actual</span><span class="oak-comma">, </span><span class="oak-identifier">predicted</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">m </span><span class="oak-assign">:= </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">actual</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-					</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">ssRes</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">actual</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">diff </span><span class="oak-assign">:= </span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">predicted</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnName">ssRes</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">diff </span><span class="oak-times">* </span><span class="oak-identifier">diff</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">ssTot</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">actual</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">diff </span><span class="oak-assign">:= </span><span class="oak-identifier">actual</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">m</span><span class="oak-newline">
-			</span><span class="oak-fnName">ssTot</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">diff </span><span class="oak-times">* </span><span class="oak-identifier">diff</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-identifier">tot </span><span class="oak-assign">:= </span><span class="oak-fnName">ssTot</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">tot </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">1 </span><span class="oak-minus">- </span><span class="oak-fnName">ssRes</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">tot </span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Data Augmentation</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// addNoise adds Gaussian-like noise to a vector using a deterministic LCG.</span>
-<span class="oak-comment">// scale controls the noise magnitude.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   addNoise([1, 2, 3], 0.1, 42)  // => [1.03, 1.95, 3.08] (approx)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">addNoise</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-comma">, </span><span class="oak-identifier">scale</span><span class="oak-comma">, </span><span class="oak-identifier">seed</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">gen</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">rng</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">r1 </span><span class="oak-assign">:= </span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1103515245 </span><span class="oak-times">* </span><span class="oak-identifier">rng </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">12345</span><span class="oak-rightParen">) </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">2147483648</span><span class="oak-newline">
-			</span><span class="oak-identifier">r2 </span><span class="oak-assign">:= </span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1103515245 </span><span class="oak-times">* </span><span class="oak-identifier">r1 </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">12345</span><span class="oak-rightParen">) </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">2147483648</span><span class="oak-newline">
-			</span><span class="oak-comment">// Box-Muller-like approximation: map uniform to roughly normal</span><span class="oak-newline">
-			</span><span class="oak-identifier">u </span><span class="oak-assign">:= </span><span class="oak-identifier">r1 </span><span class="oak-divide">/ </span><span class="oak-numberLiteral">2147483648 </span><span class="oak-minus">- </span><span class="oak-numberLiteral">0.5</span><span class="oak-newline">
-			</span><span class="oak-identifier">noise </span><span class="oak-assign">:= </span><span class="oak-identifier">u </span><span class="oak-times">* </span><span class="oak-numberLiteral">2 </span><span class="oak-times">* </span><span class="oak-identifier">scale</span><span class="oak-newline">
-			</span><span class="oak-fnName">gen</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">r2</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-identifier">noise</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">gen</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">seed</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// mixup performs mixup data augmentation between two samples.</span>
-<span class="oak-comment">// lambda controls interpolation: 0 = pure sample2, 1 = pure sample1.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   mixup([1, 0], [0, 1], 0.7)  // => [0.7, 0.3]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">mixup</span><span class="oak-leftParen">(</span><span class="oak-identifier">sample1</span><span class="oak-comma">, </span><span class="oak-identifier">sample2</span><span class="oak-comma">, </span><span class="oak-identifier">lambda</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">mix</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">sample1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">mix</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftParen">(</span><span class="oak-identifier">lambda </span><span class="oak-times">* </span><span class="oak-identifier">sample1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1 </span><span class="oak-minus">- </span><span class="oak-identifier">lambda</span><span class="oak-rightParen">) </span><span class="oak-times">* </span><span class="oak-identifier">sample2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">mix</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Quantization</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// quantize maps floating-point values to discrete levels in [0, numLevels-1].</span>
-<span class="oak-comment">// Useful for model compression and integer quantization.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   quantize([0.1, 0.5, 0.9], 4)  // => [0, 1, 2] (approx)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">quantize</span><span class="oak-leftParen">(</span><span class="oak-identifier">values</span><span class="oak-comma">, </span><span class="oak-identifier">numLevels</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">scaled </span><span class="oak-assign">:= </span><span class="oak-fnName">minMaxScale</span><span class="oak-leftParen">(</span><span class="oak-identifier">values</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">scaled</span><span class="oak-dot">.</span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">level </span><span class="oak-assign">:= </span><span class="oak-fnName">int</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-times">* </span><span class="oak-leftParen">(</span><span class="oak-identifier">numLevels </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">0.5</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">level </span><span class="oak-geq">>= </span><span class="oak-identifier">numLevels </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">numLevels </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">level </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// dequantize converts quantized integer levels back to [0, 1] range.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   dequantize([0, 1, 2, 3], 4)  // => [0, 0.333, 0.666, 1]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">dequantize</span><span class="oak-leftParen">(</span><span class="oak-identifier">levels</span><span class="oak-comma">, </span><span class="oak-identifier">numLevels</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">levels </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">l</span><span class="oak-rightParen">) </span><span class="oak-identifier">l </span><span class="oak-divide">/ </span><span class="oak-leftParen">(</span><span class="oak-identifier">numLevels </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Mini-Batch Gradient Descent Loop</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// trainLoop runs a simple training loop over batches for a given number of epochs.</span>
-<span class="oak-comment">// updateFn(params, batch) => {params: newParams, loss: batchLoss}</span>
-<span class="oak-comment">// Returns {params: finalParams, losses: [avgLossPerEpoch]}.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   trainLoop(initParams, data, 32, 5, fn(p, batch) { params: p, loss: 0.1 })</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">trainLoop</span><span class="oak-leftParen">(</span><span class="oak-identifier">params</span><span class="oak-comma">, </span><span class="oak-identifier">data</span><span class="oak-comma">, </span><span class="oak-identifier">batchSize</span><span class="oak-comma">, </span><span class="oak-identifier">epochs</span><span class="oak-comma">, </span><span class="oak-identifier">updateFn</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">batches </span><span class="oak-assign">:= </span><span class="oak-fnName">batchify</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-comma">, </span><span class="oak-identifier">batchSize</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">epoch</span><span class="oak-leftParen">(</span><span class="oak-identifier">e</span><span class="oak-comma">, </span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-identifier">losses</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">e </span><span class="oak-geq">>= </span><span class="oak-identifier">epochs </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">params</span><span class="oak-colon">: </span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-identifier">losses</span><span class="oak-colon">: </span><span class="oak-identifier">losses </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">batch</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-comma">, </span><span class="oak-identifier">curP</span><span class="oak-comma">, </span><span class="oak-identifier">totalLoss</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">b </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">batches</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">avgLoss </span><span class="oak-assign">:= </span><span class="oak-identifier">totalLoss </span><span class="oak-divide">/ </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">batches</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-fnName">epoch</span><span class="oak-leftParen">(</span><span class="oak-identifier">e </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">curP</span><span class="oak-comma">, </span><span class="oak-identifier">losses </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">avgLoss</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-fnName">updateFn</span><span class="oak-leftParen">(</span><span class="oak-identifier">curP</span><span class="oak-comma">, </span><span class="oak-identifier">batches</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-fnName">batch</span><span class="oak-leftParen">(</span><span class="oak-identifier">b </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">params</span><span class="oak-comma">, </span><span class="oak-identifier">totalLoss </span><span class="oak-plus">+ </span><span class="oak-identifier">result</span><span class="oak-dot">.</span><span class="oak-identifier">loss</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">batch</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">p</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">epoch</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">params</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span>
-</code></pre>
-        </article>
-    </main>
-    <footer>
-        <div class="split overlay">
-            <div class="left">
-            </div>
-            <div class="right">
-                - <a href="https://thesephist.com/">Linus</a>
-            </div>
-        </div>
-    </footer>
-</body>

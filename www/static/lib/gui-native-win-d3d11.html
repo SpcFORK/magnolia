@@ -1,403 +1,0 @@
-<!doctype html>
-<head>
-    <meta charset="utf-8">
-    <title>gui-native-win-d3d11.oak | Oak programming language</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <link rel="stylesheet" href="/css/main.css">
-    <link rel="stylesheet" href="/css/lib.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header>
-        <div class="overlay">
-            <div class="home">
-                <a href="/">Oak</a>
-            </div>
-            <nav>
-                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
-                <a href="/posts/">blog</a>
-                <a href="/#start">download</a>
-                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
-            </nav>
-        </div>
-    </header>
-    <main aria-role="main">
-        <article class="overlay stdlib">
-            <h1>gui-native-win-d3d11.oak</h1>
-            <p class="meta">
-                <a href="/lib/">&larr; Standard library</a>
-                <a href="https://github.com/thesephist/oak/blob/main/lib/gui-native-win-d3d11.oak">See on GitHub ↗</a>
-            </p>
-            <pre><code><span class="oak-comment">// gui-native-win-d3d11 contains Direct3D 11 2D presenter backend for Win32.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Uses D3D11CreateDeviceAndSwapChain to create a device, swap chain, and</span>
-<span class="oak-comment">// immediate context.  Pixels from the GDI back-buffer are uploaded via</span>
-<span class="oak-comment">// UpdateSubresource to the swap chain's back buffer, then presented via</span>
-<span class="oak-comment">// IDXGISwapChain::Present.  DXGI handles resolution scaling automatically</span>
-<span class="oak-comment">// when the swap chain buffer dimensions differ from the window size.</span><span class="oak-newline">
-</span>
-<span class="oak-identifier">windows </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'windows'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{ </span><span class="oak-identifier">_default</span><span class="oak-colon">: </span><span class="oak-identifier">_default </span><span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'gui-common'</span><span class="oak-rightParen">)</span>
-<span class="oak-identifier">guiThread </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'gui-thread'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{ </span><span class="oak-identifier">_ptrRead</span><span class="oak-colon">: </span><span class="oak-identifier">_ptrRead</span><span class="oak-comma">, </span><span class="oak-identifier">_comCall</span><span class="oak-colon">: </span><span class="oak-identifier">_comCall</span><span class="oak-comma">, </span><span class="oak-identifier">_readOutPointer</span><span class="oak-colon">: </span><span class="oak-identifier">_readOutPointer</span><span class="oak-comma">, </span><span class="oak-identifier">_releaseOk?</span><span class="oak-colon">: </span><span class="oak-identifier">_releaseOk? </span><span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'win-common'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// COM vtable indices</span>
-<span class="oak-identifier">COM_RELEASE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// IDXGISwapChain vtable indices (IUnknown:3 + IDXGIObject:4 + IDXGIDeviceSubObject:1 = 8 base)</span>
-<span class="oak-identifier">IDXGISWAPCHAIN_PRESENT </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">8</span>
-<span class="oak-identifier">IDXGISWAPCHAIN_GETBUFFER </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">9</span>
-<span class="oak-identifier">IDXGISWAPCHAIN_RESIZEBUFFERS </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">13</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ID3D11DeviceContext vtable indices</span>
-<span class="oak-comment">// IUnknown:3 + ID3D11DeviceChild:4 = 7 base</span>
-<span class="oak-comment">// Then the methods in order per d3d11.h</span>
-<span class="oak-identifier">ID3D11DEVICECONTEXT_MAP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">14</span>
-<span class="oak-identifier">ID3D11DEVICECONTEXT_UNMAP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">15</span>
-<span class="oak-identifier">ID3D11DEVICECONTEXT_UPDATESUBRESOURCE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">48</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ID3D11Device vtable indices</span>
-<span class="oak-comment">// IUnknown:3, then:</span>
-<span class="oak-identifier">ID3D11DEVICE_CREATETEXTURE2D </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">5</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// D3D11 / DXGI constants</span>
-<span class="oak-identifier">DXGI_FORMAT_B8G8R8A8_UNORM </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">87</span>
-<span class="oak-identifier">DXGI_USAGE_RENDER_TARGET_OUTPUT </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">32</span>
-<span class="oak-identifier">DXGI_SWAP_EFFECT_DISCARD </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span>
-<span class="oak-identifier">D3D11_SDK_VERSION </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">7</span>
-<span class="oak-identifier">D3D_DRIVER_TYPE_HARDWARE </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
-<span class="oak-identifier">D3D_DRIVER_TYPE_WARP </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">5</span>
-<span class="oak-identifier">D3D11_CREATE_DEVICE_BGRA_SUPPORT </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">32</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// DIB constants (for GetDIBits pixel extraction)</span>
-<span class="oak-identifier">DIB_RGB_COLORS </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span>
-<span class="oak-identifier">BI_RGB </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// IID_ID3D11Texture2D = {6f15aaf2-d208-4e89-9ab4-489535d34f9c}</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">_iidD3d11Texture2D</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-newline">
-	</span><span class="oak-numberLiteral">242</span><span class="oak-comma">, </span><span class="oak-numberLiteral">170</span><span class="oak-comma">, </span><span class="oak-numberLiteral">21</span><span class="oak-comma">, </span><span class="oak-numberLiteral">111</span><span class="oak-newline">
-	</span><span class="oak-numberLiteral">8</span><span class="oak-comma">, </span><span class="oak-numberLiteral">210</span><span class="oak-newline">
-	</span><span class="oak-numberLiteral">137</span><span class="oak-comma">, </span><span class="oak-numberLiteral">78</span><span class="oak-newline">
-	</span><span class="oak-numberLiteral">154</span><span class="oak-comma">, </span><span class="oak-numberLiteral">180</span><span class="oak-comma">, </span><span class="oak-numberLiteral">72</span><span class="oak-comma">, </span><span class="oak-numberLiteral">149</span><span class="oak-comma">, </span><span class="oak-numberLiteral">53</span><span class="oak-comma">, </span><span class="oak-numberLiteral">211</span><span class="oak-comma">, </span><span class="oak-numberLiteral">79</span><span class="oak-comma">, </span><span class="oak-numberLiteral">156</span>
-<span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">initD3d112DLayer</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">is64 </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">ptrSize</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-numberLiteral">8</span><span class="oak-newline">
-	</span><span class="oak-identifier">ps </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">ptrSize</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">hwnd </span><span class="oak-assign">:= </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">hwnd</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Determine buffer dimensions: use design resolution if scaling is active,</span><span class="oak-newline">
-	</span><span class="oak-comment">// otherwise use window dimensions.  DXGI stretches the buffer to the window</span><span class="oak-newline">
-	</span><span class="oak-comment">// size during Present, giving us free resolution scaling.</span><span class="oak-newline">
-	</span><span class="oak-identifier">r </span><span class="oak-assign">:= </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_res</span><span class="oak-newline">
-	</span><span class="oak-identifier">bufW </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">r </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-and">&amp; </span><span class="oak-identifier">r</span><span class="oak-dot">.</span><span class="oak-identifier">dw </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">r</span><span class="oak-dot">.</span><span class="oak-identifier">dw</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">width </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-identifier">bufH </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">r </span><span class="oak-neq">!= </span><span class="oak-qmark">? </span><span class="oak-and">&amp; </span><span class="oak-identifier">r</span><span class="oak-dot">.</span><span class="oak-identifier">dh </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">r</span><span class="oak-dot">.</span><span class="oak-identifier">dh</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">height </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Build DXGI_SWAP_CHAIN_DESC</span><span class="oak-newline">
-	</span><span class="oak-comment">// x64: 72 bytes (HWND at +48, size 8, alignment padding)</span><span class="oak-newline">
-	</span><span class="oak-comment">// x86: 60 bytes (HWND at +44, size 4)</span><span class="oak-newline">
-	</span><span class="oak-identifier">descSize </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">is64 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">72</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">60 </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-identifier">desc </span><span class="oak-assign">:= </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">descSize</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">dp </span><span class="oak-assign">:= </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">desc</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// BufferDesc.Width/Height</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">bufW</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">4</span><span class="oak-comma">, </span><span class="oak-identifier">bufH</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// BufferDesc.RefreshRate = 60/1</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">8</span><span class="oak-comma">, </span><span class="oak-numberLiteral">60</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">12</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">16</span><span class="oak-comma">, </span><span class="oak-identifier">DXGI_FORMAT_B8G8R8A8_UNORM</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// ScanlineOrdering = 0 (unspecified), Scaling = 0 (unspecified)</span><span class="oak-newline">
-	</span><span class="oak-comment">// SampleDesc.Count = 1, Quality = 0</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">28</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">32</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// BufferUsage</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">36</span><span class="oak-comma">, </span><span class="oak-identifier">DXGI_USAGE_RENDER_TARGET_OUTPUT</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// BufferCount</span><span class="oak-newline">
-	</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">40</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-comment">// OutputWindow (HWND — pointer)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">is64 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU64</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">48</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// Windowed = TRUE</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">56</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// SwapEffect = DXGI_SWAP_EFFECT_DISCARD</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">60</span><span class="oak-comma">, </span><span class="oak-identifier">DXGI_SWAP_EFFECT_DISCARD</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// Flags = 0</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">64</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">44</span><span class="oak-comma">, </span><span class="oak-identifier">hwnd</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// Windowed = TRUE</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">48</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// SwapEffect</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">52</span><span class="oak-comma">, </span><span class="oak-identifier">DXGI_SWAP_EFFECT_DISCARD</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-comment">// Flags</span><span class="oak-newline">
-			</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">dp </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">56</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Output pointer buffers for device, context, swap chain</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">freshPtr</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">is64 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-identifier">swapChainOut </span><span class="oak-assign">:= </span><span class="oak-fnName">freshPtr</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">deviceOut </span><span class="oak-assign">:= </span><span class="oak-fnName">freshPtr</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">featureLevelOut </span><span class="oak-assign">:= </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">contextOut </span><span class="oak-assign">:= </span><span class="oak-fnName">freshPtr</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Call D3D11CreateDeviceAndSwapChain</span><span class="oak-newline">
-	</span><span class="oak-comment">// Parameters: pAdapter, DriverType, Software, Flags, pFeatureLevels,</span><span class="oak-newline">
-	</span><span class="oak-comment">//             FeatureLevels, SDKVersion, pSwapChainDesc,</span><span class="oak-newline">
-	</span><span class="oak-comment">//             ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext</span><span class="oak-newline">
-	</span><span class="oak-identifier">result </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">d3d11</span><span class="oak-leftParen">(</span><span class="oak-newline">
-		</span><span class="oak-stringLiteral">'D3D11CreateDeviceAndSwapChain'</span><span class="oak-newline">
-		</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-identifier">D3D_DRIVER_TYPE_HARDWARE</span><span class="oak-newline">
-		</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-identifier">D3D11_CREATE_DEVICE_BGRA_SUPPORT</span><span class="oak-newline">
-		</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-identifier">D3D11_SDK_VERSION</span><span class="oak-newline">
-		</span><span class="oak-identifier">dp</span><span class="oak-newline">
-		</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">swapChainOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">deviceOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">featureLevelOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">contextOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">swapChain </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">swapChainOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">device </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">deviceOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">context </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">contextOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">featureLevel </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">featureLevelOut</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">result</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">statusOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">result</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">swapChain </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-and">&amp; </span><span class="oak-identifier">device </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-and">&amp; </span><span class="oak-identifier">context </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-comment">// Get back buffer: swapChain->GetBuffer(0, IID_ID3D11Texture2D, &amp;backBuffer)</span><span class="oak-newline">
-			</span><span class="oak-identifier">iid </span><span class="oak-assign">:= </span><span class="oak-fnName">_iidD3d11Texture2D</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">backBufOut </span><span class="oak-assign">:= </span><span class="oak-fnName">freshPtr</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">getBuf </span><span class="oak-assign">:= </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">swapChain</span><span class="oak-comma">, </span><span class="oak-identifier">IDXGISWAPCHAIN_GETBUFFER</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">iid</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">backBufOut</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">backBuffer </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">backBufOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">getBuf</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">statusOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">getBuf</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">backBuffer </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-comment">// Allocate CPU pixel buffer for GetDIBits</span><span class="oak-newline">
-					</span><span class="oak-identifier">pixBufSize </span><span class="oak-assign">:= </span><span class="oak-identifier">bufW </span><span class="oak-times">* </span><span class="oak-identifier">bufH </span><span class="oak-times">* </span><span class="oak-numberLiteral">4</span><span class="oak-newline">
-					</span><span class="oak-identifier">pixBuf </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">virtualAlloc</span><span class="oak-leftParen">(</span><span class="oak-identifier">pixBufSize</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-					</span><span class="oak-comment">// Store D3D11 state on window</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Device </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">device</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Context </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">context</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11SwapChain </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">swapChain</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BackBuffer </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">backBuffer</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BufW </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">bufW</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BufH </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">bufH</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">pixBuf</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBufSize </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">pixBufSize</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11FeatureLevel </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">featureLevel</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Ready </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-trueLiteral">true</span><span class="oak-newline">
-</span><span class="oak-newline">
-					</span><span class="oak-comment">// BITMAPINFOHEADER (40 bytes) for GetDIBits</span><span class="oak-newline">
-					</span><span class="oak-identifier">bmi </span><span class="oak-assign">:= </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-						</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-							</span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-							</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-						</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-						</span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">40</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BmiPtr </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmi</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-comment">// Keep bmi alive</span><span class="oak-newline">
-					</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Bmi </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">bmi</span><span class="oak-newline">
-</span><span class="oak-newline">
-					</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-						</span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-newline">
-						</span><span class="oak-identifier">device</span><span class="oak-colon">: </span><span class="oak-identifier">device</span><span class="oak-newline">
-						</span><span class="oak-identifier">context</span><span class="oak-colon">: </span><span class="oak-identifier">context</span><span class="oak-newline">
-						</span><span class="oak-identifier">swapChain</span><span class="oak-colon">: </span><span class="oak-identifier">swapChain</span><span class="oak-newline">
-						</span><span class="oak-identifier">backBuffer</span><span class="oak-colon">: </span><span class="oak-identifier">backBuffer</span><span class="oak-newline">
-						</span><span class="oak-identifier">featureLevel</span><span class="oak-colon">: </span><span class="oak-identifier">featureLevel</span><span class="oak-newline">
-						</span><span class="oak-identifier">bufferWidth</span><span class="oak-colon">: </span><span class="oak-identifier">bufW</span><span class="oak-newline">
-						</span><span class="oak-identifier">bufferHeight</span><span class="oak-colon">: </span><span class="oak-identifier">bufH</span><span class="oak-newline">
-					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-comment">// GetBuffer failed; release everything</span><span class="oak-newline">
-					</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">swapChain</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">device</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">context</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-						</span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">error</span><span class="oak-newline">
-						</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-stringLiteral">'IDXGISwapChain::GetBuffer failed'</span><span class="oak-newline">
-						</span><span class="oak-identifier">getBufferResult</span><span class="oak-colon">: </span><span class="oak-identifier">getBuf</span><span class="oak-newline">
-					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-comment">// Try WARP driver as fallback</span><span class="oak-newline">
-			</span><span class="oak-identifier">warpResult </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">d3d11</span><span class="oak-leftParen">(</span><span class="oak-newline">
-				</span><span class="oak-stringLiteral">'D3D11CreateDeviceAndSwapChain'</span><span class="oak-newline">
-				</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-				</span><span class="oak-identifier">D3D_DRIVER_TYPE_WARP</span><span class="oak-newline">
-				</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-				</span><span class="oak-identifier">D3D11_CREATE_DEVICE_BGRA_SUPPORT</span><span class="oak-newline">
-				</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-				</span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-				</span><span class="oak-identifier">D3D11_SDK_VERSION</span><span class="oak-newline">
-				</span><span class="oak-identifier">dp</span><span class="oak-newline">
-				</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">swapChainOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">deviceOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">featureLevelOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">contextOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-			</span><span class="oak-identifier">warpSwapChain </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">swapChainOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">warpDevice </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">deviceOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">warpContext </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">contextOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">warpFeatureLevel </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">readU32</span><span class="oak-leftParen">(</span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">featureLevelOut</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">warpResult</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">statusOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">warpResult</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">warpSwapChain </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-and">&amp; </span><span class="oak-identifier">warpDevice </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-and">&amp; </span><span class="oak-identifier">warpContext </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">iid </span><span class="oak-assign">:= </span><span class="oak-fnName">_iidD3d11Texture2D</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-identifier">backBufOut </span><span class="oak-assign">:= </span><span class="oak-fnName">freshPtr</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-identifier">getBuf </span><span class="oak-assign">:= </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">warpSwapChain</span><span class="oak-comma">, </span><span class="oak-identifier">IDXGISWAPCHAIN_GETBUFFER</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">iid</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">backBufOut</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-identifier">backBuffer </span><span class="oak-assign">:= </span><span class="oak-fnName">_readOutPointer</span><span class="oak-leftParen">(</span><span class="oak-identifier">backBufOut</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-					</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">getBuf</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">statusOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">getBuf</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">backBuffer </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-						</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-							</span><span class="oak-identifier">pixBufSize </span><span class="oak-assign">:= </span><span class="oak-identifier">bufW </span><span class="oak-times">* </span><span class="oak-identifier">bufH </span><span class="oak-times">* </span><span class="oak-numberLiteral">4</span><span class="oak-newline">
-							</span><span class="oak-identifier">pixBuf </span><span class="oak-assign">:= </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">virtualAlloc</span><span class="oak-leftParen">(</span><span class="oak-identifier">pixBufSize</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Device </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">warpDevice</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Context </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">warpContext</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11SwapChain </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">warpSwapChain</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BackBuffer </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">backBuffer</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BufW </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">bufW</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BufH </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">bufH</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">pixBuf</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBufSize </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">pixBufSize</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11FeatureLevel </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">warpFeatureLevel</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Ready </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-trueLiteral">true</span><span class="oak-newline">
-</span><span class="oak-newline">
-							</span><span class="oak-identifier">bmi </span><span class="oak-assign">:= </span><span class="oak-fnName">bits</span><span class="oak-leftParen">(</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-								</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-									</span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-									</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-identifier">n </span><span class="oak-minus">- </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-								</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-								</span><span class="oak-fnName">zeros</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">40</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-							</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BmiPtr </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-fnName">addr</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmi</span><span class="oak-rightParen">)</span><span class="oak-newline">
-							</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Bmi </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">bmi</span><span class="oak-newline">
-</span><span class="oak-newline">
-							</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-								</span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">ok</span><span class="oak-newline">
-								</span><span class="oak-identifier">device</span><span class="oak-colon">: </span><span class="oak-identifier">warpDevice</span><span class="oak-newline">
-								</span><span class="oak-identifier">context</span><span class="oak-colon">: </span><span class="oak-identifier">warpContext</span><span class="oak-newline">
-								</span><span class="oak-identifier">swapChain</span><span class="oak-colon">: </span><span class="oak-identifier">warpSwapChain</span><span class="oak-newline">
-								</span><span class="oak-identifier">backBuffer</span><span class="oak-colon">: </span><span class="oak-identifier">backBuffer</span><span class="oak-newline">
-								</span><span class="oak-identifier">featureLevel</span><span class="oak-colon">: </span><span class="oak-identifier">warpFeatureLevel</span><span class="oak-newline">
-								</span><span class="oak-identifier">bufferWidth</span><span class="oak-colon">: </span><span class="oak-identifier">bufW</span><span class="oak-newline">
-								</span><span class="oak-identifier">bufferHeight</span><span class="oak-colon">: </span><span class="oak-identifier">bufH</span><span class="oak-newline">
-								</span><span class="oak-identifier">driverType</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">warp</span><span class="oak-newline">
-							</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-						</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-						</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-							</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">warpSwapChain</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-							</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">warpDevice</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-							</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">warpContext</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-							</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-								</span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">error</span><span class="oak-newline">
-								</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-stringLiteral">'D3D11 initialization failed (hardware and WARP)'</span><span class="oak-newline">
-								</span><span class="oak-identifier">hardwareResult</span><span class="oak-colon">: </span><span class="oak-identifier">result</span><span class="oak-newline">
-								</span><span class="oak-identifier">warpResult</span><span class="oak-colon">: </span><span class="oak-identifier">warpResult</span><span class="oak-newline">
-								</span><span class="oak-identifier">warpGetBufferResult</span><span class="oak-colon">: </span><span class="oak-identifier">getBuf</span><span class="oak-newline">
-							</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-						</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-						</span><span class="oak-identifier">type</span><span class="oak-colon">: </span><span class="oak-colon">:</span><span class="oak-identifier">error</span><span class="oak-newline">
-						</span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-stringLiteral">'D3D11CreateDeviceAndSwapChain failed (hardware and WARP)'</span><span class="oak-newline">
-						</span><span class="oak-identifier">hardwareResult</span><span class="oak-colon">: </span><span class="oak-identifier">result</span><span class="oak-newline">
-						</span><span class="oak-identifier">warpResult</span><span class="oak-colon">: </span><span class="oak-identifier">warpResult</span><span class="oak-newline">
-					</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">presentFrameViaD3d11</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-fnName">_default</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Ready</span><span class="oak-comma">, </span><span class="oak-falseLiteral">false</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">presented</span><span class="oak-colon">: </span><span class="oak-falseLiteral">false</span><span class="oak-comma">, </span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-stringLiteral">'D3D11 not initialized' </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">bufW </span><span class="oak-assign">:= </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BufW</span><span class="oak-newline">
-		</span><span class="oak-identifier">bufH </span><span class="oak-assign">:= </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BufH</span><span class="oak-newline">
-</span><span class="oak-newline">
-		</span><span class="oak-comment">// Extract GDI back-buffer pixels via GetDIBits into CPU buffer</span><span class="oak-newline">
-		</span><span class="oak-identifier">bmiPtr </span><span class="oak-assign">:= </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BmiPtr</span><span class="oak-newline">
-		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmiPtr </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">40</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmiPtr </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">4</span><span class="oak-comma">, </span><span class="oak-identifier">bufW</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmiPtr </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">8</span><span class="oak-comma">, </span><span class="oak-identifier">bufH</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmiPtr </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">12</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1 </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">32 </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">writeU32</span><span class="oak-leftParen">(</span><span class="oak-identifier">bmiPtr </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">16</span><span class="oak-comma">, </span><span class="oak-identifier">BI_RGB</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">gdi32</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'GetDIBits'</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">frameHdc</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">frameBitmap</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">bufH</span><span class="oak-comma">, </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf</span><span class="oak-comma">, </span><span class="oak-identifier">bmiPtr</span><span class="oak-comma">, </span><span class="oak-identifier">DIB_RGB_COLORS</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-		</span><span class="oak-comment">// UpdateSubresource: upload pixel data to back buffer</span><span class="oak-newline">
-		</span><span class="oak-comment">// pDstResource, DstSubresource, pDstBox (NULL=full), pSrcData, SrcRowPitch, SrcDepthPitch</span><span class="oak-newline">
-		</span><span class="oak-identifier">rowPitch </span><span class="oak-assign">:= </span><span class="oak-identifier">bufW </span><span class="oak-times">* </span><span class="oak-numberLiteral">4</span><span class="oak-newline">
-		</span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Context</span><span class="oak-comma">, </span><span class="oak-identifier">ID3D11DEVICECONTEXT_UPDATESUBRESOURCE</span><span class="oak-comma">,</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BackBuffer</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-comma">,</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf</span><span class="oak-comma">, </span><span class="oak-identifier">rowPitch</span><span class="oak-comma">, </span><span class="oak-identifier">rowPitch </span><span class="oak-times">* </span><span class="oak-identifier">bufH</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-		</span><span class="oak-comment">// Present: swap chain -> screen</span><span class="oak-newline">
-		</span><span class="oak-comment">// SyncInterval=1 (vsync), Flags=0</span><span class="oak-newline">
-		</span><span class="oak-identifier">presentResult </span><span class="oak-assign">:= </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11SwapChain</span><span class="oak-comma">, </span><span class="oak-identifier">IDXGISWAPCHAIN_PRESENT</span><span class="oak-comma">, </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">callOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">presentResult</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">statusOk?</span><span class="oak-leftParen">(</span><span class="oak-identifier">presentResult</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">presented</span><span class="oak-colon">: </span><span class="oak-trueLiteral">true </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{ </span><span class="oak-identifier">presented</span><span class="oak-colon">: </span><span class="oak-falseLiteral">false</span><span class="oak-comma">, </span><span class="oak-identifier">error</span><span class="oak-colon">: </span><span class="oak-stringLiteral">'IDXGISwapChain::Present failed'</span><span class="oak-comma">, </span><span class="oak-identifier">detail</span><span class="oak-colon">: </span><span class="oak-identifier">presentResult </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">releaseD3d11</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-fnName">_default</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Ready</span><span class="oak-comma">, </span><span class="oak-falseLiteral">false</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">windows</span><span class="oak-dot">.</span><span class="oak-fnName">virtualFree</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BackBuffer </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BackBuffer</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11SwapChain </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11SwapChain</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Context </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Context</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Device </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">_comCall</span><span class="oak-leftParen">(</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Device</span><span class="oak-comma">, </span><span class="oak-identifier">COM_RELEASE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Ready </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-falseLiteral">false</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Device </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11Context </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11SwapChain </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11BackBuffer </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">window</span><span class="oak-dot">.</span><span class="oak-identifier">_d3d11PixBuf </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span>
-</code></pre>
-        </article>
-    </main>
-    <footer>
-        <div class="split overlay">
-            <div class="left">
-            </div>
-            <div class="right">
-                - <a href="https://thesephist.com/">Linus</a>
-            </div>
-        </div>
-    </footer>
-</body>

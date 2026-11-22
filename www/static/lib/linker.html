@@ -1,459 +1,0 @@
-<!doctype html>
-<head>
-    <meta charset="utf-8">
-    <title>linker.oak | Oak programming language</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <link rel="stylesheet" href="/css/main.css">
-    <link rel="stylesheet" href="/css/lib.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header>
-        <div class="overlay">
-            <div class="home">
-                <a href="/">Oak</a>
-            </div>
-            <nav>
-                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
-                <a href="/posts/">blog</a>
-                <a href="/#start">download</a>
-                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
-            </nav>
-        </div>
-    </header>
-    <main aria-role="main">
-        <article class="overlay stdlib">
-            <h1>linker.oak</h1>
-            <p class="meta">
-                <a href="/lib/">&larr; Standard library</a>
-                <a href="https://github.com/thesephist/oak/blob/main/lib/linker.oak">See on GitHub ↗</a>
-            </p>
-            <pre><code><span class="oak-comment">// linker -- Object file linker for Magnolia native codegen</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Links assembled machine code segments into executable binary formats:</span>
-<span class="oak-comment">//   - ELF (Linux/FreeBSD)</span>
-<span class="oak-comment">//   - PE/COFF (Windows)</span>
-<span class="oak-comment">//   - Mach-O (macOS) [stub]</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// The linker resolves relocations between sections, merges data/text</span>
-<span class="oak-comment">// segments, and writes platform-appropriate headers and load commands.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Used by the native codegen target (codegen-native.oak) and can be</span>
-<span class="oak-comment">// called directly for custom binary generation workflows.</span><span class="oak-newline">
-</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">default</span><span class="oak-colon">: </span><span class="oak-identifier">default</span><span class="oak-newline">
-	</span><span class="oak-identifier">map</span><span class="oak-colon">: </span><span class="oak-identifier">map</span><span class="oak-newline">
-	</span><span class="oak-identifier">each</span><span class="oak-colon">: </span><span class="oak-identifier">each</span><span class="oak-newline">
-	</span><span class="oak-identifier">slice</span><span class="oak-colon">: </span><span class="oak-identifier">slice</span><span class="oak-newline">
-	</span><span class="oak-identifier">filter</span><span class="oak-colon">: </span><span class="oak-identifier">filter</span><span class="oak-newline">
-	</span><span class="oak-identifier">reduce</span><span class="oak-colon">: </span><span class="oak-identifier">reduce</span><span class="oak-newline">
-	</span><span class="oak-identifier">clone</span><span class="oak-colon">: </span><span class="oak-identifier">clone</span><span class="oak-newline">
-	</span><span class="oak-identifier">append</span><span class="oak-colon">: </span><span class="oak-identifier">append</span><span class="oak-newline">
-	</span><span class="oak-identifier">len</span><span class="oak-colon">: </span><span class="oak-identifier">len</span><span class="oak-newline">
-	</span><span class="oak-identifier">range</span><span class="oak-colon">: </span><span class="oak-identifier">range</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">replace</span><span class="oak-colon">: </span><span class="oak-identifier">replace</span><span class="oak-newline">
-	</span><span class="oak-identifier">join</span><span class="oak-colon">: </span><span class="oak-identifier">join</span><span class="oak-newline">
-	</span><span class="oak-identifier">padStart</span><span class="oak-colon">: </span><span class="oak-identifier">padStart</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'str'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">format</span><span class="oak-colon">: </span><span class="oak-identifier">format</span><span class="oak-newline">
-	</span><span class="oak-identifier">printf</span><span class="oak-colon">: </span><span class="oak-identifier">printf</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'fmt'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// Binary format constants</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-identifier">FORMAT_ELF  </span><span class="oak-assign">:= </span><span class="oak-colon">:</span><span class="oak-identifier">elf</span>
-<span class="oak-identifier">FORMAT_PE   </span><span class="oak-assign">:= </span><span class="oak-colon">:</span><span class="oak-identifier">pe</span>
-<span class="oak-identifier">FORMAT_MACHO </span><span class="oak-assign">:= </span><span class="oak-colon">:</span><span class="oak-identifier">macho</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ELF constants</span>
-<span class="oak-identifier">ELF_MAGIC </span><span class="oak-assign">:= </span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0x7F</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x45</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x4C</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x46</span><span class="oak-rightBracket">]  </span><span class="oak-comment">// \x7FELF</span>
-<span class="oak-identifier">ELFCLASS64 </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span>
-<span class="oak-identifier">ELFDATA2LSB </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
-<span class="oak-identifier">EV_CURRENT </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">1</span>
-<span class="oak-identifier">ET_EXEC </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2</span>
-<span class="oak-identifier">EM_X86_64 </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0x3E</span>
-<span class="oak-identifier">EM_AARCH64 </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0xB7</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// PE/COFF constants</span>
-<span class="oak-identifier">PE_MAGIC </span><span class="oak-assign">:= </span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0x4D</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x5A</span><span class="oak-rightBracket">]  </span><span class="oak-comment">// MZ</span>
-<span class="oak-identifier">PE_SIGNATURE </span><span class="oak-assign">:= </span><span class="oak-leftBracket">[</span><span class="oak-numberLiteral">0x50</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x45</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x00</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0x00</span><span class="oak-rightBracket">]  </span><span class="oak-comment">// PE\0\0</span>
-<span class="oak-identifier">IMAGE_FILE_MACHINE_AMD64 </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0x8664</span>
-<span class="oak-identifier">IMAGE_FILE_MACHINE_ARM64 </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0xAA64</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// Byte emission helpers</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">createByteWriter</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">buf </span><span class="oak-assign">:= </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-identifier">b</span><span class="oak-rightParen">) </span><span class="oak-identifier">buf </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftParen">(</span><span class="oak-identifier">b </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">w</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-identifier">w </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-identifier">w </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">d</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-identifier">d </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-identifier">d </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-identifier">d </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-identifier">d </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">24</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">q</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">q </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">4294967295</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-leftParen">(</span><span class="oak-identifier">q </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">32</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">4294967295</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">bytes</span><span class="oak-rightParen">) </span><span class="oak-identifier">bytes </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-identifier">writeByte</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">writeString</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-comma">, </span><span class="oak-identifier">fixedLen</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">s </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">c</span><span class="oak-rightParen">) </span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-fnName">codepoint</span><span class="oak-leftParen">(</span><span class="oak-identifier">c</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-comment">// Pad with zeroes to fixed length</span><span class="oak-newline">
-		</span><span class="oak-identifier">remaining </span><span class="oak-assign">:= </span><span class="oak-identifier">fixedLen </span><span class="oak-minus">- </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">s</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">remaining</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">padTo</span><span class="oak-leftParen">(</span><span class="oak-identifier">alignment</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">remainder </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">) </span><span class="oak-modulus">% </span><span class="oak-identifier">alignment</span><span class="oak-newline">
-		</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">remainder </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-identifier">alignment </span><span class="oak-minus">- </span><span class="oak-identifier">remainder</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">position</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">buf</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">patchDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset</span><span class="oak-comma">, </span><span class="oak-identifier">val</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">val </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
-		</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-leftParen">(</span><span class="oak-identifier">val </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
-		</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-leftParen">(</span><span class="oak-identifier">val </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
-		</span><span class="oak-identifier">buf</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">3</span><span class="oak-rightParen">) </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-leftParen">(</span><span class="oak-identifier">val </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">24</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">255</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">patchQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset</span><span class="oak-comma">, </span><span class="oak-identifier">val</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-fnName">patchDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset</span><span class="oak-comma">, </span><span class="oak-identifier">val </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">4294967295</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-fnName">patchDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">offset </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">4</span><span class="oak-comma">, </span><span class="oak-leftParen">(</span><span class="oak-identifier">val </span><span class="oak-rshift">>> </span><span class="oak-numberLiteral">32</span><span class="oak-rightParen">) </span><span class="oak-and">&amp; </span><span class="oak-numberLiteral">4294967295</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">writeByte</span><span class="oak-colon">: </span><span class="oak-identifier">writeByte</span><span class="oak-newline">
-		</span><span class="oak-identifier">writeWord</span><span class="oak-colon">: </span><span class="oak-identifier">writeWord</span><span class="oak-newline">
-		</span><span class="oak-identifier">writeDword</span><span class="oak-colon">: </span><span class="oak-identifier">writeDword</span><span class="oak-newline">
-		</span><span class="oak-identifier">writeQword</span><span class="oak-colon">: </span><span class="oak-identifier">writeQword</span><span class="oak-newline">
-		</span><span class="oak-identifier">writeBytes</span><span class="oak-colon">: </span><span class="oak-identifier">writeBytes</span><span class="oak-newline">
-		</span><span class="oak-identifier">writeString</span><span class="oak-colon">: </span><span class="oak-identifier">writeString</span><span class="oak-newline">
-		</span><span class="oak-identifier">padTo</span><span class="oak-colon">: </span><span class="oak-identifier">padTo</span><span class="oak-newline">
-		</span><span class="oak-identifier">position</span><span class="oak-colon">: </span><span class="oak-identifier">position</span><span class="oak-newline">
-		</span><span class="oak-identifier">patchDword</span><span class="oak-colon">: </span><span class="oak-identifier">patchDword</span><span class="oak-newline">
-		</span><span class="oak-identifier">patchQword</span><span class="oak-colon">: </span><span class="oak-identifier">patchQword</span><span class="oak-newline">
-		</span><span class="oak-identifier">getBuffer</span><span class="oak-colon">: </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-identifier">buf</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// Section descriptor</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">createSection</span><span class="oak-leftParen">(</span><span class="oak-identifier">name</span><span class="oak-comma">, </span><span class="oak-identifier">flags</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">name</span><span class="oak-colon">: </span><span class="oak-identifier">name</span><span class="oak-newline">
-		</span><span class="oak-identifier">flags</span><span class="oak-colon">: </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">flags</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-		</span><span class="oak-identifier">relocations</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-		</span><span class="oak-identifier">address</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-identifier">fileOffset</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// ELF64 linker</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">linkELF</span><span class="oak-leftParen">(</span><span class="oak-identifier">textCode</span><span class="oak-comma">, </span><span class="oak-identifier">dataBytes</span><span class="oak-comma">, </span><span class="oak-identifier">entrySymbol</span><span class="oak-comma">, </span><span class="oak-identifier">arch</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">w </span><span class="oak-assign">:= </span><span class="oak-fnName">createByteWriter</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">machine </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">arch </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-colon">:</span><span class="oak-identifier">arm64</span><span class="oak-comma">, </span><span class="oak-colon">:</span><span class="oak-identifier">aarch64 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">EM_AARCH64</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">EM_X86_64</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Virtual addresses</span><span class="oak-newline">
-	</span><span class="oak-identifier">textVAddr </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0x400000</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataVAddr </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0x600000</span><span class="oak-newline">
-	</span><span class="oak-identifier">ehdrSize </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">64       </span><span class="oak-comment">// ELF64 header size</span><span class="oak-newline">
-	</span><span class="oak-identifier">phdrSize </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">56       </span><span class="oak-comment">// Program header size</span><span class="oak-newline">
-	</span><span class="oak-identifier">phdrCount </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">2       </span><span class="oak-comment">// .text + .data</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">textOffset </span><span class="oak-assign">:= </span><span class="oak-identifier">ehdrSize </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-identifier">phdrSize </span><span class="oak-times">* </span><span class="oak-identifier">phdrCount</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">textSize </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">textCode</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Align data to page boundary</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataOffset </span><span class="oak-assign">:= </span><span class="oak-identifier">textOffset </span><span class="oak-plus">+ </span><span class="oak-identifier">textSize</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataAlignedOffset </span><span class="oak-assign">:= </span><span class="oak-identifier">dataOffset</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">dataOffset </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">4096 </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">dataAlignedOffset </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">dataOffset </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">4096 </span><span class="oak-minus">- </span><span class="oak-leftParen">(</span><span class="oak-identifier">dataOffset </span><span class="oak-modulus">% </span><span class="oak-numberLiteral">4096</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataSize </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataBytes</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- ELF Header ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">ELF_MAGIC</span><span class="oak-rightParen">)          </span><span class="oak-comment">// e_ident magic</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-identifier">ELFCLASS64</span><span class="oak-rightParen">)          </span><span class="oak-comment">// 64-bit</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-identifier">ELFDATA2LSB</span><span class="oak-rightParen">)         </span><span class="oak-comment">// little-endian</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-identifier">EV_CURRENT</span><span class="oak-rightParen">)          </span><span class="oak-comment">// version</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// OS/ABI (ELFOSABI_NONE)</span><span class="oak-newline">
-	</span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)  </span><span class="oak-comment">// padding</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">ET_EXEC</span><span class="oak-rightParen">)             </span><span class="oak-comment">// e_type: executable</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">machine</span><span class="oak-rightParen">)             </span><span class="oak-comment">// e_machine</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">EV_CURRENT</span><span class="oak-rightParen">)         </span><span class="oak-comment">// e_version</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textVAddr</span><span class="oak-rightParen">)          </span><span class="oak-comment">// e_entry: entry point</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">ehdrSize</span><span class="oak-rightParen">)           </span><span class="oak-comment">// e_phoff: program header offset</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// e_shoff: section header offset (none)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// e_flags</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">ehdrSize</span><span class="oak-rightParen">)            </span><span class="oak-comment">// e_ehsize</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">phdrSize</span><span class="oak-rightParen">)            </span><span class="oak-comment">// e_phentsize</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">phdrCount</span><span class="oak-rightParen">)           </span><span class="oak-comment">// e_phnum</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// e_shentsize</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// e_shnum</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// e_shstrndx</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- Program Header: .text (PT_LOAD) ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// p_type: PT_LOAD</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">5</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// p_flags: PF_R | PF_X</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textOffset</span><span class="oak-rightParen">)         </span><span class="oak-comment">// p_offset</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textVAddr</span><span class="oak-rightParen">)          </span><span class="oak-comment">// p_vaddr</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textVAddr</span><span class="oak-rightParen">)          </span><span class="oak-comment">// p_paddr</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textSize</span><span class="oak-rightParen">)           </span><span class="oak-comment">// p_filesz</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textSize</span><span class="oak-rightParen">)           </span><span class="oak-comment">// p_memsz</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">4096</span><span class="oak-rightParen">)               </span><span class="oak-comment">// p_align</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- Program Header: .data (PT_LOAD) ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// p_type: PT_LOAD</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">6</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// p_flags: PF_R | PF_W</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataAlignedOffset</span><span class="oak-rightParen">)  </span><span class="oak-comment">// p_offset</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataVAddr</span><span class="oak-rightParen">)          </span><span class="oak-comment">// p_vaddr</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataVAddr</span><span class="oak-rightParen">)          </span><span class="oak-comment">// p_paddr</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataSize</span><span class="oak-rightParen">)           </span><span class="oak-comment">// p_filesz</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataSize</span><span class="oak-rightParen">)           </span><span class="oak-comment">// p_memsz</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">4096</span><span class="oak-rightParen">)               </span><span class="oak-comment">// p_align</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- .text section ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">textCode</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Pad to data section</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">padTo</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">4096</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- .data section ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataBytes</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">binary</span><span class="oak-colon">: </span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">getBuffer</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">entryPoint</span><span class="oak-colon">: </span><span class="oak-identifier">textVAddr</span><span class="oak-newline">
-		</span><span class="oak-identifier">textVAddr</span><span class="oak-colon">: </span><span class="oak-identifier">textVAddr</span><span class="oak-newline">
-		</span><span class="oak-identifier">dataVAddr</span><span class="oak-colon">: </span><span class="oak-identifier">dataVAddr</span><span class="oak-newline">
-		</span><span class="oak-identifier">textSize</span><span class="oak-colon">: </span><span class="oak-identifier">textSize</span><span class="oak-newline">
-		</span><span class="oak-identifier">dataSize</span><span class="oak-colon">: </span><span class="oak-identifier">dataSize</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// PE/COFF linker (Windows)</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">linkPE</span><span class="oak-leftParen">(</span><span class="oak-identifier">textCode</span><span class="oak-comma">, </span><span class="oak-identifier">dataBytes</span><span class="oak-comma">, </span><span class="oak-identifier">entrySymbol</span><span class="oak-comma">, </span><span class="oak-identifier">arch</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">w </span><span class="oak-assign">:= </span><span class="oak-fnName">createByteWriter</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">machine </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">arch </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-colon">:</span><span class="oak-identifier">arm64</span><span class="oak-comma">, </span><span class="oak-colon">:</span><span class="oak-identifier">aarch64 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">IMAGE_FILE_MACHINE_ARM64</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">IMAGE_FILE_MACHINE_AMD64</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// DOS stub</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">PE_MAGIC</span><span class="oak-rightParen">)           </span><span class="oak-comment">// e_magic: MZ</span><span class="oak-newline">
-	</span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">58</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)  </span><span class="oak-comment">// DOS header fields (zeroed)</span><span class="oak-newline">
-	</span><span class="oak-identifier">peHeaderOffset </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">64</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">peHeaderOffset</span><span class="oak-rightParen">)     </span><span class="oak-comment">// e_lfanew: PE header offset</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Some minimal DOS stub padding to get to offset 64</span><span class="oak-newline">
-	</span><span class="oak-comment">// (We already wrote 64 bytes above: 2 + 58 + 4 = 64)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- PE Signature ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">PE_SIGNATURE</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- COFF File Header ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">machine</span><span class="oak-rightParen">)             </span><span class="oak-comment">// Machine</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// NumberOfSections (.text + .data)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// TimeDateStamp</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// PointerToSymbolTable</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// NumberOfSymbols</span><span class="oak-newline">
-	</span><span class="oak-identifier">optHdrSize </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">240                </span><span class="oak-comment">// Optional header size for PE32+</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-identifier">optHdrSize</span><span class="oak-rightParen">)          </span><span class="oak-comment">// SizeOfOptionalHeader</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x22</span><span class="oak-rightParen">)                </span><span class="oak-comment">// Characteristics: EXEC | LARGE_ADDRESS_AWARE</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- Optional Header (PE32+) ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x20B</span><span class="oak-rightParen">)              </span><span class="oak-comment">// Magic: PE32+ (64-bit)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// MajorLinkerVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeByte</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// MinorLinkerVersion</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">textSize </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">textCode</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataSize </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataBytes</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Align sizes to 512-byte file alignment</span><span class="oak-newline">
-	</span><span class="oak-identifier">fileAlignment </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">512</span><span class="oak-newline">
-	</span><span class="oak-identifier">sectionAlignment </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">4096</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">textFileSize </span><span class="oak-assign">:= </span><span class="oak-identifier">textSize</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">textFileSize </span><span class="oak-modulus">% </span><span class="oak-identifier">fileAlignment </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">textFileSize </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">textFileSize </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-identifier">fileAlignment </span><span class="oak-minus">- </span><span class="oak-leftParen">(</span><span class="oak-identifier">textFileSize </span><span class="oak-modulus">% </span><span class="oak-identifier">fileAlignment</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataFileSize </span><span class="oak-assign">:= </span><span class="oak-identifier">dataSize</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">dataFileSize </span><span class="oak-modulus">% </span><span class="oak-identifier">fileAlignment </span><span class="oak-greater">> </span><span class="oak-numberLiteral">0 </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">dataFileSize </span><span class="oak-nonlocalAssign">&lt;- </span><span class="oak-identifier">dataFileSize </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-identifier">fileAlignment </span><span class="oak-minus">- </span><span class="oak-leftParen">(</span><span class="oak-identifier">dataFileSize </span><span class="oak-modulus">% </span><span class="oak-identifier">fileAlignment</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textFileSize</span><span class="oak-rightParen">)       </span><span class="oak-comment">// SizeOfCode</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataFileSize</span><span class="oak-rightParen">)       </span><span class="oak-comment">// SizeOfInitializedData</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// SizeOfUninitializedData</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">textRVA </span><span class="oak-assign">:= </span><span class="oak-identifier">sectionAlignment</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataRVA </span><span class="oak-assign">:= </span><span class="oak-identifier">textRVA </span><span class="oak-plus">+ </span><span class="oak-identifier">sectionAlignment</span><span class="oak-newline">
-	</span><span class="oak-identifier">imageSize </span><span class="oak-assign">:= </span><span class="oak-identifier">dataRVA </span><span class="oak-plus">+ </span><span class="oak-identifier">sectionAlignment</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textRVA</span><span class="oak-rightParen">)            </span><span class="oak-comment">// AddressOfEntryPoint</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textRVA</span><span class="oak-rightParen">)            </span><span class="oak-comment">// BaseOfCode</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-identifier">imageBase </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0x140000000         </span><span class="oak-comment">// Default image base for 64-bit PE</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-identifier">imageBase</span><span class="oak-rightParen">)          </span><span class="oak-comment">// ImageBase</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">sectionAlignment</span><span class="oak-rightParen">)   </span><span class="oak-comment">// SectionAlignment</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">fileAlignment</span><span class="oak-rightParen">)      </span><span class="oak-comment">// FileAlignment</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">6</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// MajorOperatingSystemVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// MinorOperatingSystemVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// MajorImageVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// MinorImageVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">6</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// MajorSubsystemVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// MinorSubsystemVersion</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// Win32VersionValue</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">imageSize</span><span class="oak-rightParen">)          </span><span class="oak-comment">// SizeOfImage</span><span class="oak-newline">
-	</span><span class="oak-identifier">headerSize </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">512</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">headerSize</span><span class="oak-rightParen">)         </span><span class="oak-comment">// SizeOfHeaders</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// CheckSum</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">3</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// Subsystem: CONSOLE</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x8160</span><span class="oak-rightParen">)              </span><span class="oak-comment">// DllCharacteristics: NX_COMPAT | DYNAMIC_BASE | TERMINAL_SERVER_AWARE | HIGH_ENTROPY_VA</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x100000</span><span class="oak-rightParen">)           </span><span class="oak-comment">// SizeOfStackReserve</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x1000</span><span class="oak-rightParen">)             </span><span class="oak-comment">// SizeOfStackCommit</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x100000</span><span class="oak-rightParen">)           </span><span class="oak-comment">// SizeOfHeapReserve</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeQword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x1000</span><span class="oak-rightParen">)             </span><span class="oak-comment">// SizeOfHeapCommit</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// LoaderFlags</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">)                 </span><span class="oak-comment">// NumberOfRvaAndSizes</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Data directories (16 entries, all zeroed)</span><span class="oak-newline">
-	</span><span class="oak-fnName">range</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">16</span><span class="oak-rightParen">) </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">each</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)              </span><span class="oak-comment">// VirtualAddress</span><span class="oak-newline">
-		</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)              </span><span class="oak-comment">// Size</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- Section Headers ---</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// .text section</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeString</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'.text'</span><span class="oak-comma">, </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">)        </span><span class="oak-comment">// Name</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textSize</span><span class="oak-rightParen">)           </span><span class="oak-comment">// VirtualSize</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textRVA</span><span class="oak-rightParen">)            </span><span class="oak-comment">// VirtualAddress</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">textFileSize</span><span class="oak-rightParen">)       </span><span class="oak-comment">// SizeOfRawData</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">headerSize</span><span class="oak-rightParen">)         </span><span class="oak-comment">// PointerToRawData</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// PointerToRelocations</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                  </span><span class="oak-comment">// PointerToLinenumbers</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// NumberOfRelocations</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)                   </span><span class="oak-comment">// NumberOfLinenumbers</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0x60000020</span><span class="oak-rightParen">)         </span><span class="oak-comment">// Characteristics: CODE | EXECUTE | READ</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// .data section</span><span class="oak-newline">
-	</span><span class="oak-identifier">dataPointer </span><span class="oak-assign">:= </span><span class="oak-identifier">headerSize </span><span class="oak-plus">+ </span><span class="oak-identifier">textFileSize</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeString</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'.data'</span><span class="oak-comma">, </span><span class="oak-numberLiteral">8</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataSize</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataRVA</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataFileSize</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataPointer</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeWord</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeDword</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0xC0000040</span><span class="oak-rightParen">)         </span><span class="oak-comment">// Characteristics: INITIALIZED_DATA | READ | WRITE</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// Pad headers to alignment</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">padTo</span><span class="oak-leftParen">(</span><span class="oak-identifier">fileAlignment</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- .text section data ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">textCode</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">padTo</span><span class="oak-leftParen">(</span><span class="oak-identifier">fileAlignment</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-comment">// --- .data section data ---</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">writeBytes</span><span class="oak-leftParen">(</span><span class="oak-identifier">dataBytes</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">padTo</span><span class="oak-leftParen">(</span><span class="oak-identifier">fileAlignment</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">binary</span><span class="oak-colon">: </span><span class="oak-identifier">w</span><span class="oak-dot">.</span><span class="oak-fnName">getBuffer</span><span class="oak-leftParen">(</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">entryPoint</span><span class="oak-colon">: </span><span class="oak-identifier">imageBase </span><span class="oak-plus">+ </span><span class="oak-identifier">textRVA</span><span class="oak-newline">
-		</span><span class="oak-identifier">imageBase</span><span class="oak-colon">: </span><span class="oak-identifier">imageBase</span><span class="oak-newline">
-		</span><span class="oak-identifier">textRVA</span><span class="oak-colon">: </span><span class="oak-identifier">textRVA</span><span class="oak-newline">
-		</span><span class="oak-identifier">dataRVA</span><span class="oak-colon">: </span><span class="oak-identifier">dataRVA</span><span class="oak-newline">
-		</span><span class="oak-identifier">textSize</span><span class="oak-colon">: </span><span class="oak-identifier">textSize</span><span class="oak-newline">
-		</span><span class="oak-identifier">dataSize</span><span class="oak-colon">: </span><span class="oak-identifier">dataSize</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// Link section — merge code and data into a binary</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">createLinkerConfig</span><span class="oak-leftParen">(</span><span class="oak-identifier">opts</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">format</span><span class="oak-colon">: </span><span class="oak-identifier">opts</span><span class="oak-dot">.</span><span class="oak-identifier">format </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-identifier">FORMAT_ELF</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">arch</span><span class="oak-colon">: </span><span class="oak-identifier">opts</span><span class="oak-dot">.</span><span class="oak-identifier">arch </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-colon">:</span><span class="oak-identifier">x86_64</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">entry</span><span class="oak-colon">: </span><span class="oak-identifier">opts</span><span class="oak-dot">.</span><span class="oak-identifier">entry </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'_start'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">textCode</span><span class="oak-colon">: </span><span class="oak-identifier">opts</span><span class="oak-dot">.</span><span class="oak-identifier">textCode </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">dataBytes</span><span class="oak-colon">: </span><span class="oak-identifier">opts</span><span class="oak-dot">.</span><span class="oak-identifier">dataBytes </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-identifier">symbols</span><span class="oak-colon">: </span><span class="oak-identifier">opts</span><span class="oak-dot">.</span><span class="oak-identifier">symbols </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">default</span><span class="oak-leftParen">(</span><span class="oak-leftBrace">{</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span>
-<span class="oak-comment">// Public API</span>
-<span class="oak-comment">// ---------------------------------------------------------------------------</span><span class="oak-newline">
-</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">link</span><span class="oak-leftParen">(</span><span class="oak-identifier">config</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">cfg </span><span class="oak-assign">:= </span><span class="oak-fnName">createLinkerConfig</span><span class="oak-leftParen">(</span><span class="oak-identifier">config</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">format </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-colon">:</span><span class="oak-identifier">elf </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">linkELF</span><span class="oak-leftParen">(</span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">textCode</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">dataBytes</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">entry</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">arch</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-colon">:</span><span class="oak-identifier">pe </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">linkPE</span><span class="oak-leftParen">(</span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">textCode</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">dataBytes</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">entry</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">arch</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">linkELF</span><span class="oak-leftParen">(</span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">textCode</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">dataBytes</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">entry</span><span class="oak-comma">, </span><span class="oak-identifier">cfg</span><span class="oak-dot">.</span><span class="oak-identifier">arch</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// Convenience: compile AST → native → linked binary</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">compileAndLink</span><span class="oak-leftParen">(</span><span class="oak-identifier">ast</span><span class="oak-comma">, </span><span class="oak-identifier">format</span><span class="oak-comma">, </span><span class="oak-identifier">arch</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">nativeCodegen </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'codegen-native'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">nativeResult </span><span class="oak-assign">:= </span><span class="oak-identifier">nativeCodegen</span><span class="oak-dot">.</span><span class="oak-fnName">compileToNative</span><span class="oak-leftParen">(</span><span class="oak-identifier">ast</span><span class="oak-comma">, </span><span class="oak-identifier">arch</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-	</span><span class="oak-fnName">link</span><span class="oak-leftParen">(</span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-identifier">format</span><span class="oak-colon">: </span><span class="oak-identifier">format</span><span class="oak-newline">
-		</span><span class="oak-identifier">arch</span><span class="oak-colon">: </span><span class="oak-identifier">arch</span><span class="oak-newline">
-		</span><span class="oak-identifier">textCode</span><span class="oak-colon">: </span><span class="oak-identifier">nativeResult</span><span class="oak-dot">.</span><span class="oak-identifier">code</span><span class="oak-newline">
-		</span><span class="oak-identifier">dataBytes</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span>
-</code></pre>
-        </article>
-    </main>
-    <footer>
-        <div class="split overlay">
-            <div class="left">
-            </div>
-            <div class="right">
-                - <a href="https://thesephist.com/">Linus</a>
-            </div>
-        </div>
-    </footer>
-</body>

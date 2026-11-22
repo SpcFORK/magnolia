@@ -1,457 +1,0 @@
-<!doctype html>
-<head>
-    <meta charset="utf-8">
-    <title>ai-vec.oak | Oak programming language</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <link rel="stylesheet" href="/css/main.css">
-    <link rel="stylesheet" href="/css/lib.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header>
-        <div class="overlay">
-            <div class="home">
-                <a href="/">Oak</a>
-            </div>
-            <nav>
-                <a href="/lib/"><span class="desktop">standard library</span><span class="mobile">stdlib</span></a>
-                <a href="/posts/">blog</a>
-                <a href="/#start">download</a>
-                <a href="https://github.com/thesephist/oak" target="_blank">source ↗</a>
-            </nav>
-        </div>
-    </header>
-    <main aria-role="main">
-        <article class="overlay stdlib">
-            <h1>ai-vec.oak</h1>
-            <p class="meta">
-                <a href="/lib/">&larr; Standard library</a>
-                <a href="https://github.com/thesephist/oak/blob/main/lib/ai-vec.oak">See on GitHub ↗</a>
-            </p>
-            <pre><code><span class="oak-comment">// libai-vec implements vector operations, distances, normalization, statistics,</span>
-<span class="oak-comment">// and parallel batch utilities for the ai module.</span><span class="oak-newline">
-</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">default</span><span class="oak-colon">: </span><span class="oak-identifier">default</span><span class="oak-newline">
-	</span><span class="oak-identifier">map</span><span class="oak-colon">: </span><span class="oak-identifier">map</span><span class="oak-newline">
-	</span><span class="oak-identifier">filter</span><span class="oak-colon">: </span><span class="oak-identifier">filter</span><span class="oak-newline">
-	</span><span class="oak-identifier">slice</span><span class="oak-colon">: </span><span class="oak-identifier">slice</span><span class="oak-newline">
-	</span><span class="oak-identifier">each</span><span class="oak-colon">: </span><span class="oak-identifier">each</span><span class="oak-newline">
-	</span><span class="oak-identifier">range</span><span class="oak-colon">: </span><span class="oak-identifier">range</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'std'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">sqrt</span><span class="oak-colon">: </span><span class="oak-identifier">sqrt</span><span class="oak-newline">
-	</span><span class="oak-identifier">abs</span><span class="oak-colon">: </span><span class="oak-identifier">abs</span><span class="oak-newline">
-	</span><span class="oak-identifier">pow</span><span class="oak-colon">: </span><span class="oak-identifier">pow</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'math'</span><span class="oak-rightParen">)</span>
-<span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">pmap</span><span class="oak-colon">: </span><span class="oak-identifier">pmap</span>
-<span class="oak-rightBrace">} </span><span class="oak-assign">:= </span><span class="oak-fnName">import</span><span class="oak-leftParen">(</span><span class="oak-stringLiteral">'thread'</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Vector Operations &amp; Embeddings</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// dotProduct computes the dot product of two vectors (lists of numbers).</span>
-<span class="oak-comment">// Both vectors must have the same length.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   dotProduct([1, 2, 3], [4, 5, 6])  // => 32 (1*4 + 2*5 + 3*6)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">dotProduct</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-times">* </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// magnitude returns the Euclidean norm (L2 norm) of a vector.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   magnitude([3, 4])  // => 5</span>
-<span class="oak-comment">//   magnitude([0, 0])  // => 0</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">magnitude</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">squared </span><span class="oak-assign">:= </span><span class="oak-fnName">dotProduct</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-comma">, </span><span class="oak-identifier">v</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnName">sqrt</span><span class="oak-leftParen">(</span><span class="oak-identifier">squared</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// normalize returns a normalized vector with magnitude 1 (unit vector).</span>
-<span class="oak-comment">// Returns ? if the vector has zero magnitude.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   normalize([3, 4])  // => [0.6, 0.8]</span>
-<span class="oak-comment">//   normalize([0, 0])  // => ?</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">normalize</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">mag </span><span class="oak-assign">:= </span><span class="oak-fnName">magnitude</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">mag </span><span class="oak-leq">&lt;= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-qmark">?</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">v </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">) </span><span class="oak-identifier">x </span><span class="oak-divide">/ </span><span class="oak-identifier">mag</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// cosineSimilarity computes the cosine similarity between two embeddings/vectors.</span>
-<span class="oak-comment">// Returns a value between -1 and 1, where 1 means identical direction.</span>
-<span class="oak-comment">// This is commonly used for comparing embeddings in AI/ML applications.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   cosineSimilarity([1, 0, 0], [1, 0, 0])  // => 1.0 (identical)</span>
-<span class="oak-comment">//   cosineSimilarity([1, 0], [0, 1])        // => 0.0 (orthogonal)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">cosineSimilarity</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">mag1 </span><span class="oak-assign">:= </span><span class="oak-fnName">magnitude</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-identifier">mag2 </span><span class="oak-assign">:= </span><span class="oak-fnName">magnitude</span><span class="oak-leftParen">(</span><span class="oak-identifier">v2</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">mag1 </span><span class="oak-times">* </span><span class="oak-identifier">mag2 </span><span class="oak-leq">&lt;= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-qmark">?</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">dotProduct</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-leftParen">(</span><span class="oak-identifier">mag1 </span><span class="oak-times">* </span><span class="oak-identifier">mag2</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// euclideanDistance computes the L2 (Euclidean) distance between two vectors.</span>
-<span class="oak-comment">// Used for distance-based similarity in embeddings.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   euclideanDistance([0, 0], [3, 4])  // => 5</span>
-<span class="oak-comment">//   euclideanDistance([1, 2], [4, 6])  // => 5</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">euclideanDistance</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sumSquares</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">diff </span><span class="oak-assign">:= </span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnName">sumSquares</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">diff </span><span class="oak-times">* </span><span class="oak-identifier">diff</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">sqrt</span><span class="oak-leftParen">(</span><span class="oak-fnName">sumSquares</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// manhattanDistance computes the L1 (Manhattan/Taxicab) distance between vectors.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   manhattanDistance([0, 0], [3, 4])  // => 7</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">manhattanDistance</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-fnName">abs</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// chebyshevDistance computes the Chebyshev (L-infinity) distance between vectors.</span>
-<span class="oak-comment">// Returns the maximum absolute difference across all dimensions.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   chebyshevDistance([1, 2, 3], [4, 1, 0])  // => 3</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">chebyshevDistance</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">maxDiff</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">m</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">m</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">d </span><span class="oak-assign">:= </span><span class="oak-fnName">abs</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnName">maxDiff</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">d </span><span class="oak-greater">> </span><span class="oak-identifier">m </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">d</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">m </span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">maxDiff</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// hammingDistance counts the number of positions where two vectors differ.</span>
-<span class="oak-comment">// Useful for comparing binary codes or label vectors.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   hammingDistance([1, 0, 1, 1], [1, 1, 0, 1])  // => 2</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">hammingDistance</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">1 </span><span class="oak-rightBrace">}</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">count</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// vecAdd adds two vectors element-wise.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   vecAdd([1, 2, 3], [4, 5, 6])  // => [5, 7, 9]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">vecAdd</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">add</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">add</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">add</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// vecSub subtracts v2 from v1 element-wise.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   vecSub([4, 5, 6], [1, 2, 3])  // => [3, 3, 3]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">vecSub</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-comma">, </span><span class="oak-identifier">v2</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-leftParen">(</span><span class="oak-identifier">v1</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-minus">- </span><span class="oak-identifier">v2</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">sub</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// vecScale multiplies every element of a vector by a scalar.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   vecScale([1, 2, 3], 2)  // => [2, 4, 6]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">vecScale</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-comma">, </span><span class="oak-identifier">scalar</span><span class="oak-rightParen">) </span><span class="oak-identifier">v </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">) </span><span class="oak-identifier">x </span><span class="oak-times">* </span><span class="oak-identifier">scalar</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Normalization &amp; Standardization</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// minMaxScale normalizes values to the range [0, 1] using min-max scaling.</span>
-<span class="oak-comment">// Returns the min and max values found, plus the normalized vector.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   minMaxScale([1, 2, 3, 4, 5])  // => {min: 1, max: 5, data: [0, 0.25, 0.5, 0.75, 1]}</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">minMaxScale</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">min</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">max</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">findMin</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">m</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">m</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">x </span><span class="oak-assign">:= </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-identifier">next </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">x </span><span class="oak-less">&lt; </span><span class="oak-identifier">m </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">m </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-					</span><span class="oak-fnName">findMin</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">next</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">m</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">m</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">x </span><span class="oak-assign">:= </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-					</span><span class="oak-identifier">next </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">x </span><span class="oak-greater">> </span><span class="oak-identifier">m </span><span class="oak-leftBrace">{ </span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">x</span><span class="oak-comma">, </span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">m </span><span class="oak-rightBrace">}</span><span class="oak-newline">
-					</span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">next</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-identifier">minVal </span><span class="oak-assign">:= </span><span class="oak-fnName">findMin</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">maxVal </span><span class="oak-assign">:= </span><span class="oak-fnName">findMax</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">range </span><span class="oak-assign">:= </span><span class="oak-identifier">maxVal </span><span class="oak-minus">- </span><span class="oak-identifier">minVal</span><span class="oak-newline">
-</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">range </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">min</span><span class="oak-colon">: </span><span class="oak-identifier">minVal</span><span class="oak-newline">
-					</span><span class="oak-identifier">max</span><span class="oak-colon">: </span><span class="oak-identifier">maxVal</span><span class="oak-newline">
-					</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-underscore">_</span><span class="oak-rightParen">) </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">min</span><span class="oak-colon">: </span><span class="oak-identifier">minVal</span><span class="oak-newline">
-					</span><span class="oak-identifier">max</span><span class="oak-colon">: </span><span class="oak-identifier">maxVal</span><span class="oak-newline">
-					</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">)</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-minus">- </span><span class="oak-identifier">minVal</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">range</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// zScore normalizes values using z-score standardization (standard normal distribution).</span>
-<span class="oak-comment">// Returns mean, standard deviation, and standardized data.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   zScore([1, 2, 3, 4, 5])  // => {mean: 3, stddev: ..., data: [...]}</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">zScore</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">mean</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">stddev</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sumData</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">sum</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">sum</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sumData</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">sum </span><span class="oak-plus">+ </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-identifier">mean </span><span class="oak-assign">:= </span><span class="oak-fnName">sumData</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-newline">
-</span><span class="oak-newline">
-			</span><span class="oak-identifier">squaredDiffs </span><span class="oak-assign">:= </span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">) </span><span class="oak-fnName">pow</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-minus">- </span><span class="oak-identifier">mean</span><span class="oak-comma">, </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sumSquaredDiffs</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">sum</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">sum</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sumSquaredDiffs</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">sum </span><span class="oak-plus">+ </span><span class="oak-identifier">squaredDiffs</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-identifier">variance </span><span class="oak-assign">:= </span><span class="oak-fnName">sumSquaredDiffs</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-newline">
-			</span><span class="oak-identifier">stddev </span><span class="oak-assign">:= </span><span class="oak-fnName">sqrt</span><span class="oak-leftParen">(</span><span class="oak-identifier">variance</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span><span class="oak-newline">
-			</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">stddev </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">mean</span><span class="oak-colon">: </span><span class="oak-identifier">mean</span><span class="oak-newline">
-					</span><span class="oak-identifier">stddev</span><span class="oak-colon">: </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-					</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-underscore">_</span><span class="oak-rightParen">) </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">mean</span><span class="oak-colon">: </span><span class="oak-identifier">mean</span><span class="oak-newline">
-					</span><span class="oak-identifier">stddev</span><span class="oak-colon">: </span><span class="oak-identifier">stddev</span><span class="oak-newline">
-					</span><span class="oak-identifier">data</span><span class="oak-colon">: </span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">)</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-minus">- </span><span class="oak-identifier">mean</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">stddev</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Statistical Utilities</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// mean computes the arithmetic mean of a list of numbers.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   mean([1, 2, 3, 4, 5])  // => 3</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">mean</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// variance computes the variance of a dataset.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   variance([1, 2, 3, 4, 5])  // => 2</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">variance</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-identifier">n </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">m </span><span class="oak-assign">:= </span><span class="oak-fnName">mean</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">squared </span><span class="oak-assign">:= </span><span class="oak-identifier">data </span><span class="oak-pipeArrow">|> </span><span class="oak-fnName">map</span><span class="oak-leftParen">(</span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">x</span><span class="oak-rightParen">) </span><span class="oak-fnName">pow</span><span class="oak-leftParen">(</span><span class="oak-identifier">x </span><span class="oak-minus">- </span><span class="oak-identifier">m</span><span class="oak-comma">, </span><span class="oak-numberLiteral">2</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">squared</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">sum</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">) </span><span class="oak-divide">/ </span><span class="oak-identifier">n</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// stddev computes the standard deviation of a dataset.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   stddev([1, 2, 3, 4, 5])  // => 1.414...</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">stddev</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-fnName">sqrt</span><span class="oak-leftParen">(</span><span class="oak-fnName">variance</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// entropy computes Shannon entropy of a probability distribution.</span>
-<span class="oak-comment">// Measures the amount of uncertainty in the distribution.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   entropy([0.5, 0.5])  // => 1.0 (maximum entropy for 2 outcomes)</span>
-<span class="oak-comment">//   entropy([1, 0])      // => 0   (no entropy, certain outcome)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">entropy</span><span class="oak-leftParen">(</span><span class="oak-identifier">probabilities</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">epsilon </span><span class="oak-assign">:= </span><span class="oak-numberLiteral">0.0000000001</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">h</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">probabilities</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc </span><span class="oak-times">* </span><span class="oak-minus">-</span><span class="oak-numberLiteral">1</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-identifier">p </span><span class="oak-assign">:= </span><span class="oak-identifier">probabilities</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-identifier">next </span><span class="oak-assign">:= </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">p </span><span class="oak-greater">> </span><span class="oak-identifier">epsilon </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">p </span><span class="oak-times">* </span><span class="oak-fnName">pow</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">2</span><span class="oak-comma">, </span><span class="oak-numberLiteral">10</span><span class="oak-rightParen">) </span><span class="oak-comment">// Simplified log approximation</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-numberLiteral">0</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">h</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-plus">+ </span><span class="oak-identifier">next</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">h</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ema applies exponential moving average smoothing to a time series.</span>
-<span class="oak-comment">// alpha is the smoothing factor (0 &lt; alpha &lt;= 1). Higher = more weight on recent.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   ema([1, 2, 3, 4, 5], 0.3)  // => [1, 1.3, 1.81, 2.467, 3.227] (approx)</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">ema</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-comma">, </span><span class="oak-identifier">alpha</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-ifKeyword">if </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-eq">= </span><span class="oak-numberLiteral">0 </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">smooth</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">prev</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">data</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-					</span><span class="oak-identifier">val </span><span class="oak-assign">:= </span><span class="oak-identifier">alpha </span><span class="oak-times">* </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">) </span><span class="oak-plus">+ </span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1 </span><span class="oak-minus">- </span><span class="oak-identifier">alpha</span><span class="oak-rightParen">) </span><span class="oak-times">* </span><span class="oak-identifier">prev</span><span class="oak-newline">
-					</span><span class="oak-fnName">smooth</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">val</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-identifier">val</span><span class="oak-rightParen">)</span><span class="oak-newline">
-				</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">smooth</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-identifier">data</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-rightParen">)</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// ============================================================================</span>
-<span class="oak-comment">// Parallel Batch Utilities</span>
-<span class="oak-comment">// ============================================================================</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// pbatchNormalize normalizes a list of vectors in parallel.</span>
-<span class="oak-comment">// Each vector is normalized independently using pmap.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   pbatchNormalize([[3, 4], [5, 12]])  // => [[0.6, 0.8], [0.384..., 0.923...]]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">pbatchNormalize</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-rightParen">) </span><span class="oak-fnName">pmap</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-comma">, </span><span class="oak-identifier">normalize</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// pbatchCosineSimilarity computes cosine similarity between a query vector</span>
-<span class="oak-comment">// and each vector in a list, in parallel. Returns a list of similarity scores.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   pbatchCosineSimilarity([[1, 0], [0, 1], [1, 1]], [1, 0])</span>
-<span class="oak-comment">//   // => [1.0, 0.0, 0.707...]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">pbatchCosineSimilarity</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-comma">, </span><span class="oak-identifier">query</span><span class="oak-rightParen">) </span><span class="oak-fnName">pmap</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-comma">, </span><span class="oak-fnKeyword">fn</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-rightParen">) </span><span class="oak-fnName">cosineSimilarity</span><span class="oak-leftParen">(</span><span class="oak-identifier">v</span><span class="oak-comma">, </span><span class="oak-identifier">query</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// cosineSimilarityMatrix computes pairwise cosine similarity for a list of vectors.</span>
-<span class="oak-comment">// Returns an n x n matrix where entry [i][j] is cosineSimilarity(vectors[i], vectors[j]).</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   cosineSimilarityMatrix([[1,0],[0,1],[1,1]])</span>
-<span class="oak-comment">//   // => [[1, 0, 0.707], [0, 1, 0.707], [0.707, 0.707, 1]]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">cosineSimilarityMatrix</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">makeRow</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">makeCols</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-comma">, </span><span class="oak-identifier">row</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">j </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">row</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">makeCols</span><span class="oak-leftParen">(</span><span class="oak-identifier">j </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">row </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">cosineSimilarity</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">vectors</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">makeRow</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">makeCols</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">makeRow</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span><span class="oak-newline">
-</span>
-<span class="oak-comment">// distanceMatrix computes pairwise distances for a list of vectors using distFn.</span>
-<span class="oak-comment">//</span>
-<span class="oak-comment">// Example:</span>
-<span class="oak-comment">//   distanceMatrix([[0,0],[3,4]], euclideanDistance)</span>
-<span class="oak-comment">//   // => [[0, 5], [5, 0]]</span>
-<span class="oak-fnKeyword">fn </span><span class="oak-fnName">distanceMatrix</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-comma">, </span><span class="oak-identifier">distFn</span><span class="oak-rightParen">) </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-	</span><span class="oak-identifier">n </span><span class="oak-assign">:= </span><span class="oak-fnName">len</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-rightParen">)</span><span class="oak-newline">
-	</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">makeRow</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-comma">, </span><span class="oak-identifier">acc</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">i </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-		</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">acc</span><span class="oak-newline">
-		</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-			</span><span class="oak-fnKeyword">fn </span><span class="oak-fnName">makeCols</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-comma">, </span><span class="oak-identifier">row</span><span class="oak-rightParen">) </span><span class="oak-ifKeyword">if </span><span class="oak-identifier">j </span><span class="oak-geq">>= </span><span class="oak-identifier">n </span><span class="oak-leftBrace">{</span><span class="oak-newline">
-				</span><span class="oak-trueLiteral">true </span><span class="oak-branchArrow">-> </span><span class="oak-identifier">row</span><span class="oak-newline">
-				</span><span class="oak-underscore">_ </span><span class="oak-branchArrow">-> </span><span class="oak-fnName">makeCols</span><span class="oak-leftParen">(</span><span class="oak-identifier">j </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">row </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">distFn</span><span class="oak-leftParen">(</span><span class="oak-identifier">vectors</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">i</span><span class="oak-rightParen">)</span><span class="oak-comma">, </span><span class="oak-identifier">vectors</span><span class="oak-dot">.</span><span class="oak-leftParen">(</span><span class="oak-identifier">j</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-			</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-			</span><span class="oak-fnName">makeRow</span><span class="oak-leftParen">(</span><span class="oak-identifier">i </span><span class="oak-plus">+ </span><span class="oak-numberLiteral">1</span><span class="oak-comma">, </span><span class="oak-identifier">acc </span><span class="oak-pushArrow">&lt;&lt; </span><span class="oak-fnName">makeCols</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span><span class="oak-rightParen">)</span><span class="oak-newline">
-		</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-rightBrace">}</span><span class="oak-newline">
-	</span><span class="oak-fnName">makeRow</span><span class="oak-leftParen">(</span><span class="oak-numberLiteral">0</span><span class="oak-comma">, </span><span class="oak-leftBracket">[</span><span class="oak-rightBracket">]</span><span class="oak-rightParen">)</span>
-<span class="oak-rightBrace">}</span>
-</code></pre>
-        </article>
-    </main>
-    <footer>
-        <div class="split overlay">
-            <div class="left">
-            </div>
-            <div class="right">
-                - <a href="https://thesephist.com/">Linus</a>
-            </div>
-        </div>
-    </footer>
-</body>
