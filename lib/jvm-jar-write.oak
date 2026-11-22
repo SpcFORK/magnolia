@@ -6,6 +6,7 @@
 std := import('std')
 str := import('str')
 zip := import('./applet-zip.oak')
+path := import('path')
 classfile := import('./applet-class.oak')
 
 fn _error(message) {type: :error, message: message}
@@ -15,24 +16,7 @@ fn _u4(raw, pos) _u2(raw, pos) + 65536 * _u2(raw, pos + 2)
 fn _le2(n) char(n & 255) + char((n >> 8) & 255)
 fn _le4(n) _le2(n & 65535) + _le2((n >> 16) & 65535)
 
-fn _safe?(name) {
-    if name = '' | len(name) > 1024 | name.(0) = '/' |
-        str.contains?(name, '\\') | str.contains?(name, char(0)) {
-        true -> false
-        _ -> {
-            parts := str.split(name, '/')
-            // ZIP directory markers end in '/', never allow empty interior
-            // segments, '..', drive letters or ambiguous path separators.
-            directory? := str.endsWith?(name, '/')
-            bad? := false
-            parts |> std.each(fn(part, i) {
-                if part = '.' | part = '..' | str.contains?(part, ':') |
-                    (part = '' & !(directory? & i = len(parts) - 1)) -> bad? <- true
-            })
-            !bad?
-        }
-    }
-}
+fn _safe?(name) path.safeEntryName?(name)
 fn _signature?(name) {
     low := str.lower(name)
     str.startsWith?(low, 'meta-inf/') & (

@@ -6,6 +6,7 @@ slice := std.slice
 join := std.join
 fmt := import('fmt')
 format := fmt.format
+bytes := import('bytes')
 
 MAX_CLASS_BYTES := 8388608
 MAX_POOL := 8192
@@ -19,55 +20,8 @@ MAX_STACKMAP_TYPES := 8192
 // file strings expose each raw byte via codepoint(raw.(index)). Class files
 // are parsed before generating Oak/JS/Java output; the generated program only
 // contains normalized, textual instructions, never raw binary source strings.
-fn Reader(raw) {
-	cursor := 0
-	problem := ?
-
-	fn fail(message) {
-		if problem = ? -> problem <- format('at byte {{0}}: {{1}}', cursor, message)
-		?
-	}
-	fn take(n) if problem != ? {
-		true -> ?
-		_ -> if n < 0 | cursor + n > len(raw) {
-			true -> fail(format('truncated class file (need {{0}} bytes)', n))
-			_ -> {
-				chunk := slice(raw, cursor, cursor + n)
-				cursor <- cursor + n
-				chunk
-			}
-		}
-	}
-	fn u1() if chunk := take(1) {
-		? -> 0
-		_ -> codepoint(chunk.(0)) & 255
-	}
-	fn u2() {
-		a := u1()
-		b := u1()
-		(a * 256) + b
-	}
-	fn u4() {
-		a := u2()
-		b := u2()
-		(a * 65536) + b
-	}
-
-	{
-		take: take
-		skip: fn(n) {
-			take(n)
-			?
-		}
-		u1: u1
-		u2: u2
-		u4: u4
-		pos: fn() cursor
-		remaining: fn() len(raw) - cursor
-		problem: fn() problem
-		fail: fail
-	}
-}
+// Reader is a shared byte-order cursor abstracted onto lib/bytes.oak.
+fn Reader(raw) bytes.Reader(raw)
 
 fn _cp(pool, index, tag) {
 	if index <= 0 | index >= len(pool) {
@@ -297,22 +251,7 @@ fn _codeAttribute(raw, pool, major) {
     }
 }
 
-fn _safeName?(name) {
-	if type(name) != :string | len(name) = 0 {
-		true -> false
-		_ -> {
-			parts := import('str').split(name, '/')
-			fn bad(i) if i >= len(parts) {
-				true -> false
-				_ -> if parts.(i) = '' | parts.(i) = '.' | parts.(i) = '..' {
-					true -> true
-					_ -> bad(i + 1)
-				}
-			}
-			!bad(0) & name.(0) != '/' & !import('str').contains?(name, '\\')
-		}
-	}
-}
+fn _safeName?(name) path.safeEntryName?(name)
 
 // parseClass returns {type: :ok, value: {...}} or {type: :error, message}.
 // It never fetches dependencies or interprets bytecode.
