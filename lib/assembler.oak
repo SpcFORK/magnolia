@@ -107,36 +107,37 @@ fn tokenizeAsm(source) {
 				parts |> each(fn(part, idx) {
 					part <- part |> trim() |> replace('\t', '')
 					if part = '' -> ()
-					if part = ',' {
-						true -> tokens << { type: TOK_COMMA, val: ',' }
-						_ -> if endsWith?(part, ':') {
-							true -> tokens << { type: TOK_LABEL, val: slice(part, 0, len(part) - 1) }
-							_ -> if startsWith?(part, '.') {
-								true -> tokens << { type: TOK_DIRECTIVE, val: part }
-								_ -> if startsWith?(part, '%') | startsWith?(part, '$') {
-									true -> if startsWith?(part, '$') | startsWith?(part, '#') {
-										true -> tokens << { type: TOK_IMM, val: part }
-										_ -> tokens << { type: TOK_REG, val: part |> replace('%', '') |> replace(',', '') }
-									}
-									_ -> if idx = 0 {
-										true -> tokens << { type: TOK_MNEMONIC, val: part |> lower() }
+					// classify part into a kind for match dispatch
+					kind := if part {
+						',' -> 'comma'
+						endsWith?(part, ':') -> 'label'
+						startsWith?(part, '.') -> 'directive'
+						startsWith?(part, '$') | startsWith?(part, '#') -> 'imm'
+						startsWith?(part, '%') | startsWith?(part, '$') -> 'reg'
+						_ -> 'other'
+					}
+					if kind {
+						'comma' -> tokens << { type: TOK_COMMA, val: ',' }
+						'label' -> tokens << { type: TOK_LABEL, val: slice(part, 0, len(part) - 1) }
+						'directive' -> tokens << { type: TOK_DIRECTIVE, val: part }
+						'imm' -> tokens << { type: TOK_IMM, val: part }
+						'reg' -> tokens << { type: TOK_REG, val: part |> replace('%', '') |> replace(',', '') }
+						_ -> {
+							if idx = 0 {
+								true -> tokens << { type: TOK_MNEMONIC, val: part |> lower() }
+								_ -> {
+									// Could be register, immediate, or symbol
+									cleanPart := part |> replace(',', '')
+									if x86_64Regs.(cleanPart) != ? | arm64Regs.(cleanPart) != ? {
+										true -> tokens << { type: TOK_REG, val: cleanPart }
 										_ -> {
-											// Could be register, immediate, or symbol
-											cleanPart := part |> replace(',', '')
-											if x86_64Regs.(cleanPart) != ? | arm64Regs.(cleanPart) != ? {
-												true -> tokens << { type: TOK_REG, val: cleanPart }
-												_ -> {
-													// Try parsing as number
-													tokens << { type: TOK_SYMBOL, val: cleanPart }
-												}
-											}
+											// Try parsing as number
+											tokens << { type: TOK_SYMBOL, val: cleanPart }
 										}
 									}
 								}
 							}
 						}
-					}
-				})
 			}
 		}
 		tokens << { type: TOK_NEWLINE, val: '\n' }
