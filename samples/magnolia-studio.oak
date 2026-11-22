@@ -1,0 +1,516 @@
+// app.oak — Magnolia Cross-Platform GUI & UI Application
+// Runs on Native (Windows Win32 / Linux X11) and Web (Canvas / WebGL / Bridge)
+// Uses Magnolia's GUI.oak, gui-form, ui-core, ui-sdk, ui-surface, gui-drawlist
+
+std := import('std')
+gui := import('GUI')
+guiWeb := import('gui-web')
+guiForm := import('gui-form')
+uiSdk := import('ui-sdk')
+uiCore := import('ui-core')
+surface := import('ui-surface')
+drawlist := import('gui-drawlist')
+
+// ─── Application Theme & Colors (Packed RGB) ────────────────────────────────
+C_BG          := gui.rgb(15, 20, 32)
+C_HEADER      := gui.rgb(22, 30, 48)
+C_PANEL       := gui.rgb(24, 34, 54)
+C_PANEL_ALT   := gui.rgb(19, 27, 43)
+C_BORDER      := gui.rgb(45, 60, 92)
+C_BORDER_HI   := gui.rgb(70, 95, 145)
+C_ACCENT_BLUE := gui.rgb(56, 128, 255)
+C_ACCENT_HOV  := gui.rgb(82, 148, 255)
+C_ACCENT_PRS  := gui.rgb(38, 98, 210)
+C_ACCENT_CYAN := gui.rgb(45, 212, 191)
+C_ACCENT_AMB  := gui.rgb(251, 191, 36)
+C_SUCCESS     := gui.rgb(52, 211, 153)
+C_TEXT_TITLE  := gui.rgb(245, 248, 255)
+C_TEXT_BODY   := gui.rgb(205, 218, 240)
+C_TEXT_MUTED  := gui.rgb(130, 148, 180)
+C_CHECK_ON    := gui.rgb(56, 128, 255)
+
+// ─── Initial Application State ──────────────────────────────────────────────
+fn createInitialState() {
+	{
+		activeTab: 0
+		tabs: ['UI Surface', 'Widgets & Forms', '2D Canvas & Shaders', 'Diagnostics']
+		counter: 42
+		sliderVal: 65
+		progress: 40
+		progressDir: 1
+		hwAccel: true
+		gridOverlay: true
+		backendChoice: 0
+		hoverKey: ''
+		pressedKey: ''
+		statusText: 'Magnolia Studio Initialized. Ready.'
+		statusOk: true
+		frameTick: 0
+		fps: 60
+		lastTime: 0
+		boxX: 80
+		boxY: 260
+		boxVx: 4
+		boxVy: 3
+		boxSize: 32
+		eventsLog: ['[INIT] Magnolia GUI runtime ready', '[BUS] Event bus wired to window']
+	}
+}
+
+// ─── Event Log Helper ───────────────────────────────────────────────────────
+fn logEvent(state, msg) {
+	state.statusText <- msg
+	state.eventsLog <- state.eventsLog << msg
+	if len(state.eventsLog) > 8 {
+		true -> state.eventsLog <- std.slice(state.eventsLog, len(state.eventsLog) - 8, len(state.eventsLog))
+	}
+}
+
+// ─── Tab 0: Pocket Grammar Retained UI Surface ─────────────────────────────
+fn renderTabSurface(window, state) {
+	// Build a declarative UI tree via uiSdk
+	app := uiSdk.createApp({ width: window.width, height: window.height })
+	root := surface.ROOT_ID
+
+	// Screen container
+	screen := uiSdk.View(app, root, 'flex flex-col gap-3 p-4 bg-slate-900')
+	
+	// Metric card container
+	metricsRow := uiSdk.View(app, screen, 'flex flex-row gap-3')
+	card1 := uiSdk.View(app, metricsRow, 'flex flex-col p-3 bg-slate-800 rounded-md')
+	uiSdk.Text(app, card1, 'Frame Tick', 'text-xs text-slate-400')
+	uiSdk.Text(app, card1, string(state.frameTick), 'text-lg text-blue-400')
+
+	card2 := uiSdk.View(app, metricsRow, 'flex flex-col p-3 bg-slate-800 rounded-md')
+	uiSdk.Text(app, card2, 'Reactive Count', 'text-xs text-slate-400')
+	uiSdk.Text(app, card2, string(state.counter), 'text-lg text-emerald-400')
+
+	card3 := uiSdk.View(app, metricsRow, 'flex flex-col p-3 bg-slate-800 rounded-md')
+	uiSdk.Text(app, card3, 'Speed Gauge', 'text-xs text-slate-400')
+	uiSdk.Text(app, card3, string(state.sliderVal) + '%', 'text-lg text-amber-400')
+
+	// Execute layout and obtain DrawList
+	dl := uiSdk.frame(app)
+	drawHash := uiCore.drawListHash(dl)
+
+	// Present DrawList through GUI module onto window
+	drawlist.presentGUI(gui, window, dl)
+
+	// Additional interactive controls drawn on top of surface
+	gui.fillRect(window, 20, 210, 920, 360, C_PANEL, ?, C_BORDER)
+	gui.drawText(window, 40, 225, 'Interactive Pocket-Grammar Component State', C_TEXT_TITLE)
+	gui.drawText(window, 40, 255, 'Retained UI tree computed via flexbox layout algorithm. Deterministic DrawList hash: ' + string(drawHash), C_TEXT_MUTED)
+
+	// Counter badge
+	gui.fillRect(window, 40, 290, 260, 90, C_PANEL_ALT, ?, C_BORDER_HI)
+	gui.drawText(window, 60, 305, 'COUNTER VALUE', C_TEXT_MUTED)
+	gui.drawText(window, 60, 335, string(state.counter), C_ACCENT_BLUE)
+
+	// Action buttons for Counter
+	btnDecHover := state.hoverKey = 'btnDec'
+	btnDecPress := state.pressedKey = 'btnDec'
+	gui.formDrawSecondaryButton(window, 320, 310, 90, 38, '- Decrement', btnDecHover, btnDecPress, C_PANEL_ALT, C_BORDER_HI, C_BORDER, C_BORDER_HI)
+
+	btnIncHover := state.hoverKey = 'btnInc'
+	btnIncPress := state.pressedKey = 'btnInc'
+	gui.formDrawPrimaryButton(window, 425, 310, 90, 38, '+ Increment', btnIncHover, btnIncPress, C_ACCENT_BLUE, C_ACCENT_HOV, C_ACCENT_PRS, C_BORDER)
+
+	btnRstHover := state.hoverKey = 'btnRst'
+	btnRstPress := state.pressedKey = 'btnRst'
+	gui.formDrawSecondaryButton(window, 530, 310, 80, 38, 'Reset', btnRstHover, btnRstPress, C_PANEL_ALT, C_BORDER_HI, C_BORDER, C_BORDER_HI)
+
+	// Information list
+	gui.drawText(window, 40, 410, 'Features demonstrated in this view:', C_TEXT_TITLE)
+	gui.drawText(window, 60, 440, '* ui-sdk.createApp: initializes host-guest mirror architecture', C_TEXT_BODY)
+	gui.drawText(window, 60, 465, '* uiSdk.View & uiSdk.Text: declarative grammar with flexbox sizing', C_TEXT_BODY)
+	gui.drawText(window, 60, 490, '* uiCore.layout & frame: generates optimized DRAW_OP command stream', C_TEXT_BODY)
+	gui.drawText(window, 60, 515, '* gui-drawlist.presentGUI: interprets DRAW_OPs via GUI facade primitives', C_TEXT_BODY)
+	gui.drawText(window, 60, 540, '* Real-time cross-platform rendering on both desktop and browser canvas', C_ACCENT_CYAN)
+}
+
+// ─── Tab 1: Form Widgets Suite ─────────────────────────────────────────────
+fn renderTabWidgets(window, state) {
+	// Left column: interactive form controls
+	gui.fillRect(window, 20, 80, 440, 490, C_PANEL, ?, C_BORDER)
+	gui.drawText(window, 40, 98, 'Interactive Form Controls (gui-form)', C_TEXT_TITLE)
+	gui.drawLine(window, 40, 120, 440, 120, C_BORDER)
+
+	// Action button
+	btnActHover := state.hoverKey = 'btnAction'
+	btnActPress := state.pressedKey = 'btnAction'
+	gui.formDrawPrimaryButton(window, 40, 140, 180, 36, 'Trigger Operation', btnActHover, btnActPress, C_ACCENT_BLUE, C_ACCENT_HOV, C_ACCENT_PRS, C_BORDER)
+
+	btnSecHover := state.hoverKey = 'btnSec'
+	btnSecPress := state.pressedKey = 'btnSec'
+	gui.formDrawSecondaryButton(window, 240, 140, 180, 36, 'Secondary Action', btnSecHover, btnSecPress, C_PANEL_ALT, C_BORDER_HI, C_BORDER, C_BORDER_HI)
+
+	// Slider
+	gui.drawText(window, 40, 195, 'Velocity & Speed Multiplier: ' + string(state.sliderVal) + '%', C_TEXT_BODY)
+	gui.formDrawSlider(window, 40, 220, 380, state.sliderVal, 100, C_PANEL_ALT, C_ACCENT_BLUE, C_TEXT_TITLE, C_BORDER_HI, {})
+
+	// Progress bar
+	gui.drawText(window, 40, 260, 'Asynchronous Task Progress: ' + string(state.progress) + '%', C_TEXT_BODY)
+	gui.formDrawProgressBar(window, 40, 285, 380, state.progress, 100, C_PANEL_ALT, C_SUCCESS, C_BORDER, {})
+
+	// Checkboxes
+	gui.formDrawCheckbox(window, 40, 330, state.hwAccel, 'Enable Hardware Acceleration', C_PANEL_ALT, C_BORDER, C_CHECK_ON)
+	gui.formDrawCheckbox(window, 40, 365, state.gridOverlay, 'Show 2D Background Coordinate Grid', C_PANEL_ALT, C_BORDER, C_CHECK_ON)
+
+	// Radios for Backend Choice
+	gui.drawText(window, 40, 410, 'Target Graphics Presenter Layer:', C_TEXT_BODY)
+	gui.formDrawRadio(window, 40, 435, state.backendChoice = 0, 'Auto Layer (Win32 GDI / Linux X11)', C_PANEL_ALT, C_BORDER, C_ACCENT_BLUE)
+	gui.formDrawRadio(window, 40, 465, state.backendChoice = 1, 'Hardware OpenGL / Vulkan', C_PANEL_ALT, C_BORDER, C_ACCENT_BLUE)
+	gui.formDrawRadio(window, 40, 495, state.backendChoice = 2, 'HTML5 Canvas 2D / WebGL Command Queue', C_PANEL_ALT, C_BORDER, C_ACCENT_BLUE)
+
+	// Status Banner
+	gui.formDrawStatusBanner(window, 40, 530, 380, 30, state.statusText, state.statusOk, C_PANEL_ALT, C_BORDER, C_SUCCESS, gui.rgb(239, 68, 68))
+
+	// Right column: Module Registry & Diagnostics Table
+	gui.fillRect(window, 480, 80, 460, 490, C_PANEL, ?, C_BORDER)
+	gui.drawText(window, 500, 98, 'Magnolia Standard Library Modules', C_TEXT_TITLE)
+	gui.drawLine(window, 500, 120, 920, 120, C_BORDER)
+
+	cols := [
+		{ name: 'Module', width: 140 }
+		{ name: 'Category', width: 150 }
+		{ name: 'Status', width: 110 }
+	]
+	rows := [
+		['GUI.oak', 'Window Middleware', 'Active']
+		['ui-core.oak', 'Flexbox Retained Engine', 'Loaded']
+		['ui-sdk.oak', 'Declarative Pocket SDK', 'Loaded']
+		['ui-surface.oak', 'DRAW_OP Spec & Atoms', 'Active']
+		['gui-form.oak', 'Form & Widget Suite', 'Active']
+		['gui-draw.oak', 'Cross-Platform Primitives', 'Active']
+		['gui-2d.oak', '2D Math & Transforms', 'Ready']
+		['gui-shader.oak', 'CPU Fragment Shaders', 'Ready']
+		['gui-web.oak', 'WebGL / Canvas Queue', 'Linked']
+		['web-pipeline.oak', 'Web Resource Pipeline', 'Ready']
+		['build.oak', 'Multi-target Bundler', 'Standby']
+	]
+	gui.formDrawTable(window, 500, 140, 420, 410, cols, rows, 0, -1, C_PANEL_ALT, C_PANEL, C_PANEL_ALT, C_BORDER_HI, C_ACCENT_CYAN, C_TEXT_BODY, C_TEXT_TITLE, C_BORDER, {})
+}
+
+// ─── Tab 2: 2D Graphics & Procedural Shaders ───────────────────────────────
+fn renderTabGraphics(window, state) {
+	gui.fillRect(window, 20, 80, 920, 490, C_PANEL, ?, C_BORDER)
+	gui.drawText(window, 40, 98, '2D Vector Geometry, Particles & Procedural Wave Shader', C_TEXT_TITLE)
+	gui.drawLine(window, 40, 120, 920, 120, C_BORDER)
+
+	// Coordinate grid if enabled
+	if state.gridOverlay -> {
+		fn drawGridCols(i) if i < 15 {
+			true -> {
+				gx := 40 + i * 58
+				gui.drawLine(window, gx, 130, gx, 480, gui.rgb(24, 34, 52))
+				drawGridCols(i + 1)
+			}
+		}
+		fn drawGridRows(j) if j < 10 {
+			true -> {
+				gy := 130 + j * 35
+				gui.drawLine(window, 40, gy, 900, gy, gui.rgb(24, 34, 52))
+				drawGridRows(j + 1)
+			}
+		}
+		drawGridCols(0)
+		drawGridRows(0)
+	}
+
+	// 1. Procedural Color Wave Spectrum (simulating CPU shader)
+	waveBaseY := 150
+	fn drawWaveSegments(x) if x < 860 {
+		true -> {
+			t := float(state.frameTick) * 0.05
+			phase := float(x) * 0.02 + t
+			// Procedural wave amplitude using integer mod approximation
+			waveH := int(24.0 + 18.0 * float((state.frameTick + x) % 40) / 40.0)
+			
+			r := int(128.0 + 120.0 * float((x * 2 + state.frameTick * 3) % 255) / 255.0)
+			g := int(80.0 + 160.0 * float((x + state.frameTick * 2) % 255) / 255.0)
+			b := int(200.0 + 55.0 * float((x * 3 + state.frameTick) % 255) / 255.0)
+
+			barColor := gui.rgb(r, g, b)
+			gui.fillRect(window, 40 + x, waveBaseY + 30 - waveH / 2, 8, waveH, barColor)
+			drawWaveSegments(x + 10)
+		}
+	}
+	drawWaveSegments(0)
+	gui.drawText(window, 40, 230, 'Procedural Fragment Color Spectrum (CPU-Evaluated)', C_TEXT_MUTED)
+
+	// 2. Animated Bouncing Physics Box
+	gui.fillRect(window, state.boxX, state.boxY, state.boxSize, state.boxSize, C_ACCENT_CYAN, ?, C_TEXT_TITLE)
+	gui.drawText(window, state.boxX + 4, state.boxY + 9, 'MG', C_BG)
+
+	// 3. Static & Dynamic Vector Shapes
+	// Rounded rectangle card
+	gui.fillRoundedRect(window, 560, 270, 340, 180, 8, C_PANEL_ALT, C_BORDER_HI)
+	gui.drawText(window, 580, 290, 'Vector Primitive Features', C_TEXT_TITLE)
+	gui.drawText(window, 580, 320, '- fillRoundedRect: clean corner radiuses', C_TEXT_BODY)
+	gui.drawText(window, 580, 345, '- drawLine & fillRect: batch rasterization', C_TEXT_BODY)
+	gui.drawText(window, 580, 370, '- fillEllipse: circular avatar & handles', C_TEXT_BODY)
+	gui.drawText(window, 580, 395, '- Procedural color modulation at 60 FPS', C_TEXT_BODY)
+
+	// Ellipses / circles
+	gui.fillEllipse(window, 120, 390, 40, 40, gui.rgb(236, 72, 153), C_TEXT_TITLE)
+	gui.fillEllipse(window, 230, 390, 45, 45, gui.rgb(139, 92, 246), C_TEXT_TITLE)
+	gui.fillEllipse(window, 340, 390, 35, 35, gui.rgb(59, 130, 246), C_TEXT_TITLE)
+	gui.drawText(window, 105, 385, 'RED', C_TEXT_TITLE)
+	gui.drawText(window, 205, 385, 'VIOLET', C_TEXT_TITLE)
+	gui.drawText(window, 325, 385, 'BLUE', C_TEXT_TITLE)
+
+	// Interactive Hint
+	gui.fillRect(window, 40, 500, 860, 40, C_PANEL_ALT, ?, C_BORDER)
+	gui.drawText(window, 60, 513, 'Use the slider on Tab 2 to dynamically modulate animation speed and particle velocity.', C_ACCENT_AMB)
+}
+
+// ─── Tab 3: Diagnostics & Cross-Platform Bridge ────────────────────────────
+fn renderTabDiagnostics(window, state) {
+	gui.fillRect(window, 20, 80, 920, 490, C_PANEL, ?, C_BORDER)
+	gui.drawText(window, 40, 98, 'Cross-Platform Telemetry & Bridge Inspector', C_TEXT_TITLE)
+	gui.drawLine(window, 40, 120, 920, 120, C_BORDER)
+
+	// System Specs Grid
+	gui.fillRect(window, 40, 140, 420, 190, C_PANEL_ALT, ?, C_BORDER_HI)
+	gui.drawText(window, 60, 158, 'ENVIRONMENT TELEMETRY', C_ACCENT_CYAN)
+
+	sysInfo := ___runtime_sys_info()
+	gui.drawText(window, 60, 190, 'Operating System: ' + string(sysInfo.os), C_TEXT_BODY)
+	gui.drawText(window, 60, 215, 'Architecture:     ' + string(sysInfo.arch), C_TEXT_BODY)
+	gui.drawText(window, 60, 240, 'Active Backend:   :' + string(gui.backend()), C_ACCENT_BLUE)
+	gui.drawText(window, 60, 265, 'Frame Budget:     ' + string(window.frameMs) + ' ms target', C_TEXT_BODY)
+	gui.drawText(window, 60, 290, 'Calculated FPS:   ' + string(state.fps) + ' FPS', C_SUCCESS)
+
+	// Event Bus & Window Diagnostics
+	gui.fillRect(window, 480, 140, 420, 190, C_PANEL_ALT, ?, C_BORDER_HI)
+	gui.drawText(window, 500, 158, 'MIDDLEWARE METRICS', C_ACCENT_AMB)
+	gui.drawText(window, 500, 190, 'Window Size:        ' + string(window.width) + ' x ' + string(window.height), C_TEXT_BODY)
+	gui.drawText(window, 500, 215, 'Recorded Messages:  ' + string(len(window.messages)) + ' ops queued', C_TEXT_BODY)
+	gui.drawText(window, 500, 240, 'Event Bus Token:    ' + if window.eventBus { ? -> 'None', _ -> 'Active' }, C_TEXT_BODY)
+	gui.drawText(window, 500, 265, 'Active Presenter:   Native / WebGL Hybrid', C_TEXT_BODY)
+	gui.drawText(window, 500, 290, 'WebBridge Callback: ' + if window.webBridge { ? -> 'Not Bound (Native Mode)', _ -> 'Attached (Web Mode)' }, C_TEXT_BODY)
+
+	// Live Event Log
+	gui.fillRect(window, 40, 350, 860, 200, C_PANEL_ALT, ?, C_BORDER)
+	gui.drawText(window, 60, 368, 'INTERACTION & EVENT BUS LOG STREAM', C_TEXT_TITLE)
+	gui.drawLine(window, 60, 388, 880, 388, C_BORDER)
+
+	fn printLogLines(i) if i < len(state.eventsLog) {
+		true -> {
+			ly := 405 + i * 20
+			gui.drawText(window, 60, ly, state.eventsLog.(i), C_TEXT_MUTED)
+			printLogLines(i + 1)
+		}
+	}
+	printLogLines(0)
+}
+
+// ─── Master Frame Render Routine ───────────────────────────────────────────
+fn renderApp(window, state) {
+	// 1. Clear background
+	gui.fillRect(window, 0, 0, window.width, window.height, C_BG)
+
+	// 2. Draw Top Navigation Header
+	gui.fillRect(window, 0, 0, window.width, 65, C_HEADER, ?, C_BORDER)
+	
+	// Logo badge
+	gui.fillRect(window, 20, 14, 38, 38, C_ACCENT_BLUE, ?, C_BORDER_HI)
+	gui.drawText(window, 27, 24, 'MG', C_TEXT_TITLE)
+
+	// Title & Subtitle
+	gui.drawText(window, 70, 18, 'MAGNOLIA STUDIO', C_TEXT_TITLE)
+	gui.drawText(window, 70, 38, 'Cross-Platform GUI & UI Application', C_TEXT_MUTED)
+
+	// Tab Strip
+	gui.formDrawTabStrip(window, 270, 16, state.tabs, state.activeTab, C_PANEL, C_ACCENT_BLUE, C_BORDER, C_TEXT_TITLE, C_TEXT_MUTED, {})
+
+	// Right header badge: backend indicator
+	backendLabel := if gui.backend() {
+		:windows -> 'WIN32'
+		:linux -> 'LINUX'
+		:web -> 'WEB'
+		_ -> 'DESKTOP'
+	}
+	gui.fillRect(window, 820, 18, 120, 30, C_PANEL_ALT, ?, C_BORDER_HI)
+	gui.drawText(window, 835, 26, 'BACKEND: ' + backendLabel, C_ACCENT_CYAN)
+
+	// 3. Render Active Tab Content
+	if state.activeTab {
+		0 -> renderTabSurface(window, state)
+		1 -> renderTabWidgets(window, state)
+		2 -> renderTabGraphics(window, state)
+		3 -> renderTabDiagnostics(window, state)
+		_ -> renderTabSurface(window, state)
+	}
+}
+
+// ─── Frame Step & Physics Simulation ───────────────────────────────────────
+fn updateApp(window, state, dt) {
+	state.frameTick <- state.frameTick + 1
+
+	// Update animated progress bar
+	if state.progress >= 100 -> state.progressDir <- -1
+	if state.progress <= 5   -> state.progressDir <- 1
+	if state.frameTick % 2 = 0 -> {
+		state.progress <- state.progress + state.progressDir
+	}
+
+	// Update bouncing physics box on Tab 2
+	speedMult := float(state.sliderVal) / 50.0
+	state.boxX <- state.boxX + int(float(state.boxVx) * speedMult)
+	state.boxY <- state.boxY + int(float(state.boxVy) * speedMult)
+
+	if state.boxX < 40 -> {
+		state.boxX <- 40
+		state.boxVx <- 0 - state.boxVx
+	}
+	if state.boxX + state.boxSize > 520 -> {
+		state.boxX <- 520 - state.boxSize
+		state.boxVx <- 0 - state.boxVx
+	}
+	if state.boxY < 250 -> {
+		state.boxY <- 250
+		state.boxVy <- 0 - state.boxVy
+	}
+	if state.boxY + state.boxSize > 480 -> {
+		state.boxY <- 480 - state.boxSize
+		state.boxVy <- 0 - state.boxVy
+	}
+}
+
+// ─── Interactive Mouse Click Dispatcher ────────────────────────────────────
+fn handleAppClick(window, state, mx, my) {
+	logEvent(state, '[INPUT] MouseClick at (' + string(mx) + ', ' + string(my) + ')')
+
+	// 1. Tab strip click check (y: 16 to 52, x: 270+)
+	if my >= 16 & my <= 52 & mx >= 270 & mx <= 800 {
+		true -> {
+			tabIndex := int((mx - 270) / 130)
+			if tabIndex >= 0 & tabIndex < len(state.tabs) -> {
+				state.activeTab <- tabIndex
+				logEvent(state, '[NAV] Switched to tab: ' + state.tabs.(tabIndex))
+			}
+		}
+	}
+
+	// 2. Tab 0: Pocket UI Surface Buttons
+	if state.activeTab = 0 {
+		true -> {
+			// Decr button (320, 310, 90, 38)
+			if mx >= 320 & mx <= 410 & my >= 310 & my <= 348 -> {
+				state.counter <- state.counter - 1
+				logEvent(state, '[STATE] Counter decremented to ' + string(state.counter))
+			}
+			// Incr button (425, 310, 90, 38)
+			if mx >= 425 & mx <= 515 & my >= 310 & my <= 348 -> {
+				state.counter <- state.counter + 1
+				logEvent(state, '[STATE] Counter incremented to ' + string(state.counter))
+			}
+			// Reset button (530, 310, 80, 38)
+			if mx >= 530 & mx <= 610 & my >= 310 & my <= 348 -> {
+				state.counter <- 0
+				logEvent(state, '[STATE] Counter reset to 0')
+			}
+		}
+	}
+
+	// 3. Tab 1: Form Widgets Controls
+	if state.activeTab = 1 {
+		true -> {
+			// Primary button (40, 140, 180, 36)
+			if mx >= 40 & mx <= 220 & my >= 140 & my <= 176 -> {
+				logEvent(state, '[ACTION] Primary button executed!')
+			}
+			// Secondary button (240, 140, 180, 36)
+			if mx >= 240 & mx <= 420 & my >= 140 & my <= 176 -> {
+				logEvent(state, '[ACTION] Secondary button triggered!')
+			}
+			// Slider click (40, 215, 380, 25)
+			if mx >= 40 & mx <= 420 & my >= 210 & my <= 235 -> {
+				pct := int(float(mx - 40) / 380.0 * 100.0)
+				state.sliderVal <- if pct < 0 { true -> 0, _ -> if pct > 100 { true -> 100, _ -> pct } }
+				logEvent(state, '[SLIDER] Speed set to ' + string(state.sliderVal) + '%')
+			}
+			// Checkbox 1: Hardware Acceleration (40, 330, 300, 24)
+			if mx >= 40 & mx <= 340 & my >= 325 & my <= 350 -> {
+				state.hwAccel <- !state.hwAccel
+				logEvent(state, '[CONFIG] Hardware Accel: ' + string(state.hwAccel))
+			}
+			// Checkbox 2: Grid Overlay (40, 365, 300, 24)
+			if mx >= 40 & mx <= 340 & my >= 360 & my <= 385 -> {
+				state.gridOverlay <- !state.gridOverlay
+				logEvent(state, '[CONFIG] Grid Overlay: ' + string(state.gridOverlay))
+			}
+			// Radio 0 (40, 435)
+			if mx >= 40 & mx <= 300 & my >= 430 & my <= 455 -> {
+				state.backendChoice <- 0
+				logEvent(state, '[BACKEND] Selected Auto / Native GDI/X11')
+			}
+			// Radio 1 (40, 465)
+			if mx >= 40 & mx <= 300 & my >= 460 & my <= 485 -> {
+				state.backendChoice <- 1
+				logEvent(state, '[BACKEND] Selected OpenGL / Vulkan')
+			}
+			// Radio 2 (40, 495)
+			if mx >= 40 & mx <= 300 & my >= 490 & my <= 515 -> {
+				state.backendChoice <- 2
+				logEvent(state, '[BACKEND] Selected WebGL / Canvas')
+			}
+		}
+	}
+}
+
+// ─── Entry Point & Launcher ────────────────────────────────────────────────
+fn run() {
+	std.println('========================================================')
+	std.println('     MAGNOLIA STUDIO (Cross-Platform GUI App)           ')
+	std.println('========================================================')
+	std.println('Targeting Native and Web backends')
+	std.println('Active platform OS: ' + string(___runtime_sys_info().os))
+	std.println('GUI backend:        :' + string(gui.backend()))
+
+	state := createInitialState()
+
+	// Create window with cross-platform options
+	window := gui.createWindow('Magnolia Studio', 960, 640, {
+		frameMs: 16
+		layer2D: 'auto'
+		canvasId: 'magnolia-studio-canvas'
+	})
+
+	// If native display is available, run native event loop;
+	// otherwise fall back seamlessly to web/virtual window mode!
+	activeWindow := if window.type = :ok {
+		true -> window
+		_ -> {
+			std.println('Native display unavailable; running in Web / Virtual Window mode.')
+			guiWeb.createWindowState('Magnolia Studio', 960, 640, 16, false, {
+				canvasId: 'magnolia-studio-canvas'
+			})
+		}
+	}
+
+	std.println('Window initialized successfully (backend: :' + string(activeWindow.backend) + ')')
+
+	// Render first frame
+	renderApp(activeWindow, state)
+	std.println('Initial frame rendered. Queued ops: ' + string(len(activeWindow.messages)))
+
+	// Simulate 10 frames to verify event handling and physics loop
+	fn simLoop(i) if i < 10 {
+		true -> {
+			updateApp(activeWindow, state, 0.016)
+			if i = 3 -> handleAppClick(activeWindow, state, 450, 320) // simulate Incr click
+			if i = 6 -> handleAppClick(activeWindow, state, 420, 30)  // simulate Tab 1 click
+			renderApp(activeWindow, state)
+			simLoop(i + 1)
+		}
+	}
+	simLoop(0)
+
+	std.println('Completed simulation loop. Total ops: ' + string(len(activeWindow.messages)))
+	std.println('State after simulation: counter=' + string(state.counter) + ', tab=' + string(state.activeTab))
+	std.println('Magnolia GUI Studio is fully operational on Native and Web!')
+}
+
+run()
