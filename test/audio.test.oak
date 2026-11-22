@@ -30,9 +30,9 @@ fn run(t) {
 			0
 		)
 
-		'i16ToF32 converts 32767 back to ~1.0' |> t.approx(
+		'i16ToF32 converts 32767 using the signed 16-bit scale' |> t.approx(
 			i16ToF32(32767)
-			1.0
+			32767 / 32768
 		)
 		'i16ToF32 converts -32768 back to ~-1.0' |> t.approx(
 			i16ToF32(-32768)
@@ -69,6 +69,27 @@ fn run(t) {
 		'u8ToF32 converts 255 back to 1.0' |> t.approx(
 			u8ToF32(255)
 			1.0
+		)
+		'unsigned PCM endpoints and silence encode consistently across helpers and formats' |> t.eq(
+			{
+				samples := [-1.0, 0.0, 1.0]
+				raw := audio.rawEncode(samples, {bitDepth: 8, signed: false})
+				wav := audio.wav(samples, 8000, 1, 8)
+				[samples |> std.map(f32ToU8),
+					[codepoint(raw.(0)), codepoint(raw.(1)), codepoint(raw.(2))],
+					[codepoint(wav.(44)), codepoint(wav.(45)), codepoint(wav.(46))]]
+			}
+			[[0, 128, 255], [0, 128, 255], [0, 128, 255]]
+		)
+		'unsigned PCM endpoints and silence decode consistently across helpers and formats' |> t.approx(
+			{
+				bytes := char(0) + char(128) + char(255)
+				wav := audio.wav([-1.0, 0.0, 1.0], 8000, 1, 8)
+				[[u8ToF32(0), u8ToF32(128), u8ToF32(255)],
+					audio.rawDecode(bytes, {bitDepth: 8, signed: false}).samples,
+					audio.parseWav(wav).samples]
+			}
+			[[-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]]
 		)
 
 		'clipF32 clips values > 1 to 1' |> t.eq(
@@ -202,8 +223,8 @@ fn run(t) {
 		'panStereo at 0 is balanced' |> t.eq(
 			{
 				s := panStereo([1, 1, 1], 0)
-				(s.left).(0) |> int(math.abs(_) * 10000) =
-					(s.right).(0) |> int(math.abs(_) * 10000)
+				int(math.abs((s.left).(0)) * 10000) =
+					int(math.abs((s.right).(0)) * 10000)
 			}
 			true
 		)
@@ -230,11 +251,8 @@ fn run(t) {
 		)
 
 		'deinterleave splits channels' |> t.eq(
-			{
-				ch := deinterleave([1, 4, 2, 5, 3, 6], 2)
-				ch.(0) = [1, 2, 3] & ch.(1) = [4, 5, 6]
-			}
-			true
+			deinterleave([1, 4, 2, 5, 3, 6], 2)
+			[[1, 2, 3], [4, 5, 6]]
 		)
 	}
 
@@ -350,15 +368,14 @@ fn run(t) {
 			true
 		)
 
-		'ifft inverts fft for zero-padded signal' |> t.eq(
+		'ifft inverts fft for zero-padded signal' |> t.approx(
 			{
 				orig := [0.5, -0.3, 0.1, -0.2]
 				result := fft(orig, ?)
 				back := ifft(result.re, result.im)
-				orig |> std.map(fn(x) int(x * 1000)) =
-					back.re |> std.map(fn(x) int(x * 1000))
+				back.re
 			}
-			true
+			[0.5, -0.3, 0.1, -0.2]
 		)
 
 		'magnitude has correct length' |> t.eq(
@@ -418,6 +435,7 @@ fn run(t) {
 		'midiToFreq converts MIDI note 60 (middle C) to ~261.63 Hz' |> t.approx(
 			midiToFreq(60)
 			261.63
+			0.005
 		)
 
 		'freqToMidi converts 440 Hz back to 69' |> t.eq(
@@ -433,6 +451,7 @@ fn run(t) {
 		'dbToLinear converts -6 dB to ~0.501' |> t.approx(
 			dbToLinear(-6)
 			0.501
+			0.0005
 		)
 
 		'linearToDb converts 1 to 0 dB' |> t.approx(
@@ -443,6 +462,7 @@ fn run(t) {
 		'linearToDb converts 0.5 to ~-6.02 dB' |> t.approx(
 			linearToDb(0.5)
 			-6.02
+			0.005
 		)
 	}
 
@@ -485,6 +505,25 @@ fn run(t) {
 		'parseWav returns ? for invalid data' |> t.eq(
 			parseWav('invalid')
 			?
+		)
+	}
+
+	// AIFF's 80-bit extended sample rate and PCM payload.
+	{
+		'aiff uses a ten-byte extended 44100 Hz field' |> t.eq(
+			{
+				data := audio.aiff([0.5, -0.5], 44100, 1, 16)
+				[len(data), codepoint(data.(28)), codepoint(data.(29)),
+					codepoint(data.(30)), codepoint(data.(31)), std.slice(data, 38, 42)]
+			}
+			[58, 64, 14, 172, 68, 'SSND']
+		)
+		'aiff parses its encoded 44100 Hz PCM16' |> t.approx(
+			{
+				decoded := audio.parseAiff(audio.aiff([0.5, -0.5], 44100, 1, 16))
+				[decoded.sampleRate, decoded.channels, decoded.bitDepth, decoded.samples.(0), decoded.samples.(1)]
+			}
+			[44100, 1, 16, 16383 / 32768, -0.5]
 		)
 	}
 
@@ -543,6 +582,34 @@ fn run(t) {
 
 		'parseOgg returns ? for invalid data' |> t.eq(
 			parseOgg('invalid')
+			?
+		)
+		'ogg refuses non-PCM16 rather than writing a false format header' |> t.eq(
+			[ogg([0], 44100, 1, 8), ogg([0], 44100, 1, 32)]
+			[?, ?]
+		)
+		'parseOgg rejects a bad capture pattern and truncated header or data' |> t.eq(
+			{
+				valid := ogg([0.5, -0.5], 44100, 1, 16)
+				[parseOgg('bad!' + std.slice(valid, 4)),
+					parseOgg(std.slice(valid, 0, 26)),
+					parseOgg(std.slice(valid, 0, len(valid) - 1)),
+					parseOgg(std.slice(valid, 0, 44))]
+			}
+			[?, ?, ?, ?]
+		)
+		'parseOgg safely rejects every truncated prefix of an owned valid Ogg' |> t.assert(
+			{
+				valid := ogg([0.5, -0.5], 44100, 1, 16)
+				std.range(len(valid)) |> std.every(fn(n) parseOgg(std.slice(valid, 0, n)) = ?)
+			}
+		)
+		'parseOgg refuses PCM header claiming a non-16-bit payload' |> t.eq(
+			{
+				valid := ogg([0.5, -0.5], 44100, 1, 16)
+				badDepth := std.slice(valid, 0, 42) + char(8) + char(0) + std.slice(valid, 44)
+				parseOgg(badDepth)
+			}
 			?
 		)
 	}

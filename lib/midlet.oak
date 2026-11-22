@@ -1,0 +1,838 @@
+// Separate, headless Java ME MIDP-1 *lifecycle probe*.
+// The trusted owned classfiles under lib/midp1-classes supply a small
+// MIDlet, Display, Canvas, Command, pinned-device Font and a small Image/
+// Graphics offscreen bytecode profile. The normal Java SE applet entry and
+// Builder targets still reject MIDlets. The optional --canvas-paint route
+// preflights and delivers ONE 176x176 owned-fixture Canvas callback. A
+// separate --canvas-service opt-in permits ONE later selected repaint in a
+// verified triggerService() call, but not a concurrent event queue. The
+// ordinary model remains no-paint. No JAD provisioning, keypad, network or
+// game playback. JAR PNGs are
+// available only when a caller selects names from that SAME local JAR.
+// Run from the repository root; no javac/JVM is needed at NATIVE runtime.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+app := import('./applet.oak')
+classfile := import('./applet-class.oak')
+zip := import('./applet-zip.oak')
+png := import('./midp-indexed-png.oak')
+device := import('./midp-device-profile.oak')
+crypto := import('./crypto.oak')
+
+fn error(message) {type: :error, message: 'MIDP probe: ' + message}
+
+MODEL := [
+    'javax/microedition/midlet/MIDlet'
+    'javax/microedition/midlet/MIDletStateChangeException'
+    'javax/microedition/lcdui/Display'
+    'javax/microedition/lcdui/Displayable'
+    'javax/microedition/lcdui/Canvas'
+    'javax/microedition/lcdui/Command'
+    'javax/microedition/lcdui/CommandListener'
+    'javax/microedition/lcdui/Graphics'
+    'javax/microedition/lcdui/Font'
+    'javax/microedition/lcdui/Image'
+]
+// javac-only bridge type: its source stub is NOT a VM class or JAR class.
+// Only exact static descriptors in jvm-vm-libs may invoke its Oak service.
+PROFILE_NAMES := std.append(std.slice(MODEL, 0, len(MODEL)), [
+    'javax/microedition/lcdui/ImageBridge'
+])
+// A deliberately small CLDC-facing profile. In particular, the shared
+// interpreter's Java SE AWT, URL/ZIP, Thread and StringBuilder contracts do
+// NOT become Java ME contracts just because they exist in the other host.
+CORE := [
+    'java/lang/Object'
+    'java/lang/String'
+    'java/lang/StringBuffer'
+    'java/lang/System'
+    'java/lang/Integer'
+    // One finite synchronous Runnable task with metered virtual sleep;
+    // this is NOT a general handset preemptive scheduler or event queue.
+    'java/lang/Thread'
+    'java/lang/Runnable'
+    'java/lang/InterruptedException'
+    // Only constructor identity and reproducibly seeded, bounded methods.
+    // The original game's Random is allocated but NEVER sampled.
+    'java/util/Random'
+    'java/lang/Throwable'
+    'java/lang/Exception'
+    'java/lang/RuntimeException'
+    'java/lang/NullPointerException'
+    'java/lang/IllegalArgumentException'
+    'java/lang/IllegalStateException'
+    'java/lang/ArithmeticException'
+    'java/lang/IndexOutOfBoundsException'
+    'java/lang/StringIndexOutOfBoundsException'
+    'java/io/IOException'
+    'java/io/PrintStream'
+]
+// Only an explicitly supplied finite virtual snapshot admits Runtime. No
+// host/JDK freeMemory value or magic constant is silently substituted.
+CORE_WITH_RUNTIME := std.append(std.slice(CORE, 0, len(CORE)), [
+    'java/lang/Runtime'
+])
+fn _model?(owner) MODEL |> std.some(fn(name) name = owner)
+
+// Check declared references, even dead methods/fields. The bytecode linker
+// separately checks exact reachable method descriptors and invocation kind.
+// Refuse Java SE host capabilities that the shared VM can use for APPLETS:
+// they are NOT thereby CLDC/MIDP services. Fail closed on unknown MIDP APIs.
+fn _allowedNames?(text, prefix, known) {
+    // A naive substring replacement would mistakenly allow DisplayFake
+    // after removing the permitted Display prefix. Require an exact JVM
+    // class-name boundary for EVERY qualified reference in a descriptor.
+    chunks := str.split(text, prefix)
+    safe? := true
+    std.range(1, len(chunks)) |> std.each(fn(i) {
+        tail := chunks.(i)
+        allowed? := known |> std.some(fn(name) {
+            suffix := std.slice(name, len(prefix))
+            str.startsWith?(tail, suffix) &
+                (len(tail) = len(suffix) |
+                 !str.contains?('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$/',
+                     tail.(len(suffix))))
+        })
+        if !allowed? -> safe? <- false
+    })
+    safe?
+}
+fn _allowedReference?(text, virtualFree?) if type(text) != :string | len(text) > 8192 {
+    true -> false
+    _ -> _allowedNames?(text, 'javax/', PROFILE_NAMES) &
+        _allowedNames?(text, 'java/', if virtualFree? {
+            true -> CORE_WITH_RUNTIME, _ -> CORE}) &
+        !str.contains?(text, 'sun/') &
+        !str.contains?(text, 'org/microemu/')
+}
+
+fn _ownedModels(paint?, service?) {
+    raw := []
+    problem := ?
+    MODEL |> std.each(fn(name) if problem = ? {
+        true -> {
+            // Keep three distinct Canvas classfiles: default refusal,
+            // one paint, and separately selected bounded service. Graphics
+            // is shared only by the two opt-in profiles. The javac-only
+            // ImageBridge stub is NEVER loaded by the VM.
+            directory := if service? & name = 'javax/microedition/lcdui/Canvas' {
+                true -> 'lib/midp1-service-classes/'
+                _ -> if paint? & (name = 'javax/microedition/lcdui/Canvas' |
+                    name = 'javax/microedition/lcdui/Graphics') {
+                    true -> 'lib/midp1-paint-classes/'
+                    _ -> 'lib/midp1-classes/'
+                }
+            }
+            bytes := fs.readFile(directory + name + '.class')
+            if type(bytes) != :string | len(bytes) > 8192 {
+                true -> problem <- 'missing or oversized owned model ' + name
+                _ -> {
+                    parsed := classfile.parseClass(bytes)
+                    if parsed.type != :ok {
+                        true -> problem <- 'invalid owned model class ' + name
+                        _ -> if parsed.value.name != name {
+                            true -> problem <- 'owned model class identity mismatch: ' + name
+                            _ -> raw << bytes
+                        }
+                    }
+                }
+            }
+        }
+    })
+    if problem != ? {true -> error(problem), _ -> {type: :ok, value: raw}}
+}
+
+fn _simpleResource?(name) if type(name) != :string |
+    len(name) < 1 | len(name) > 64 {
+    true -> false
+    _ -> std.range(len(name)) |> std.every(fn(i) {
+        str.contains?('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-',
+            name.(i))
+    })
+}
+
+// Read and decode every explicitly allowed asset BEFORE constructing the
+// selected MIDlet, so malformed/missing/duplicate/oversized resources cannot
+// appear as a partial-success trace. The class bytes must come from this SAME
+// JAR. No implicit classloader/JAD lookup or arbitrary filesystem path exists.
+fn _prepareImages(inputs, config) {
+    names := config.resourceNames |> std.default([])
+    jar := config.resourceJar
+    if type(names) != :list | len(names) > 40 |
+        (jar = ? & len(names) > 0) |
+        (jar != ? & (type(jar) != :string | len(jar) > 1048576)) {
+        true -> error('resources require one local <=1 MiB JAR and at most 40 names')
+        _ -> if jar = ? {
+            true -> {type: :ok, value: {}}
+            _ -> {
+                entries := zip.entries(jar)
+                if entries.type != :ok | len(entries.classes) != len(inputs) |
+                    len(inputs) < 1 | len(inputs) > 8 {
+                    true -> error('resource JAR classes differ from MIDlet inputs')
+                    _ -> {
+                        same? := true
+                        entries.classes |> std.each(fn(raw, i) if raw != inputs.(i) ->
+                            same? <- false)
+                        if !same? {
+                            true -> error('resource JAR class bytes differ from MIDlet inputs')
+                            _ -> {
+                                images := {}
+                                pixels := 0
+                                problem := ?
+                                names |> std.each(fn(name) if problem = ? {
+                                    true -> if !_simpleResource?(name) |
+                                        images.('asset:' + name) != ? {
+                                        true -> problem <- 'unsafe or duplicate selected image name'
+                                        _ -> {
+                                            member := zip.selectResource(jar, name, 65536)
+                                            if member.type != :ok {
+                                                true -> problem <- name + ': ' + member.message
+                                                _ -> {
+                                                    decoded := png.decode(member.value)
+                                                    if decoded.type != :ok {
+                                                        true -> problem <- name + ': ' + decoded.message
+                                                        _ -> if pixels + decoded.width * decoded.height > 100000 {
+                                                            true -> problem <- 'preflight image pixel budget exceeded'
+                                                            _ -> {
+                                                                pixels <- pixels + decoded.width * decoded.height
+                                                                images.('asset:' + name) <- {
+                                                                    width: decoded.width
+                                                                    height: decoded.height
+                                                                    pixels: decoded.pixels
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                })
+                                if problem != ? {true -> error(problem),
+                                    _ -> {type: :ok, value: images}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Only caller-supplied *original* class bytes are accepted here. System/MIDP
+// package classes are supplied by the owned model, never shadowed by a JAR.
+fn compile(inputs, config) {
+    config := config |> std.default({})
+    if config.virtualFreeBytes != ? &
+        (type(config.virtualFreeBytes) != :int |
+         config.virtualFreeBytes < 0 | config.virtualFreeBytes > 268435456) {
+        true -> error('virtual free-memory snapshot must be 0..268435456 bytes')
+        _ -> if type(inputs) != :list {true -> error('expected 1..8 original classes'), _ -> {
+        if len(inputs) < 1 | len(inputs) > 8 {
+            true -> error('expected 1..8 original classes')
+            _ -> {
+                entry := config.entry
+                if type(entry) != :string | len(entry) < 1 | len(entry) > 256 {
+                    true -> error('choose an explicit MIDlet --class')
+                    _ -> {
+                        originals := {}
+                        problem := ?
+                        total := 0
+                        inputs |> std.each(fn(raw) if problem = ? {
+                            true -> if type(raw) != :string | len(raw) > 131072 {
+                                true -> problem <- 'original class exceeds 128 KiB limit'
+                                _ -> {
+                                    total <- total + len(raw)
+                                    if total > 524288 {
+                                        true -> problem <- 'original classes exceed 512 KiB total'
+                                        _ -> {
+                                            parsed := classfile.parseClass(raw)
+                                            if parsed.type != :ok {
+                                                true -> problem <- 'invalid original class: ' + parsed.message
+                                                _ -> {
+                                                    cls := parsed.value
+                                                    if cls.major < 45 | cls.major > 52 |
+                                                        str.startsWith?(cls.name, 'java/') |
+                                                        str.startsWith?(cls.name, 'javax/') |
+                                                        str.startsWith?(cls.name, 'sun/') |
+                                                        str.startsWith?(cls.name, 'org/microemu/') {
+                                                        true -> problem <- 'protected or unsupported original class/version ' + cls.name
+                                                        _ -> if originals.(cls.name) != ? {
+                                                            true -> problem <- 'duplicate original class ' + cls.name
+                                                            _ -> {
+                                                                originals.(cls.name) <- cls
+                                                                cls.fields |> std.each(fn(field) if problem = ? &
+                                                                    !_allowedReference?(field.desc, config.virtualFreeBytes != ?) ->
+                                                                    problem <- 'unmodeled MIDP/desktop field ' + cls.name + '.' + field.name)
+                                                                cls.methods |> std.each(fn(method) if problem = ? &
+                                                                    !_allowedReference?(method.desc, config.virtualFreeBytes != ?) ->
+                                                                    problem <- 'unmodeled MIDP/desktop method ' + cls.name + '.' + method.name)
+                                                                std.range(len(cls.pool)) |> std.each(fn(i) if
+                                                                    problem = ? & cls.pool.(i) != ? &
+                                                                    cls.pool.(i).tag = 7 {
+                                                                    true -> {
+                                                                        name := classfile.className(cls.pool, i)
+                                                                        if !_allowedReference?(name, config.virtualFreeBytes != ?) ->
+                                                                            problem <- 'unmodeled MIDP/desktop class reference ' + string(name)
+                                                                    }
+                                                                })
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                        selected := originals.(entry)
+                        if problem = ? & selected = ? -> problem <- 'entry class missing: ' + entry
+                        // An explicit ordered Canvas callback script is a
+                        // *direct-method* checkpoint on one unselected
+                        // constructed object, never an injected device key.
+                        if problem = ? & config.directKeyPlan != ? &
+                            (config.constructorOnly? != true |
+                             config.canvasPaint? = true |
+                             config.canvasService? = true |
+                             config.deferredWorkerStart? = true |
+                             type(config.directKeyPlan) != :object) ->
+                            problem <- 'direct Canvas key script requires an isolated constructor image'
+                        // The reusable start-return profile accepts any
+                        // preflighted MIDlet entry, but never combines a
+                        // deferred Runnable with paint, service or key calls.
+                        if problem = ? & config.deferredWorkerStart? = true &
+                            (config.constructorOnly? = true |
+                             config.directKeyPlan != ? |
+                             config.canvasPaint? = true |
+                             config.canvasService? = true) ->
+                            problem <- 'deferred worker start requires an isolated startApp and an explicitly pinned local JAR'
+                        // Every isolated constructor, direct method or
+                        // deferred-start image ties EXACTLY its class bytes
+                        // to its local SHA-pinned archive: a pinned unrelated
+                        // resource JAR is not executable provenance.
+                        if problem = ? & (config.constructorOnly? = true |
+                            config.deferredWorkerStart? = true) {
+                            true -> {
+                                pin := config.sourcePin
+                                jar := config.resourceJar
+                                if type(pin) != :object |
+                                    type(pin.sha256) != :string |
+                                    type(pin.bytes) != :int |
+                                    type(jar) != :string |
+                                    pin.bytes != len(jar) |
+                                    pin.bytes < 1 | pin.bytes > 1048576 |
+                                    pin.sha256 != crypto.sha256(jar) {
+                                    true -> problem <- 'opt-in MIDP method requires an explicitly SHA-pinned local JAR'
+                                    _ -> {
+                                        archive := zip.entries(jar)
+                                        if archive.type != :ok |
+                                            len(archive.classes) != len(inputs) {
+                                            true -> problem <- 'opt-in MIDP class list differs from pinned JAR'
+                                            _ -> std.range(len(inputs)) |> std.each(fn(i) if
+                                                problem = ? & inputs.(i) != archive.classes.(i) ->
+                                                problem <- 'opt-in MIDP class bytes differ from pinned JAR')
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        fn descendant?(name, depth) if depth > 16 | name = ? {
+                            true -> false
+                            _ -> if name = 'javax/microedition/midlet/MIDlet' {
+                                true -> true
+                                _ -> if originals.(name) = ? {true -> false,
+                                    _ -> descendant?(originals.(name).super, depth + 1)}
+                            }
+                        }
+                        if problem = ? {
+                            true -> {
+                                ctor := classfile.method(selected, '<init>', '()V')
+                                if !descendant?(selected.super, 0) |
+                                    (selected.flags & 1) = 0 |
+                                    (selected.flags & 1536) != 0 | ctor = ? {
+                                    true -> problem <- 'entry needs a public concrete MIDlet ancestor and public no-arg constructor'
+                                    _ -> if (ctor.flags & 1) = 0 ->
+                                        problem <- 'MIDlet no-arg constructor must be public'
+                                }
+                                fn inherited(owner, name, desc, depth) if depth > 16 |
+                                    originals.(owner) = ? {
+                                    true -> ?
+                                    _ -> {
+                                        found := classfile.method(originals.(owner), name, desc)
+                                        if found = ? {
+                                            true -> inherited(originals.(owner).super,
+                                                name, desc, depth + 1)
+                                            _ -> found
+                                        }
+                                    }
+                                }
+                                // The explicit constructor checkpoint links no
+                                // lifecycle or paint callback; ordinary runs
+                                // keep their all-callback preflight unchanged.
+                                callbacks := if config.constructorOnly? = true {
+                                    true -> []
+                                    _ -> if config.deferredWorkerStart? = true {
+                                        true -> [{name: 'startApp', desc: '()V'}]
+                                        _ -> [
+                                            {name: 'startApp', desc: '()V'}
+                                            {name: 'pauseApp', desc: '()V'}
+                                            {name: 'destroyApp', desc: '(Z)V'}
+                                        ]
+                                    }
+                                }
+                                if config.canvasService? = true &
+                                    config.constructorOnly? != true ->
+                                    callbacks << {name: 'triggerService', desc: '()V'}
+                                callbacks |> std.each(fn(callback) if problem = ? {
+                                    true -> {
+                                        method := inherited(entry, callback.name, callback.desc, 0)
+                                        if method = ? {
+                                            true -> problem <- 'missing concrete MIDlet callback ' + callback.name + callback.desc
+                                            _ -> if (method.flags & 1032) != 0 |
+                                                (method.flags & 5) = 0 ->
+                                                problem <- 'MIDlet callback must be concrete, nonstatic and public/protected: ' + callback.name
+                                        }
+                                    }
+                                })
+                            }
+                        }
+                        if problem != ? {
+                            true -> error(problem)
+                            _ -> {
+                                models := if config.constructorOnly? = true &
+                                    (config.canvasPaint? = true |
+                                     config.canvasService? = true) {
+                                    true -> error('constructor-only MIDlet cannot select paint or service')
+                                    _ -> if config.canvasService? = true &
+                                        config.canvasPaint? != true {
+                                        true -> error('Canvas service requires the paint opt-in')
+                                        _ -> _ownedModels(config.canvasPaint? = true,
+                                            config.canvasService? = true)
+                                    }
+                                }
+                                if models.type != :ok {
+                                    true -> models
+                                    _ -> {
+                                        // Normal mode preflights every lifecycle callback;
+                                        // constructor mode links only the requested constructor
+                                        // and, when explicitly provided, bounded Canvas callbacks.
+                                        // Do not mutate caller-supplied original bytes.
+                                        image := app.compile(std.append(
+                                            std.slice(inputs, 0, len(inputs)), models.value), {
+                                            entry: entry,
+                                            method: if config.constructorOnly? = true {
+                                                true -> ?, _ -> 'startApp'},
+                                            constructorOnly?: config.constructorOnly? = true,
+                                            desc: '()V', midpProfile?: true,
+                                            extraMidpPinnedConstructor?:
+                                                config.constructorOnly? = true &
+                                                config.directKeyPlan = ?,
+                                            extraMidpConstructorFreeBytes:
+                                                config.virtualFreeBytes,
+                                            extraMidpPaint?: config.canvasPaint? = true,
+                                            extraMidpDirectPlan: config.directKeyPlan,
+                                            extraMidpDirectFreeBytes: config.virtualFreeBytes,
+                                            extraMidpDeferredStart?: config.deferredWorkerStart? = true,
+                                            extraMidpDeferredClassPins: if config.deferredWorkerStart? = true {
+                                                true -> inputs |> std.map(fn(raw) crypto.sha256(raw))
+                                                _ -> ?
+                                            },
+                                            extraMidpDeferredFreeBytes: config.virtualFreeBytes,
+                                            extraMethods: if config.constructorOnly? = true |
+                                                config.deferredWorkerStart? = true {
+                                                true -> ?, _ -> std.append([
+                                                    {name: 'pauseApp', desc: '()V'}
+                                                    {name: 'destroyApp', desc: '(Z)V'}
+                                                ], if config.canvasService? = true {
+                                                    true -> [{name: 'triggerService', desc: '()V'}]
+                                                    _ -> []
+                                                })
+                                            }
+                                        })
+                                        if image.type != :ok {
+                                            true -> error(image.message)
+                                            _ -> {
+                                                image.value.midpProfile? <- true
+                                                image.value.midpOnePaint? <- (config.canvasPaint? = true)
+                                                image.value.midpOneService? <- (config.canvasService? = true)
+                                                image
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }}}
+}
+
+fn _signal(result) result.object.fields.(
+    'javax/microedition/midlet/MIDlet.modelSignal:I') |> std.default(0)
+fn _displayObject(result) {
+    displayStatics := result.statics.('javax/microedition/lcdui/Display')
+    display := if displayStatics = ? {true -> ?, _ ->
+        displayStatics.('javax/microedition/lcdui/Display.instance:Ljavax/microedition/lcdui/Display;')}
+    if display = ? {true -> ?, _ ->
+        display.fields.('javax/microedition/lcdui/Display.requested:Ljavax/microedition/lcdui/Displayable;')}
+}
+fn _requested(result) {
+    requested := _displayObject(result)
+    if requested = ? {true -> ?, _ -> requested.className}
+}
+// Read only the owned Displayable model's bounded logical command state.
+// A command/listener is registered here, NOT delivered as an AMS input event.
+fn _registration(result) {
+    requested := _displayObject(result)
+    if requested = ? {
+        true -> {count: 0, labels: [], listenerClass: ?}
+        _ -> {
+            prefix := 'javax/microedition/lcdui/Displayable.'
+            count := requested.fields.(prefix + 'commandCount:I')
+            array := requested.fields.(prefix + 'registered:[Ljavax/microedition/lcdui/Command;')
+            listener := requested.fields.(prefix +
+                'commandListener:Ljavax/microedition/lcdui/CommandListener;')
+            if type(count) != :int | count < 0 | count > 4 |
+                type(array) != :object | len(array.values) != 4 {
+                true -> error('invalid bounded command registration state')
+                _ -> {
+                    labels := []
+                    problem := ?
+                    std.range(count) |> std.each(fn(i) {
+                        command := array.values.(i)
+                        label := if command = ? {true -> ?, _ ->
+                            command.fields.('javax/microedition/lcdui/Command.label:Ljava/lang/String;')}
+                        if type(label) != :object | type(label.text) != :string {
+                            true -> problem <- 'invalid registered command label'
+                            _ -> labels << label.text
+                        }
+                    })
+                    if problem != ? {true -> error(problem),
+                        _ -> {count: count, labels: labels,
+                            listenerClass: if listener = ? {
+                                true -> ?, _ -> listener.className}}}
+                }
+            }
+        }
+    }
+}
+
+// Only for the explicit paint routes. Serialize each entire modeled frame
+// in big-endian ARGB order; the real-emulator observer separately snapshots
+// its cropped device Canvas rather than the 22-row chrome on either side.
+// There is no inferred portable clip or general scheduler.
+fn _joinBalanced(parts) if len(parts) {
+    0 -> ''
+    1 -> parts.0
+    _ -> {
+        half := int(len(parts) / 2)
+        joined := std.range(half) |> std.map(fn(i) parts.(2 * i) +
+            parts.(2 * i + 1))
+        if len(parts) % 2 = 1 -> joined << parts.(len(parts) - 1)
+        _joinBalanced(joined)
+    }
+}
+fn _frameSignature(image) if type(image) != :object |
+    image.className != 'javax/microedition/lcdui/Image' |
+    image.width != device.WIDTH | image.height != device.HEIGHT |
+    type(image.midpPixels) != :list | len(image.midpPixels) != device.PIXELS {
+    true -> error('one-frame MIDP paint requires exactly ' +
+        string(device.WIDTH) + 'x' + string(device.HEIGHT) + ' modeled pixels')
+    _ -> {
+        bytes := image.midpPixels |> std.map(fn(pixel) {
+            char((pixel >> 24) & 255) + char((pixel >> 16) & 255) +
+            char((pixel >> 8) & 255) + char(pixel & 255)
+        })
+        raw := _joinBalanced(bytes)
+        if len(raw) != device.ARGB_BYTES {
+            true -> error('one-frame MIDP ARGB encoding differs')
+            _ -> {type: :ok, sha256: crypto.sha256(raw)}
+        }
+    }
+}
+
+// A constructor-only execution of SHA-pinned local class bytes. This does
+// not call startApp, schedule a worker, paint or deliver a device event. A
+// logical setCurrent request, if the constructor makes one, is NOT an actual
+// device selection and is reported only as a request.
+fn _constructorRecord(current, virtualFreeBytes) {
+    if current.type != :ok | type(current.object) != :object |
+        current.startedTasks != 0 | current.virtualMillis != 0 |
+        current.repaintCount != 0 | current.session != ? |
+        _signal(current) != 0 {
+        true -> error('pinned MIDP constructor did not finish without a worker or callback')
+        _ -> {
+            registration := _registration(current)
+            if registration.type = :error {true -> registration,
+                _ -> {type: :ok, phase: 'constructed-only-bounded',
+                    actions: ['construct'], output: current.output,
+                    steps: current.steps,
+                    constructedClass: current.object.className,
+                    requestedDisplay: _requested(current),
+                    registeredCommands: registration,
+                    modelStartAppCalled?: false,
+                    modelWorkerStarted?: false,
+                    modelPaintCalled?: false,
+                    modelDisplaySelected?: false,
+                    deviceInputDelivered?: false,
+                    virtualFreeBytes: virtualFreeBytes,
+                    runtimeGcCalls: current.midpRuntimeGcCalls}
+            }
+        }
+    }
+}
+
+// Generic bounded start-return profile. The one Runnable and its target
+// come from the executed MIDlet bytecode; no class names, pixel hashes or
+// expected trace values are inferred by this host. A logical display request
+// is not an actual selected device, and the worker has NOT run.
+fn _deferredStartRecord(current, virtualFreeBytes) {
+    thread := current.midpDeferredThread
+    if current.type != :ok | type(current.object) != :object |
+        type(thread) != :object | thread.className != 'java/lang/Thread' |
+        thread.threadReady? != true | thread.threadStarted? != true |
+        thread.threadAlive? != true |
+        type(thread.threadTarget) != :object |
+        current.startedTasks != 1 | current.virtualMillis != 0 |
+        current.repaintCount != 0 | current.session != ? |
+        _signal(current) != 0 {
+        true -> error('deferred worker start did not finish at one unscheduled Runnable')
+        _ -> {
+            registration := _registration(current)
+            if registration.type = :error {
+                true -> registration
+                _ -> {type: :ok, output: current.output,
+                    steps: current.steps,
+                    phase: 'start-returned-worker-deferred',
+                    actions: ['construct', 'startApp'],
+                    constructedClass: current.object.className,
+                    deferredRunnableClass: thread.threadTarget.className,
+                    requestedDisplay: _requested(current),
+                    registeredCommands: registration,
+                    workerThreadStartCalled?: true,
+                    workerRunnableDeferred?: true,
+                    workerRunExecuted?: false,
+                    modelDisplaySelected?: false,
+                    modelPaintCalled?: false,
+                    deviceInputDelivered?: false,
+                    virtualFreeBytes: virtualFreeBytes,
+                    runtimeGcCalls: current.midpRuntimeGcCalls}
+            }
+        }
+    }
+}
+
+// Fixed AMS actions, one opt-in post-start paint, and (separately opted-in)
+// one preflighted service callback on the selected Canvas. No event thread.
+// A self-notified destroyed MIDlet is never called again, including when it
+// destroys itself during start/pause. A self-notified pause ends this probe.
+fn run(inputs, config) {
+    config := config |> std.default({})
+    sequence := config.sequence |> std.default('full')
+    deferredStart? := sequence = 'start-deferred'
+    constructorOnly? := sequence = 'construct-only'
+    limit := if deferredStart? | constructorOnly? {true -> 50000,
+        _ -> 10000}
+    maxSteps := config.maxSteps |> std.default(limit)
+    if (sequence != 'start' & sequence != 'full' & !deferredStart? &
+        !constructorOnly?) |
+        type(maxSteps) != :int | maxSteps < 1 | maxSteps > limit |
+        (config.canvasPaint? = true & sequence != 'start') |
+        (config.canvasService? = true & config.canvasPaint? != true) |
+        (config.canvasPaint? != ? & config.canvasPaint? != true &
+         config.canvasPaint? != false) |
+        (config.canvasService? != ? & config.canvasService? != true &
+         config.canvasService? != false) {
+        true -> error('sequence must be start|full|construct-only|start-deferred with bounded steps; Canvas paint requires start and service requires paint')
+        _ -> {
+            config.constructorOnly? <- constructorOnly?
+            config.deferredWorkerStart? <- deferredStart?
+            compiled := compile(inputs, config)
+            if compiled.type != :ok {
+                true -> compiled
+                _ -> {
+                    staged := _prepareImages(inputs, config)
+                    if staged.type != :ok {
+                        true -> staged
+                        _ -> {
+                            current := app.run(compiled.value, {}, {
+                                method: if constructorOnly? {true -> ?,
+                                    _ -> 'startApp'}, desc: '()V',
+                                constructorOnly?: constructorOnly?,
+                                midpDeferredStart?: deferredStart?,
+                                persistentMethod?: (sequence = 'full' |
+                                    config.canvasPaint? = true),
+                                maxSteps: maxSteps, maxDepth: 16, maxArray: 4096,
+                                midpImages: staged.value
+                                midpVirtualFreeBytes: config.virtualFreeBytes
+                            })
+                            if deferredStart? | constructorOnly? {
+                                true -> if current.type != :ok {
+                                    true -> error(current.message)
+                                    _ -> if constructorOnly? {
+                                        true -> _constructorRecord(current,
+                                            config.virtualFreeBytes)
+                                        _ -> _deferredStartRecord(current,
+                                            config.virtualFreeBytes)
+                                    }
+                                }
+                                _ -> {
+                            if current.type = :ok & config.canvasPaint? = true {
+                                true -> if _signal(current) != 0 {
+                                    true -> current <- {type: :error,
+                                        message: 'Canvas paint requires an active MIDlet after startApp'}
+                                    _ -> current <- app.dispatchMidpPaint(current.session)
+                                }
+                            }
+                            canvasFrame := if current.type = :ok &
+                                config.canvasPaint? = true {
+                                true -> current.frame, _ -> ?
+                            }
+                            firstSignature := if current.type = :ok &
+                                config.canvasService? = true {
+                                true -> _frameSignature(canvasFrame)
+                                _ -> ?
+                            }
+                            if current.type = :ok & config.canvasService? = true {
+                                true -> if firstSignature.type != :ok {
+                                    true -> current <- firstSignature
+                                    _ -> if _signal(current) != 0 {
+                                        true -> current <- error('Canvas service requires an active MIDlet')
+                                        _ -> {
+                                            before := current.paintedCanvas
+                                            call := app.dispatchMethod(current.session,
+                                                'triggerService', '()V', [])
+                                            if call.type != :ok {
+                                                true -> current <- call
+                                                _ -> {
+                                                    after := _displayObject(call)
+                                                    serviceCount := before.fields.(
+                                                        'javax/microedition/lcdui/Canvas.serviceCount:I')
+                                                    pending := before.fields.(
+                                                        'javax/microedition/lcdui/Canvas.repaintPending:Z')
+                                                    if type(after) != :object |
+                                                        after.refId != before.refId |
+                                                        _signal(call) != 0 |
+                                                        serviceCount != 1 | pending != 0 {
+                                                        true -> current <- error('Canvas service requires exactly one consumed selected repaint')
+                                                        _ -> current <- call
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if current.type != :ok {
+                                true -> error(current.message)
+                                _ -> {
+                                    actions := ['start']
+                                    if config.canvasService? = true ->
+                                        actions << 'service'
+                                    phase := if _signal(current) {
+                                        3 -> 'destroyed'
+                                        2 -> 'paused'
+                                        _ -> 'active'
+                                    }
+                                    problem := ?
+                                    if sequence = 'full' & phase = 'active' {
+                                        true -> {
+                                            // Four total calls (start/pause/start/destroy)
+                                            // share the *same* object, statics and budget.
+                                            [
+                                                {label: 'pause', name: 'pauseApp', desc: '()V', args: []}
+                                                {label: 'resume', name: 'startApp', desc: '()V', args: []}
+                                                {label: 'destroy', name: 'destroyApp', desc: '(Z)V', args: [1]}
+                                            ] |> std.each(fn(action) if phase != 'failed' &
+                                                ((phase = 'active' & action.label = 'pause') |
+                                                 (phase = 'paused' & action.label = 'resume') |
+                                                 (phase = 'active' & action.label = 'destroy')) {
+                                                true -> {
+                                                    // notifyPaused is a one-shot request, not
+                                                    // a sticky reason to stay paused after the
+                                                    // explicit, finite AMS resume callback.
+                                                    if action.label = 'resume' & _signal(current) = 2 ->
+                                                        current.object.fields.(
+                                                            'javax/microedition/midlet/MIDlet.modelSignal:I') <- 0
+                                                    call := app.dispatchMethod(current.session,
+                                                        action.name, action.desc, action.args)
+                                                    if call.type != :ok {
+                                                        true -> {
+                                                            problem <- call.message
+                                                            phase <- 'failed'
+                                                        }
+                                                        _ -> {
+                                                            current <- call
+                                                            actions << action.label
+                                                            phase <- if _signal(current) {
+                                                                3 -> 'destroyed'
+                                                                2 -> 'paused'
+                                                                _ -> if action.label = 'pause' {true -> 'paused',
+                                                                    _ -> if action.label = 'destroy' {
+                                                                        true -> 'destroyed', _ -> 'active'}}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            })
+                                        }
+                                    }
+                                    if phase = 'failed' {
+                                        true -> error(problem)
+                                        _ -> {
+                                            registration := _registration(current)
+                                            signature := if config.canvasPaint? = true {
+                                                true -> _frameSignature(canvasFrame)
+                                                _ -> {type: :ok, sha256: ?}
+                                            }
+                                            if registration.type = :error {
+                                                true -> registration
+                                                _ -> if signature.type != :ok {
+                                                    true -> signature
+                                                    _ -> {
+                                                        result := {type: :ok, output: current.output,
+                                                            steps: current.steps, phase: phase,
+                                                            actions: actions, requestedDisplay: _requested(current),
+                                                            registeredCommands: registration,
+                                                            virtualFreeBytes: config.virtualFreeBytes,
+                                                            runtimeGcCalls: if current.session = ? {
+                                                                true -> current.midpRuntimeGcCalls
+                                                                _ -> current.session.state.midpRuntimeGcCalls
+                                                            },
+                                                            painted?: (config.canvasPaint? = true),
+                                                            inputDelivered?: false}
+                                                        if config.canvasPaint? = true {
+                                                            true -> {
+                                                                result.canvasArgbSha256 <- signature.sha256
+                                                                result.canvasPixels <- device.PIXELS
+                                                                if config.canvasService? = true {
+                                                                    true -> {
+                                                                        result.canvasFirstArgbSha256 <- firstSignature.sha256
+                                                                        result.canvasFrameCount <- 2
+                                                                    }
+                                                                    _ -> result.canvasFrameCount <- 1
+                                                                }
+                                                            }
+                                                        }
+                                                        result
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

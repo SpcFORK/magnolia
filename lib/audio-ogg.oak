@@ -8,7 +8,9 @@
 // this pure-Oak implementation uses raw PCM so that no external codec
 // library is needed. Files produced by this module can be round-tripped
 // through ogg()/parseOgg() and converted to standard formats via the
-// other libaudio modules.
+// other libaudio modules. This custom profile is not Vorbis or Opus.
+// The reader checks basic framing/truncation but does not verify CRC or all
+// stream sequencing/continuation rules; it is not an untrusted-input parser.
 //
 // Samples are normalised floats in [-1, 1].
 
@@ -17,11 +19,6 @@
 	reduce: reduce
 	default: default
 	range: range
-	int: int
-	type: type
-	len: len
-	char: char
-	codepoint: codepoint
 } := import('std')
 {
 	join: join
@@ -33,62 +30,29 @@
 
 // ---- clamp -----------------------------------------------------------
 
-fn _clipF32(s) if {
-	s > 1 -> 1
-	s < -1 -> -1
-	_ -> s
-}
+// Sample-conversion primitives are abstracted into lib/sample.oak; this lib
+// keeps thin re-stubs so the call sites below are unchanged.
+_sample := import('sample')
+fn _clipF32(s) _sample._clipF32(s)
 
 // ---- sample conversions (signed 16-bit LE) --------------------------
 
-fn _f32ToI16(s) int(s * 32767)
-fn _i16ToF32(s) s / 32768
+fn _f32ToI16(s) _sample._f32ToI16(s)
+fn _i16ToF32(s) _sample._i16ToF32(s)
 
 // ---- little-endian byte utilities -----------------------------------
 
-fn _byteStr(blist) blist |> map(fn(b) char(b % 256)) |> join('')
-
-fn _u16LE(n) {
-	n := int(n)
-	[n % 256, int(n / 256) % 256]
-}
-
-fn _u32LE(n) {
-	n := int(n)
-	b0 := n % 256
-	b1 := int(n / 256) % 256
-	b2 := int(n / 65536) % 256
-	b3 := int(n / 16777216) % 256
-	[b0, b1, b2, b3]
-}
-
-fn _i16LE(n) {
-	n := int(n)
-	u := if n < 0 { true -> n + 65536, _ -> n }
-	_u16LE(u)
-}
-
-fn _readU8(s, off) codepoint(s.(off))
-
-fn _readU16LE(s, off) {
-	b0 := codepoint(s.(off))
-	b1 := codepoint(s.(off + 1))
-	b0 + b1 * 256
-}
-
-fn _readU32LE(s, off) {
-	b0 := codepoint(s.(off))
-	b1 := codepoint(s.(off + 1))
-	b2 := codepoint(s.(off + 2))
-	b3 := codepoint(s.(off + 3))
-	b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
-}
-
-fn _readI16LE(s, off) {
-	u := _readU16LE(s, off)
-	if u > 32767 { true -> u - 65536, _ -> u }
-}
-
+// Byte-order primitives are abstracted into lib/bytes.oak; this lib keeps
+// thin re-stubs so the call sites below are unchanged.
+_bytes := import('bytes')
+fn _byteStr(blist) _bytes._byteStr(blist)
+fn _u16LE(n) _bytes._u16LE(n)
+fn _u32LE(n) _bytes._u32LE(n)
+fn _i16LE(n) _bytes._i16LE(n)
+fn _readU8(s, off) _bytes._readU8(s, off)
+fn _readU16LE(s, off) _bytes._readU16LE(s, off)
+fn _readU32LE(s, off) _bytes._readU32LE(s, off)
+fn _readI16LE(s, off) _bytes._readI16LE(s, off)
 // ---- CRC-32 (OGG variant) -------------------------------------------
 // OGG pages use a CRC-32 with polynomial 0x04C11DB7 (normal form).
 // The checksum field in the page header is zeroed during computation.
@@ -249,9 +213,17 @@ fn _encodeSamples(samples, bitDepth) {
 //   s := sine(440, 44100, 44100)
 //   data := ogg(s, 44100, 1, 16)
 fn ogg(samples, sampleRate, channels, bitDepth) {
+	bitDepth := default(bitDepth, 16)
+	if bitDepth != 16 {
+		true -> ? // This profile writes signed PCM16 only.
+		_ -> _oggEncode16(samples, sampleRate, channels)
+	}
+}
+
+fn _oggEncode16(samples, sampleRate, channels) {
 	sampleRate := default(sampleRate, 44100)
 	channels := default(channels, 1)
-	bitDepth := default(bitDepth, 16)
+	bitDepth := 16
 	serial := 1
 
 	// BOS page: codec identification header
@@ -262,19 +234,21 @@ fn ogg(samples, sampleRate, channels, bitDepth) {
 	totalSamples := len(samples)
 	bytesPerSample := int(bitDepth / 8)
 
-	fn buildPages(offset, pageSeq, acc) {
-		remaining := totalSamples - offset
-		if remaining <= 0 -> acc
-		count := if remaining < _maxPageSamples { true -> remaining, _ -> _maxPageSamples }
-		pageSamples := range(count) |> map(fn(i) samples.(offset + i))
-		payload := _encodeSamples(pageSamples, bitDepth)
+	fn buildPages(offset, pageSeq, acc) if offset >= totalSamples {
+		true -> acc
+		_ -> {
+			remaining := totalSamples - offset
+			count := if remaining < _maxPageSamples { true -> remaining, _ -> _maxPageSamples }
+			pageSamples := range(count) |> map(fn(i) samples.(offset + i))
+			payload := _encodeSamples(pageSamples, bitDepth)
 
-		granule := offset + count
-		isLast := granule >= totalSamples
-		headerType := if isLast { true -> 0x04, _ -> 0x00 }
+			granule := offset + count
+			isLast := granule >= totalSamples
+			headerType := if isLast { true -> 0x04, _ -> 0x00 }
 
-		page := _oggPage(headerType, granule, serial, pageSeq, payload)
-		buildPages(offset + count, pageSeq + 1, acc << page)
+			page := _oggPage(headerType, granule, serial, pageSeq, payload)
+			buildPages(offset + count, pageSeq + 1, acc << page)
+		}
 	}
 
 	pages := buildPages(0, 1, [])
@@ -293,48 +267,35 @@ fn ogg(samples, sampleRate, channels, bitDepth) {
 // _readOggPageHeader reads an OGG page header starting at `off` in `data`.
 // Returns { headerType, granule, serial, pageSeq, nSegments, segTable,
 //           headerLen, dataLen } or ? on error.
-fn _readOggPageHeader(data, off) {
-	if off + 27 > len(data) -> ?
-
-	// Check capture pattern 'OggS'
-	magic := slice(data, off, off + 4)
-	if magic != 'OggS' -> ?
-
-	version := _readU8(data, off + 4)
-	if version != 0 -> ?
-
-	headerType := _readU8(data, off + 5)
-
-	// Granule position: 8 bytes LE (treat as unsigned for sample count)
-	granule := {
-		fn sub(i, acc) if i >= 8 {
-			true -> acc
-			_ -> sub(i + 1, acc + _readU8(data, off + 6 + i) * _pow2(i * 8))
+fn _readOggPageHeader(data, off) if off < 0 | off + 27 > len(data) {
+	true -> ?
+	_ -> if slice(data, off, off + 4) != 'OggS' | _readU8(data, off + 4) != 0 {
+		true -> ?
+		_ -> {
+			headerType := _readU8(data, off + 5)
+			// Granule position: 8 bytes LE (unsigned sample count).
+			granule := {
+				fn sub(i, acc) if i >= 8 {
+					true -> acc
+					_ -> sub(i + 1, acc + _readU8(data, off + 6 + i) * _pow2(i * 8))
+				}
+				sub(0, 0)
+			}
+			serial := _readU32LE(data, off + 14)
+			pageSeq := _readU32LE(data, off + 18)
+			// CRC at off+22..25 is not verified by this finite parser.
+			nSegments := _readU8(data, off + 26)
+			if off + 27 + nSegments > len(data) {
+				true -> ?
+				_ -> {
+					segTable := range(nSegments) |> map(fn(i) _readU8(data, off + 27 + i))
+					dataLen := segTable |> reduce(0, fn(a, b) a + b)
+					{headerType: headerType, granule: granule, serial: serial,
+						pageSeq: pageSeq, nSegments: nSegments, segTable: segTable,
+						headerLen: 27 + nSegments, dataLen: dataLen}
+				}
+			}
 		}
-		sub(0, 0)
-	}
-
-	serial := _readU32LE(data, off + 14)
-	pageSeq := _readU32LE(data, off + 18)
-	// CRC at off+22..25 (skip verification for simplicity)
-	nSegments := _readU8(data, off + 26)
-
-	if off + 27 + nSegments > len(data) -> ?
-
-	segTable := range(nSegments) |> map(fn(i) _readU8(data, off + 27 + i))
-
-	dataLen := segTable |> reduce(0, fn(a, b) a + b)
-	headerLen := 27 + nSegments
-
-	{
-		headerType: headerType
-		granule: granule
-		serial: serial
-		pageSeq: pageSeq
-		nSegments: nSegments
-		segTable: segTable
-		headerLen: headerLen
-		dataLen: dataLen
 	}
 }
 
@@ -359,74 +320,75 @@ fn _readPcmSamples(data, off, nBytes) {
 //   r := parseOgg(fileBytes)
 //   r.sampleRate  // => 44100
 //   r.samples.(0) // => first normalised sample
-fn parseOgg(data) {
-	if len(data) < 27 -> ?
-
-	// Read BOS page
-	bos := _readOggPageHeader(data, 0)
-	if bos = ? -> ?
-	if (int(bos.headerType / 2) % 2) != 1 -> ?  // BOS flag (bit 1) must be set
-
-	idOff := bos.headerLen
-	if idOff + bos.dataLen > len(data) -> ?
-
-	// Parse codec identification header
-	idData := slice(data, idOff, idOff + bos.dataLen)
-	if len(idData) < 16 -> ?
-
-	codecId := slice(idData, 0, 8)
-	if codecId != 'PCM     ' -> ?
-
-	channels := _readU16LE(idData, 8)
-	sampleRate := _readU32LE(idData, 10)
-	bitDepth := _readU16LE(idData, 14)
-
-	// Helper to flatten a list of lists into a single list.
-	fn _flatten(lists) {
-		fn cat(result, i) if i >= len(lists) {
-			true -> result
-			_ -> {
-				lst := lists.(i)
-				fn inner(r, j) if j >= len(lst) {
-					true -> r
-					_ -> inner(r << lst.(j), j + 1)
+fn parseOgg(data) if type(data) != :string {
+	true -> ?
+	_ -> {
+		bos := _readOggPageHeader(data, 0)
+		if bos = ? {
+			true -> ?
+			_ -> if (int(bos.headerType / 2) % 2) != 1 |
+				bos.headerLen + bos.dataLen > len(data) | bos.dataLen < 16 {
+				true -> ?
+				_ -> {
+					idOff := bos.headerLen
+					idData := slice(data, idOff, idOff + bos.dataLen)
+					if slice(idData, 0, 8) != 'PCM     ' {
+						true -> ?
+						_ -> {
+							channels := _readU16LE(idData, 8)
+							sampleRate := _readU32LE(idData, 10)
+							bitDepth := _readU16LE(idData, 14)
+							fn readPages(off, acc) if off >= len(data) {
+								true -> ? // an EOS page is required
+								_ -> {
+									pg := _readOggPageHeader(data, off)
+									if pg = ? {
+										true -> ?
+										_ -> {
+											dataStart := off + pg.headerLen
+											if dataStart + pg.dataLen > len(data) | pg.dataLen % 2 != 0 {
+												true -> ?
+												_ -> {
+													pageSamples := _readPcmSamples(data, dataStart, pg.dataLen)
+													nextOff := dataStart + pg.dataLen
+													isEos := (int(pg.headerType / 4) % 2) = 1
+													if isEos {
+														true -> acc << pageSamples
+														_ -> readPages(nextOff, acc << pageSamples)
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+							sampleLists := if bitDepth != 16 | channels < 1 | sampleRate < 1 {
+								true -> ?
+								_ -> readPages(bos.headerLen + bos.dataLen, [])
+							}
+							if sampleLists = ? {
+								true -> ?
+								_ -> {
+									fn cat(result, i) if i >= len(sampleLists) {
+										true -> result
+										_ -> {
+											lst := sampleLists.(i)
+											fn inner(r, j) if j >= len(lst) {
+												true -> r
+												_ -> inner(r << lst.(j), j + 1)
+											}
+											cat(inner(result, 0), i + 1)
+										}
+									}
+									{sampleRate: sampleRate, channels: channels,
+										bitDepth: bitDepth, samples: cat([], 0)}
+								}
+							}
+						}
+					}
 				}
-				cat(inner(result, 0), i + 1)
 			}
 		}
-		cat([], 0)
-	}
-
-	// Read subsequent data pages
-	fn readPages(off, acc) {
-		if off >= len(data) -> acc
-
-		pg := _readOggPageHeader(data, off)
-		if pg = ? -> acc
-
-		dataStart := off + pg.headerLen
-		if dataStart + pg.dataLen > len(data) -> acc
-
-		pageSamples := _readPcmSamples(data, dataStart, pg.dataLen)
-		nextOff := dataStart + pg.dataLen
-
-		isEos := (int(pg.headerType / 4) % 2) = 1  // EOS flag (bit 2)
-		if isEos {
-			true -> acc << pageSamples
-			_ -> readPages(nextOff, acc << pageSamples)
-		}
-	}
-
-	firstDataOff := bos.headerLen + bos.dataLen
-	sampleLists := readPages(firstDataOff, [])
-
-	allSamples := _flatten(sampleLists)
-
-	{
-		sampleRate: sampleRate
-		channels: channels
-		bitDepth: bitDepth
-		samples: allSamples
 	}
 }
 

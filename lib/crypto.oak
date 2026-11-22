@@ -139,11 +139,20 @@ _sha256H0 := [
 	0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
 ]
 
-// 32-bit rotate-right
-fn _rotr32(x, n)((x >> n) | ((x << (32 - n)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+// JavaScript's >> sign-extends a 32-bit *signed* value, even after masking
+// with 0xFFFFFFFF. Keep the high bit as a separate positive term so SHA-256
+// sees a logical shift on native Oak and in Builder JS alike (n = 0..31).
+fn _shr32(x, n) {
+    low := (x & 0x7FFFFFFF) >> n
+    high := if (x & 0x80000000) != 0 {
+        true -> if n = 0 {true -> 0x80000000, _ -> 1 << (31 - n)}
+        _ -> 0
+    }
+    low + high
+}
 
-// 32-bit logical shift-right
-fn _shr32(x, n)(x & 0xFFFFFFFF) >> n
+// 32-bit rotate-right
+fn _rotr32(x, n) (_shr32(x, n) | ((x << (32 - n)) & 0xFFFFFFFF)) & 0xFFFFFFFF
 
 // sha256 computes SHA-256 over byte string `data` and returns a 64-character
 // lowercase hexadecimal digest.
@@ -153,10 +162,17 @@ fn _shr32(x, n)(x & 0xFFFFFFFF) >> n
 //   // => 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
 fn sha256(data) {
 	msgLen := len(data)
-	bitLen := msgLen * 8
 	padLen := (56 - (msgLen + 1) % 64 + 64) % 64
 	pad := range(padLen) |> map(fn(_) char(0)) |> join('')
-	lenBytes := range(8) |> map(fn(i) char((bitLen >> (56 - i * 8)) & 0xFF)) |> join('')
+	// JS masks shift counts to five bits: bitLen >> 32 would shift by ZERO.
+	// Split the 64-bit bit length into two exact 32-bit words first. This also
+	// avoids multiplying a large byte length by eight before splitting it.
+	lenHi := int(msgLen / 536870912)
+	lenLo := (msgLen % 536870912) * 8
+	lenBytes := range(8) |> map(fn(i) {
+		word := if i < 4 {true -> lenHi, _ -> lenLo}
+		char((word >> (24 - (i % 4) * 8)) & 0xFF)
+	}) |> join('')
 	msg := data + char(0x80) + pad + lenBytes
 	numBlocks := len(msg) / 64
 

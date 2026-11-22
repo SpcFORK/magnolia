@@ -1,0 +1,1559 @@
+// js-parse.oak -- JavaScript (ES3/ES5 + minimal ES2015) parser for the
+// Oak-native front-end. Companion to lib/js-tokenize.oak; together they
+// replace the Node/Acorn bridge for JS -> Oak transpilation (see
+// see the JS tooling milestone notes).
+//
+// The parser constructs the same js* AST that lib/estree.oak produces from
+// an Acorn dump (lib/ast-js.oak constructors), so the Oak-native pipeline and
+// the Acorn bridge are directly diffable. Differences are limited to tok
+// metadata (which is a constant placeholder in both) and to constructs the
+// native subset rejects.
+//
+// Scope: ES3/ES5 syntax plus arrow functions, template literals, spread in
+// call/array/argument position and let/const (lowered to jsVar, matching the
+// bridge). Classes, generators, async and ES modules are hard errors with a
+// positioned diagnostic. Error recovery is deliberately absent: the first
+// fatal error aborts the parse and is returned in the errors list, mirroring
+// the plan's "bail with position on first error" rule. Diagnostics that do
+// not affect the tree (labeled statements, with statements, exotic but
+// droppable constructs) are collected as non-fatal warnings instead.
+//
+// Entry point:
+//   parse(src) -> { ast, errors, warnings, ok }
+// where ast is a jsBlock on success (? on failure) and ok means no fatal
+// errors were recorded. errors/warnings are lists of { error/msg, line, col }.
+//
+// This module is embedded + visible in the stdlib map but is intentionally
+// NOT autoloaded: the JS front-end is opt-in (import('js-parse')).
+
+std := import('std')
+str := import('str')
+jstok := import('js-tokenize')
+ast := import('ast-js')
+{
+	default: default
+	len: len
+	map: map
+	each: each
+	filter: filter
+	flatten: flatten
+	slice: slice
+} := import('std')
+join := str.join
+
+
+// ---------------------------------------------------------------------------
+// Template helpers (module level; shared by sub-parsers)
+// ---------------------------------------------------------------------------
+
+fn _simpleEscape(e) if e = 'n' {
+	true -> char(10)
+	_ -> if e = 't' {
+		true -> char(9)
+		_ -> if e = 'r' {
+			true -> char(13)
+			_ -> if e = 'b' {
+				true -> char(8)
+				_ -> if e = 'f' {
+					true -> char(12)
+					_ -> if e = 'v' {
+						true -> char(11)
+						_ -> if e = '0' {
+							true -> char(0)
+							_ -> if e = '\\' {
+								true -> '\\'
+								_ -> if e = '`' {
+									true -> '`'
+									_ -> if e = '$' {
+										true -> '$'
+										_ -> if e = '{' {
+											true -> '{'
+											_ -> if e = char(39) {
+												true -> char(39)
+												_ -> if e = '"' {
+													true -> '"'
+													_ -> ''
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// splitTemplatePieces walks the raw inner text of a template literal and
+// separates quasi strings from ${ expression } raw texts. Returns
+// { quasis: [...], exprs: [...] } or ? when a boundary cannot be found
+// (unterminated expression).
+fn splitTemplatePieces(raw) {
+	quasis := []
+	exprs := []
+	cur := ''
+	i := 0
+	n := len(raw)
+	bad := false
+	fn loop() if i < n & !bad {
+		true -> {
+			c := raw.(i)
+			if c = '\\' {
+				true -> {
+					// an escape sequence travels into the quasi verbatim;
+					// cookTemplate decodes it later
+					nxt := if i + 1 < n {
+						true -> raw.(i + 1)
+						_ -> ''
+					}
+					cur <- cur + '\\' + nxt
+					i <- i + 2
+					loop()
+				}
+				_ -> if c = '$' & i + 1 < n & raw.(i + 1) = '{' {
+					true -> {
+						quasis << cur
+						cur <- ''
+						i <- i + 2
+						exprStart := i
+						depth := 1
+						fn scan() if i < n & depth > 0 {
+							true -> {
+								d := raw.(i)
+								if d = '\\' {
+									true -> i <- i + 2
+									_ -> if d = char(39) | d = '"' | d = '`' {
+										true -> {
+											// skip the string literal interior
+											quote := d
+											i <- i + 1
+											fn skip() if i < n & raw.(i) != quote {
+												true -> {
+													if raw.(i) = '\\' -> i <- i + 1
+													i <- i + 1
+													skip()
+												}
+											}
+											skip()
+											i <- i + 1
+										}
+										_ -> if d = '{' | d = '(' | d = '[' {
+											true -> {
+												depth <- depth + 1
+												i <- i + 1
+											}
+											_ -> if d = '}' | d = ')' | d = ']' {
+												true -> {
+													depth <- depth - 1
+													i <- i + 1
+												}
+												_ -> i <- i + 1
+											}
+										}
+									}
+								}
+								scan()
+							}
+							_ -> ?
+						}
+						scan()
+						if depth != 0 {
+							true -> bad <- true
+							_ -> {
+								exprs << slice(raw, exprStart, i - 1)
+								loop()
+							}
+						}
+					}
+					_ -> {
+						cur <- cur + c
+						i <- i + 1
+						loop()
+					}
+				}
+			}
+		}
+	}
+	loop()
+	if bad -> ?
+	quasis << cur
+	result := {
+		quasis: quasis
+		exprs: exprs
+	}
+	result
+}
+
+// cookTemplate decodes the escape sequences of one quasi string. Invalid
+// escapes pass through untouched (mirrors the bridge's fallback to `raw`
+// when acorn produces no cooked value). Non-ASCII \u escapes are emitted
+// clamped to a single byte: Oak strings are byte strings, so astral and
+// multi-byte codepoints cannot be represented exactly here.
+fn cookTemplate(raw) {
+	out := ''
+	i := 0
+	n := len(raw)
+	fn hex(v) if v {
+		? -> -1
+		_ -> if v >= '0' & v <= '9' -> codepoint(v) - 48
+		_ -> if v >= 'a' & v <= 'f' -> codepoint(v) - 87
+		_ -> if v >= 'A' & v <= 'F' -> codepoint(v) - 55
+		_ -> -1
+	}
+	fn loop() if i < n {
+		true -> {
+			c := raw.(i)
+			if c != '\\' {
+				true -> {
+					out <- out + c
+					i <- i + 1
+					loop()
+				}
+				_ -> {
+					e := if i + 1 < n {
+						true -> raw.(i + 1)
+						_ -> ''
+					}
+					if e = 'x' {
+						true -> if i + 3 < n {
+							true -> {
+								hi := hex(raw.(i + 2))
+								lo := hex(raw.(i + 3))
+								if hi >= 0 & lo >= 0 {
+									true -> {
+										out <- out + char(hi * 16 + lo)
+										i <- i + 4
+									}
+									_ -> {
+										out <- out + '\\' + e
+										i <- i + 2
+									}
+								}
+							}
+							_ -> {
+								out <- out + '\\' + e
+								i <- i + 2
+							}
+						}
+						_ -> if e = 'u' {
+							true -> if i + 5 < n {
+								true -> {
+									d1 := hex(raw.(i + 2))
+									d2 := hex(raw.(i + 3))
+									d3 := hex(raw.(i + 4))
+									d4 := hex(raw.(i + 5))
+									if d1 >= 0 & d2 >= 0 & d3 >= 0 & d4 >= 0 {
+										true -> {
+											cp := d1 * 4096 + d2 * 256 + d3 * 16 + d4
+											out <- out + char(cp)
+											i <- i + 6
+										}
+										_ -> {
+											out <- out + '\\' + e
+											i <- i + 2
+										}
+									}
+								}
+								_ -> {
+									out <- out + '\\' + e
+									i <- i + 2
+								}
+							}
+							_ -> if e = '\n' {
+								true -> i <- i + 2 // line continuation
+								_ -> {
+									simple := _simpleEscape(e)
+									if len(simple) > 0 {
+										true -> {
+											out <- out + simple
+											i <- i + 2
+										}
+										_ -> {
+											out <- out + '\\' + e
+											i <- i + 2
+										}
+									}
+								}
+							}
+						}
+					}
+					loop()
+				}
+			}
+		}
+	}
+	loop()
+	out
+}
+
+// ---------------------------------------------------------------------------
+// Parser factory. A parser object closes over its own token cursor state so
+// templates can spin up a clean sub-parser for ${ expression } segments.
+// ---------------------------------------------------------------------------
+
+fn _binPrec(op) if op {
+	? -> 0
+	'||' -> 1
+	'&&' -> 2
+	'|' -> 3
+	'^' -> 4
+	'&' -> 5
+	'==', '!=', '===', '!==' -> 6
+	'<', '<=', '>', '>=', 'in', 'instanceof' -> 7
+	'<<', '>>', '>>>' -> 8
+	'+', '-' -> 9
+	'*', '/', '%' -> 10
+	_ -> 0
+}
+
+fn _makeParser(tokens) {
+	st := {
+		tokens: tokens
+		index: 0
+		errors: []
+		warnings: []
+		failed: false
+		noIn: false
+	}
+
+	fn peekAt(n) {
+		i := st.index + n
+		if i >= len(st.tokens) -> i <- len(st.tokens) - 1
+		st.tokens.(i)
+	}
+
+	fn peek peekAt(0)
+
+	fn eof? {
+		t := peek()
+		t.type = :eof
+	}
+
+	fn advance {
+		tok := st.tokens.(st.index)
+		if st.index < len(st.tokens) - 1 -> st.index <- st.index + 1
+		tok
+	}
+
+	fn atPunct(p) {
+		t := peek()
+		t.type = :punct & t.value = p
+	}
+
+	// keyword or identifier with a given word (let/const/etc. are keywords,
+	// 'of' is lexed as a plain identifier)
+	fn atWord(w) {
+		t := peek()
+		(t.type = :ident | t.type = :keyword) & t.value = w
+	}
+
+	fn atKw(w) {
+		t := peek()
+		t.type = :keyword & t.value = w
+	}
+
+	fn warn(msg) {
+		t := peek()
+		st.warnings := st.warnings << { msg: msg, line: t.line, col: t.col }
+		?
+	}
+
+	fn perr(msg) {
+		t := peek()
+		st.errors := st.errors << { error: msg, line: t.line, col: t.col }
+		st.failed <- true
+		?
+	}
+
+	fn expectPunct(p) {
+		if st.failed -> ?
+		if atPunct(p) {
+			true -> advance()
+			_ -> {
+				perr('Unexpected token ' << string(peek().value) << ', expected ' << p)
+				?
+			}
+		}
+	}
+
+	fn expectWord(w) {
+		if st.failed -> ?
+		if atWord(w) {
+			true -> advance()
+			_ -> {
+				perr('Unexpected token ' << string(peek().value) << ', expected ' << w)
+				?
+			}
+		}
+	}
+
+	fn eatSemi {
+		if atPunct(';') -> advance()
+		?
+	}
+
+	// run `run()` with the `in` operator disabled; restores the previous
+	// setting afterwards. Used for the init/test/update of for statements.
+	fn _parseNoIn(run) {
+		prevNoIn := st.noIn
+		st.noIn <- true
+		r := run()
+		st.noIn <- prevNoIn
+		r
+	}
+
+	// run `run()` with the `in` operator fully allowed (restores on exit).
+	// Used at bracket/paren boundaries inside noIn regions.
+	fn _parseAllowIn(run) {
+		prevNoIn := st.noIn
+		st.noIn <- false
+		r := run()
+		st.noIn <- prevNoIn
+		r
+	}
+
+	// --- expression grammar -------------------------------------------------
+	// sequence < assignment < conditional
+	// conditional < binary(table) < unary < left-hand-side < primary
+
+	fn parseExpression() {
+		if st.failed -> ?
+		first := parseAssignmentExpression()
+		exprs := [first]
+		fn loop() if atPunct(',') & !st.failed {
+			true -> {
+				advance()
+				exprs << parseAssignmentExpression()
+				loop()
+			}
+		}
+		loop()
+		if len(exprs) = 1 {
+			true -> first
+			_ -> ast.jsSequence(exprs)
+		}
+	}
+
+	fn parseAssignmentExpression() {
+		if st.failed -> ?
+		left := parseConditionalExpression()
+		if left {
+			? -> ?
+			_ -> if _assignOpAt() {
+				? -> if atPunct('=>') & left.type = :jsIdentifier {
+					true -> _arrowFromIdentifier(left)
+					_ -> left
+				}
+				_ -> {
+					op := advance()
+					right := parseAssignmentExpression()
+					ast.jsAssignment(left, right, op.value)
+				}
+			}
+		}
+	}
+
+	fn _assignOpAt() {
+		t := peek()
+		if t.type = :punct {
+			true -> if ['=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '>>>=', '&=', '|=', '^='] |> std.contains?(t.value) {
+				true -> t.value
+				_ -> ?
+			}
+			_ -> ?
+		}
+	}
+
+	// a single-identifier arrow function: x => body (the "async" prefix of
+	// async x => is not supported; async arrows fail as a plain identifier
+	// followed by a non-comma token)
+	fn _arrowFromIdentifier(idNode) {
+		advance() // eat =>
+		_arrowBody([idNode])
+	}
+
+	fn _arrowBody(params) {
+		if atPunct('{') {
+			true -> ast.jsArrowFunction(params, ast.jsBlock(parseBlockInner()))
+			_ -> ast.jsArrowFunction(params, ast.jsBlock([ast.jsReturn(parseAssignmentExpression())]))
+		}
+	}
+
+	fn parseConditionalExpression() {
+		if st.failed -> ?
+		test := parseBinaryExpression(1)
+		if atPunct('?') & !st.failed {
+			true -> {
+				advance() // ?
+				consequent := parseAssignmentExpression()
+				expectPunct(':')
+				alternate := parseAssignmentExpression()
+				ast.jsTernary(test, consequent, alternate)
+			}
+			_ -> test
+		}
+	}
+
+	fn _binaryOpAt() {
+		t := peek()
+		if t.type {
+			:punct -> if _binPrec(t.value) > 0 {
+				true -> t.value
+				_ -> ?
+			}
+			:keyword -> if _binPrec(t.value) > 0 {
+				true -> if st.noIn {
+					true -> if t.value = 'in' {
+						true -> ?
+						_ -> t.value
+					}
+					_ -> t.value
+				}
+				_ -> ?
+			}
+			_ -> ?
+		}
+	}
+
+	fn parseBinaryExpression(minPrec) {
+		if st.failed -> ?
+		left := parseUnaryExpression()
+		fn loop() {
+			op := _binaryOpAt()
+			prec := if op {
+				? -> 0
+				_ -> _binPrec(op)
+			}
+			if prec > 0 & prec >= minPrec {
+				true -> {
+					advance()
+					right := parseBinaryExpression(prec + 1)
+					left <- ast.jsBinary(op, left, right)
+					loop()
+				}
+				_ -> left
+			}
+		}
+		loop()
+	}
+
+	fn parseUnaryExpression() {
+		if st.failed -> ?
+		t := peek()
+		prefix := ?
+		if t.type {
+			:punct -> if t.value = '-' | t.value = '+' | t.value = '!' | t.value = '~' | t.value = '++' | t.value = '--' {
+				true -> prefix <- t.value
+			}
+			:keyword -> if t.value = 'typeof' | t.value = 'void' | t.value = 'delete' {
+				true -> prefix <- t.value
+			}
+			_ -> ?
+		}
+		if prefix {
+			? -> parsePostfixExpression()
+			_ -> {
+				advance()
+				if prefix = '++' | prefix = '--' {
+					true -> ast.jsUpdate(prefix, parseUnaryExpression(), true)
+					_ -> ast.jsUnary(prefix, parseUnaryExpression())
+				}
+			}
+		}
+	}
+
+	fn parsePostfixExpression() {
+		if st.failed -> ?
+		node := parseLeftHandSide(true)
+		t := peek()
+		if t.type = :punct & (t.value = '++' | t.value = '--') {
+			true -> {
+				advance()
+				ast.jsUpdate(t.value, node, false)
+			}
+			_ -> node
+		}
+	}
+
+	// allowCall=false while parsing the callee of a `new` expression so the
+	// trailing arguments bind to the `new` instead of the last member
+	fn parseLeftHandSide(allowCall) {
+		if st.failed -> ?
+		node := parsePrimaryOrNew()
+		fn loop() {
+			if st.failed -> node
+			if atPunct('.') {
+				true -> {
+					advance()
+					name := parsePropertyName()
+					node <- ast.jsProperty(node, ast.jsIdentifier(name))
+					loop()
+				}
+				_ -> if atPunct('[') {
+					true -> {
+						advance()
+						idx := _parseAllowIn(fn() parseExpression())
+						expectPunct(']')
+						node <- ast.jsIndex(node, idx)
+						loop()
+					}
+					_ -> if atPunct('(') & allowCall {
+						true -> {
+							node <- ast.jsCall(node, parseArguments())
+							loop()
+						}
+						_ -> node
+					}
+				}
+			}
+		}
+		loop()
+	}
+
+	fn parsePrimaryOrNew() {
+		if atKw('new') {
+			true -> {
+				advance() // new
+				callee := parseLeftHandSide(false)
+				if atPunct('(') {
+					true -> ast.jsNew(callee, parseArguments())
+					_ -> ast.jsNew(callee, [])
+				}
+			}
+			_ -> parsePrimary()
+		}
+	}
+
+	fn parsePropertyName() {
+		t := peek()
+		if t.type {
+			:ident, :keyword -> {
+				advance()
+				t.value
+			}
+			_ -> {
+				perr('Expected property name')
+				'_'
+			}
+		}
+	}
+
+	fn parseArguments() {
+		prevNoIn := st.noIn
+		st.noIn <- false
+		expectPunct('(')
+		args := []
+		fn step() if !st.failed & !atPunct(')') {
+			true -> {
+				if atPunct('...') {
+					true -> {
+						advance()
+						args << ast.jsSpread(parseAssignmentExpression())
+					}
+					_ -> args << parseAssignmentExpression()
+				}
+				if atPunct(',') {
+					true -> {
+						advance()
+						step()
+					}
+				}
+			}
+		}
+		step()
+		expectPunct(')')
+		st.noIn <- prevNoIn
+		args
+	}
+
+	// --- primary expressions ---------------------------------------------------
+
+	fn parsePrimary() {
+		if st.failed -> ?
+		tok := peek()
+		if tok.type {
+			:number -> {
+				advance()
+				ast.jsNumber(tok.value)
+			}
+			:string -> {
+				advance()
+				ast.jsString(tok.value)
+			}
+			:regex -> {
+				advance()
+				ast.jsRegex(tok.pattern, tok.flags)
+			}
+			:template -> parseTemplateLiteral()
+			:ident -> {
+				advance()
+				ast.jsIdentifier(tok.value)
+			}
+			:keyword -> parseKeywordAtom(tok)
+			_ -> if atPunct('(') {
+				true -> if _parenArrowAhead() {
+					true -> parseParenArrow()
+					_ -> {
+						advance() // (
+						inner := _parseAllowIn(fn() parseExpression())
+						expectPunct(')')
+						inner
+					}
+				}
+				_ -> if atPunct('[') {
+					true -> parseArrayExpression()
+					_ -> if atPunct('{') {
+						true -> parseObjectExpression()
+						_ -> {
+							perr('Unexpected token ' << string(peek().value) << ' in expression')
+							ast.jsNull()
+						}
+					}
+				}
+			}
+		}
+	}
+
+	fn parseKeywordAtom(tok) {
+		v := tok.value
+		if v {
+			'this' -> {
+				advance()
+				ast.jsThis()
+			}
+			'true' -> {
+				advance()
+				ast.jsBool(true)
+			}
+			'false' -> {
+				advance()
+				ast.jsBool(false)
+			}
+			'null' -> {
+				advance()
+				ast.jsNull()
+			}
+			'function' -> parseFunctionExpression()
+			_ -> {
+				perr(v << ' is not supported in expression position')
+				ast.jsNull()
+			}
+		}
+	}
+
+	// --- functions and arrows --------------------------------------------------
+
+	fn parseFunction(nameRequired) {
+		advance() // function
+		name := ''
+		if peek().type = :ident {
+			true -> {
+				name <- peek().value
+				advance()
+			}
+			_ -> if nameRequired {
+				true -> perr('Function declaration requires a name')
+			}
+		}
+		expectPunct('(')
+		params := parseParameterItems()
+		body := parseBlock()
+		ast.jsFunction(name, params, body)
+	}
+
+	fn parseFunctionExpression parseFunction(false)
+
+	// caller consumed '('; consumes parameters through ')'
+	fn parseParameterItems() {
+		params := []
+		if st.failed -> params
+		if atPunct(')') {
+			true -> {
+				advance() // )
+				params
+			}
+			_ -> {
+				fn loop() if !st.failed & !atPunct(')') {
+					true -> {
+						if atPunct('...') {
+							true -> {
+								advance()
+								if peek().type = :ident {
+									true -> {
+										nameTok := peek()
+										advance()
+										params << ast.jsSpread(ast.jsIdentifier(nameTok.value))
+									}
+									_ -> {
+										warn('non-identifier rest parameter; using placeholder _')
+										params << ast.jsSpread(ast.jsIdentifier('_'))
+									}
+								}
+							}
+							_ -> if peek().type = :ident {
+								true -> {
+									nameTok := peek()
+									advance()
+									params << ast.jsIdentifier(nameTok.value)
+								}
+								_ -> perr('Unsupported parameter pattern')
+							}
+						}
+						if atPunct(',') {
+							true -> {
+								advance()
+								loop()
+							}
+						}
+					}
+				}
+				loop()
+				expectPunct(')')
+				params
+			}
+		}
+	}
+
+	// at '('; returns true when the matching ')' is followed by '=>'
+	fn _parenArrowAhead() {
+		depth := 0
+		i := st.index
+		last := len(st.tokens) - 1
+		sawClose := false
+		fn loop() if i <= last & !sawClose {
+			true -> {
+				t := st.tokens.(i)
+				if t.type {
+					:punct -> if t.value {
+						'(', '[', '{' -> depth <- depth + 1
+						')' -> {
+							depth <- depth - 1
+							if depth = 0 -> sawClose <- true
+						}
+						']', '}' -> depth <- depth - 1
+						_ -> ?
+					}
+					_ -> ?
+				}
+				i <- i + 1
+				if !sawClose -> loop()
+			}
+		}
+		loop()
+		if !sawClose -> false
+		if i > last -> false
+		t := st.tokens.(i)
+		t.type = :punct & t.value = '=>'
+	}
+
+	fn parseParenArrow() {
+		expectPunct('(')
+		params := parseParameterItems()
+		expectPunct('=>')
+		_arrowBody(params)
+	}
+
+	// --- object and array literals ---------------------------------------------
+
+	fn parseObjectExpression() {
+		prevNoIn := st.noIn
+		st.noIn <- false
+		expectPunct('{')
+		entries := []
+		fn loop() if !st.failed & !atPunct('}') {
+			true -> {
+				entry := parseProperty()
+				if entry {
+					? -> ?
+					_ -> entries << entry
+				}
+				if atPunct(',') {
+					true -> {
+						advance()
+						loop()
+					}
+				}
+			}
+		}
+		loop()
+		if atPunct('}') {
+			true -> advance()
+			_ -> perr('Expected }')
+		}
+		st.noIn <- prevNoIn
+		ast.jsObject(entries)
+	}
+
+	// returns ? for dropped properties (spread / getter / setter)
+	fn parseProperty() {
+		if atPunct('...') {
+			true -> {
+				advance()
+				warn('spread in object literal is not supported; dropping')
+				parseAssignmentExpression()
+				?
+			}
+			_ -> if atWord('get') | atWord('set') {
+				true -> {
+					// `get`/`set` introduce a getter/setter only when not
+					// followed by a colon (a regular property key)
+					if peekAt(1).type = :punct & peekAt(1).value = ':' {
+						true -> parseRegularProperty()
+						_ -> {
+							advance() // get or set
+							if atPunct('[') {
+								true -> skipToMatching('[', ']')
+								_ -> if !st.failed -> advance() // method name (ident, keyword or string)
+							}
+							if atPunct('(') -> skipToMatching('(', ')')
+							if atPunct('{') -> skipToMatching('{', '}')
+							warn('getters and setters are not supported; dropping property')
+							?
+						}
+					}
+				}
+				_ -> if atPunct('[') {
+					true -> {
+						advance() // [
+						parseExpression()
+						expectPunct(']')
+						expectPunct(':')
+						value := parseAssignmentExpression()
+						warn('computed property keys are not supported; using placeholder key')
+						ast.jsObjectEntry(ast.jsString('__computed__'), value)
+					}
+					_ -> parseRegularProperty()
+				}
+			}
+		}
+	}
+
+	fn parseRegularProperty() {
+		keyTok := peek()
+		keyNode := ?
+		keyName := ?
+		if keyTok.type {
+			:ident, :keyword -> {
+				advance()
+				keyNode <- ast.jsIdentifier(keyTok.value)
+				keyName <- keyTok.value
+			}
+			:string -> {
+				advance()
+				keyNode <- ast.jsString(keyTok.value)
+			}
+			:number -> {
+				advance()
+				keyNode <- ast.jsString(string(keyTok.value))
+			}
+			_ -> perr('Unexpected token in object literal')
+		}
+		if atPunct(':') {
+			true -> {
+				advance()
+				ast.jsObjectEntry(keyNode, parseAssignmentExpression())
+			}
+			_ -> if keyName {
+				? -> {
+					perr('Expected : after property key')
+					?
+				}
+				_ -> ast.jsObjectEntry(keyNode, ast.jsIdentifier(keyName))
+			}
+		}
+	}
+
+	fn skipToMatching(open, close) {
+		expectPunct(open)
+		depth := 1
+		fn loop() if !eof?() & !st.failed & depth > 0 {
+			true -> {
+				t := advance()
+				if t.type = :punct {
+					true -> if t.value = open {
+						true -> depth <- depth + 1
+						_ -> if t.value = close -> depth <- depth - 1
+					}
+					_ -> ?
+				}
+				loop()
+			}
+		}
+		loop()
+		?
+	}
+
+	fn parseArrayExpression() {
+		prevNoIn := st.noIn
+		st.noIn <- false
+		expectPunct('[')
+		elems := []
+		fn loop() if !st.failed & !atPunct(']') {
+			true -> {
+				if atPunct(',') {
+					true -> {
+						advance()
+						elems << ast.jsNull()
+						loop()
+					}
+					_ -> if atPunct('...') {
+						true -> {
+							advance()
+							warn('spread in array literal is not supported; dropping element')
+							parseAssignmentExpression()
+							elems << ast.jsUndefined()
+						}
+						_ -> elems << parseAssignmentExpression()
+					}
+				}
+				if atPunct(',') {
+					true -> {
+						advance()
+						loop()
+					}
+				}
+			}
+		}
+		loop()
+		if atPunct(']') {
+			true -> advance()
+			_ -> perr('Expected ]')
+		}
+		st.noIn <- prevNoIn
+		ast.jsArray(elems)
+	}
+
+	// --- template literals ------------------------------------------------------
+
+	fn parseTemplateLiteral() {
+		tok := advance() // :template token (backticks already stripped by the tokenizer)
+		raw := tok.value
+		pieces := splitTemplatePieces(raw)
+		if pieces {
+			? -> {
+				perr('Could not scan template literal expression boundaries')
+				ast.jsUndefined()
+			}
+			_ -> {
+				parts := []
+				quasis := pieces.quasis
+				exprs := pieces.exprs
+				fn walk(i) if i < len(quasis) {
+					true -> {
+						parts << ast.jsString(cookTemplate(quasis.(i)))
+						if i < len(exprs) {
+							true -> {
+								e := parseSubExpression(exprs.(i))
+								if e {
+									? -> st.errors <- st.errors << { error: 'Template expression failed to parse', line: tok.line, col: tok.col }
+									_ -> parts << e
+								}
+								st.failed <- st.failed | e = ?
+							}
+						}
+						walk(i + 1)
+					}
+				}
+				walk(0)
+				ast.jsTemplateLiteral(parts)
+			}
+		}
+	}
+
+	fn parseSubExpression(text) {
+		res := jstok.tokenize(text)
+		if res.ok {
+			true -> {
+				p := _makeParser(res.tokens)
+				e := p.parseExpression()
+				if p.failed?() | !p.eof?() {
+					true -> ?
+					_ -> e
+				}
+			}
+			_ -> ?
+		}
+	}
+
+	// --- statements ---------------------------------------------------------------
+
+	// mode 0 = program/block list, mode 1 = switch case body (stops at
+	// case/default/})
+	fn parseStatementList(mode) {
+		list := []
+		fn loop() if !eof?() & !st.failed & !atPunct('}') & !(mode = 1 & (atKw('case') | atKw('default'))) {
+			true -> {
+				stmts := parseStatement()
+				stmts |> each(fn(s) list << s)
+				loop()
+			}
+		}
+		loop()
+		list
+	}
+
+	fn parseBlock() ast.jsBlock(parseBlockInner())
+
+	fn parseBlockInner() {
+		expectPunct('{')
+		body := parseStatementList(0)
+		if atPunct('}') {
+			true -> advance()
+			_ -> perr('Expected }')
+		}
+		body
+	}
+
+	fn parseClause() {
+		if atPunct('{') {
+			true -> ast.jsBlock(parseBlockInner())
+			_ -> {
+				stmts := parseStatement()
+				if len(stmts) {
+					1 -> stmts.(0)
+					_ -> ast.jsBlock(stmts)
+				}
+			}
+		}
+	}
+
+	fn parseStatement() {
+		if st.failed -> []
+		tok := peek()
+		if tok.type {
+			:keyword -> parseKeywordStatement(tok)
+			:ident -> if peekAt(1).type = :punct & peekAt(1).value = ':' {
+				true -> parseLabeledStatement()
+				_ -> parseExpressionStatement()
+			}
+			:punct -> if tok.value {
+				'{' -> [ast.jsBlock(parseBlockInner())]
+				';' -> {
+					advance()
+					[ast.jsEmptyStatement()]
+				}
+				_ -> parseExpressionStatement()
+			}
+			_ -> parseExpressionStatement()
+		}
+	}
+
+	fn parseLabeledStatement() {
+		warn('labeled statement is not supported; the label is ignored')
+		advance() // label identifier
+		expectPunct(':')
+		parseStatement()
+	}
+
+	fn parseExpressionStatement() {
+		e := parseExpression()
+		eatSemi()
+		[ast.jsExpressionStatement(e)]
+	}
+
+	fn parseKeywordStatement(tok) {
+		v := tok.value
+		if v {
+			'var', 'let', 'const' -> {
+				decls := parseVariableDeclarators(v)
+				eatSemi()
+				decls
+			}
+			'function' -> [parseFunction(true)]
+			'if' -> parseIfStatement()
+			'while' -> parseWhileStatement()
+			'do' -> parseDoWhileStatement()
+			'for' -> parseForStatement()
+			'switch' -> parseSwitchStatement()
+			'try' -> parseTryStatement()
+			'throw' -> parseThrowStatement()
+			'return' -> parseReturnStatement()
+			'break', 'continue' -> parseBreakOrContinue(v)
+			'debugger' -> {
+				advance()
+				eatSemi()
+				[ast.jsDebugger()]
+			}
+			'with' -> {
+				warn('with statement is not supported; the object environment is ignored')
+				advance() // with
+				expectPunct('(')
+				parseExpression()
+				expectPunct(')')
+				parseStatement()
+			}
+			'typeof', 'void', 'delete', 'new', 'this', 'true', 'false', 'null' -> parseExpressionStatement()
+			'class', 'import', 'export' -> {
+				perr(v << ' is not supported')
+				[]
+			}
+			_ -> {
+				perr('Unexpected keyword ' << v)
+				[]
+			}
+		}
+	}
+
+	fn parseVariableDeclarators(kind) {
+		advance() // var/let/const
+		decls := []
+		d := parseVariableDeclarator(kind)
+		if d {
+			? -> ?
+			_ -> decls << d
+		}
+		fn loop() if atPunct(',') & !st.failed {
+			true -> {
+				advance() // ,
+				d := parseVariableDeclarator(kind)
+				if d {
+					? -> ?
+					_ -> decls << d
+				}
+				loop()
+			}
+		}
+		loop()
+		decls
+	}
+
+	fn parseVariableDeclarator(kind) {
+		if peek().type != :ident {
+			true -> {
+				perr('Expected identifier in variable declaration')
+				?
+			}
+			_ -> {
+				nameTok := peek()
+				advance()
+				init := ?
+				if atPunct('=') {
+					true -> {
+						advance() // =
+						init <- parseAssignmentExpression()
+					}
+				}
+				ast.jsVar(kind, nameTok.value, init)
+			}
+		}
+	}
+
+	fn parseIfStatement() {
+		advance() // if
+		expectPunct('(')
+		test := parseExpression()
+		expectPunct(')')
+		consequent := parseClause()
+		alternate := ?
+		if atKw('else') {
+			true -> {
+				advance() // else
+				alternate <- parseClause()
+			}
+		}
+		[ast.jsIf(test, consequent, alternate)]
+	}
+
+	fn parseWhileStatement() {
+		advance() // while
+		expectPunct('(')
+		test := parseExpression()
+		expectPunct(')')
+		[ast.jsWhile(test, parseClause())]
+	}
+
+	fn parseDoWhileStatement() {
+		advance() // do
+		body := parseClause()
+		expectWord('while')
+		expectPunct('(')
+		test := parseExpression()
+		expectPunct(')')
+		eatSemi()
+		[ast.jsDoWhile(test, body)]
+	}
+
+	fn parseForStatement() {
+		advance() // for
+		expectPunct('(')
+		if atKw('var') | atKw('let') | atKw('const') {
+			true -> {
+				kind := peek().value
+				decls := _parseNoIn(fn() parseVariableDeclarators(kind))
+				if atWord('in') | atWord('of') {
+					true -> {
+						of? := atWord('of')
+						advance() // in|of
+						left := forLeftFromDeclarators(decls, kind)
+						right := parseExpression()
+						expectPunct(')')
+						body := parseClause()
+						if of? {
+							true -> [ast.jsForOf(left, right, body)]
+							_ -> [ast.jsForIn(left, right, body)]
+						}
+					}
+					_ -> {
+						expectPunct(';')
+						init := ?
+						hoist := []
+						if len(decls) {
+							1 -> init <- decls.(0)
+							_ -> {
+								decls |> each(fn(d) hoist << d)
+								init <- ?
+							}
+						}
+						parseForRest(init, hoist)
+					}
+				}
+			}
+		_ -> if atPunct(';') {
+			true -> {
+				advance() // ;
+				parseForRest(?, [])
+			}
+			_ -> {
+				e := _parseNoIn(fn() parseExpression())
+				if atWord('in') | atWord('of') {
+					true -> {
+						of? := atWord('of')
+						advance() // in|of
+						left := forLeftFromExpression(e)
+						right := parseExpression()
+						expectPunct(')')
+						body := parseClause()
+						if of? {
+							true -> [ast.jsForOf(left, right, body)]
+							_ -> [ast.jsForIn(left, right, body)]
+						}
+					}
+					_ -> {
+						expectPunct(';')
+						parseForRest(e, [])
+					}
+				}
+			}
+		}
+	}
+	}
+
+	fn forLeftFromDeclarators(decls, kind) {
+		if len(decls) > 1 -> warn('for-in/of with multiple declarators; only the first is bound')
+		if len(decls) = 0 {
+			true -> {
+				warn('for-in/of without declarator; using placeholder _')
+				ast.jsVar(kind, '_', ?)
+			}
+			_ -> ast.jsVar(kind, decls.(0).name, ?)
+		}
+	}
+
+	fn forLeftFromExpression(e) if e {
+		? -> {
+			warn('for-in/of with unparsable target; using placeholder _')
+			ast.jsVar('var', '_', ?)
+		}
+		_ -> if e.type = :jsIdentifier {
+			true -> e
+			_ -> {
+				warn('for-in/of target is not a variable; using placeholder')
+				ast.jsVar('var', '_', ?)
+			}
+		}
+	}
+
+	// the ';' after the init clause has been consumed by the caller; parses
+	// test, ';', update, ')' and the loop body
+	fn parseForRest(init, hoist) {
+		test := ?
+		if !atPunct(';') & !st.failed -> test <- _parseNoIn(fn() parseExpression())
+		expectPunct(';')
+		update := ?
+		if !atPunct(')') & !st.failed -> update <- _parseNoIn(fn() parseExpression())
+		expectPunct(')')
+		body := parseClause()
+		hoist << ast.jsFor(init, test, update, body)
+		hoist
+	}
+
+	fn parseSwitchStatement() {
+		advance() // switch
+		expectPunct('(')
+		disc := parseExpression()
+		expectPunct(')')
+		expectPunct('{')
+		cases := []
+		fn loop() if !eof?() & !st.failed & !atPunct('}') {
+			true -> {
+				if atKw('case') {
+					true -> {
+						advance() // case
+						test := parseExpression()
+						expectPunct(':')
+						stmts := parseStatementList(1)
+						cases << ast.jsSwitchCase(test, stmts)
+					}
+					_ -> if atKw('default') {
+						true -> {
+							advance() // default
+							expectPunct(':')
+							stmts := parseStatementList(1)
+							cases << ast.jsSwitchCase(?, stmts)
+						}
+						_ -> {
+							perr('Expected case or default')
+							advance() // ensure progress
+						}
+					}
+				}
+				loop()
+			}
+		}
+		loop()
+		if atPunct('}') {
+			true -> advance()
+			_ -> perr('Expected }')
+		}
+		[ast.jsSwitch(disc, cases)]
+	}
+
+	fn parseTryStatement() {
+		advance() // try
+		guarded := parseBlock()
+		catchParam := ?
+		catchBody := ?
+		if atKw('catch') {
+			true -> {
+				advance() // catch
+				expectPunct('(')
+				if peek().type = :ident {
+					true -> {
+						catchParam <- ast.jsIdentifier(peek().value)
+						advance()
+					}
+					_ -> {
+						warn('destructured catch parameter; using placeholder _')
+						catchParam <- ast.jsIdentifier('_')
+						advance()
+					}
+				}
+				expectPunct(')')
+				catchBody <- parseBlock()
+			}
+		}
+		finalizer := ?
+		if atKw('finally') {
+			true -> {
+				advance() // finally
+				finalizer <- parseBlock()
+			}
+		}
+		if catchParam = ? & catchBody = ? & finalizer = ? -> perr('try statement requires catch or finally')
+		[ast.jsTry(guarded, catchParam, catchBody, finalizer)]
+	}
+
+	fn parseThrowStatement() {
+		advance() // throw
+		arg := parseExpression()
+		eatSemi()
+		[ast.jsThrow(arg)]
+	}
+
+	fn parseReturnStatement() {
+		advance() // return
+		if atPunct(';') | atPunct('}') | eof?() {
+			true -> {
+				eatSemi()
+				[ast.jsReturn(?)]
+			}
+			_ -> {
+				v := parseExpression()
+				eatSemi()
+				[ast.jsReturn(v)]
+			}
+		}
+	}
+
+	fn parseBreakOrContinue(kind) {
+		advance() // break|continue
+		label := ?
+		if peek().type = :ident {
+			true -> {
+				label <- peek().value
+				advance()
+			}
+		}
+		if label {
+			? -> ?
+			_ -> warn(kind + ' with a label is not supported; acts on the innermost loop or switch')
+		}
+		eatSemi()
+		if kind = 'break' {
+			true -> [ast.jsBreak()]
+			_ -> [ast.jsContinue()]
+		}
+	}
+
+	// parser object: the bits the module API and template sub-parsers need
+	result := {
+		parseStatementList: fn() parseStatementList(0)
+		parseExpression: parseExpression
+		failed?: fn() st.failed
+		eof?: eof?
+		errors: fn() st.errors
+		warnings: fn() st.warnings
+	}
+	result
+}
+
+// ---------------------------------------------------------------------------
+// Module entry points
+// ---------------------------------------------------------------------------
+
+// parse(text) -> { ast, errors, warnings, ok }
+// ast is a jsBlock on success (? on failure); ok is true when no fatal
+// errors were recorded. Warnings are non-fatal diagnostics (dropped
+// constructs that do not affect the tree shape).
+fn parse(text) {
+	src := default(text, '')
+	res := jstok.tokenize(src)
+	if res.ok {
+		true -> {
+			p := _makeParser(res.tokens)
+			body := p.parseStatementList()
+			if p.failed?() {
+				true -> {
+					result := {
+						ast: ?
+						errors: p.errors()
+						warnings: p.warnings()
+						ok: false
+					}
+					result
+				}
+				_ -> {
+					result := {
+						ast: ast.jsBlock(body)
+						errors: p.errors()
+						warnings: p.warnings()
+						ok: true
+					}
+					result
+				}
+			}
+		}
+		_ -> {
+			result := {
+				ast: ?
+				errors: res.errors
+				warnings: []
+				ok: false
+			}
+			result
+		}
+	}
+}

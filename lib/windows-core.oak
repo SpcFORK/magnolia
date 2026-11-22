@@ -53,3 +53,20 @@ fn psapi(symbol, args...) if isWindows?() {
 	true -> sys.resolveAndCall(Psapi, symbol, args...)
 	_ -> _platformError('psapi')
 }
+// _utf16leToString converts a little-endian UTF-16 byte buffer to a string,
+// stopping at the first NUL code unit. Abstracted from windows-kernel and
+// windows-registry, which each carried an identical local copy.
+fn _utf16leToString(buf) {
+	bytes := bits(buf)
+	fn sub(i, out) if i + 1 < len(bytes) {
+		true -> {
+			cp := bytes.(i) + bytes.(i + 1) * 256
+			if cp = 0 {
+				true -> out
+				_ -> sub(i + 2, out + char(cp))
+			}
+		}
+		_ -> out
+	}
+	sub(0, '')
+}

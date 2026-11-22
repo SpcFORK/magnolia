@@ -476,6 +476,24 @@ fn setAlpha(window, alpha) if window.type = :ok {
 	_ -> window
 }
 
+// A bounded pixel command for trusted CPU raster producers (including the
+// original-bytecode Applet GUI). Pixels are signed 32-bit ARGB words; a bridge
+// must explicitly recognize :argb32 and convert each word to Canvas RGBA.
+// Do not expose this as a generic browser-input or unbounded image decoder.
+fn drawPackedImageData(window, x, y, w, h, pixels) if window.type = :ok {
+    true -> if window.backend != :web | type(w) != :int |
+        type(h) != :int | w < 1 | h < 1 | w > 4096 | h > 4096 |
+        w * h > 81920 | type(pixels) != :list | len(pixels) != w * h {
+        true -> _err('invalid bounded ARGB image data', window)
+        _ -> {
+            _webRecord(window, {type: :image_data, format: :argb32,
+                x: x, y: y, width: w, height: h, data: pixels})
+            window
+        }
+    }
+    _ -> window
+}
+
 // drawImageData records a :image_data command for blitting a pixel byte string
 // (e.g. from gui-shader CPU render) onto the canvas at (x, y).
 fn drawImageData(window, x, y, w, h, pixelBytes) if window.type = :ok {

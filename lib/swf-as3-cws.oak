@@ -1,0 +1,224 @@
+// Opt-in, bounded CWS v9/v15 AS3 *container* envelope inventory.
+// This does not parse ABC pools/opcodes, validate Flash APIs, execute scripts,
+// render frames, admit ZWS, or alter the FWS1..7 player's default gate.
+// The two original SHA-pinned CWS inputs are checked by a separate Python
+// oracle before any CLI invocation; this library accepts untrusted bytes only
+// behind the small independent zlib/size/tag/recursion budgets below.
+std := import('std')
+zip := import('./applet-zip.oak')
+bytes := import('bytes')
+
+fn _error(message) std.error('AS3 CWS metadata: ' + message)
+fn _at(raw, pos) bytes.at(raw, pos)
+fn _u16(raw, pos) bytes.u16(raw, pos)
+fn _u32(raw, pos) _u16(raw, pos) + 65536 * _u16(raw, pos + 2)
+fn _be32(raw, pos) (_at(raw, pos) << 24) + (_at(raw, pos + 1) << 16) +
+    (_at(raw, pos + 2) << 8) + _at(raw, pos + 3)
+fn _adler(raw) {
+    a := 1
+    b := 0
+    std.range(len(raw)) |> std.each(fn(i) {
+        a <- (a + _at(raw, i)) % 65521
+        b <- (b + a) % 65521
+    })
+    (b << 16) + a
+}
+
+fn scan(raw) if type(raw) != :string | len(raw) < 16 |
+    len(raw) > 500000 {
+    true -> _error('compressed input outside 16..500000-byte cap')
+    _ -> if std.slice(raw, 0, 3) != 'CWS' |
+        (_at(raw, 3) != 9 & _at(raw, 3) != 15) {
+        true -> _error('only opt-in CWS v9/v15 AS3 metadata admitted')
+        _ -> {
+            declared := _u32(raw, 4)
+            if declared < 16 | declared > 1000000 | len(raw) < 18 {
+                true -> _error('declared uncompressed size outside finite cap')
+                _ -> {
+                    cmf := _at(raw, 8)
+                    flg := _at(raw, 9)
+                    if (cmf & 15) != 8 | (cmf >> 4) > 7 |
+                        ((cmf << 8) + flg) % 31 != 0 | (flg & 32) != 0 {
+                        true -> _error('unsupported zlib header or dictionary')
+                        _ -> {
+                            compressed := std.slice(raw, 10, len(raw) - 4)
+                            decoded := zip.inflate(compressed,
+                                declared - 8, 1000000)
+                            if decoded.type != :ok {
+                                true -> _error('zlib/DEFLATE size or stream differs')
+                                _ -> if decoded.consumed != len(compressed) |
+                                    _adler(decoded.value) != _be32(raw, len(raw) - 4) {
+                                    true -> _error('trailing data or Adler32 differs')
+                                    _ -> _scanBody(decoded.value,
+                                        _at(raw, 3), len(raw), declared)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn _scanBody(body, version, compressedBytes, declared) {
+    bits := _at(body, 0) >> 3
+    rectBytes := (5 + 4 * bits + 7) >> 3
+    if bits < 1 | bits > 31 | rectBytes + 4 >= len(body) {
+        true -> _error('truncated or over-budget RECT/frame header')
+        _ -> {
+            fpsFixed := _u16(body, rectBytes)
+            frames := _u16(body, rectBytes + 2)
+            if fpsFixed = 0 | frames < 1 | frames > 4096 {
+                true -> _error('frame rate/count outside finite profile')
+                _ -> {
+                    topTags := 0
+                    nestedTags := 0
+                    totalTags := 0
+                    topAvm1 := 0
+                    nestedAvm1 := 0
+                    topABC := []
+                    fileFlags := []
+                    sprites := []
+                    problem := ?
+                    fn walk(start, stop, claimedFrames, depth) {
+                        cursor := start
+                        tags := 0
+                        shows := 0
+                        avm1 := 0
+                        ended? := false
+                        std.range(10000) |> std.each(fn(_) if problem = ? &
+                            !ended? & cursor < stop {
+                            true -> {
+                                if stop - cursor < 2 {
+                                    true -> problem <- 'truncated tag header'
+                                    _ -> {
+                                        header := _u16(body, cursor)
+                                        cursor <- cursor + 2
+                                        code := header >> 6
+                                        size := header & 63
+                                        if size = 63 {
+                                            true -> if stop - cursor < 4 {
+                                                true -> problem <- 'truncated long tag length'
+                                                _ -> {
+                                                    size <- _u32(body, cursor)
+                                                    cursor <- cursor + 4
+                                                }
+                                            }
+                                        }
+                                        if problem = ? {
+                                            true -> if size > stop - cursor |
+                                                totalTags >= 10000 {
+                                                true -> problem <- 'tag overflows parent or 10000-tag budget'
+                                                _ -> {
+                                                    tags <- tags + 1
+                                                    totalTags <- totalTags + 1
+                                                    if depth = 0 {true -> topTags <- topTags + 1,
+                                                        _ -> nestedTags <- nestedTags + 1}
+                                                    if code = 0 {
+                                                        true -> if size != 0 {
+                                                            true -> problem <- 'End tag has payload'
+                                                            _ -> ended? <- true
+                                                        }
+                                                    }
+                                                    if code = 1 -> shows <- shows + 1
+                                                    if code = 12 | code = 59 {
+                                                        true -> {
+                                                            avm1 <- avm1 + 1
+                                                            if depth = 0 {
+                                                                true -> topAvm1 <- topAvm1 + 1
+                                                                _ -> nestedAvm1 <- nestedAvm1 + 1
+                                                            }
+                                                        }
+                                                    }
+                                                    if code = 69 {
+                                                        true -> if depth != 0 | size != 4 |
+                                                            len(fileFlags) != 0 {
+                                                            true -> problem <- 'invalid/duplicate FileAttributes'
+                                                            _ -> fileFlags << _u32(body, cursor)
+                                                        }
+                                                    }
+                                                    if code = 82 & problem = ? {
+                                                        true -> if depth != 0 | size < 9 |
+                                                            len(topABC) != 0 {
+                                                            true -> problem <- 'nested/duplicate/truncated DoABC header'
+                                                            _ -> {
+                                                                nameEnd := ?
+                                                                std.range(size - 4) |> std.each(fn(i) if
+                                                                    nameEnd = ? & _at(body, cursor + 4 + i) = 0 ->
+                                                                    nameEnd <- cursor + 4 + i)
+                                                                if nameEnd = ? | nameEnd + 5 > cursor + size {
+                                                                    true -> problem <- 'invalid DoABC name/header'
+                                                                    _ -> topABC << {
+                                                                        bytes: cursor + size - nameEnd - 1,
+                                                                        minor: _u16(body, nameEnd + 1),
+                                                                        major: _u16(body, nameEnd + 3)
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if code = 39 & problem = ? {
+                                                        true -> if size < 4 | depth >= 8 |
+                                                            len(sprites) >= 128 {
+                                                            true -> problem <- 'truncated or over-budget sprite'
+                                                            _ -> {
+                                                                id := _u16(body, cursor)
+                                                                spriteFrames := _u16(body, cursor + 2)
+                                                                if spriteFrames > 4096 {
+                                                                    true -> problem <- 'sprite frames outside budget'
+                                                                    _ -> {
+                                                                        inner := walk(cursor + 4,
+                                                                            cursor + size,
+                                                                            spriteFrames, depth + 1)
+                                                                        if problem = ? -> sprites << {
+                                                                            id: id, depth: depth + 1,
+                                                                            frames: spriteFrames,
+                                                                            tags: inner.tags,
+                                                                            actionTags: inner.avm1
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    cursor <- cursor + size
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                        if problem = ? & (!ended? | cursor != stop |
+                            shows != claimedFrames) ->
+                            problem <- 'timeline End/length/ShowFrame differs'
+                        {tags: tags, avm1: avm1}
+                    }
+                    walk(rectBytes + 4, len(body), frames, 0)
+                    if problem != ? {
+                        true -> _error(problem)
+                        _ -> if len(fileFlags) != 1 |
+                            (fileFlags.(0) & 8) = 0 | len(topABC) != 1 |
+                            topABC.(0).major != 46 | topABC.(0).minor != 16 {
+                            true -> _error('not a single AS3 16/46 ABC envelope')
+                            _ -> {type: :ok, profile: 'CWS9/15-AS3-metadata-only',
+                                signature: 'CWS', version: version,
+                                compressedBytes: compressedBytes,
+                                declaredUncompressedBytes: declared,
+                                frames: frames, fpsFixed: fpsFixed,
+                                topTags: topTags, nestedTags: nestedTags,
+                                totalTags: totalTags,
+                                topAvm1ActionTags: topAvm1,
+                                nestedAvm1ActionTags: nestedAvm1,
+                                fileAttributes: fileFlags,
+                                topDoABCHeaders: topABC, sprites: sprites,
+                                ABCParsedOrExecuted: false,
+                                framesRendered: false}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

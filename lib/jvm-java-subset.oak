@@ -1,0 +1,644 @@
+// Oak-only Java source -> real JVM class bytes. This is an intentionally
+// small, checked Java 8 *subset*, not a substitute for javac. Its output is
+// linked by jvm-bridge and runs through the same verified Oak JVM image.
+// ASCII source, one class, static int/void methods, optional Applet lifecycle,
+// integer/string locals, arithmetic, print, branches, while and arguments.
+
+std := import('std')
+str := import('str')
+path := import('path')
+classfile := import('./applet-class.oak')
+bytes := import('bytes')
+
+fn _error(message) std.error(message)
+fn _letter?(c) (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | c = '_' | c = '$'
+fn _digit?(c) c >= '0' & c <= '9'
+fn _id?(c) _letter?(c) | _digit?(c)
+fn _u1(n) char(n & 255)
+fn _u2(n) bytes.le2(n)
+fn _u4(n) bytes.le4(n)
+
+fn tokenize(text) {
+    i := 0
+    tokens := []
+    problem := ?
+    fn fail(msg) if problem = ? -> problem <- msg + ' at source byte ' + string(i)
+    fn at(offset) if i + offset < len(text) {true -> text.(i + offset), _ -> ?}
+    fn scan() if i < len(text) & problem = ? {
+        true -> {
+            c := at(0)
+            if codepoint(c) > 127 | c = char(0) {
+                true -> fail('Oak-only Java subset requires ASCII input without NUL')
+                _ -> if c = ' ' | c = '\n' | c = '\t' | c = '\r' {
+                    true -> i <- i + 1
+                    _ -> if c = '/' & at(1) = '/' {
+                        true -> {
+                            rest := str.indexOf(std.slice(text, i + 2), '\n')
+                            i <- if rest < 0 {true -> len(text), _ -> i + 2 + rest}
+                        }
+                        _ -> if c = '/' & at(1) = '*' {
+                            true -> {
+                                i <- i + 2
+                                finish := str.indexOf(std.slice(text, i), '*/')
+                                if finish < 0 {
+                                    true -> fail('unterminated Java comment')
+                                    _ -> i <- i + finish + 2
+                                }
+                            }
+                            _ -> if _letter?(c) | _digit?(c) {
+                                true -> {
+                                    begin := i
+                                    fn word() if i < len(text) & _id?(at(0)) & problem = ? {
+                                        true -> {
+                                            i <- i + 1
+                                            if i - begin > 255 {true -> fail('Java identifier exceeds 255 bytes'), _ -> word()}
+                                        }
+                                    }
+                                    if _digit?(c) {
+                                        true -> {
+                                            fn number() if i < len(text) & _digit?(at(0)) & problem = ? {
+                                                true -> {
+                                                    i <- i + 1
+                                                    if i - begin > 12 {true -> fail('Java int literal too long'), _ -> number()}
+                                                }
+                                            }
+                                            number()
+                                        }
+                                        _ -> word()
+                                    }
+                                    tokens << {kind: if _digit?(c) {true -> 'int', _ -> 'id'},
+                                        val: std.slice(text, begin, i), pos: begin}
+                                }
+                                _ -> if c = '"' {
+                                    true -> {
+                                        begin := i
+                                        i <- i + 1
+                                        value := ''
+                                        fn quoted() if len(value) > 4096 {
+                                            true -> fail('Java string literal exceeds 4096 bytes')
+                                            _ -> if i >= len(text) {
+                                            true -> fail('unterminated string literal')
+                                            _ -> if at(0) = '"' {
+                                                true -> i <- i + 1
+                                                _ -> if at(0) = '\n' | at(0) = '\r' {
+                                                    true -> fail('multiline Java strings are not supported')
+                                                    _ -> if at(0) = char(92) {
+                                                        true -> {
+                                                            i <- i + 1
+                                                            escaped := if at(0) {
+                                                                'n' -> '\n'
+                                                                'r' -> '\r'
+                                                                't' -> '\t'
+                                                                '"' -> '"'
+                                                                '\\' -> '\\'
+                                                                _ -> ?
+                                                            }
+                                                            if escaped = ? {
+                                                                true -> fail('unsupported Java string escape')
+                                                                _ -> {value <- value + escaped, i <- i + 1, quoted()}
+                                                            }
+                                                        }
+                                                        _ -> {value <- value + at(0), i <- i + 1, quoted()}
+                                                    }
+                                                }
+                                            }
+                                            }
+                                        }
+                                        quoted()
+                                        tokens << {kind: 'string', val: value, pos: begin}
+                                    }
+                                    _ -> {
+                                        pair := c + if at(1) = ? {true -> '', _ -> at(1)}
+                                        if pair = '==' | pair = '!=' | pair = '<=' | pair = '>=' {
+                                            true -> {tokens << {kind: 'sym', val: pair, pos: i}, i <- i + 2}
+                                            _ -> {tokens << {kind: 'sym', val: c, pos: i}, i <- i + 1}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if len(tokens) > 8192 {true -> fail('too many Java source tokens'), _ -> scan()}
+        }
+    }
+    scan()
+    tokens << {kind: 'eof', val: '<eof>', pos: i}
+    if problem != ? {true -> _error(problem), _ -> {type: :ok, tokens: tokens}}
+}
+
+// The parser emits symbolic JVM instructions, then resolves constant-pool
+// indices and branch offsets once. Neither Java text nor JAR metadata is ever
+// interpreted as Oak code or accepted as an unverified runtime call.
+fn _compile(entry, tokens) {
+    p := 0
+    problem := ?
+    fn fail(message) if problem = ? -> problem <- message + ' at source byte ' + string(tokens.(p).pos)
+    fn peek() tokens.(p).val
+    fn consume(word) if peek() = word {
+        true -> {p <- p + 1, true}
+        _ -> false
+    }
+    fn expect(word) if consume(word) {true -> true, _ -> {fail('expected ' + word + ', got ' + peek()), false}}
+    fn identifier() if tokens.(p).kind = 'id' {
+        true -> {name := peek(), p <- p + 1, name}
+        _ -> {fail('expected Java identifier'), '?'}
+    }
+    fn qualified() {
+        name := identifier()
+        fn part() if consume('.') {true -> {name <- name + '/' + identifier(), part()}}
+        part()
+        name
+    }
+    packageName := ''
+    if consume('package') -> {packageName <- qualified(), expect(';')}
+    consume('public')
+    expect('class')
+    simple := identifier()
+    expected := path.base(entry)
+    expected <- std.slice(expected, 0, len(expected) - 5)
+    if simple != expected -> fail('Java class name must match source .java filename')
+    name := if packageName = '' {true -> simple, _ -> packageName + '/' + simple}
+    superName := 'java/lang/Object'
+    if consume('extends') {
+        true -> {
+            superName <- qualified()
+            if superName != 'java/applet/Applet' -> fail('Oak-only subset extends only java.applet.Applet')
+        }
+    }
+    expect('{')
+
+    pool := []
+    poolIndex := {}
+    fn add(key, bytes) if poolIndex.(key) {
+        ? -> {pool << bytes, poolIndex.(key) <- len(pool), len(pool)}
+        _ -> poolIndex.(key)
+    }
+    fn utf(raw) {
+        if len(raw) > 65535 -> fail('Java constant-pool UTF8 entry too long')
+        add('U:' + raw, char(1) + _u2(len(raw)) + raw)
+    }
+    fn cls(raw) add('C:' + raw, char(7) + _u2(utf(raw)))
+    fn pair(a, b) add('P:' + a + ':' + b, char(12) + _u2(utf(a)) + _u2(utf(b)))
+    fn field(owner, key, desc) add('F:' + owner + '.' + key + desc,
+        char(9) + _u2(cls(owner)) + _u2(pair(key, desc)))
+    fn method(owner, key, desc) add('M:' + owner + '.' + key + desc,
+        char(10) + _u2(cls(owner)) + _u2(pair(key, desc)))
+    fn intConst(n) add('I:' + string(n), char(3) + _u4(n))
+    fn stringConst(s) add('S:' + s, char(8) + _u2(utf(s)))
+    thisIndex := cls(name)
+    parentIndex := cls(superName)
+    codeIndex := utf('Code')
+    methods := []
+    signatures := {}
+    referenced := []
+
+    // Each function body has its own locals/instruction stream. All kinds of
+    // branch target must be an instruction boundary; displacements are signed.
+    fn compileBody(retType, argType, static?) {
+        code := []
+        locals := {}
+        count := if static? {true -> 0, _ -> 1}
+        if argType != ? {
+            true -> {
+                locals.(argType.name) <- {kind: argType.kind, index: count}
+                count <- count + 1
+            }
+        }
+        fn emit(op, arg) {code << {op: op, arg: arg, target: ?}, len(code) - 1}
+        fn loadLocal(local) {
+            n := local.index
+            op := if local.kind = 'int' | local.kind = 'bool' {true -> 21, _ -> 25}
+            if n > 255 -> fail('too many local slots')
+            emit(op, n)
+        }
+        fn storeLocal(local) {
+            n := local.index
+            op := if local.kind = 'int' | local.kind = 'bool' {true -> 54, _ -> 58}
+            if n > 255 -> fail('too many local slots')
+            emit(op, n)
+        }
+        fn literal(n) {
+            if n < -2147483648 | n > 2147483647 -> fail('Java int literal outside 32-bit range')
+            if n >= -1 & n <= 5 {
+                true -> emit(n + 3, 0)
+                _ -> if n >= -128 & n <= 127 {
+                    true -> emit(16, n)
+                    _ -> if n >= -32768 & n <= 32767 {
+                        true -> emit(17, n)
+                        _ -> {
+                            index := intConst(n)
+                            emit(if index <= 255 {true -> 18, _ -> 19}, index)
+                        }
+                    }
+                }
+            }
+        }
+        fn atom(depth) {
+            kind := ?
+            if depth > 32 -> fail('Java expression nesting exceeds 32')
+            token := tokens.(p)
+            if token.kind = 'int' {
+                true -> {
+                    p <- p + 1
+                    // Java treats multi-digit literals starting with 0 as
+                    // octal. Reject them instead of silently reading decimal.
+                    if len(token.val) > 1 & token.val.(0) = '0' ->
+                        fail('octal/leading-zero Java integers are not supported')
+                    n := int(token.val)
+                    if n = ? {true -> fail('invalid Java integer literal'),
+                        _ -> if problem = ? -> literal(n)}
+                    kind <- 'int'
+                }
+                _ -> if token.kind = 'string' {
+                    true -> {
+                        p <- p + 1
+                        index := stringConst(token.val)
+                        emit(if index <= 255 {true -> 18, _ -> 19}, index)
+                        kind <- 'string'
+                    }
+                    _ -> if consume('true') | consume('false') {
+                        true -> {literal(if token.val = 'true' {true -> 1, _ -> 0}), kind <- 'bool'}
+                        _ -> if consume('-') {
+                            true -> {
+                                // -2147483648 is a valid Java int literal
+                                // only when directly under unary minus.
+                                if tokens.(p).kind = 'int' &
+                                    tokens.(p).val = '2147483648' {
+                                    true -> {p <- p + 1, literal(-2147483648)}
+                                    _ -> {
+                                        child := atom(depth + 1)
+                                        if child != 'int' -> fail('integer negation needs int')
+                                        if problem = ? -> emit(116, 0)
+                                    }
+                                }
+                                kind <- 'int'
+                            }
+                            _ -> if consume('(') {
+                                true -> {kind <- expression(depth + 1), expect(')')}
+                                _ -> if token.kind = 'id' {
+                                    true -> {
+                                        word := identifier()
+                                        local := locals.(word)
+                                        if local != ? {
+                                            true -> {
+                                                loadLocal(local)
+                                                kind <- local.kind
+                                                if local.kind = 'args' {
+                                                    true -> if consume('.') {
+                                                        true -> {expect('length'), emit(190, 0), kind <- 'int'}
+                                                        _ -> if consume('[') {
+                                                            true -> {
+                                                                indexType := expression(depth + 1)
+                                                                expect(']')
+                                                                if indexType != 'int' -> fail('array index must be int')
+                                                                emit(50, 0)
+                                                                kind <- 'string'
+                                                            }
+                                                            _ -> fail('String[] args requires .length or [index]')
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ -> if consume('(') {
+                                                true -> {
+                                                    argKind := expression(depth + 1)
+                                                    expect(')')
+                                                    if argKind != 'int' -> fail('subset static method arguments must be int')
+                                                    emit(184, method(name, word, '(I)I'))
+                                                    referenced << word
+                                                    kind <- 'int'
+                                                }
+                                                _ -> fail('undefined local or unsupported Java expression ' + word)
+                                            }
+                                        }
+                                    }
+                                    _ -> fail('unsupported Java expression ' + token.val)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            kind
+        }
+        fn product(depth) {
+            kind := atom(depth)
+            fn next() if (peek() = '*' | peek() = '/' | peek() = '%') & problem = ? {
+                true -> {
+                    op := peek()
+                    p <- p + 1
+                    right := atom(depth)
+                    if kind != 'int' | right != 'int' -> fail('arithmetic requires int')
+                    emit(if op = '*' {true -> 104, _ -> if op = '/' {true -> 108, _ -> 112}}, 0)
+                    next()
+                }
+            }
+            next()
+            kind
+        }
+        fn expression(depth) {
+            kind := product(depth)
+            fn next() if (peek() = '+' | peek() = '-') & problem = ? {
+                true -> {
+                    op := peek()
+                    p <- p + 1
+                    right := product(depth)
+                    if kind != 'int' | right != 'int' -> fail('arithmetic requires int')
+                    emit(if op = '+' {true -> 96, _ -> 100}, 0)
+                    next()
+                }
+            }
+            next()
+            kind
+        }
+        fn condition() {
+            lhs := expression(0)
+            op := peek()
+            if op = '==' | op = '!=' | op = '<' | op = '<=' | op = '>' | op = '>=' {
+                true -> {
+                    p <- p + 1
+                    rhs := expression(0)
+                    if lhs != rhs | (lhs != 'int' & lhs != 'bool') ->
+                        fail('comparison requires operands of the same int/boolean type')
+                    if lhs = 'bool' & op != '==' & op != '!=' ->
+                        fail('boolean operands support only == and !=')
+                    emit(if op {
+                        '==' -> 160   // if_icmpne
+                        '!=' -> 159   // if_icmpeq
+                        '<' -> 162    // if_icmpge
+                        '<=' -> 163   // if_icmpgt
+                        '>' -> 164    // if_icmple
+                        _ -> 161      // if_icmplt
+                    }, 0)
+                }
+                _ -> {
+                    if lhs != 'bool' -> fail('Java if/while condition requires boolean')
+                    emit(153, 0) // ifeq
+                }
+            }
+        }
+        fn statement(depth) if problem = ? {
+            true -> {
+                if depth > 32 -> fail('Java statement nesting exceeds 32')
+                if consume('{') {
+                    true -> {
+                        prior := std.clone(locals)
+                        fn contents() if peek() != '}' & peek() != '<eof>' & problem = ? {
+                            true -> {nested(depth + 1), contents()}
+                        }
+                        contents()
+                        expect('}')
+                        locals <- prior
+                    }
+                    _ -> if consume('if') {
+                        true -> {
+                            expect('(')
+                            branch := condition()
+                            expect(')')
+                            if problem = ? & peek() != '{' ->
+                                fail('Oak-only subset requires braced if bodies')
+                            if problem = ? -> nested(depth + 1)
+                            if problem = ? -> if consume('else') {
+                                true -> {
+                                    skip := emit(167, 0)
+                                    code.(branch).target <- len(code)
+                                    if peek() != '{' ->
+                                        fail('Oak-only subset requires braced else bodies')
+                                    if problem = ? -> nested(depth + 1)
+                                    code.(skip).target <- len(code)
+                                }
+                                _ -> code.(branch).target <- len(code)
+                            }
+                        }
+                        _ -> if consume('while') {
+                            true -> {
+                                begin := len(code)
+                                expect('(')
+                                branch := condition()
+                                expect(')')
+                                if problem = ? & peek() != '{' ->
+                                    fail('Oak-only subset requires braced while bodies')
+                                if problem = ? {
+                                    true -> {
+                                        nested(depth + 1)
+                                        back := emit(167, 0)
+                                        code.(back).target <- begin
+                                        code.(branch).target <- len(code)
+                                    }
+                                }
+                            }
+                            _ -> if consume('return') {
+                                true -> {
+                                    if retType = 'void' {
+                                        true -> {expect(';'), emit(177, 0)}
+                                        _ -> {
+                                            got := expression(0)
+                                            if got != retType -> fail('return type does not match Java method')
+                                            expect(';')
+                                            emit(172, 0)
+                                        }
+                                    }
+                                }
+                                _ -> if peek() = 'int' | peek() = 'String' {
+                                    true -> {
+                                        kind := if consume('int') {true -> 'int', _ -> {consume('String'), 'string'}}
+                                        variable := identifier()
+                                        if locals.(variable) != ? -> fail('duplicate Java local ' + variable)
+                                        expect('=')
+                                        value := expression(0)
+                                        if kind != value -> fail('local initializer has wrong Java type')
+                                        expect(';')
+                                        local := {kind: kind, index: count}
+                                        locals.(variable) <- local
+                                        count <- count + 1
+                                        storeLocal(local)
+                                    }
+                                    _ -> if consume('System') {
+                                        true -> {
+                                            expect('.')
+                                            expect('out')
+                                            expect('.')
+                                            fnName := identifier()
+                                            if fnName != 'print' & fnName != 'println' ->
+                                                fail('only System.out.print/println are supported')
+                                            expect('(')
+                                            // JVM receiver precedes the printed expression.
+                                            emit(178, field('java/lang/System', 'out', 'Ljava/io/PrintStream;'))
+                                            arg := if peek() = ')' {true -> ?, _ -> expression(0)}
+                                            expect(')')
+                                            expect(';')
+                                            desc := if arg = ? {true -> '()V', _ ->
+                                                if arg = 'string' {true -> '(Ljava/lang/String;)V',
+                                                    _ -> if arg = 'bool' {true -> '(Z)V', _ -> '(I)V'}}}
+                                            emit(182, method('java/io/PrintStream', fnName, desc))
+                                        }
+                                        _ -> if tokens.(p).kind = 'id' {
+                                            true -> {
+                                                variable := identifier()
+                                                local := locals.(variable)
+                                                if local = ? -> fail('assignment to undefined Java local ' + variable)
+                                                expect('=')
+                                                value := expression(0)
+                                                if local != ? & local.kind != value -> fail('assignment type mismatch')
+                                                expect(';')
+                                                if local != ? -> storeLocal(local)
+                                            }
+                                            _ -> fail('unsupported Java statement ' + peek())
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        fn nested(level) statement(level)
+        statement(0)
+        if retType = 'void' & problem = ? -> emit(177, 0)
+        if retType = 'int' & problem = ? {
+            true -> if len(code) = 0 | code.(len(code) - 1).op != 172 ->
+                fail('int method must end in return expression')
+        }
+        {code: code, locals: count}
+    }
+
+    fn writeBody(body) {
+        code := body.code
+        offsets := []
+        at := 0
+        code |> std.each(fn(inst) {
+            offsets << at
+            at <- at + if inst.op = 16 | inst.op = 18 | inst.op = 21 | inst.op = 25 |
+                inst.op = 54 | inst.op = 58 {true -> 2, _ ->
+                if inst.op = 17 | inst.op = 19 | inst.op = 178 | inst.op = 182 |
+                    inst.op = 183 | inst.op = 184 | inst.op = 167 |
+                    (inst.op >= 153 & inst.op <= 164) {true -> 3, _ -> 1}}
+        })
+        if at > 8192 -> fail('Java subset method bytecode exceeds 8192 bytes')
+        encoded := ''
+        code |> std.each(fn(inst, i) if problem = ? {
+            true -> {
+                op := inst.op
+                value := inst.arg
+                if op = 167 | (op >= 153 & op <= 164) {
+                    true -> {
+                        target := inst.target
+                        if target = ? | target < 0 | target >= len(offsets) {
+                            true -> fail('Java branch target is not an instruction')
+                            _ -> {
+                                value <- offsets.(target) - offsets.(i)
+                                if value < -32768 | value > 32767 ->
+                                    fail('Java branch displacement outside signed 16-bit range')
+                            }
+                        }
+                    }
+                }
+                encoded <- encoded + _u1(op)
+                if op = 16 | op = 18 | op = 21 | op = 25 | op = 54 | op = 58 {
+                    true -> encoded <- encoded + _u1(value)
+                    _ -> if op = 17 | op = 19 | op = 178 | op = 182 | op = 183 |
+                        op = 184 | op = 167 | (op >= 153 & op <= 164) ->
+                        encoded <- encoded + _u2(value)
+                }
+            }
+        })
+        {bytes: encoded, locals: body.locals}
+    }
+
+    fn declaration() if peek() != '}' & peek() != '<eof>' & problem = ? {
+        true -> {
+            flags := 0
+            if consume('public') -> flags <- flags | 1
+            if consume('static') -> flags <- flags | 8
+            returns := if consume('void') {true -> 'void', _ ->
+                if consume('int') {true -> 'int', _ -> {fail('only void/int methods supported'), '?'}}}
+            methodName := identifier()
+            expect('(')
+            arg := ?
+            desc := '()'
+            if peek() != ')' {
+                true -> if consume('String') {
+                    true -> {
+                        expect('[')
+                        expect(']')
+                        arg <- {name: identifier(), kind: 'args'}
+                        desc <- '([Ljava/lang/String;)'
+                    }
+                    _ -> if consume('int') {
+                        true -> {arg <- {name: identifier(), kind: 'int'}, desc <- '(I)'}
+                        _ -> fail('only int or String[] argument supported')
+                    }
+                }
+            }
+            expect(')')
+            desc <- desc + if returns = 'int' {true -> 'I', _ -> 'V'}
+            if methodName = 'main' & (desc != '([Ljava/lang/String;)V' | flags & 9 != 9) ->
+                fail('main must be public static void main(String[] args)')
+            if methodName != 'main' & desc = '([Ljava/lang/String;)V' ->
+                fail('String[] argument is only supported for main')
+            if flags & 8 = 0 & !(methodName = 'init' | methodName = 'start') ->
+                fail('only static methods or Applet init/start are supported')
+            if flags & 8 = 0 & superName != 'java/applet/Applet' ->
+                fail('instance lifecycle methods require extends java.applet.Applet')
+            if flags & 8 = 0 & (desc != '()V') ->
+                fail('Applet lifecycle methods cannot take arguments')
+            if flags & 8 = 0 & flags & 1 = 0 ->
+                fail('Applet lifecycle methods must be public')
+            if signatures.(methodName + desc) != ? -> fail('duplicate Java method')
+            signatures.(methodName + desc) <- true
+            body := compileBody(returns, arg, (flags & 8) != 0)
+            bytes := writeBody(body)
+            methods << {name: methodName, desc: desc, flags: flags,
+                code: bytes.bytes, locals: bytes.locals}
+            declaration()
+        }
+    }
+    declaration()
+    expect('}')
+    if peek() != '<eof>' -> fail('trailing Java source after class')
+    referenced |> std.each(fn(name) if signatures.(name + '(I)I') = ? ->
+        fail('unknown static int method ' + name))
+    if len(methods) = 0 -> fail('Java subset class has no methods')
+    if len(pool) >= 8192 -> fail('Java constant pool exceeds 8192 entries')
+    if problem != ? {
+        true -> _error(problem)
+        _ -> {
+            // Java 5 class version permits branch verification without a
+            // StackMapTable. Every method is independently bounded/checked.
+            constructor := _u1(42) + _u1(183) + _u2(method(superName, '<init>', '()V')) + _u1(177)
+            methods <- std.append([{name: '<init>', desc: '()V', flags: 1,
+                code: constructor, locals: 1}], methods)
+            fn member(m) {
+                code := m.code
+                payload := _u2(64) + _u2(m.locals) + _u4(len(code)) + code +
+                    _u2(0) + _u2(0)
+                _u2(m.flags) + _u2(utf(m.name)) + _u2(utf(m.desc)) +
+                    _u2(1) + _u2(codeIndex) + _u4(len(payload)) + payload
+            }
+            out := ''
+            methods |> std.each(fn(m) out <- out + member(m))
+            binary := _u4(3405691582) + _u2(0) + _u2(49) +
+                _u2(len(pool) + 1) + str.join(pool, '') +
+                _u2(33) + _u2(thisIndex) + _u2(parentIndex) +
+                _u2(0) + _u2(0) + _u2(len(methods)) + out + _u2(0)
+            checked := classfile.parseClass(binary)
+            if checked.type = :error {
+                true -> _error('Oak Java compiler produced invalid class: ' + checked.message)
+                _ -> {type: :ok, classes: [binary], entry: name, backend: 'oak'}
+            }
+        }
+    }
+}
+
+fn compile(entry, source) {
+    if type(source) != :string | len(source) = 0 | len(source) > 1048576 {
+        true -> _error('Oak-only Java source must be 1..1048576 bytes')
+        _ -> {
+            tokens := tokenize(source)
+            if tokens.type = :error {true -> tokens, _ -> _compile(entry, tokens.tokens)}
+        }
+    }
+}

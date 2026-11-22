@@ -1,0 +1,77 @@
+// Bounded JAR manifest main-section reader. Continuation lines are unfolded
+// before interpreting Main-Class. This never fetches Class-Path URLs/JARs or
+// evaluates manifest text as code.
+std := import('std')
+str := import('str')
+
+fn _error(message) std.error(message)
+fn _letter?(c) (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | c = '_' | c = '$'
+fn _digit?(c) c >= '0' & c <= '9'
+fn _className?(name) {
+    if type(name) != :string | name = '' | len(name) > 1024 {
+        true -> false
+        _ -> {
+            parts := str.split(name, '.')
+            !(parts |> std.some(fn(part) part = '' | !_letter?(part.(0)) |
+                (std.range(len(part)) |> std.some(fn(i) !(_letter?(part.(i)) | _digit?(part.(i)))))))
+        }
+    }
+}
+fn parse(raw) {
+    if type(raw) != :string | len(raw) > 65536 {
+        true -> _error('oversized JAR manifest (64 KiB limit)')
+        _ -> {
+            values := {}
+            seen := {}
+            problem := ?
+            current := ?
+            text := ''
+            finished? := false
+            fn flush() if current != ? & problem = ? {
+                true -> {
+                    key := str.lower(current)
+                    if seen.(key) != ? & (key = 'main-class' | key = 'class-path' |
+                        key = 'multi-release') {
+                        true -> problem <- 'duplicate JAR manifest attribute ' + current
+                        _ -> {seen.(key) <- true, values.(key) <- text}
+                    }
+                }
+            }
+            str.split(raw, '\n') |> std.each(fn(line) if !finished? & problem = ? {
+                true -> {
+                    if str.endsWith?(line, '\r') -> line <- std.slice(line, 0, len(line) - 1)
+                    if len(line) > 8192 | str.contains?(line, char(0)) {
+                        true -> problem <- 'invalid JAR manifest line'
+                        _ -> if line = '' {
+                            true -> {flush(), finished? <- true}
+                            _ -> if str.startsWith?(line, ' ') {
+                                true -> if current = ? {
+                                    true -> problem <- 'JAR manifest continuation without a header'
+                                    _ -> text <- text + std.slice(line, 1)
+                                }
+                                _ -> {
+                                    flush()
+                                    split := str.cut(line, ': ')
+                                    if split.(1) = '' | split.(0) = '' {
+                                        true -> problem <- 'invalid JAR manifest header'
+                                        _ -> {current <- split.(0), text <- split.(1)}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            if !finished? -> flush()
+            entry := str.trim(values.('main-class') |> std.default(''))
+            if problem = ? & entry != '' & !_className?(entry) ->
+                problem <- 'invalid JAR Main-Class name: ' + entry
+            if problem != ? {
+                true -> _error(problem)
+                _ -> {type: :ok, entry: if entry = '' {true -> ?, _ -> str.replace(entry, '.', '/')},
+                    classPath: values.('class-path'), multiRelease?:
+                        str.lower(str.trim(values.('multi-release') |> std.default(''))) = 'true'}
+            }
+        }
+    }
+}

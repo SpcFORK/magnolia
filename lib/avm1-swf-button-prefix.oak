@@ -1,0 +1,84 @@
+// Finite uploaded SWF5 virtual preloader-complete / Play-button action slice.
+// This is NOT a SWF player: no actual load accounting, automatic scheduler,
+// physical hit test, later root-frame entry, renderer, audio, or AVM2/AS3.
+// The direct CLI is not source-pinned; the independent Python oracle pins the
+// unchanged entire upload before exercising this explicitly bounded profile.
+std := import('std')
+timeline := import('avm1-swf-timeline-prefix')
+actions := import('avm1-preloader')
+bytes := import('bytes')
+
+fn _error(message) std.error('SWF5 button prefix: ' + message)
+fn _at(raw, i) bytes.at(raw, i)
+fn _u16(raw, i) bytes.u16(raw, i)
+
+// Button2 header and button-record bytes are deliberately a narrow exact
+// profile, rather than a general matrix/CXFORM/button-state parser. Original
+// AVM1 action bytes are sliced from the input and decoded/executed separately.
+fn _buttonHeader() '\x0a\x00\x00\x2e\x00\x0f\x08\x00\x01\x00\x00\x04\x01\x09\x00\x02\x00\xc9\x0e\x52\x43\xad\x88\x94\xe3\x04\x02\x09\x00\x02\x00\xc9\x1f\x82\x48\x17\x89\x89\xef\x80\x04\x0c\x09\x00\x02\x00\x00\x04\x00\x00\x00\x08\x00'
+
+fn releasePlay(raw) {
+    // firstFrame validates the entire envelope, three sprite definitions and
+    // original first action. It records a pending, not scheduled, loaded goto.
+    first := timeline.firstFrame(raw, 1, 1)
+    if first.type != :ok {
+        true -> _error(first.message)
+        _ -> if !first.pendingGotoLoaded? | !first.rootStopped? |
+            first.loadedLabelFrame != 2 {
+            true -> _error('complete-load preloader did not request loaded label')
+            _ -> {
+                // Offsets and short headers bind the virtual dispatch to this
+                // checked container's actual root button and loaded placement.
+                buttonTag := 1859
+                body := buttonTag + 6
+                placeTag := 2260
+                labelTag := 2247
+                if len(raw) < 2279 | _u16(raw, buttonTag) != (34 << 6) + 63 |
+                    _u16(raw, buttonTag + 2) != 85 |
+                    _u16(raw, buttonTag + 4) != 0 |
+                    std.slice(raw, body, body + 53) != _buttonHeader() |
+                    _u16(raw, labelTag) != (43 << 6) + 63 |
+                    _u16(raw, labelTag + 2) != 7 | _u16(raw, labelTag + 4) != 0 |
+                    std.slice(raw, labelTag + 6, labelTag + 13) != 'loaded' + char(0) |
+                    _u16(raw, placeTag) != (26 << 6) + 17 |
+                    std.slice(raw, placeTag + 2, placeTag + 19) != '\x16\x06\x00\x0a\x00\xc9\x00\x01\x40\x00\x4d\xf6\xcb\x61\x00\x02\x00' {
+                    true -> _error('original Button2 or loaded-frame placement profile differs')
+                    _ -> {
+                        // CONDACTION's final zero-size block has flag 0x0008:
+                        // OverDownToOverUp, i.e. a synthetic button release.
+                        actionStart := body + 53
+                        actionEnd := body + 85
+                        dispatched := actions.runButton(std.slice(raw, actionStart, actionEnd))
+                        if dispatched.type != :ok {
+                            true -> _error(dispatched.message)
+                            _ -> if dispatched.actionRecords != 6 | dispatched.steps != 6 |
+                                len(dispatched.events) != 1 |
+                                dispatched.events.(0).action != 'call' |
+                                dispatched.events.(0).target != '_root' |
+                                dispatched.events.(0).name != 'play' |
+                                dispatched.stackDepth != 0 {
+                                true -> _error('original release action did not issue exactly one _root.play')
+                                _ -> {
+                                    type: :ok, sourceBytes: len(raw),
+                                    preloaderCompleteHostSnapshot: {loaded: 1, total: 1},
+                                    preloaderRootInitiallyStopped?: first.rootStopped?,
+                                    preloaderRequestedLoadedFrame?: first.pendingGotoLoaded?,
+                                    explicitVirtualLoadedFrame: 2,
+                                    buttonId: 10, buttonTagOffset: buttonTag,
+                                    placementOffset: placeTag, placementDepth: 6,
+                                    syntheticTransition: 'OverDownToOverUp',
+                                    conditionFlags: 8,
+                                    actionOffset: actionStart, actionBytes: actionEnd - actionStart,
+                                    actionResult: dispatched,
+                                    virtualRootPlayRequested?: true,
+                                    automaticSchedulingOrPhysicalHitTest?: false,
+                                    rootFrame1Entered?: false, renderedOrAudio?: false
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

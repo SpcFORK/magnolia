@@ -14,9 +14,16 @@ filter := std.filter
 each := std.each
 clone := std.clone
 keys := std.keys
-contains? := std.contains?
+reduce := std.reduce
 surface := import('ui-surface')
 styleBake := import('style-bake')
+
+// Module-level set built from the surface's canonical LAYOUT_DIRTYING list;
+// setProp does membership tests on every call, so avoid a linear list scan.
+LAYOUT_DIRTYING_SET := surface.LAYOUT_DIRTYING |> reduce({}, fn(acc, name) {
+	acc.(name) := true
+	acc
+})
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -85,11 +92,29 @@ fn _mergeProps(base, over) {
 	loop(0)
 }
 
+// memo for _measureText: keyed by (fontSize, text). Advances are a pure
+// function of those two, so a bounded module-level cache is safe and shared
+// across cores. Evicts everything once full -- simpler than LRU and good
+// enough for the small working set of live labels.
+MEASURE_CACHE := {}
+MEASURE_CACHE_MAX := 256
+
 fn _measureText(text, fontSize) {
 	// approximate advance: 0.55 * fontSize per character (Inter-ish)
-	w := len(default(text, '')) * fontSize * 0.55
-	h := if fontSize > 0 { true -> fontSize * 1.25, _ -> 14 }
-	{ w: w, h: h }
+	t := default(text, '')
+	key := string(fontSize) + ':' + t
+	cached := MEASURE_CACHE.(key)
+	if cached != ? {
+		true -> cached
+		_ -> {
+			w := len(t) * fontSize * 0.55
+			h := if fontSize > 0 { true -> fontSize * 1.25, _ -> 14 }
+			size := { w: w, h: h }
+			if len(keys(MEASURE_CACHE)) >= MEASURE_CACHE_MAX -> MEASURE_CACHE <- {}
+			MEASURE_CACHE.(key) := size
+			size
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +166,9 @@ fn createCore(options) {
 		stepArmed?: false
 		// last drawlist for goldens
 		drawList: []
+		// bumped by every mutating op; cleared resolve cache pairs with it
+		epoch: 0
+		resolveCache: {}
 	}
 }
 
@@ -168,14 +196,32 @@ fn _node(core, id) {
 	}
 }
 
+// invalidate the props cache; call from every mutating op
+fn _bumpEpoch(core) {
+	core.epoch := core.epoch + 1
+	core.resolveCache := {}
+}
+
+// _resolveProps is called several times per node per layout/draw/hitTest
+// pass (measure, place, emit, test). Resolution is deterministic between
+// mutating ops, so cache per node id and clear the whole cache on any op.
 fn _resolveProps(core, node) {
-	base := _defaultProps()
-	if node.styleId >= 0 {
-		true -> {
-			st := styleBake.getStyle(core.styles, node.styleId)
-			_mergeProps(base, _mergeProps(st, node.props))
+	key := string(node.id)
+	cached := core.resolveCache.(key)
+	if cached != ? {
+		true -> cached
+		_ -> {
+			base := _defaultProps()
+			props := if node.styleId >= 0 {
+				true -> {
+					st := styleBake.getStyle(core.styles, node.styleId)
+					_mergeProps(base, _mergeProps(st, node.props))
+				}
+				_ -> _mergeProps(base, node.props)
+			}
+			core.resolveCache.(key) := props
+			props
 		}
-		_ -> _mergeProps(base, node.props)
 	}
 }
 
@@ -228,6 +274,7 @@ fn createNode(core, kind) {
 		h: 0
 	}
 	core.nodes.(slot) := node
+	_bumpEpoch(core)
 	core.layoutDirty? := true
 	id
 }
@@ -257,6 +304,7 @@ fn destroyNode(core, id) {
 			node.children := []
 			node.parent := 0
 			core.free := core.free << node.slot
+			_bumpEpoch(core)
 			core.layoutDirty? := true
 		}
 	}
@@ -326,6 +374,7 @@ fn insertBefore(core, parentId, childId, anchorId) {
 							}
 						}
 					}
+					_bumpEpoch(core)
 					core.layoutDirty? := true
 				}
 			}
@@ -341,6 +390,7 @@ fn removeChild(core, parentId, childId) {
 		_ -> {
 			parent.children := parent.children |> filter(fn(c) c != childId)
 			if child.parent = parentId -> child.parent := 0
+			_bumpEpoch(core)
 			core.layoutDirty? := true
 		}
 	}
@@ -352,6 +402,7 @@ fn setStyle(core, id, styleId) {
 		true -> ?
 		_ -> {
 			node.styleId := styleId
+			_bumpEpoch(core)
 			core.layoutDirty? := true
 		}
 	}
@@ -370,57 +421,14 @@ fn setProp(core, id, propNameOrId, value) {
 				true -> ?
 				_ -> {
 					node.props.(name) := value
-					// layout dirty if layout prop
-					if LAYOUT_DIRTYING_SET.(name) {
-						true -> core.layoutDirty? := true
-						_ -> if name {
-							'width', 'height', 'paddingT', 'paddingR', 'paddingB', 'paddingL'
-							'marginT', 'marginR', 'marginB', 'marginL', 'gap', 'flexDir'
-							'justify', 'align', 'grow', 'shrink', 'display', 'posType'
-							'fontSize', 'textAlign' -> core.layoutDirty? := true
-							_ -> ? // paint-only
-						}
-					}
+					_bumpEpoch(core)
+					if LAYOUT_DIRTYING_SET.(name) -> core.layoutDirty? := true
 				}
 			}
 		}
 	}
 }
 
-// local set for layout dirtying (object lookup)
-LAYOUT_DIRTYING_SET := {
-	width: true
-	height: true
-	minW: true
-	minH: true
-	maxW: true
-	maxH: true
-	paddingT: true
-	paddingR: true
-	paddingB: true
-	paddingL: true
-	marginT: true
-	marginR: true
-	marginB: true
-	marginL: true
-	gap: true
-	flexDir: true
-	justify: true
-	align: true
-	grow: true
-	shrink: true
-	basis: true
-	posType: true
-	insetT: true
-	insetR: true
-	insetB: true
-	insetL: true
-	display: true
-	overflow: true
-	fontSize: true
-	textAlign: true
-	lineHeight: true
-}
 
 fn setText(core, id, text) {
 	node := _node(core, id)
@@ -428,6 +436,7 @@ fn setText(core, id, text) {
 		true -> ?
 		_ -> {
 			node.text := default(text, '')
+			_bumpEpoch(core)
 			core.layoutDirty? := true
 		}
 	}
@@ -457,6 +466,7 @@ fn setActive(core, id) {
 
 fn loadStyles(core, table) {
 	core.styles := table
+	_bumpEpoch(core)
 	core.layoutDirty? := true
 }
 
@@ -840,12 +850,13 @@ fn hitTest(core, x, y) {
 			if props.display = surface.ENUMS.Display.None {
 				true -> ?
 				_ -> {
-					// children first (topmost last painted)
-					node.children |> each(fn(cid) walk(_node(core, cid)))
+					// claim in paint order: parent first, then children overwrite,
+					// so the last (topmost) painted node containing the point wins
 					inside? := x >= node.x & x < node.x + node.w & y >= node.y & y < node.y + node.h
 					// only claim if paints something
 					paints? := props.bgColor != ? | node.kind = surface.NODE_TYPE.text | props.borderWidth > 0
 					if inside? & paints? -> hit := node.id
+					node.children |> each(fn(cid) walk(_node(core, cid)))
 				}
 			}
 		}

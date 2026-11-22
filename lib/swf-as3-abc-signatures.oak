@@ -1,0 +1,107 @@
+// Opt-in bounded ABC16/46 METHOD SIGNATURE headers, on top of the separately
+// checked ASCII-only constant pool. This admits only the observed zero-flag
+// method_info profile. Nothing after method_info is parsed or executed:
+// metadata, instances/classes/scripts/traits, method_body, exceptions, AVM2
+// opcodes and the Flash host are unverified; this is NOT an ABC verifier.
+std := import('std')
+pools := import('./swf-as3-abc-pool.oak')
+fn _error(message) std.error('ABC16/46 signatures: ' + message)
+fn _var(s) {
+    value := 0
+    done? := false
+    std.range(5) |> std.each(fn(i) if s.problem = ? & !done? {
+        true -> if s.pos >= len(s.raw) {
+            true -> s.problem <- 'truncated method signature'
+            _ -> {
+                b := codepoint(s.raw.(s.pos)) & 255
+                s.pos <- s.pos + 1
+                part := b & 127
+                value <- value + (part << (7 * i))
+                if i = 4 & (part > 3 | (b & 128) != 0) ->
+                    s.problem <- 'method signature U30 overflow'
+                if (b & 128) = 0 {
+                    true -> {
+                        done? <- true
+                        if i > 0 & value < (1 << (7 * i)) ->
+                            s.problem <- 'noncanonical method signature U30'
+                    }
+                }
+            }
+        }
+    })
+    if !done? & s.problem = ? -> s.problem <- 'unterminated method signature U30'
+    value
+}
+fn _typeIndex(s, poolCount) {
+    value := _var(s)
+    // Zero means the signature's wildcard/unspecified *type*, not a known
+    // VM value. All other indices must refer inside the parsed pool.
+    if s.problem = ? & value != 0 & value >= poolCount ->
+        s.problem <- 'method type index outside checked multiname pool'
+    value
+}
+fn scan(raw) {
+    parent := pools.scan(raw)
+    if parent.type = :error {
+        true -> _error('preceding constant-pool gate: ' + parent.message)
+        _ -> _scan(raw, parent)
+    }
+}
+fn _scan(raw, parent) {
+    s := {raw: raw, pos: parent.constantPoolEndOffset, problem: ?}
+    count := _var(s)
+    if s.problem = ? & (count < 1 | count > 256) ->
+        s.problem <- 'method signature count outside 1..256 profile'
+    totalParams := 0
+    maxParams := 0
+    named := 0
+    std.range(if s.problem = ? {true -> count, _ -> 0}) |>
+        std.each(fn(_) if s.problem = ? {
+            true -> {
+                params := _var(s)
+                if params > 32 | params > 2048 - totalParams {
+                    true -> s.problem <- 'method parameters outside bounded profile'
+                    _ -> {
+                        totalParams <- totalParams + params
+                        if params > maxParams -> maxParams <- params
+                        _typeIndex(s, parent.poolCounts.multiname)
+                        std.range(params) |> std.each(fn(_) if s.problem = ? ->
+                            _typeIndex(s, parent.poolCounts.multiname))
+                        name := _var(s)
+                        if s.problem = ? & name != 0 {
+                            true -> if name >= parent.poolCounts.string {
+                                true -> s.problem <- 'method name outside checked string pool'
+                                _ -> named <- named + 1
+                            }
+                        }
+                        if s.problem = ? {
+                            true -> if s.pos >= len(raw) {
+                                true -> s.problem <- 'truncated method flags'
+                                _ -> {
+                                    flags := codepoint(raw.(s.pos)) & 255
+                                    s.pos <- s.pos + 1
+                                    if flags != 0 ->
+                                        s.problem <- 'unsupported method flags/optional/default/parameter names'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    if s.problem = ? & s.pos >= len(raw) ->
+        s.problem <- 'unverified ABC metadata/class/script/trait/code tail missing'
+    if s.problem != ? {
+        true -> _error(s.problem)
+        _ -> {
+            type: :ok, profile: 'ABC16/46-ASCII-pool-plus-flag0-signatures-only',
+            abcBytes: len(raw), constantPoolEndOffset: parent.constantPoolEndOffset,
+            methodSignatureCount: count, totalParameterTypes: totalParams,
+            maxParameters: maxParams, namedMethodCount: named,
+            signatureTableEndOffset: s.pos,
+            postSignaturesUnverifiedBytes: len(raw) - s.pos,
+            metadataClassScriptTraitOrCodeVerified: false,
+            AVM2Executed: false
+        }
+    }
+}

@@ -1,0 +1,355 @@
+// gui-render-core — Standalone rendering engine, decoupled from the UI shell.
+//
+// The rendering engine (gui-render, gui-raster, gui-2d, gui-mesh,
+// gui-lighting, gui-3dmath, gui-shader) already uses a deps-injection pattern:
+// every draw function takes a `deps` object with draw primitives and a
+// `window` with width/height. This module provides:
+//
+//   RenderDeps(drawFns) — builds a fully-wired deps object from any set of
+//     draw primitives. A 3D renderer, game engine, or headless context can
+//     supply its own fillRect / drawLine / drawText / rgb and get a working
+//     renderer without importing the GUI facade (forms, dialogs, events,
+//     input, menus, etc.).
+//
+//   Renderer3D(window, drawFns, options) — convenience wrapper that builds
+//     deps via RenderDeps and returns the gui-render.Renderer3D closure.
+//
+//   DrawMeshSolid / DrawMeshLit / DrawMeshWireframe / DrawTriangleFilled
+//     — direct re-exports of gui-raster primitives, callable with any deps.
+//
+//   Mesh constructors — re-exported from gui-mesh so renderers can build
+//     geometry without the GUI facade.
+//
+//   Vec3 / transformPoint / projectPoint / Mat4* / Quat* — re-exported
+//     3D math from gui-3dmath for camera/projection setup.
+//
+// GUI.oak re-stubs its rendering functions onto this module, so the UI
+// shell and non-UI contexts share one rendering engine.
+
+{ _default: _default, _clamp: _clamp } := import('gui-common')
+
+guiRender := import('gui-render')
+guiRaster := import('gui-raster')
+guiMesh := import('gui-mesh')
+gui3dmath := import('gui-3dmath')
+guiLighting := import('gui-lighting')
+gui2d := import('gui-2d')
+guiColor := import('gui-color')
+guiAA := import('gui-aa')
+guiShader := import('gui-shader')
+
+// ---------------------------------------------------------------------------
+// Mesh constructors — re-exported so renderers build geometry without GUI.
+// ---------------------------------------------------------------------------
+
+fn Vec3(x, y, z) guiMesh.Vec3(x, y, z)
+fn Mesh(vertices, edges) guiMesh.Mesh(vertices, edges)
+fn CubeMesh(size) guiMesh.CubeMesh(size)
+fn GridMesh(size, step) guiMesh.GridMesh(size, step)
+fn AxesMesh(length) guiMesh.AxesMesh(length)
+fn VoxelMesh(voxels, voxelSize) guiMesh.VoxelMesh(voxels, voxelSize)
+fn VoxelGrid(options) guiMesh.VoxelGrid(options)
+fn SphereMesh(radius, segments, rings) guiMesh.SphereMesh(radius, segments, rings)
+fn PyramidMesh(base, height) guiMesh.PyramidMesh(base, height)
+fn CylinderMesh(radius, height, segments) guiMesh.CylinderMesh(radius, height, segments)
+fn ConeMesh(radius, height, segments) guiMesh.ConeMesh(radius, height, segments)
+fn TorusMesh(majorRadius, minorRadius, majorSegments, minorSegments) guiMesh.TorusMesh(majorRadius, minorRadius, majorSegments, minorSegments)
+fn PlaneMesh(width, depth, subdivisionsW, subdivisionsD) guiMesh.PlaneMesh(width, depth, subdivisionsW, subdivisionsD)
+fn HemisphereMesh(radius, segments, rings) guiMesh.HemisphereMesh(radius, segments, rings)
+fn WedgeMesh(width, height, depth) guiMesh.WedgeMesh(width, height, depth)
+fn TubeMesh(outerRadius, innerRadius, height, segments) guiMesh.TubeMesh(outerRadius, innerRadius, height, segments)
+fn ArrowMesh(shaftRadius, shaftHeight, headRadius, headHeight, segments) guiMesh.ArrowMesh(shaftRadius, shaftHeight, headRadius, headHeight, segments)
+fn PrismMesh(radius, height, sides) guiMesh.PrismMesh(radius, height, sides)
+fn StairsMesh(steps, width, stepHeight, stepDepth) guiMesh.StairsMesh(steps, width, stepHeight, stepDepth)
+fn IcosphereMesh(radius) guiMesh.IcosphereMesh(radius)
+
+// ---------------------------------------------------------------------------
+// 3D math — re-exported for camera/projection setup.
+// ---------------------------------------------------------------------------
+
+fn transformPoint(v, transform) gui3dmath.transformPoint(v, transform)
+fn projectPoint(window, p, camera) gui3dmath.projectPoint(window, p, camera)
+fn transformVertices(vertices, transform, i, out) gui3dmath.transformVertices(vertices, transform, i, out)
+fn Mat4Identity() gui3dmath.Mat4Identity()
+fn Mat4Translate(x, y, z) gui3dmath.Mat4Translate(x, y, z)
+fn Mat4Scale(x, y, z) gui3dmath.Mat4Scale(x, y, z)
+fn Mat4RotateX(radians) gui3dmath.Mat4RotateX(radians)
+fn Mat4RotateY(radians) gui3dmath.Mat4RotateY(radians)
+fn Mat4RotateZ(radians) gui3dmath.Mat4RotateZ(radians)
+fn Mat4Multiply(a, b) gui3dmath.Mat4Multiply(a, b)
+fn Mat4TransformPoint(m, v) gui3dmath.Mat4TransformPoint(m, v)
+fn Quat(x, y, z, w) gui3dmath.Quat(x, y, z, w)
+fn QuatFromAxisAngle(axis, radians) gui3dmath.QuatFromAxisAngle(axis, radians)
+fn QuatMultiply(a, b) gui3dmath.QuatMultiply(a, b)
+fn QuatNormalize(q) gui3dmath.QuatNormalize(q)
+fn QuatRotateVector(q, v) gui3dmath.QuatRotateVector(q, v)
+fn QuatToMat4(q) gui3dmath.QuatToMat4(q)
+fn QuatSlerp(a, b, t) gui3dmath.QuatSlerp(a, b, t)
+
+// ---------------------------------------------------------------------------
+// Lighting — re-exported so renderers set up scenes without GUI.
+// ---------------------------------------------------------------------------
+
+fn DirectionalLight(options) guiLighting.DirectionalLight(options)
+fn PointLight(options) guiLighting.PointLight(options)
+fn SpotLight(options) guiLighting.SpotLight(options)
+fn AmbientLight(options) guiLighting.AmbientLight(options)
+fn Material(options) guiLighting.Material(options)
+fn LightScene(options) guiLighting.LightScene(options)
+fn addLight(scene, light) guiLighting.addLight(scene, light)
+fn removeLight(scene, index) guiLighting.removeLight(scene, index)
+fn clearLights(scene) guiLighting.clearLights(scene)
+fn lightCount(scene) guiLighting.lightCount(scene)
+fn faceNormal(pa, pb, pc) guiLighting.faceNormal(pa, pb, pc)
+fn faceCenter(pa, pb, pc) guiLighting.faceCenter(pa, pb, pc)
+fn shadeFaceColor(baseColor, scene, material, pa3, pb3, pc3, camPos) {
+	guiLighting.shadeFaceColor({ rgb: rgb }, baseColor, scene, material, pa3, pb3, pc3, camPos)
+}
+fn shadeFaceIntensity(scene, material, pa3, pb3, pc3, camPos) guiLighting.shadeFaceIntensity(scene, material, pa3, pb3, pc3, camPos)
+fn prepareScene(scene, material, camPos) guiLighting.prepareScene(scene, material, camPos)
+fn shadeFaceColorFast(baseColor, prep, pa3, pb3, pc3) guiLighting.shadeFaceColorFast(rgb, baseColor, prep, pa3, pb3, pc3)
+
+// ---------------------------------------------------------------------------
+// Color / AA — re-exported so renderers have full color control.
+// ---------------------------------------------------------------------------
+
+fn rgb(r, g, b) guiColor.rgb(r, g, b)
+fn rgba(r, g, b, a, background) guiColor.rgba(r, g, b, a, background)
+
+// ---------------------------------------------------------------------------
+// Raster primitives — direct re-exports, callable with any deps object.
+// ---------------------------------------------------------------------------
+
+fn DrawMeshSolid(deps, window, mesh, transform, camera, color, light, borderColor) {
+	guiRaster.drawMeshSolid(deps, window, mesh, transform, camera, color, light, borderColor)
+}
+
+fn DrawMeshLit(deps, window, mesh, transform, camera, color, scene, material, borderColor) {
+	guiRaster.drawMeshLit(deps, window, mesh, transform, camera, color, scene, material, borderColor)
+}
+
+fn DrawMeshWireframe(deps, window, mesh, transform, camera, color) {
+	guiRaster.drawMeshWireframe(deps, window, mesh, transform, camera, color)
+}
+
+fn DrawTriangleFilled(deps, window, p0, p1, p2, color, borderColor) {
+	guiRaster.drawTriangleFilled(deps, window, p0, p1, p2, color, borderColor)
+}
+
+fn DrawTriangleFilledAA(deps, window, p0, p1, p2, color, borderColor, bgColor) {
+	guiRaster.drawTriangleFilledAA(deps, window, p0, p1, p2, color, borderColor, bgColor)
+}
+
+// ---------------------------------------------------------------------------
+// RenderDeps — builds a fully-wired deps object from any draw primitives.
+//
+// drawFns: {
+//   fillRect, drawLine, drawText, rgb,
+//   drawLineAA?, fillEllipse?, fillPolygon?, fillRoundedRect?,
+//   pushMask?, popMask?,
+//   // Optional: provide custom drawMesh* for custom renderers.
+//   // If absent, RenderDeps wires gui-raster's versions using the
+//   // supplied fillRect / drawLine / rgb.
+// }
+//
+// The returned deps object is compatible with gui-render.Renderer3D,
+// gui-raster.drawMeshSolid/drawMeshLit/drawMeshWireframe, and
+// gui-draw-ops.draw.
+// ---------------------------------------------------------------------------
+
+fn RenderDeps(drawFns) {
+	d := _default(drawFns, {})
+
+	// Core color primitive — default to gui-color if not supplied.
+	rgbFn := _default(d.rgb, rgb)
+
+	// Shared 3D math deps used by gui-raster.
+	meshDeps := {
+		drawLine: _default(d.drawLine, ?)
+		transformVertices: transformVertices
+		projectPoint: projectPoint
+		rgb: rgbFn
+		Vec3: Vec3
+	}
+
+	meshWireDeps := {
+		drawLine: _default(d.drawLine, ?)
+		transformVertices: transformVertices
+		projectPoint: projectPoint
+	}
+
+	// Default drawMesh* functions wired to gui-raster.
+	// If the caller supplies custom ones, those win.
+	defaultMeshSolid := fn(window, mesh, transform, camera, color, light, borderColor) {
+		guiRaster.drawMeshSolid(meshDeps, window, mesh, transform, camera, color, light, borderColor)
+	}
+	defaultMeshLit := fn(window, mesh, transform, camera, color, scene, material, borderColor) {
+		guiRaster.drawMeshLit(meshDeps, window, mesh, transform, camera, color, scene, material, borderColor)
+	}
+	defaultMeshWire := fn(window, mesh, transform, camera, color) {
+		guiRaster.drawMeshWireframe(meshWireDeps, window, mesh, transform, camera, color)
+	}
+
+	{
+		rgb: rgbFn
+		fillRect: _default(d.fillRect, ?)
+		drawLine: _default(d.drawLine, ?)
+		drawText: _default(d.drawText, ?)
+		// Optional backend primitives
+		drawLineAA: _default(d.drawLineAA, ?)
+		fillEllipse: _default(d.fillEllipse, ?)
+		fillPolygon: _default(d.fillPolygon, ?)
+		fillRoundedRect: _default(d.fillRoundedRect, ?)
+		pushMask: _default(d.pushMask, ?)
+		popMask: _default(d.popMask, ?)
+		// 3D mesh drawing — custom or default
+		drawMeshSolid: _default(d.drawMeshSolid, defaultMeshSolid)
+		drawMeshLit: _default(d.drawMeshLit, defaultMeshLit)
+		drawMeshWireframe: _default(d.drawMeshWireframe, defaultMeshWire)
+		// Mesh constructors — always available
+		CubeMesh: CubeMesh
+		GridMesh: GridMesh
+		Mesh: Mesh
+		Vec3: Vec3
+		VoxelMesh: VoxelMesh
+		SphereMesh: SphereMesh
+		PyramidMesh: PyramidMesh
+		CylinderMesh: CylinderMesh
+		ConeMesh: ConeMesh
+		TorusMesh: TorusMesh
+		PlaneMesh: PlaneMesh
+		HemisphereMesh: HemisphereMesh
+		WedgeMesh: WedgeMesh
+		TubeMesh: TubeMesh
+		ArrowMesh: ArrowMesh
+		PrismMesh: PrismMesh
+		StairsMesh: StairsMesh
+		IcosphereMesh: IcosphereMesh
+		// Lighting
+		prepareScene: prepareScene
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Renderer3D — convenience: builds deps from drawFns and returns the
+// gui-render.Renderer3D closure. A non-UI context can call:
+//
+//   renderer := renderCore.Renderer3D(myWindow, {
+//     fillRect: myFillRect,
+//     drawLine: myDrawLine,
+//     drawText: myDrawText,
+//     rgb: myRgb,
+//   }, { camera: ... })
+//
+// No GUI facade import required.
+// ---------------------------------------------------------------------------
+
+fn Renderer3D(window, drawFns, options) {
+	guiRender.Renderer3D(RenderDeps(drawFns), window, options)
+}
+
+// ---------------------------------------------------------------------------
+// 2D Rendering Core — decoupled from the UI shell, same pattern as 3D.
+//
+// gui-2d.oak already uses deps-injection for all 2D shape primitives.
+// This section provides Render2DDeps to build the full set of 2D deps
+// variants from any set of draw primitives, plus re-exports of every
+// 2D drawing function so non-UI contexts can use them directly.
+//
+// A 2D renderer, HUD overlay, or game engine can call:
+//   deps := renderCore.Render2DDeps({
+//     drawLine: myDrawLine,
+//     fillRect: myFillRect,
+//     rgb: myRgb,
+//   })
+//   renderCore.DrawRect2D(deps.lineRect, window, x, y, w, h, color, true)
+//
+// No GUI facade import required.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Render2DDeps — builds all 2D deps variants from a single drawFns object.
+//
+// drawFns: {
+//   drawLine, drawLinesBatch?, fillRect, drawText, rgb,
+//   fillEllipse?, fillPolygon?, fillRoundedRect?, pushMask?, popMask?
+// }
+//
+// Returns an object with named deps variants matching what each 2D
+// drawing function expects:
+//   line, lineBatch, lineRect, lineEllipse, linePoly,
+//   lineBatchPoly, lineRectRounded, lineRectEllipse, rgb
+// ---------------------------------------------------------------------------
+
+fn Render2DDeps(drawFns) {
+	d := _default(drawFns, {})
+
+	rgbFn := _default(d.rgb, rgb)
+	drawLineFn := _default(d.drawLine, ?)
+	drawLinesBatchFn := _default(d.drawLinesBatch, ?)
+	fillRectFn := _default(d.fillRect, ?)
+	fillEllipseFn := _default(d.fillEllipse, ?)
+	fillPolygonFn := _default(d.fillPolygon, ?)
+	fillRoundedRectFn := _default(d.fillRoundedRect, ?)
+
+	{
+		rgb: rgbFn
+		line: { drawLine: drawLineFn }
+		lineBatch: { drawLine: drawLineFn, drawLinesBatch: drawLinesBatchFn }
+		lineRect: { drawLine: drawLineFn, fillRect: fillRectFn }
+		lineEllipse: { drawLine: drawLineFn, fillEllipse: fillEllipseFn }
+		linePoly: { drawLine: drawLineFn, fillPolygon: fillPolygonFn }
+		lineBatchPoly: { drawLine: drawLineFn, drawLinesBatch: drawLinesBatchFn, fillPolygon: fillPolygonFn }
+		lineRectRounded: { drawLine: drawLineFn, fillRect: fillRectFn, fillRoundedRect: fillRoundedRectFn }
+		lineRectEllipse: { drawLine: drawLineFn, fillRect: fillRectFn, fillEllipse: fillEllipseFn }
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2D drawing function re-exports — each takes (deps, window, ...) and
+// delegates to gui-2d. The deps object comes from Render2DDeps.
+// ---------------------------------------------------------------------------
+
+fn DrawPolyline2D(deps, window, points, color, closed) gui2d.drawPolyline2D(deps, window, points, color, closed)
+fn DrawRect2D(deps, window, x, y, width, height, color, filled, borderColor) gui2d.drawRect2D(deps, window, x, y, width, height, color, filled, borderColor)
+fn DrawCircle2D(deps, window, cx, cy, radius, color, filled, borderColor) gui2d.drawCircle2D(deps, window, cx, cy, radius, color, filled, borderColor)
+fn DrawPolygon2D(deps, window, points, color, filled, borderColor) gui2d.drawPolygon2D(deps, window, points, color, filled, borderColor)
+fn DrawGrid2D(deps, window, spacing, color, originX, originY) gui2d.drawGrid2D(deps, window, spacing, color, originX, originY)
+fn DrawEllipse2D(deps, window, cx, cy, rx, ry, color, filled, borderColor) gui2d.drawEllipse2D(deps, window, cx, cy, rx, ry, color, filled, borderColor)
+fn DrawArc2D(deps, window, cx, cy, radius, startAngle, endAngle, color) gui2d.drawArc2D(deps, window, cx, cy, radius, startAngle, endAngle, color)
+fn DrawTriangle2D(deps, window, x1, y1, x2, y2, x3, y3, color, filled, borderColor) gui2d.drawTriangle2D(deps, window, x1, y1, x2, y2, x3, y3, color, filled, borderColor)
+fn DrawRoundedRect2D(deps, window, x, y, width, height, radius, color, filled, borderColor) gui2d.drawRoundedRect2D(deps, window, x, y, width, height, radius, color, filled, borderColor)
+fn DrawStar2D(deps, window, cx, cy, outerR, innerR, points, color, filled, borderColor) gui2d.drawStar2D(deps, window, cx, cy, outerR, innerR, points, color, filled, borderColor)
+fn DrawBezier2D(deps, window, points, color, steps) gui2d.drawBezier2D(deps, window, points, color, steps)
+fn DrawRing2D(deps, window, cx, cy, outerR, innerR, color) gui2d.drawRing2D(deps, window, cx, cy, outerR, innerR, color)
+fn DrawCross2D(deps, window, cx, cy, size, thickness, color, filled) gui2d.drawCross2D(deps, window, cx, cy, size, thickness, color, filled)
+fn DrawDiamond2D(deps, window, cx, cy, width, height, color, filled) gui2d.drawDiamond2D(deps, window, cx, cy, width, height, color, filled)
+fn DrawArrow2D(deps, window, x1, y1, x2, y2, color, headSize) gui2d.drawArrow2D(deps, window, x1, y1, x2, y2, color, headSize)
+fn DrawCapsule2D(deps, window, cx, cy, width, height, color, filled) gui2d.drawCapsule2D(deps, window, cx, cy, width, height, color, filled)
+fn DrawSector2D(deps, window, cx, cy, radius, startAngle, endAngle, color, filled) gui2d.drawSector2D(deps, window, cx, cy, radius, startAngle, endAngle, color, filled)
+fn DrawRegularPolygon2D(deps, window, cx, cy, radius, sides, color, filled) gui2d.drawRegularPolygon2D(deps, window, cx, cy, radius, sides, color, filled)
+fn DrawSpiral2D(deps, window, cx, cy, startRadius, growth, turns, color) gui2d.drawSpiral2D(deps, window, cx, cy, startRadius, growth, turns, color)
+fn DrawThickLine2D(deps, window, x1, y1, x2, y2, thickness, color) gui2d.drawThickLine2D(deps, window, x1, y1, x2, y2, thickness, color)
+fn DrawDashedLine2D(deps, window, x1, y1, x2, y2, color, dashLen, gapLen) gui2d.drawDashedLine2D(deps, window, x1, y1, x2, y2, color, dashLen, gapLen)
+
+// 2D math helpers — re-exported so renderers do transforms without GUI.
+fn Vec2(x, y) gui2d.Vec2(x, y)
+fn Vec4(x, y, w, h) gui2d.Vec4(x, y, w, h)
+fn Rect2(x, y, width, height) gui2d.Rect2(x, y, width, height)
+fn vec2Add(a, b) gui2d.vec2Add(a, b)
+fn vec2Sub(a, b) gui2d.vec2Sub(a, b)
+fn vec2Scale(v, s) gui2d.vec2Scale(v, s)
+fn vec2Dot(a, b) gui2d.vec2Dot(a, b)
+fn vec2Len(v) gui2d.vec2Len(v)
+fn vec2Normalize(v) gui2d.vec2Normalize(v)
+fn rectTranslate(rect, dx, dy) gui2d.rectTranslate(rect, dx, dy)
+fn rectContains(rect, point) gui2d.rectContains(rect, point)
+fn rectIntersects(a, b) gui2d.rectIntersects(a, b)
+fn pointInRect2D(point, rect) gui2d.pointInRect2D(point, rect)
+fn vec2Distance(a, b) gui2d.vec2Distance(a, b)
+fn vec2Lerp(a, b, t) gui2d.vec2Lerp(a, b, t)
+fn Transform2D(options) gui2d.Transform2D(options)
+fn applyTransform2D(point, transform) gui2d.applyTransform2D(point, transform)
+fn Camera2D(options) gui2d.Camera2D(options)
+fn worldToScreen2D(point, camera, window) gui2d.worldToScreen2D(point, camera, window)
+fn screenToWorld2D(point, camera, window) gui2d.screenToWorld2D(point, camera, window)

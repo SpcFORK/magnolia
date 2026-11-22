@@ -13,7 +13,6 @@ linux := import('linux')
 _guiImportT1 := nanotime()
 
 guiMesh := import('gui-mesh')
-guiRender := import('gui-render')
 gui3dmath := import('gui-3dmath')
 gui2d := import('gui-2d')
 guiRaster := import('gui-raster')
@@ -28,6 +27,8 @@ guiNativeLinux := import('gui-native-linux')
 _guiImportT3 := nanotime()
 
 guiDraw := import('gui-draw')
+guiRenderCore := import('gui-render-core')
+guiWindowNest := import('gui-window-nest')
 guiColor := import('gui-color')
 guiEvents := import('gui-events')
 guiInput := import('gui-input')
@@ -69,14 +70,20 @@ _importTimings := {
 
 fn getImportTimings() _importTimings
 
-fn backend() if ___runtime_sys_info().os {
-	'windows' -> :windows
-	'linux' -> :linux
-	'js' -> :web
-	'web' -> :web
-	'browser' -> :web
-	'wasm' -> :web
-	_ -> :unknown
+// The Builder JS runtime reports the host OS under Node (e.g. 'linux').
+// It is still JavaScript, not an X11/Win32 process. Keep native branches
+// only for the Oak executable; both Node and browsers use GUI's web backend.
+fn backend() if __Is_Oak_Node != ? {
+	true -> :web
+	_ -> if ___runtime_sys_info().os {
+		'windows' -> :windows
+		'linux' -> :linux
+		'js' -> :web
+		'web' -> :web
+		'browser' -> :web
+		'wasm' -> :web
+		_ -> :unknown
+	}
 }
 
 fn isWindows?() backend() = :windows
@@ -538,7 +545,35 @@ fn resolutionOffsetY(window) guiResolution.offsetY(window)
 fn physicalToLogical(window, px, py) guiResolution.physicalToLogical(window, px, py)
 fn logicalToPhysical(window, lx, ly) guiResolution.logicalToPhysical(window, lx, ly)
 
-fn createCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
+// Explicitly named: the later native createCanvas overload is a different
+// API. A caller of the full GUI facade can use these bounded web services
+// without reaching into gui-web directly.
+fn createWebCanvas(window, id, options) guiWeb.createCanvas(window, id, options)
+fn queueWebInput(window, event) guiWeb.dispatchEvent(window, event)
+fn pollWebInput(window) guiWeb.pollEvents(window)
+
+// Pixel-exact shared GUI operation. Web sends one packed image command;
+// native X11/GDI use the exact (not GUI.fillRect's expanded) row-run fallback.
+// The latter is intentionally a slower, display-dependent implementation.
+fn drawPackedImageData(window, x, y, width, height, raster) {
+	if type(window) != :object | window.type != :ok {
+		true -> _err('packed image requires a GUI window', window)
+		_ -> {
+			checked := guiPixels.check(x, y, width, height, raster,
+				window.width, window.height)
+			if checked.type = :error {
+				true -> checked
+				_ -> if window.backend {
+					:web -> guiWeb.drawPackedImageData(window, x, y,
+						width, height, raster)
+					:linux -> guiImage.draw(window, x, y, width, height, raster)
+					:windows -> guiImage.draw(window, x, y, width, height, raster)
+					_ -> _err('unsupported GUI packed image backend', window.backend)
+				}
+			}
+		}
+	}
+}
 fn initWebGL(window, contextName, attrs) guiWeb.initWebGL(window, contextName, attrs)
 fn webglCreateShader(window, shaderType, source) guiWeb.webglCreateShader(window, shaderType, source)
 fn webglCreateProgram(window, vertexShader, fragmentShader) guiWeb.webglCreateProgram(window, vertexShader, fragmentShader)
@@ -628,6 +663,7 @@ fn endFrame(window) if window.type {
 			}
 			res
 		}
+		:web -> guiWeb.endFrame(window)
 		_ -> 0
 	}
 	_ -> 0
@@ -1305,48 +1341,50 @@ fn Camera2D(options) gui2d.Camera2D(options)
 fn worldToScreen2D(point, camera, window) gui2d.worldToScreen2D(point, camera, window)
 fn screenToWorld2D(point, camera, window) gui2d.screenToWorld2D(point, camera, window)
 
-// Shared deps objects for 2D drawing — avoids per-call object allocation.
-_depsLine := { drawLine: drawLine }
-_depsLineBatch := { drawLine: drawLine, drawLinesBatch: drawLinesBatch }
-_depsLineRect := { drawLine: drawLine, fillRect: fillRect }
-_depsLineEllipse := { drawLine: drawLine, fillEllipse: guiDraw.fillEllipse }
-_depsLinePoly := { drawLine: drawLine, fillPolygon: guiDraw.fillPolygon }
-_depsLineBatchPoly := { drawLine: drawLine, drawLinesBatch: drawLinesBatch, fillPolygon: guiDraw.fillPolygon }
-_depsLineRectRounded := { drawLine: drawLine, fillRect: fillRect, fillRoundedRect: guiDraw.fillRoundedRect }
-_depsLineRectEllipse := { drawLine: drawLine, fillRect: fillRect, fillEllipse: guiDraw.fillEllipse }
+// 2D deps — built once via gui-render-core.Render2DDeps from the GUI's
+// draw primitives. All 2D drawing functions re-stub onto the core module.
+_deps2D := guiRenderCore.Render2DDeps({
+	drawLine: drawLine
+	drawLinesBatch: drawLinesBatch
+	fillRect: fillRect
+	fillEllipse: guiDraw.fillEllipse
+	fillPolygon: guiDraw.fillPolygon
+	fillRoundedRect: guiDraw.fillRoundedRect
+	rgb: rgb
+})
 
-fn drawRect2D(window, x, y, width, height, color, filled, borderColor) gui2d.drawRect2D(_depsLineRect, window, x, y, width, height, color, filled, borderColor)
-fn drawCircle2D(window, cx, cy, radius, color, filled, borderColor) gui2d.drawCircle2D(_depsLineEllipse, window, cx, cy, radius, color, filled, borderColor)
-fn drawPolyline2D(window, points, color, closed) gui2d.drawPolyline2D(_depsLine, window, points, color, closed)
-fn drawPolygon2D(window, points, color, filled, borderColor) gui2d.drawPolygon2D(_depsLinePoly, window, points, color, filled, borderColor)
-fn drawGrid2D(window, spacing, color, originX, originY) gui2d.drawGrid2D(_depsLineBatch, window, spacing, color, originX, originY)
-fn drawEllipse2D(window, cx, cy, rx, ry, color, filled, borderColor) gui2d.drawEllipse2D(_depsLineEllipse, window, cx, cy, rx, ry, color, filled, borderColor)
-fn drawArc2D(window, cx, cy, radius, startAngle, endAngle, color) gui2d.drawArc2D(_depsLineBatch, window, cx, cy, radius, startAngle, endAngle, color)
-fn drawTriangle2D(window, x1, y1, x2, y2, x3, y3, color, filled, borderColor) gui2d.drawTriangle2D(_depsLinePoly, window, x1, y1, x2, y2, x3, y3, color, filled, borderColor)
-fn drawRoundedRect2D(window, x, y, width, height, radius, color, filled, borderColor) gui2d.drawRoundedRect2D(_depsLineRectRounded, window, x, y, width, height, radius, color, filled, borderColor)
-fn drawStar2D(window, cx, cy, outerR, innerR, points, color, filled, borderColor) gui2d.drawStar2D(_depsLinePoly, window, cx, cy, outerR, innerR, points, color, filled, borderColor)
-fn drawBezier2D(window, points, color, steps) gui2d.drawBezier2D(_depsLineBatch, window, points, color, steps)
-fn drawRing2D(window, cx, cy, outerR, innerR, color) gui2d.drawRing2D(_depsLineBatch, window, cx, cy, outerR, innerR, color)
-fn drawCross2D(window, cx, cy, size, thickness, color, filled) gui2d.drawCross2D(_depsLineRect, window, cx, cy, size, thickness, color, filled)
-fn drawDiamond2D(window, cx, cy, width, height, color, filled) gui2d.drawDiamond2D(_depsLinePoly, window, cx, cy, width, height, color, filled)
-fn drawArrow2D(window, x1, y1, x2, y2, color, headSize) gui2d.drawArrow2D(_depsLine, window, x1, y1, x2, y2, color, headSize)
-fn drawCapsule2D(window, cx, cy, width, height, color, filled) gui2d.drawCapsule2D(_depsLineRectEllipse, window, cx, cy, width, height, color, filled)
-fn drawSector2D(window, cx, cy, radius, startAngle, endAngle, color, filled) gui2d.drawSector2D(_depsLineBatchPoly, window, cx, cy, radius, startAngle, endAngle, color, filled)
-fn drawRegularPolygon2D(window, cx, cy, radius, sides, color, filled) gui2d.drawRegularPolygon2D(_depsLinePoly, window, cx, cy, radius, sides, color, filled)
-fn drawSpiral2D(window, cx, cy, startRadius, growth, turns, color) gui2d.drawSpiral2D(_depsLineBatch, window, cx, cy, startRadius, growth, turns, color)
-fn drawThickLine2D(window, x1, y1, x2, y2, thickness, color) gui2d.drawThickLine2D(_depsLine, window, x1, y1, x2, y2, thickness, color)
-fn drawDashedLine2D(window, x1, y1, x2, y2, color, dashLen, gapLen) gui2d.drawDashedLine2D(_depsLine, window, x1, y1, x2, y2, color, dashLen, gapLen)
+fn drawRect2D(window, x, y, width, height, color, filled, borderColor) guiRenderCore.DrawRect2D(_deps2D.lineRect, window, x, y, width, height, color, filled, borderColor)
+fn drawCircle2D(window, cx, cy, radius, color, filled, borderColor) guiRenderCore.DrawCircle2D(_deps2D.lineEllipse, window, cx, cy, radius, color, filled, borderColor)
+fn drawPolyline2D(window, points, color, closed) guiRenderCore.DrawPolyline2D(_deps2D.line, window, points, color, closed)
+fn drawPolygon2D(window, points, color, filled, borderColor) guiRenderCore.DrawPolygon2D(_deps2D.linePoly, window, points, color, filled, borderColor)
+fn drawGrid2D(window, spacing, color, originX, originY) guiRenderCore.DrawGrid2D(_deps2D.lineBatch, window, spacing, color, originX, originY)
+fn drawEllipse2D(window, cx, cy, rx, ry, color, filled, borderColor) guiRenderCore.DrawEllipse2D(_deps2D.lineEllipse, window, cx, cy, rx, ry, color, filled, borderColor)
+fn drawArc2D(window, cx, cy, radius, startAngle, endAngle, color) guiRenderCore.DrawArc2D(_deps2D.lineBatch, window, cx, cy, radius, startAngle, endAngle, color)
+fn drawTriangle2D(window, x1, y1, x2, y2, x3, y3, color, filled, borderColor) guiRenderCore.DrawTriangle2D(_deps2D.linePoly, window, x1, y1, x2, y2, x3, y3, color, filled, borderColor)
+fn drawRoundedRect2D(window, x, y, width, height, radius, color, filled, borderColor) guiRenderCore.DrawRoundedRect2D(_deps2D.lineRectRounded, window, x, y, width, height, radius, color, filled, borderColor)
+fn drawStar2D(window, cx, cy, outerR, innerR, points, color, filled, borderColor) guiRenderCore.DrawStar2D(_deps2D.linePoly, window, cx, cy, outerR, innerR, points, color, filled, borderColor)
+fn drawBezier2D(window, points, color, steps) guiRenderCore.DrawBezier2D(_deps2D.lineBatch, window, points, color, steps)
+fn drawRing2D(window, cx, cy, outerR, innerR, color) guiRenderCore.DrawRing2D(_deps2D.lineBatch, window, cx, cy, outerR, innerR, color)
+fn drawCross2D(window, cx, cy, size, thickness, color, filled) guiRenderCore.DrawCross2D(_deps2D.lineRect, window, cx, cy, size, thickness, color, filled)
+fn drawDiamond2D(window, cx, cy, width, height, color, filled) guiRenderCore.DrawDiamond2D(_deps2D.linePoly, window, cx, cy, width, height, color, filled)
+fn drawArrow2D(window, x1, y1, x2, y2, color, headSize) guiRenderCore.DrawArrow2D(_deps2D.line, window, x1, y1, x2, y2, color, headSize)
+fn drawCapsule2D(window, cx, cy, width, height, color, filled) guiRenderCore.DrawCapsule2D(_deps2D.lineRectEllipse, window, cx, cy, width, height, color, filled)
+fn drawSector2D(window, cx, cy, radius, startAngle, endAngle, color, filled) guiRenderCore.DrawSector2D(_deps2D.lineBatchPoly, window, cx, cy, radius, startAngle, endAngle, color, filled)
+fn drawRegularPolygon2D(window, cx, cy, radius, sides, color, filled) guiRenderCore.DrawRegularPolygon2D(_deps2D.linePoly, window, cx, cy, radius, sides, color, filled)
+fn drawSpiral2D(window, cx, cy, startRadius, growth, turns, color) guiRenderCore.DrawSpiral2D(_deps2D.lineBatch, window, cx, cy, startRadius, growth, turns, color)
+fn drawThickLine2D(window, x1, y1, x2, y2, thickness, color) guiRenderCore.DrawThickLine2D(_deps2D.line, window, x1, y1, x2, y2, thickness, color)
+fn drawDashedLine2D(window, x1, y1, x2, y2, color, dashLen, gapLen) guiRenderCore.DrawDashedLine2D(_deps2D.line, window, x1, y1, x2, y2, color, dashLen, gapLen)
 fn Element(bounds) gui2d.Element({ pushMask: pushMask, popMask: popMask }, bounds)
 
 // --- Anti-aliased drawing primitives ---
 // These use software sub-pixel blending for smooth edges on all backends.
 // bgColor is the background color used for blending (default: black).
-fn drawLineAA(window, x1, y1, x2, y2, color, bgColor) guiAA.drawLineAA(_depsLine, window, x1, y1, x2, y2, color, bgColor)
-fn drawCircleFilledAA(window, cx, cy, radius, color, bgColor) guiAA.drawCircleFilledAA(_depsLine, window, cx, cy, radius, color, bgColor)
-fn drawCircleOutlineAA(window, cx, cy, radius, color, bgColor) guiAA.drawCircleOutlineAA(_depsLine, window, cx, cy, radius, color, bgColor)
-fn drawEllipseFilledAA(window, cx, cy, rx, ry, color, bgColor) guiAA.drawEllipseFilledAA(_depsLine, window, cx, cy, rx, ry, color, bgColor)
-fn drawRoundedRectFilledAA(window, x, y, w, h, radius, color, bgColor) guiAA.drawRoundedRectFilledAA(_depsLine, window, x, y, w, h, radius, color, bgColor)
-fn drawTriangleFilledAA(window, p0, p1, p2, color, bgColor) guiAA.drawTriangleFilledAA(_depsLine, window, p0, p1, p2, color, bgColor)
+fn drawLineAA(window, x1, y1, x2, y2, color, bgColor) guiAA.drawLineAA(_deps2D.line, window, x1, y1, x2, y2, color, bgColor)
+fn drawCircleFilledAA(window, cx, cy, radius, color, bgColor) guiAA.drawCircleFilledAA(_deps2D.line, window, cx, cy, radius, color, bgColor)
+fn drawCircleOutlineAA(window, cx, cy, radius, color, bgColor) guiAA.drawCircleOutlineAA(_deps2D.line, window, cx, cy, radius, color, bgColor)
+fn drawEllipseFilledAA(window, cx, cy, rx, ry, color, bgColor) guiAA.drawEllipseFilledAA(_deps2D.line, window, cx, cy, rx, ry, color, bgColor)
+fn drawRoundedRectFilledAA(window, x, y, w, h, radius, color, bgColor) guiAA.drawRoundedRectFilledAA(_deps2D.line, window, x, y, w, h, radius, color, bgColor)
+fn drawTriangleFilledAA(window, p0, p1, p2, color, bgColor) guiAA.drawTriangleFilledAA(_deps2D.line, window, p0, p1, p2, color, bgColor)
 
 // --- Unified draw() API ---
 // Single entry point for all drawing — pass an options object describing
@@ -1432,54 +1470,10 @@ fn drawBatchParallelThreaded(window, ops, numWorkers) {
 	guiDrawOps.drawBatchParallelThreaded(_drawOpsDeps, window, ops, numWorkers)
 }
 
-fn CubeMesh(size) {
-	hs := _default(size, 2) / 2
-	{
-		vertices: [
-			Vec3(-hs, -hs, -hs)
-			Vec3(hs, -hs, -hs)
-			Vec3(hs, hs, -hs)
-			Vec3(-hs, hs, -hs)
-			Vec3(-hs, -hs, hs)
-			Vec3(hs, -hs, hs)
-			Vec3(hs, hs, hs)
-			Vec3(-hs, hs, hs)
-		]
-		edges: [
-			[0, 1]
-			[1, 2]
-			[2, 3]
-			[3, 0]
-			[4, 5]
-			[5, 6]
-			[6, 7]
-			[7, 4]
-			[0, 4]
-			[1, 5]
-			[2, 6]
-			[3, 7]
-		]
-		faces: [
-			[0, 3, 2, 1]
-			[4, 5, 6, 7]
-			[0, 1, 5, 4]
-			[2, 3, 7, 6]
-			[1, 2, 6, 5]
-			[0, 4, 7, 3]
-		]
-		faceColors: [
-			rgb(250, 94, 94)
-			rgb(250, 186, 86)
-			rgb(124, 238, 120)
-			rgb(94, 188, 252)
-			rgb(188, 126, 255)
-			rgb(255, 128, 214)
-		]
-	}
-}
+fn CubeMesh(size) guiMesh.CubeMesh(size)
 
 fn drawTriangleFilled(window, p0, p1, p2, color) {
-	guiRaster.drawTriangleFilled(_depsLine, window, p0, p1, p2, color)
+	guiRaster.drawTriangleFilled(_deps2D.line, window, p0, p1, p2, color)
 }
 
 // Shared deps for 3D mesh drawing — avoids per-call object allocation.
@@ -1563,32 +1557,12 @@ if _drawOpsDeps != ? {
 	}
 }
 
-fn Renderer3D(window, options) guiRender.Renderer3D({
+fn Renderer3D(window, options) guiRenderCore.Renderer3D(window, {
 	rgb: rgb
 	fillRect: fillRect
-	drawMeshSolid: drawMeshSolid
-	drawMeshLit: drawMeshLit
-	prepareScene: prepareScene
-	drawMeshWireframe: drawMeshWireframe
-	CubeMesh: CubeMesh
-	GridMesh: GridMesh
-	Mesh: Mesh
-	Vec3: Vec3
-	VoxelMesh: VoxelMesh
-	SphereMesh: SphereMesh
-	PyramidMesh: PyramidMesh
-	CylinderMesh: CylinderMesh
-	ConeMesh: ConeMesh
-	TorusMesh: TorusMesh
-	PlaneMesh: PlaneMesh
-	HemisphereMesh: HemisphereMesh
-	WedgeMesh: WedgeMesh
-	TubeMesh: TubeMesh
-	ArrowMesh: ArrowMesh
-	PrismMesh: PrismMesh
-	StairsMesh: StairsMesh
-	IcosphereMesh: IcosphereMesh
-}, window, options)
+	drawLine: drawLine
+	drawText: drawText
+}, options)
 
 fn poll(window) if window.type {
 	:ok -> if window.backend {
@@ -1602,6 +1576,11 @@ fn poll(window) if window.type {
 	}
 	_ -> window
 }
+
+// Poll exactly one native message and normalize its selected printable-key,
+// left-button, motion, or expose data. Web input enters through queueWebInput.
+// The JVM adapter still validates its bounds before dispatching bytecode.
+fn pollBoundedInput(window) guiBoundedInput.decode(window, poll(window))
 
 fn _frameIntervalNt(window) guiLoop.frameIntervalNt(window)
 
@@ -1672,6 +1651,12 @@ fn close(window) if window.type {
 				type: :closing
 			})
 			guiDraw.releaseResources(window)
+			if window.backend = :linux & _default(window._gcCache, 0) > 0 {
+				true -> {
+					linux.freeGC(window.display, window._gcCache)
+					window._gcCache <- 0
+				}
+			}
 			result := if window.backend {
 				:windows -> guiNativeWin.close(window)
 				:linux -> guiNativeLinux.close(window)
@@ -2004,6 +1989,39 @@ fn canvasCount(window) guiCanvas.canvasCount(window)
 fn canvasAt(window, px, py) guiCanvas.canvasAt(window, px, py)
 fn canvasHitTest?(canvas, px, py) guiCanvas.hitTest?(canvas, px, py)
 fn canvasToLocal(canvas, px, py) guiCanvas.toLocal(canvas, px, py)
+
+// ─── Nested windows (windows inside windows) ──────────────────────────────
+// Child windows are interactive windows within a parent window. They have
+// their own event bus, input hit-testing, z-ordering, and are clipped to
+// the parent's bounds. Destroying a parent cascades to all descendants.
+// See lib/gui-window-nest.oak for the full design.
+
+fn createChildWindow(parent, options) guiWindowNest.ChildWindow(parent, options)
+fn destroyChildWindow(child) guiWindowNest.destroyChild(child)
+fn destroyAllChildren(parent) guiWindowNest.destroyChildren(parent)
+fn childWindows(parent) guiWindowNest.children(parent)
+fn childWindowCount(parent) guiWindowNest.childCount(parent)
+fn isChildWindow?(obj) guiWindowNest.isChild?(obj)
+fn findChildWindow(parent, predicate) guiWindowNest.findChild(parent, predicate)
+fn childWindowDepth(child) guiWindowNest.childDepth(child)
+fn childWindowAt(parent, x, y) guiWindowNest.childAt(parent, x, y)
+fn setChildZIndex(child, z) guiWindowNest.setChildZIndex(child, z)
+fn bringChildToFront(child) guiWindowNest.bringToFront(child)
+fn sendChildToBack(child) guiWindowNest.sendToBack(child)
+fn reparentChild(child, newParent) guiWindowNest.reparent(child, newParent)
+fn setChildBounds(child, x, y, w, h) guiWindowNest.setChildBounds(child, x, y, w, h)
+fn setChildPos(child, x, y) guiWindowNest.setChildPos(child, x, y)
+fn setChildSize(child, w, h) guiWindowNest.setChildSize(child, w, h)
+fn setChildVisible(child, vis) guiWindowNest.setChildVisible(child, vis)
+fn childToParentCoords(child, px, py) guiWindowNest.toParentCoords(child, px, py)
+fn childToLocalCoords(child, px, py) guiWindowNest.toChildCoords(child, px, py)
+fn childToWorldCoords(child, px, py) guiWindowNest.toLocalCoords(child, px, py)
+fn routeChildInput(parent, eventType, payload) guiWindowNest.routeInput(parent, eventType, payload)
+fn compositeChildWindows(parent) guiWindowNest.compositeChildren(parent)
+fn compositeAllRecursive(window) guiWindowNest.compositeAllRecursive(window)
+fn onChild(child, event, handler) guiWindowNest.onChild(child, event, handler)
+fn offChild(child, event, tokenOrHandler) guiWindowNest.offChild(child, event, tokenOrHandler)
+fn destroyChildWithParent(child) guiWindowNest.destroyWithParent(child)
 
 // ─── Jump list customization ────────────────────────────────────────────────
 fn addJumpListTask(title, path, arguments, iconPath, iconIndex, description) guiNativeWin.addJumpListTask(title, path, arguments, iconPath, iconIndex, description)

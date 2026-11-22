@@ -43,7 +43,15 @@ function __oak_module_import(name) {
 	const module = __Oak_Modules[name] || __Oak_Modules[__Oak_Import_Aliases[name]];
 	if (module) {
 		__Oak_Modules[name] = {}; // break circular imports
-		return __Oak_Modules[name] = module();
+		const exported = module();
+		// Native std exposes these builtins through its imported environment.
+		// JS modules otherwise expose only locally declared bindings, so
+		// std.keys / std.len are missing in a self-hosted web builder.
+		if (String(name) === \'std\' && exported != null) {
+			if (exported.keys == null) exported.keys = keys;
+			if (exported.len == null) exported.len = len;
+		}
+		return __Oak_Modules[name] = exported;
 	} else {
 		throw new Error(`Could not import Oak module "${name}" at runtime`);
 	}
@@ -51,6 +59,10 @@ function __oak_module_import(name) {
 
 // language primitives
 let __oak_empty_assgn_tgt;
+// Oak has no JS receiver binding; the web backend lowers the Oak
+// identifier `this` to __oak_js_this, which must always be defined.
+// `undefined` mirrors strict-mode JS top level and plain calls.
+let __oak_js_this = undefined;
 function __oak_eq(a, b) {
 	if (a === __Oak_Empty || b === __Oak_Empty) return true;
 
@@ -162,6 +174,15 @@ function __as_oak_string(x) {
 	if (typeof x === \'string\') return __Oak_String(x);
 	return x;
 }
+// coerce string-API arguments the way host JS does: Oak strings unwrap to
+// their primitive, absent values become 'null'/'undefined', host values
+// (RegExp, numbers, booleans) pass through for native ToString coercion
+function __oak_str_arg(x) {
+	if (x === undefined) return \'undefined\';
+	if (x === null) return \'null\';
+	if (__is_oak_string(x)) return x.valueOf();
+	return x;
+}
 const { __Oak_String } = class __Oak_String_Instance {
 	static __Oak_String = s => new __Oak_String_Instance(s);
 
@@ -186,6 +207,69 @@ const { __Oak_String } = class __Oak_String_Instance {
 	get length() {
 		return this._s.length;
 	}
+
+	// Oak strings masquerade as host String for transpiled
+	// `x.constructor === String` checks (named class expression name
+	// is in scope in static blocks)
+	static { __Oak_String_Instance.prototype.constructor = String; }
+
+	// -- JS String API compatibility --
+	// Transpiled JavaScript (e.g. jQuery) calls native string methods on
+	// receivers that are actually Oak strings. Delegate to the wrapped
+	// primitive; string results are wrapped back into Oak strings.
+	toLowerCase() { return __Oak_String(this._s.toLowerCase()); }
+	toUpperCase() { return __Oak_String(this._s.toUpperCase()); }
+	trim() { return __Oak_String(this._s.trim()); }
+	charAt(i) { return __Oak_String(this._s.charAt(i)); }
+	charCodeAt(i) { return this._s.charCodeAt(i); }
+	concat(...parts) { return __Oak_String(this._s.concat(...parts.map(p => __oak_str_arg(p)))); }
+	slice(start, end) { return __Oak_String(this._s.slice(start, end)); }
+	substring(a, b) { return __Oak_String(this._s.substring(a, b)); }
+	substr(a, b) { return __Oak_String(this._s.substr(a, b)); }
+	indexOf(part, from) { return this._s.indexOf(__oak_str_arg(part), from); }
+	lastIndexOf(part, from) { return this._s.lastIndexOf(__oak_str_arg(part), from); }
+	includes(part, from) { return this._s.includes(__oak_str_arg(part), from); }
+	startsWith(part, from) { return this._s.startsWith(__oak_str_arg(part), from); }
+	endsWith(part, len) { return this._s.endsWith(__oak_str_arg(part), len); }
+	search(re) { return this._s.search(re); }
+	split(sep, limit) {
+		const s = sep === undefined ? undefined : __oak_str_arg(sep);
+		return this._s.split(s, limit).map(__Oak_String);
+	}
+	match(re) { return this._s.match(re); }
+	replace(search, replacement) {
+		const s = typeof search === \'string\' || search instanceof RegExp
+			? search : __oak_str_arg(search);
+		const rep = typeof replacement === \'function\' ? replacement : __oak_str_arg(replacement);
+		return __Oak_String(this._s.replace(s, rep));
+	}
+	replaceAll(search, replacement) {
+		const s = typeof search === \'string\' || search instanceof RegExp
+			? search : __oak_str_arg(search);
+		const rep = typeof replacement === \'function\' ? replacement : __oak_str_arg(replacement);
+		return __Oak_String(this._s.replaceAll(s, rep));
+	}
+}
+
+// host constructors referenced by transpiled JS as free identifiers
+// (String/Array/... constructor identity checks). Oak arrays ARE host arrays,
+// Oak objects are host objects, Oak numbers/booleans are primitives; Oak
+// strings masquerade as String (see __Oak_String_Instance above).
+const __Array = Array;
+const __Object = Object;
+const __String = String;
+const __Number = Number;
+const __Boolean = Boolean;
+const __Function = Function;
+const __Date = Date;
+const __RegExp = RegExp;
+const __Promise = Promise;
+
+// native RegExp construction for transpiled code (see __jsRegExp in js-runtime.oak)
+function __js_RegExp(pattern, flags) {
+	const r = new RegExp(__as_oak_string(pattern).valueOf(), __as_oak_string(flags).valueOf());
+	r.__t = \'jsRegExp\';
+	return r;
 }
 
 // tail recursion trampoline helpers
@@ -213,11 +297,8 @@ const __Oak_PointerValues = new Set();
 function int(x) {
 	x = __as_oak_string(x);
 	if (typeof x === \'number\') {
-		// JS rounds towards higher magnitude, Oak rounds towards higher value
-		const rounded = Math.floor(x);
-		const diff = x - rounded;
-		if (x < 0 && diff === 0.5) return rounded + 1;
-		return rounded;
+		// Native Oak int converts floats with floor, including negative halves.
+		return Math.floor(x);
 	}
 	if (__is_oak_string(x) && __Oak_Int_RE.test(x.valueOf())) {
 		const i = Number(x.valueOf());
@@ -333,6 +414,14 @@ function keys(x) {
 	}
 	throw new Error(\'keys() takes a composite value, but got \' + string(x).valueOf());
 }
+function values(x) {
+	if (Array.isArray(x)) {
+		return x.slice();
+	} else if (typeof x === \'object\' && x !== null) {
+		return Object.getOwnPropertyNames(x).map(k => x[k]);
+	}
+	throw new Error(\'values() takes a composite value, but got \' + string(x).valueOf());
+}
 function name(x) {
 	if (x == null) return Symbol.for(\'null\');
 	if (typeof x === \'symbol\') return x;
@@ -384,14 +473,14 @@ function csof(x, cls) {
 
 // OS interfaces
 function args() {
-	if (__Is_Oak_Node) return process.argv.map(__as_oak_string);
-	return [window.location.href];
+	if (__Is_Oak_Node) return process.argv.map(x => __as_oak_string(__oak_from_host_text(x)));
+	return [__as_oak_string(__oak_from_host_text(window.location.href))];
 }
 function env() {
 	if (__Is_Oak_Node) {
-		const e = Object.assign({}, process.env);
-		for (const key in e) {
-			e[key] = __as_oak_string(e[key]);
+		const e = {};
+		for (const key of Object.keys(process.env)) {
+			e[__oak_from_host_text(key)] = __as_oak_string(__oak_from_host_text(process.env[key]));
 		}
 		return e;
 	}
@@ -423,7 +512,12 @@ function wait(duration, cb) {
 }
 function exit(code) {
 	if (__Is_Oak_Node) process.exit(code);
-	return null;
+	// A browser cannot terminate its process. Stop this Oak invocation
+	// explicitly instead of continuing after exit; hosts may catch this tag.
+	const termination = new Error("Oak program exited with code " + String(code ?? 0));
+	termination.name = "OakExit";
+	termination.code = code ?? 0;
+	throw termination;
 }
 
 let __Oak_NextPtr = 4096;
@@ -680,6 +774,11 @@ function __oak_to_string_value(x) {
 	if (x == null) return "";
 	return String(x);
 }
+// Interpret Oak UTF-8 bytes when passing a textual value to host APIs.
+function __oak_to_host_text(x) {
+	const raw = __oak_to_string_value(x);
+	return __oak_utf8_decode(raw);
+}
 function __oak_to_event_data(s) {
 	return {
 		type: Symbol.for("data"),
@@ -697,9 +796,9 @@ function exec(path, args = [], stdin = "") {
 	if (__Is_Oak_Node) {
 		try {
 			const cp = __oak_require_child_process();
-			const result = cp.spawnSync(__oak_to_string_value(path),
-				(Array.isArray(args) ? args : []).map(__oak_to_string_value), {
-					input: __oak_to_string_value(stdin),
+			const result = cp.spawnSync(__oak_to_host_text(path),
+				(Array.isArray(args) ? args : []).map(__oak_to_host_text), {
+					input: Buffer.from(__oak_to_string_value(stdin), "latin1"),
 					encoding: "latin1",
 				});
 			if (result.error) return __oak_io_error(result.error.message || result.error);
@@ -733,9 +832,12 @@ function utf16(x) {
 		throw new Error("utf16() expects a string");
 	}
 	const raw = x.valueOf();
+	// Native utf16 decodes the Oak byte string as UTF-8 before converting
+	// to UTF-16LE. Splitting each UTF-8 byte into a word corrupts non-ASCII.
+	const text = __oak_utf8_decode(raw);
 	let out = "";
-	for (let i = 0; i < raw.length; i++) {
-		const code = raw.charCodeAt(i);
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
 		out += String.fromCharCode(code & 0xff);
 		out += String.fromCharCode((code >> 8) & 0xff);
 	}
@@ -759,16 +861,22 @@ function input() {
 	if (typeof prompt === "function") {
 		const value = prompt("");
 		if (value == null) return __oak_io_error("eof");
-		return __oak_to_event_data(value);
+		return __oak_to_event_data(__oak_from_host_text(value));
 	}
 	return __oak_io_error("input() unavailable in this runtime");
 }
 function print(s) {
 	s = __as_oak_string(s);
+	const raw = string(s).toString();
 	if (__Is_Oak_Node) {
-		process.stdout.write(string(s).toString());
+		// Oak strings are bytes; Node\'s default UTF-8 string write would
+		// re-encode each high byte, corrupting both text and binary output.
+		process.stdout.write(Buffer.from(raw, "latin1"));
 	} else {
-		console.log(string(s).toString());
+		// Browser consoles display Unicode, while Oak text contains UTF-8
+		// bytes. Decode for presentation only; retain original bytes in Oak.
+		const bytes = Uint8Array.from(raw, c => c.charCodeAt(0) & 0xff);
+		console.log(typeof TextDecoder === "function" ? new TextDecoder().decode(bytes) : raw);
 	}
 	return s.length;
 }
@@ -778,22 +886,28 @@ function ls() {
 	if (vfs && typeof vfs.listFiles === "function" && !__Is_Oak_Node) {
 		const names = vfs.listFiles() || [];
 		const normalized = target.replace(/\\\\/g, "/");
-		const prefix = normalized === "/" || normalized === "" ? "" : normalized + "/";
+		const prefix = normalized === "/" || normalized === "" || normalized === "." ? "" : normalized + "/";
 		const result = [];
+		const seen = new Set();
 		for (const fullName of names) {
 			const name = __oak_to_string_value(fullName);
 			if (prefix !== "" && !name.startsWith(prefix)) continue;
 			const rel = prefix === "" ? name : name.slice(prefix.length);
-			if (rel === "" || rel.includes("/")) continue;
-			result.push({ name: __as_oak_string(rel), dir: false });
+			if (rel === "") continue;
+			const slash = rel.indexOf("/");
+			const part = slash < 0 ? rel : rel.slice(0, slash);
+			if (!part || seen.has(part)) continue;
+			seen.add(part);
+			result.push({ name: __as_oak_string(part), dir: slash >= 0 });
 		}
 		return __oak_to_event_data(result);
 	}
 	if (__Is_Oak_Node) {
 		try {
 			const fs = __oak_require_fs();
-			const list = fs.readdirSync(target, { withFileTypes: true }).map(entry => ({
-				name: __as_oak_string(entry.name),
+			// Preserve native byte paths and return directory names as Oak bytes.
+			const list = fs.readdirSync(Buffer.from(target, "latin1"), { withFileTypes: true, encoding: "buffer" }).map(entry => ({
+				name: __as_oak_string(entry.name.toString("latin1")),
 				dir: !!entry.isDirectory(),
 			}));
 			return __oak_to_event_data(list);
@@ -806,7 +920,7 @@ function ls() {
 function rm() {
 	if (__Is_Oak_Node) {
 		try {
-			__oak_require_fs().rmSync(__oak_to_string_value(arguments[0]), { recursive: true, force: true });
+			__oak_require_fs().rmSync(Buffer.from(__oak_to_string_value(arguments[0]), "latin1"), { recursive: true, force: true });
 			return { type: Symbol.for("end") };
 		} catch (e) {
 			return __oak_io_error("rm() failed: " + e);
@@ -817,7 +931,7 @@ function rm() {
 function mkdir() {
 	if (__Is_Oak_Node) {
 		try {
-			__oak_require_fs().mkdirSync(__oak_to_string_value(arguments[0]), { recursive: true });
+			__oak_require_fs().mkdirSync(Buffer.from(__oak_to_string_value(arguments[0]), "latin1"), { recursive: true });
 			return { type: Symbol.for("end") };
 		} catch (e) {
 			return __oak_io_error("mkdir() failed: " + e);
@@ -842,7 +956,7 @@ function stat() {
 		try {
 			const fs = __oak_require_fs();
 			const path = __oak_require_path();
-			const st = fs.statSync(target);
+			const st = fs.statSync(Buffer.from(target, "latin1"));
 			return __oak_to_event_data({
 				name: __as_oak_string(path.basename(target)),
 				len: int(st.size) ?? 0,
@@ -872,7 +986,7 @@ function open() {
 		try {
 			const fs = __oak_require_fs();
 			const map = { readonly: "r", readwrite: "w+", append: "a+", truncate: "w+" };
-			const fd = fs.openSync(path, map[flag] || "w+");
+			const fd = fs.openSync(Buffer.from(path, "latin1"), map[flag] || "w+");
 			return { type: Symbol.for("file"), fd: int(fd) ?? fd };
 		} catch (e) {
 			return __oak_io_error("open() failed: " + e);
@@ -1002,7 +1116,7 @@ function listen(host, handler, cb) {
 }
 function req(data, cb) {
 	const method = __oak_to_string_value((data && data.method) || \'GET\');
-	const url = __oak_to_string_value((data && data.url) || \'\');
+	const url = __oak_to_host_text((data && data.url) || \'\');
 	const headers = (data && data.headers) ? data.headers : {};
 	const body = (data && data.body != null && data.body !== null) ? __oak_to_string_value(data.body) : null;
 
@@ -1026,16 +1140,64 @@ function req(data, cb) {
 		fetchHeaders[k] = __oak_to_string_value(headers[k]);
 	}
 
+	// Match the native HTTP client transport boundary. Fetch also accepts
+	// data: URLs and the Node fallback must not treat an ftp: URL as HTTP.
+	// Validate before initiating any request, including callbacks.
+	let parsedUrl;
+	try {
+		parsedUrl = new URL(url);
+		if (parsedUrl.protocol !== \'http:\' && parsedUrl.protocol !== \'https:\') {
+			throw new Error(\'only HTTP(S) URLs are supported\');
+		}
+	} catch (e) {
+		const error = __oak_io_error(\'req() invalid or unsupported URL: \' + e);
+		if (typeof cb === \'function\') {
+			Promise.resolve().then(() => cb(error));
+			return null;
+		}
+		return error;
+	}
+
 	if (__Is_Oak_Node) {
+		// Go sends URL userinfo as Basic auth unless Authorization is supplied.
+		// Fetch rejects URLs with credentials, while http.request does not add
+		// them from our options, so explicitly preserve that native contract.
+		// Use the original authority to retain the empty-userinfo case (the
+		// WHATWG serializer drops an empty @). Do not expose credentials in
+		// failure text or pass them through the sanitized fetch URL.
+		let requestUrl = url;
+		const schemeEnd = url.indexOf(\'://\');
+		const authority = schemeEnd < 0 ? \'\' : url.slice(schemeEnd + 3).split(/[/?#]/, 1)[0];
+		if (authority.includes(\'@\')) {
+			if (!Object.keys(fetchHeaders).some(k => k.toLowerCase() === \'authorization\')) {
+				try {
+					const user = decodeURIComponent(parsedUrl.username);
+					const password = decodeURIComponent(parsedUrl.password);
+					fetchHeaders.Authorization = \'Basic \' + Buffer.from(user + \':\' + password, \'utf8\').toString(\'base64\');
+				} catch (_) {
+					const error = __oak_io_error(\'req() URL userinfo must decode as UTF-8\');
+					if (typeof cb === \'function\') {
+						Promise.resolve().then(() => cb(error));
+						return null;
+					}
+					return error;
+				}
+			}
+			parsedUrl.username = \'\';
+			parsedUrl.password = \'\';
+			requestUrl = parsedUrl.href;
+		}
 		// Use Node.js built-in fetch (v18+) or fall back to http/https modules
-		if (typeof fetch === \'function\') {
+		// Native req does not follow redirects. Use fetch only for callbacks;
+		// otherwise do not start an invisible async request before returning.
+		if (typeof fetch === \'function\' && typeof cb === \'function\') {
 			const opts = {
 				method,
 				headers: fetchHeaders,
-				redirect: \'follow\',
+				redirect: \'manual\',
 			};
-			if (body != null) opts.body = body;
-			const p = fetch(url, opts)
+			if (body != null) opts.body = Uint8Array.from(body, c => c.charCodeAt(0) & 0xff);
+			const p = fetch(requestUrl, opts)
 				.then(r => r.arrayBuffer().then(buf => {
 					const bodyText = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join(\'\');
 					const hdrsOut = {};
@@ -1051,13 +1213,13 @@ function req(data, cb) {
 		}
 		// Node.js http/https fallback for older runtimes
 		try {
-			const parsedUrl = require(\'url\').parse(url);
+			// WHATWG URL percent-encodes Unicode path/query for Node http.
 			const mod = parsedUrl.protocol === \'https:\' ? require(\'https\') : require(\'http\');
 			const bodyBuf = body != null ? Buffer.from(body, \'latin1\') : null;
 			const reqOpts = {
 				hostname: parsedUrl.hostname,
 				port: parsedUrl.port,
-				path: parsedUrl.path || \'/\',
+				path: (parsedUrl.pathname || \'/\') + parsedUrl.search,
 				method,
 				headers: { ...fetchHeaders },
 			};
@@ -1087,7 +1249,7 @@ function req(data, cb) {
 				+ `const o=${JSON.stringify(reqOpts)};`
 				+ `const r=[];`
 				+ `const q=http.request(o,res=>{res.on(\'data\',c=>r.push(c));res.on(\'end\',()=>{`
-				+ `const b=Buffer.concat(r).toString(\'latin1\');`
+				+ `const b=Array.from(Buffer.concat(r));`
 				+ `const h={};for(const k of Object.keys(res.headers))h[k]=res.headers[k];`
 				+ `process.stdout.write(JSON.stringify({s:res.statusCode,h,b}));})});`
 				+ `q.on(\'error\',e=>{process.stdout.write(JSON.stringify({err:e.message}))});`
@@ -1099,37 +1261,56 @@ function req(data, cb) {
 			}
 			const parsed = JSON.parse(result.stdout);
 			if (parsed.err) return __oak_io_error(\'req() failed: \' + parsed.err);
-			return __oak_make_resp(parsed.s, parsed.h, parsed.b);
+			return __oak_make_resp(parsed.s, parsed.h, Buffer.from(parsed.b).toString(\'latin1\'));
 		} catch (e) {
 			return __oak_io_error(\'req() failed: \' + e);
 		}
 	}
-	// browser path — use fetch
+	// Browser fetch is asynchronous. Refuse a synchronous call before fetch
+	// so reporting an error cannot also send an unobserved request.
 	if (typeof fetch === \'function\') {
-		const opts = { method, headers: fetchHeaders, redirect: \'follow\' };
-		if (body != null) opts.body = body;
+		if (typeof cb !== \'function\') return __oak_io_error(\'req() in browser requires a callback\');
+		const opts = { method, headers: fetchHeaders, redirect: \'manual\' };
+		if (body != null) opts.body = Uint8Array.from(body, c => c.charCodeAt(0) & 0xff);
 		const p = fetch(url, opts)
-			.then(r => r.arrayBuffer().then(buf => {
+			.then(r => r.type === \'opaqueredirect\'
+				? __oak_io_error(\'req() redirect response is opaque in browser\')
+				: r.arrayBuffer().then(buf => {
 				const bodyText = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join(\'\');
 				const hdrsOut = {};
 				r.headers.forEach((v, k) => { hdrsOut[k] = v; });
 				return __oak_make_resp(r.status, hdrsOut, bodyText);
 			}))
 			.catch(e => __oak_io_error(\'req() failed: \' + e));
-		if (typeof cb === \'function\') {
-			p.then(cb);
-			return null;
-		}
-		// return a promise-like synthetic result; Oak callers should use callback form
-		return __oak_io_error(\'req() in browser requires a callback\');
+		p.then(cb);
+		return null;
 	}
 	return __oak_io_error(\'req() unavailable in this runtime\');
 }
 
 // Raw sockets
-// The JS runtime currently does not expose Magnolia\'s synchronous stream
-// socket model. Define explicit builtins anyway so socket-backed stdlibs fail
-// with structured IO errors instead of crashing with ReferenceError.
+// Implemented on Node.js using the net/tls modules. Browsers lack raw TCP
+// stream access, so socket-backed stdlibs on browsers receive structured
+// IO errors instead of crashing with ReferenceError.
+
+let __Oak_Socket_NextID = 1;
+const __Oak_Socket_Map = new Map();
+
+function __oak_socket_obj(id) {
+	return { type: Symbol.for(\'socket\'), id: int(id) };
+}
+
+function __oak_socket_get(socket, fnName) {
+	if (socket == null || typeof socket !== \'object\' || socket.type !== Symbol.for(\'socket\')) {
+		return [null, __oak_io_error(fnName + \'() expects a socket\')];
+	}
+	const entry = __Oak_Socket_Map.get(socket.id);
+	if (!entry) {
+		return [null, __oak_io_error(fnName + \'() invalid socket\')];
+	}
+	return [entry, null];
+}
+
 function __oak_socket_unavailable(fnName, cb) {
 	const err = __oak_io_error(fnName + \'() unavailable in this runtime\');
 	if (typeof cb === \'function\') {
@@ -1138,36 +1319,314 @@ function __oak_socket_unavailable(fnName, cb) {
 	}
 	return err;
 }
+
+function __oak_socket_opts(options) {
+	if (options == null || typeof options !== \'object\' || Array.isArray(options)) {
+		return {};
+	}
+	return options;
+}
+
 function socket_connect(address, options, cb) {
-	if (typeof options === \'function\') {
-		cb = options;
+	if (typeof options === \'function\') { cb = options; options = {}; }
+	if (!__Is_Oak_Node) {
+		return __oak_socket_unavailable(\'socket_connect\', cb);
 	}
-	return __oak_socket_unavailable(\'socket_connect\', cb);
+	const addr = __oak_to_string_value(address);
+	const opts = __oak_socket_opts(options);
+	const useTLS = !!opts.tls;
+	try {
+		const net = require(\'net\');
+		let conn;
+		if (useTLS) {
+			const tls = require(\'tls\');
+			const config = {};
+			if (opts.serverName) config.servername = __oak_to_string_value(opts.serverName);
+			if (opts.insecureSkipVerify) config.rejectUnauthorized = false;
+			conn = tls.connect(addr, config);
+		} else {
+			conn = net.connect(addr);
+		}
+		const id = __Oak_Socket_NextID++;
+		const entry = { conn, isTLS: useTLS, serverTLS: false, reader: null, buffer: \'\' };
+		__Oak_Socket_Map.set(id, entry);
+		if (typeof cb === \'function\') {
+			conn.once(\'error\', e => {
+				__Oak_Socket_Map.delete(id);
+				cb(__oak_io_error(\'Could not connect socket: \' + e));
+			});
+			conn.once(\'connect\', () => {
+				cb({
+					type: Symbol.for(\'ok\'),
+					socket: __oak_socket_obj(id),
+					remote: __as_oak_string(conn.remoteAddress + \':\' + conn.remotePort),
+					local: __as_oak_string(conn.localAddress + \':\' + conn.localPort),
+					tls: useTLS,
+				});
+			});
+			return null;
+		}
+		conn.on(\'error\', e => __Oak_Socket_Map.delete(id));
+		return {
+			type: Symbol.for(\'ok\'),
+			socket: __oak_socket_obj(id),
+			remote: __as_oak_string(\'\'),
+			local: __as_oak_string(\'\'),
+			tls: useTLS,
+		};
+	} catch (e) {
+		return __oak_io_error(\'Could not connect socket: \' + e);
+	}
 }
+
 function socket_send(socket, data, cb) {
-	return __oak_socket_unavailable(\'socket_send\', cb);
-}
-function socket_recv(socket, size, cb) {
-	return __oak_socket_unavailable(\'socket_recv\', cb);
-}
-function socket_recv_exact(socket, size, cb) {
-	return __oak_socket_unavailable(\'socket_recv_exact\', cb);
-}
-function socket_recv_line(socket, cb) {
-	return __oak_socket_unavailable(\'socket_recv_line\', cb);
-}
-function socket_starttls(socket, options, cb) {
-	if (typeof options === \'function\') {
-		cb = options;
+	const [entry, err] = __oak_socket_get(socket, \'socket_send\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
 	}
-	return __oak_socket_unavailable(\'socket_starttls\', cb);
+	const payload = __oak_to_string_value(data);
+	try {
+		const written = entry.conn.write(payload, \'latin1\');
+		const result = { type: Symbol.for(\'sent\'), bytes: int(written) };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		const ferr = __oak_io_error(\'Could not write socket data: \' + e);
+		if (typeof cb === \'function\') { cb(ferr); return null; }
+		return ferr;
+	}
 }
+
+function socket_recv(socket, size, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_recv\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	const count = int(size) ?? 0;
+	if (count === 0) {
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(\'\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	}
+	if (typeof cb !== \'function\') {
+		return __oak_io_error(\'socket_recv() requires a callback in this runtime\');
+	}
+	const buf = Buffer.alloc(count);
+	entry.conn.once(\'data\', chunk => {
+		const readLen = Math.min(chunk.length, count);
+		chunk.copy(buf, 0, 0, readLen);
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(buf.toString(\'latin1\', 0, readLen)) };
+		cb(result);
+	});
+	entry.conn.once(\'end\', () => {
+		const result = { type: Symbol.for(\'closed\') };
+		__Oak_Socket_Map.delete(socket.id);
+		cb(result);
+	});
+	entry.conn.once(\'error\', e => {
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read socket data: \' + e));
+	});
+	return null;
+}
+
+function socket_recv_exact(socket, size, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_recv_exact\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	const count = int(size) ?? 0;
+	if (count === 0) {
+		const result = { type: Symbol.for(\'data\'), data: __as_oak_string(\'\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	}
+	if (typeof cb !== \'function\') {
+		return __oak_io_error(\'socket_recv_exact() requires a callback in this runtime\');
+	}
+	const buf = Buffer.alloc(count);
+	let received = 0;
+	const onData = chunk => {
+		const remaining = count - received;
+		const take = Math.min(chunk.length, remaining);
+		chunk.copy(buf, received, 0, take);
+		received += take;
+		if (received >= count) {
+			entry.conn.removeListener(\'data\', onData);
+			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(buf.toString(\'latin1\')) };
+			cb(result);
+		}
+	};
+	entry.conn.on(\'data\', onData);
+	entry.conn.once(\'end\', () => {
+		entry.conn.removeListener(\'data\', onData);
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read exact socket data: connection closed\'));
+	});
+	entry.conn.once(\'error\', e => {
+		entry.conn.removeListener(\'data\', onData);
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read exact socket data: \' + e));
+	});
+	return null;
+}
+
+function socket_recv_line(socket, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_recv_line\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	if (typeof cb !== \'function\') {
+		return __oak_io_error(\'socket_recv_line() requires a callback in this runtime\');
+	}
+	entry.buffer = entry.buffer || \'\';
+	const onData = chunk => {
+		entry.buffer += chunk.toString(\'latin1\');
+		const idx = entry.buffer.indexOf(\'\n\');
+		if (idx >= 0) {
+			entry.conn.removeListener(\'data\', onData);
+			const line = entry.buffer.slice(0, idx).replace(/\r$/, \'\');
+			entry.buffer = entry.buffer.slice(idx + 1);
+			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(line) };
+			cb(result);
+		}
+	};
+	entry.conn.on(\'data\', onData);
+	entry.conn.once(\'end\', () => {
+		entry.conn.removeListener(\'data\', onData);
+		const line = entry.buffer.replace(/\r?\n$/, \'\');
+		if (line !== \'\') {
+			const result = { type: Symbol.for(\'data\'), data: __as_oak_string(line) };
+			cb(result);
+		} else {
+			__Oak_Socket_Map.delete(socket.id);
+			cb({ type: Symbol.for(\'closed\') });
+		}
+	});
+	entry.conn.once(\'error\', e => {
+		entry.conn.removeListener(\'data\', onData);
+		__Oak_Socket_Map.delete(socket.id);
+		cb(__oak_io_error(\'Could not read socket line: \' + e));
+	});
+	return null;
+}
+
+function socket_starttls(socket, options, cb) {
+	const [entry, err] = __oak_socket_get(socket, \'socket_starttls\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	if (!__Is_Oak_Node) {
+		return __oak_socket_unavailable(\'socket_starttls\', cb);
+	}
+	const opts = __oak_socket_opts(options);
+	try {
+		const tls = require(\'tls\');
+		const config = {};
+		if (opts.serverName) config.servername = __oak_to_string_value(opts.serverName);
+		if (opts.insecureSkipVerify) config.rejectUnauthorized = false;
+		const tlsConn = new tls.TLSSocket(entry.conn, config);
+		if (typeof cb === \'function\') {
+			tlsConn.once(\'secureConnect\', () => {
+				entry.conn = tlsConn;
+				entry.isTLS = true;
+				entry.buffer = \'\';
+				cb({
+					type: Symbol.for(\'ok\'),
+					socket: __oak_socket_obj(socket.id),
+					remote: __as_oak_string(tlsConn.remoteAddress + \':\' + tlsConn.remotePort),
+					local: __as_oak_string(tlsConn.localAddress + \':\' + tlsConn.localPort),
+					tls: true,
+				});
+			});
+			tlsConn.once(\'error\', e => {
+				cb(__oak_io_error(\'Could not upgrade socket to TLS: \' + e));
+			});
+			return null;
+		}
+		tlsConn.on(\'error\', () => __Oak_Socket_Map.delete(socket.id));
+		entry.conn = tlsConn;
+		entry.isTLS = true;
+		entry.buffer = \'\';
+		return {
+			type: Symbol.for(\'ok\'),
+			socket: __oak_socket_obj(socket.id),
+			remote: __as_oak_string(\'\'),
+			local: __as_oak_string(\'\'),
+			tls: true,
+		};
+	} catch (e) {
+		return __oak_io_error(\'Could not upgrade socket to TLS: \' + e);
+	}
+}
+
 function socket_close(socket, cb) {
-	return __oak_socket_unavailable(\'socket_close\', cb);
+	const [entry, err] = __oak_socket_get(socket, \'socket_close\');
+	if (err) {
+		if (typeof cb === \'function\') { cb(err); return null; }
+		return err;
+	}
+	try {
+		entry.conn.end();
+		entry.conn.destroy();
+		__Oak_Socket_Map.delete(socket.id);
+		const result = { type: Symbol.for(\'closed\') };
+		if (typeof cb === \'function\') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		__Oak_Socket_Map.delete(socket.id);
+		const ferr = __oak_io_error(\'Could not close socket: \' + e);
+		if (typeof cb === \'function\') { cb(ferr); return null; }
+		return ferr;
+	}
 }
+
 function socket_listen(address, handler, options) {
-	return __oak_socket_unavailable(\'socket_listen\');
+	if (!__Is_Oak_Node) {
+		return __oak_socket_unavailable(\'socket_listen\');
+	}
+	const opts = __oak_socket_opts(options);
+	const useTLS = !!opts.tls;
+	try {
+		const net = require(\'net\');
+		const addr = __oak_to_string_value(address);
+		const server = net.createServer();
+		if (useTLS) {
+			const tls = require(\'tls\');
+			const config = {};
+			if (opts.certFile && opts.keyFile) {
+				const fs = require(\'fs\');
+				config.cert = fs.readFileSync(__oak_to_string_value(opts.certFile));
+				config.key = fs.readFileSync(__oak_to_string_value(opts.keyFile));
+			}
+			server.on(\'tlsClientError\', () => {});
+		}
+		server.on(\'connection\', conn => {
+			const id = __Oak_Socket_NextID++;
+			const entry = { conn, isTLS: useTLS, serverTLS: useTLS, reader: null, buffer: \'\' };
+			__Oak_Socket_Map.set(id, entry);
+			if (typeof handler === \'function\') {
+				handler({
+					type: Symbol.for(\'connect\'),
+					socket: __oak_socket_obj(id),
+					remote: __as_oak_string(conn.remoteAddress + \':\' + conn.remotePort),
+					local: __as_oak_string(conn.localAddress + \':\' + conn.localPort),
+					tls: useTLS,
+				});
+			}
+		});
+		server.listen(addr);
+		return (...args) => { server.close(); return null; };
+	} catch (e) {
+		return __oak_io_error(\'Could not listen on socket: \' + e);
+	}
 }
+
 
 // WebSocket
 let __Oak_WS_NextID = 1;
@@ -1590,48 +2049,23 @@ function __oak_js_try(fn) {
 	}
 }
 
-
 // builtin aliases for the __std_builtin_<name> := <name> capture idiom
 // (lib/std.oak). Module closures shadow bare global builtin names with
 // their own same-named bindings; these never-shadowed aliases give the
-// capture idiom a path back to the real globals.
-var __oak_builtin_acos = (typeof acos === "function") ? acos : undefined;
-var __oak_builtin_addr = (typeof addr === "function") ? addr : undefined;
-var __oak_builtin_args = (typeof args === "function") ? args : undefined;
-var __oak_builtin_asin = (typeof asin === "function") ? asin : undefined;
-var __oak_builtin_atan = (typeof atan === "function") ? atan : undefined;
-var __oak_builtin_atom = (typeof atom === "function") ? atom : undefined;
+// capture idiom a path back to the real globals. Only the builtins that
+// are actually destructured from import('std') by lib modules are listed.
 var __oak_builtin_bits = (typeof bits === "function") ? bits : undefined;
 var __oak_builtin_char = (typeof char === "function") ? char : undefined;
 var __oak_builtin_codepoint = (typeof codepoint === "function") ? codepoint : undefined;
 var __oak_builtin_cos = (typeof cos === "function") ? cos : undefined;
-var __oak_builtin_env = (typeof env === "function") ? env : undefined;
-var __oak_builtin_exec = (typeof exec === "function") ? exec : undefined;
-var __oak_builtin_exit = (typeof exit === "function") ? exit : undefined;
 var __oak_builtin_float = (typeof float === "function") ? float : undefined;
-var __oak_builtin_go = (typeof go === "function") ? go : undefined;
-var __oak_builtin_input = (typeof input === "function") ? input : undefined;
 var __oak_builtin_int = (typeof int === "function") ? int : undefined;
-var __oak_builtin_interpreter = (typeof interpreter === "function") ? interpreter : undefined;
 var __oak_builtin_keys = (typeof keys === "function") ? keys : undefined;
 var __oak_builtin_len = (typeof len === "function") ? len : undefined;
-var __oak_builtin_log = (typeof log === "function") ? log : undefined;
-var __oak_builtin_memread = (typeof memread === "function") ? memread : undefined;
-var __oak_builtin_memwrite = (typeof memwrite === "function") ? memwrite : undefined;
-var __oak_builtin_name = (typeof name === "function") ? name : undefined;
-var __oak_builtin_nanotime = (typeof nanotime === "function") ? nanotime : undefined;
-var __oak_builtin_pointer = (typeof pointer === "function") ? pointer : undefined;
-var __oak_builtin_pow = (typeof pow === "function") ? pow : undefined;
-var __oak_builtin_print = (typeof print === "function") ? print : undefined;
 var __oak_builtin_rand = (typeof rand === "function") ? rand : undefined;
-var __oak_builtin_read = (typeof read === "function") ? read : undefined;
 var __oak_builtin_sin = (typeof sin === "function") ? sin : undefined;
-var __oak_builtin_srand = (typeof srand === "function") ? srand : undefined;
 var __oak_builtin_string = (typeof string === "function") ? string : undefined;
-var __oak_builtin_tan = (typeof tan === "function") ? tan : undefined;
 var __oak_builtin_time = (typeof time === "function") ? time : undefined;
 var __oak_builtin_type = (typeof type === "function") ? type : undefined;
-var __oak_builtin_utf16 = (typeof utf16 === "function") ? utf16 : undefined;
 var __oak_builtin_wait = (typeof wait === "function") ? wait : undefined;
-var __oak_builtin_write = (typeof write === "function") ? write : undefined;
 '

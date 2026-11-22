@@ -190,9 +190,27 @@ fn run(t) {
 		astJs.transpileToOak(astJs.jsArrowFunction(['x'], astJs.jsNumber(0))).type
 		:function
 	)
-	'jsReturn transpiles to inner value' |> t.eq(
-		astJs.transpileToOak(astJs.jsReturn(astJs.jsNumber(42))).val
-		42
+	// jsReturn (like break/continue/throw) lowers to a value-carrying
+	// signal object {__t: :jsReturn, v: <value>}; function boundaries
+	// unwrap it via __jsUnwrapReturn.
+	'jsReturn transpiles to a signal object carrying the value' |> t.eq(
+		{
+			sig := astJs.transpileToOak(astJs.jsReturn(astJs.jsNumber(42)))
+			[sig.type, sig.entries.(0).val.val, sig.entries.(1).val.val]
+		}
+		[:object, 'jsReturn', 42]
+	)
+	'jsBreak transpiles to a signal object' |> t.eq(
+		astJs.transpileToOak(astJs.jsBreak()).entries.(0).val.val
+		'jsBreak'
+	)
+	'jsContinue transpiles to a signal object' |> t.eq(
+		astJs.transpileToOak(astJs.jsContinue()).entries.(0).val.val
+		'jsContinue'
+	)
+	'jsThrow carries the thrown value in the signal' |> t.eq(
+		astJs.transpileToOak(astJs.jsThrow(astJs.jsString('boom'))).entries.(1).val.val
+		'boom'
 	)
 	'jsBlock transpiles to Oak block' |> t.eq(
 		astJs.transpileToOak(astJs.jsBlock([astJs.jsNumber(1)])).type

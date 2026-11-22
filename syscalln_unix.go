@@ -1,7 +1,4 @@
-//go:build !windows
-
-package main
-
+//go:build !windows && (!linux || !cgo)
 import "syscall"
 
 func oakSyscallN(trap uintptr, args ...uintptr) (uintptr, uintptr, syscall.Errno) {

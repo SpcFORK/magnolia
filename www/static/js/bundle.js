@@ -7,6 +7,36 @@ function __oak_modularize(name, fn) {
 }
 function __oak_module_import(name) {
 	if (typeof __Oak_Modules[name] === 'object') return __Oak_Modules[name];
+	// VFS-first: check virtual file system for overrides or dynamically created files
+	const __vfs = typeof __oak_get_vfs === 'function' ? __oak_get_vfs() : null;
+	if (__vfs && typeof __vfs.readFile === 'function') {
+		const __exts = ['', '.oak', '.ok', '.mag', '.mg'];
+		for (let __i = 0; __i < __exts.length; __i++) {
+			const __c = __vfs.readFile(name + __exts[__i]);
+			if (__c != null) {
+				const __src = (typeof __c === 'object' && typeof __c.valueOf === 'function')
+					? __c.valueOf() : String(__c);
+				__Oak_Modules[name] = {};
+				// attempt eval as pre-transpiled JS module (expression or factory)
+				try {
+					const __evald = new Function("return (" + __src + ")")();
+					if (typeof __evald === 'function') {
+						const __mod = __evald();
+						if (__mod != null && typeof __mod === 'object') return __Oak_Modules[name] = __mod;
+					} else if (__evald != null && typeof __evald === 'object') {
+						return __Oak_Modules[name] = __evald;
+					}
+				} catch (__e) {}
+				// attempt JSON parse for data files
+				try {
+					const __json = JSON.parse(__src);
+					if (__json != null && typeof __json === 'object') return __Oak_Modules[name] = __json;
+				} catch (__e) {}
+				// fallback: expose raw source content
+				return __Oak_Modules[name] = { __source: __as_oak_string(__src) };
+			}
+		}
+	}
 	const module = __Oak_Modules[name] || __Oak_Modules[__Oak_Import_Aliases[name]];
 	if (module) {
 		__Oak_Modules[name] = {}; // break circular imports
@@ -18,6 +48,10 @@ function __oak_module_import(name) {
 
 // language primitives
 let __oak_empty_assgn_tgt;
+// Oak has no JS receiver binding; the web backend lowers the Oak
+// identifier `this` to __oak_js_this, which must always be defined.
+// `undefined` mirrors strict-mode JS top level and plain calls.
+let __oak_js_this = undefined;
 function __oak_eq(a, b) {
 	if (a === __Oak_Empty || b === __Oak_Empty) return true;
 
@@ -49,12 +83,16 @@ function __oak_eq(a, b) {
 	return true;
 }
 function __oak_acc(tgt, prop) {
+	if (tgt == null) return null;
 	return (__is_oak_string(tgt) ? __as_oak_string(tgt.valueOf()[prop]) : tgt[prop]) ?? null;
 }
 function __oak_obj_key(x) {
 	return typeof x === 'symbol' ? Symbol.keyFor(x) : x;
 }
 function __oak_push(a, b) {
+	if (typeof a === 'number' && typeof b === 'number') {
+		return a << b;
+	}
 	a = __as_oak_string(a);
 	a.push(b);
 	return a;
@@ -109,6 +147,13 @@ function __oak_xor(a, b) {
 }
 const __Oak_Empty = Symbol('__Oak_Empty');
 
+// class identity support
+function __Oak_Class(name, ctor) {
+	ctor.__oak_class_name = name;
+	ctor.__oak_class_tag = true;
+	return ctor;
+}
+
 // mutable string type
 function __is_oak_string(x) {
 	if (x == null) return false;
@@ -118,26 +163,97 @@ function __as_oak_string(x) {
 	if (typeof x === 'string') return __Oak_String(x);
 	return x;
 }
-const __Oak_String = s => {
-	return {
-		__mark_oak_string: true,
-		assign(i, slice) {
-			if (i === s.length) return s += slice;
-			return s = s.substr(0, i) + slice + s.substr(i + slice.length);
-		},
-		push(slice) {
-			s += slice;
-		},
-		toString() {
-			return s;
-		},
-		valueOf() {
-			return s;
-		},
-		get length() {
-			return s.length;
-		},
+const { __Oak_String } = class __Oak_String_Instance {
+	static __Oak_String = s => new __Oak_String_Instance(s);
+
+	__mark_oak_string = true;
+	constructor(s) {
+		this._s = s;
+		this.__mark_oak_string = true;
 	}
+	assign(i, slice) {
+		if (i === this._s.length) return this._s += slice;
+		return this._s = this._s.substr(0, i) + slice + this._s.substr(i + slice.length);
+	}
+	push(slice) {
+		this._s += slice;
+	}
+	toString() {
+		return this._s;
+	}
+	valueOf() {
+		return this._s;
+	}
+	get length() {
+		return this._s.length;
+	}
+
+	// Oak strings masquerade as host String for transpiled
+	// `x.constructor === String` checks (named class expression name
+	// is in scope in static blocks)
+	static { __Oak_String_Instance.prototype.constructor = String; }
+
+	// -- JS String API compatibility --
+	// Transpiled JavaScript (e.g. jQuery) calls native string methods on
+	// receivers that are actually Oak strings. Delegate to the wrapped
+	// primitive; string results are wrapped back into Oak strings.
+	toLowerCase() { return __Oak_String(this._s.toLowerCase()); }
+	toUpperCase() { return __Oak_String(this._s.toUpperCase()); }
+	trim() { return __Oak_String(this._s.trim()); }
+	charAt(i) { return __Oak_String(this._s.charAt(i)); }
+	charCodeAt(i) { return this._s.charCodeAt(i); }
+	concat(...parts) { return __Oak_String(this._s.concat(...parts.map(p => __as_oak_string(p).valueOf()))); }
+	slice(start, end) { return __Oak_String(this._s.slice(start, end)); }
+	substring(a, b) { return __Oak_String(this._s.substring(a, b)); }
+	substr(a, b) { return __Oak_String(this._s.substr(a, b)); }
+	indexOf(part, from) { return this._s.indexOf(__as_oak_string(part).valueOf(), from); }
+	lastIndexOf(part, from) { return this._s.lastIndexOf(__as_oak_string(part).valueOf(), from); }
+	includes(part, from) { return this._s.includes(__as_oak_string(part).valueOf(), from); }
+	startsWith(part, from) { return this._s.startsWith(__as_oak_string(part).valueOf(), from); }
+	endsWith(part, len) { return this._s.endsWith(__as_oak_string(part).valueOf(), len); }
+	search(re) { return this._s.search(re); }
+	split(sep, limit) {
+		const s = sep === undefined ? this._s : __as_oak_string(sep).valueOf();
+		return this._s.split(s, limit).map(__Oak_String);
+	}
+	match(re) { return this._s.match(re); }
+	replace(search, replacement) {
+		const s = typeof search === 'string' || search instanceof RegExp
+			? search : __as_oak_string(search).valueOf();
+		const rep = typeof replacement === 'function'
+			? replacement
+			: (replacement == null ? String(replacement) : __as_oak_string(replacement).valueOf());
+		return __Oak_String(this._s.replace(s, rep));
+	}
+	replaceAll(search, replacement) {
+		const s = typeof search === 'string' || search instanceof RegExp
+			? search : __as_oak_string(search).valueOf();
+		const rep = typeof replacement === 'function'
+			? replacement
+			: (replacement == null ? String(replacement) : __as_oak_string(replacement).valueOf());
+		return __Oak_String(this._s.replaceAll(s, rep));
+	}
+}
+
+// host constructors referenced by transpiled JS as free identifiers
+// (String/Array/... constructor identity checks). Oak arrays ARE host arrays,
+// Oak objects are host objects, Oak numbers/booleans are primitives; Oak
+// strings masquerade as String (see __Oak_String_Instance above).
+const __Array = Array;
+const __Object = Object;
+const __String = String;
+const __Number = Number;
+const __Boolean = Boolean;
+const __Function = Function;
+const __Date = Date;
+const __RegExp = RegExp;
+const __Promise = Promise;
+
+// native RegExp construction for transpiled code (see __jsRegExp in js-runtime.oak)
+function __js_RegExp(pattern, flags) {
+	const r = new RegExp(__as_oak_string(pattern).valueOf(), __as_oak_string(flags).valueOf());
+	r.__t = 'jsRegExp';
+	return r;
 }
 
 // tail recursion trampoline helpers
@@ -161,6 +277,7 @@ function __oak_trampoline(fn, ...args) {
 // reflection and types
 const __Is_Oak_Node = typeof process === 'object';
 const __Oak_Int_RE = /^[+-]?\d+$/;
+const __Oak_PointerValues = new Set();
 function int(x) {
 	x = __as_oak_string(x);
 	if (typeof x === 'number') {
@@ -240,6 +357,8 @@ function type(x) {
 	x = __as_oak_string(x);
 	if (x == null) {
 		return Symbol.for('null');
+	} else if (typeof x === 'number' && __Oak_PointerValues.has(x)) {
+		return Symbol.for('pointer');
 	} else if (typeof x === 'number') {
 		// Many discrete APIs check for :int, so we consider all integer
 		// numbers :int and fall back to :float. This is not an airtight
@@ -259,6 +378,7 @@ function type(x) {
 	} else if (Array.isArray(x)) {
 		return Symbol.for('list');
 	} else if (typeof x === 'object') {
+		if (x != null && x.__oak_chan === true) return Symbol.for('channel');
 		return Symbol.for('object');
 	}
 	throw new Error('type() called on unknown type ' + x.toString());
@@ -280,6 +400,60 @@ function keys(x) {
 		return Object.getOwnPropertyNames(x).map(__as_oak_string);
 	}
 	throw new Error('keys() takes a composite value, but got ' + string(x).valueOf());
+}
+function values(x) {
+	if (typeof x === 'object' && x !== null && !Array.isArray(x)) {
+		return Object.getOwnPropertyNames(x).map(k => x[k]);
+	}
+	return [];
+}
+function name(x) {
+	if (x == null) return Symbol.for('null');
+	if (typeof x === 'symbol') return x;
+	if (__is_oak_string(x)) return Symbol.for(x.valueOf());
+	if (typeof x === 'function') {
+		const n = x.name;
+		return Symbol.for(n ?? '');
+	}
+	if (typeof x === 'number' && __Oak_PointerValues.has(x)) {
+		const nameVal = __Oak_NameRefs.get(x);
+		if (nameVal != null) return Symbol.for(nameVal);
+	}
+	if (typeof x === 'object' && x !== null && typeof x.constructor === 'function') {
+		return Symbol.for(x.constructor.name || '');
+	}
+	return Symbol.for(string(x).valueOf());
+}
+function csof(x, cls) {
+	if (cls === undefined) {
+		// 1-arg: check if x is an Oak class (tagged by __Oak_Class)
+		return typeof x === 'function' && x.__oak_class_tag === true;
+	}
+	if (x == null || cls == null) return false;
+	// class vs class: identity check
+	if (typeof x === 'function' && x.__oak_class_tag && typeof cls === 'function' && cls.__oak_class_tag) {
+		return x === cls;
+	}
+	// class vs atom: compare class name to atom name
+	if (typeof x === 'function' && x.__oak_class_tag && typeof cls === 'symbol') {
+		return x.__oak_class_name === Symbol.keyFor(cls);
+	}
+	// atom vs class: compare atom name to class name
+	if (typeof x === 'symbol' && typeof cls === 'function' && cls.__oak_class_tag) {
+		return Symbol.keyFor(x) === cls.__oak_class_name;
+	}
+	// JS-native fallbacks
+	if (typeof cls === 'function') return x instanceof cls;
+	if (typeof cls === 'symbol') {
+		const clsName = Symbol.keyFor(cls);
+		if (typeof x === 'object' && x !== null && typeof x.constructor === 'function') {
+			return x.constructor.name === clsName;
+		}
+		if (typeof x === 'symbol') {
+			return Symbol.keyFor(x) === clsName;
+		}
+	}
+	return false;
 }
 
 // OS interfaces
@@ -325,13 +499,343 @@ function exit(code) {
 	if (__Is_Oak_Node) process.exit(code);
 	return null;
 }
-function exec() {
-	return { type: Symbol.for('error'), error: __as_oak_string('exec() unavailable in this runtime') };
+
+let __Oak_NextPtr = 4096;
+const __Oak_MemoryRegions = new Map();
+const __Oak_NameRefs = new Map();
+const __Oak_NamePtrs = new Map();
+function __oak_bytes_from_string(s) {
+	s = __as_oak_string(s);
+	if (!__is_oak_string(s)) return [];
+	const out = [];
+	const raw = s.valueOf();
+	for (let i = 0; i < raw.length; i++) out.push(raw.charCodeAt(i) & 0xff);
+	return out;
+}
+function __oak_alloc_region(bytes) {
+	const base = __Oak_NextPtr;
+	const size = Math.max(1, bytes.length);
+	__Oak_NextPtr += size + 16;
+	__Oak_MemoryRegions.set(base, bytes.slice());
+	__Oak_PointerValues.add(base);
+	return base;
+}
+function __oak_find_region(addr) {
+	for (const [base, bytes] of __Oak_MemoryRegions.entries()) {
+		if (addr >= base && addr < base + bytes.length) {
+			return { base, bytes };
+		}
+	}
+	return null;
+}
+function bits(x) {
+	x = __as_oak_string(x);
+	if (Array.isArray(x)) {
+		let out = '';
+		for (const val of x) {
+			const n = int(val);
+			if (n == null || n < 0 || n > 255) throw new Error('bits(list) expects byte values 0-255');
+			out += String.fromCharCode(n);
+		}
+		return __as_oak_string(out);
+	}
+	if (__is_oak_string(x)) {
+		const out = [];
+		const raw = x.valueOf();
+		for (let i = 0; i < raw.length; i++) out.push(raw.charCodeAt(i) & 0xff);
+		return out;
+	}
+	throw new Error('bits() expects a list of bytes or a byte string');
+}
+function pointer(x) {
+	x = __as_oak_string(x);
+	if (typeof x === 'number') {
+		if (__Oak_PointerValues.has(x)) return x;
+		if (x < 0) throw new Error('pointer() expects non-negative integer');
+		__Oak_PointerValues.add(x);
+		return x;
+	}
+	if (__is_oak_string(x)) {
+		if (x.length === 0) return 0;
+		return __oak_alloc_region(__oak_bytes_from_string(x));
+	}
+	if (typeof x === 'symbol' && x !== __Oak_Empty) {
+		const atomName = Symbol.keyFor(x);
+		if (!atomName) return 0;
+		if (__Oak_NamePtrs.has(atomName)) return __Oak_NamePtrs.get(atomName);
+		const bytes = __oak_bytes_from_string(__as_oak_string(atomName));
+		const ptr = __oak_alloc_region(bytes);
+		__Oak_NameRefs.set(ptr, atomName);
+		__Oak_NamePtrs.set(atomName, ptr);
+		return ptr;
+	}
+	throw new Error('pointer() expects int, atom, or byte string');
+}
+function addr(x) {
+	x = __as_oak_string(x);
+	if (!__is_oak_string(x)) throw new Error('addr() expects a byte string');
+	if (x.length === 0) return 0;
+	return __oak_alloc_region(__oak_bytes_from_string(x));
+}
+function memread(p, n) {
+	const addrValue = int(p);
+	const length = int(n);
+	if (addrValue == null || addrValue < 0) throw new Error('memread address must be non-negative');
+	if (length == null || length < 0) throw new Error('memread length must be non-negative');
+	if (length === 0) return __as_oak_string('');
+	const region = __oak_find_region(addrValue);
+	if (!region) throw new Error('memread cannot read from unknown address');
+	const start = addrValue - region.base;
+	let out = '';
+	for (let i = 0; i < length; i++) {
+		out += String.fromCharCode(region.bytes[start + i] ?? 0);
+	}
+	return __as_oak_string(out);
+}
+function __oak_memwrite_bytes(val) {
+	val = __as_oak_string(val);
+	if (__is_oak_string(val)) return __oak_bytes_from_string(val);
+	if (typeof val === 'symbol' && val !== __Oak_Empty) {
+		const atomStr = Symbol.keyFor(val) || '';
+		return __oak_bytes_from_string(__as_oak_string(atomStr));
+	}
+	if (Array.isArray(val)) {
+		const buf = [];
+		for (const el of val) {
+			const n = int(el);
+			if (n == null || n < 0 || n > 255) throw new Error('memwrite list payload expects byte values 0-255');
+			buf.push(n);
+		}
+		return buf;
+	}
+	throw new Error('memwrite payload must be byte string, atom, or byte list');
+}
+function memwrite(p, data) {
+	p = __as_oak_string(p);
+	if (typeof p === 'symbol' && p !== __Oak_Empty) {
+		const atomName = Symbol.keyFor(p) || '';
+		const bytes = __oak_memwrite_bytes(data);
+		if (bytes.length === 0) {
+			if (__Oak_NamePtrs.has(atomName)) {
+				const oldPtr = __Oak_NamePtrs.get(atomName);
+				__Oak_NameRefs.delete(oldPtr);
+				__Oak_NamePtrs.delete(atomName);
+			}
+			return 0;
+		}
+		const ptr = __oak_alloc_region(bytes);
+		if (__Oak_NamePtrs.has(atomName)) {
+			const oldPtr = __Oak_NamePtrs.get(atomName);
+			__Oak_NameRefs.delete(oldPtr);
+		}
+		__Oak_NameRefs.set(ptr, atomName);
+		__Oak_NamePtrs.set(atomName, ptr);
+		return bytes.length;
+	}
+	const addrValue = int(p);
+	const bytes = __oak_memwrite_bytes(data);
+	if (addrValue == null || addrValue < 0) throw new Error('memwrite address must be non-negative');
+	if (bytes.length === 0) return 0;
+	const region = __oak_find_region(addrValue);
+	if (!region) throw new Error('memwrite cannot write to unknown address');
+	const start = addrValue - region.base;
+	for (let i = 0; i < bytes.length; i++) {
+		if (start + i < region.bytes.length) region.bytes[start + i] = bytes[i];
+	}
+	return bytes.length;
+}
+
+function go(fn, ...args) {
+	setTimeout(() => {
+		try {
+			__oak_resolve_trampoline(fn, ...args);
+		} catch (_) {}
+	}, 0);
+	return null;
+}
+
+function make_chan(size) {
+	const cap = int(size) ?? 0;
+	return {
+		type: Symbol.for("channel"),
+		__oak_chan: true,
+		cap: cap < 0 ? 0 : cap,
+		queue: [],
+		receivers: [],
+	};
+}
+
+function chan_send(ch, value, cb) {
+	if (ch == null || ch.__oak_chan !== true) {
+		return __oak_io_error("chan_send() expects a channel");
+	}
+	if (ch.receivers.length > 0) {
+		const recvCb = ch.receivers.shift();
+		recvCb({ type: Symbol.for("data"), data: value });
+	} else {
+		ch.queue.push(value);
+	}
+	if (typeof cb === "function") cb({ type: Symbol.for("end") });
+	return { type: Symbol.for("end") };
+}
+
+function chan_recv(ch, cb) {
+	if (ch == null || ch.__oak_chan !== true) {
+		const evt = __oak_io_error("chan_recv() expects a channel");
+		if (typeof cb === "function") {
+			cb(evt);
+			return null;
+		}
+		return evt;
+	}
+	if (ch.queue.length > 0) {
+		const evt = { type: Symbol.for("data"), data: ch.queue.shift() };
+		if (typeof cb === "function") {
+			cb(evt);
+			return null;
+		}
+		return evt;
+	}
+	if (typeof cb === "function") {
+		ch.receivers.push(cb);
+		return null;
+	}
+	return __oak_io_error("chan_recv() would block on empty channel");
+}
+function chan_try_recv(ch) {
+	if (ch == null || ch.__oak_chan !== true) {
+		return { ok: false };
+	}
+	if (ch.queue.length > 0) {
+		return { ok: true, data: ch.queue.shift() };
+	}
+	return { ok: false };
+}
+function lock_thread() {
+	return null;
+}
+function unlock_thread() {
+	return null;
+}
+function win_msg_loop(fn) {
+	return __oak_io_error('win_msg_loop() unavailable in this runtime');
+}
+
+let __Oak_FS;
+let __Oak_Path;
+let __Oak_ChildProc;
+let __Oak_VirtualFDNext = 100000;
+const __Oak_VirtualFDs = new Map();
+
+function __oak_require_fs() {
+	if (!__Is_Oak_Node) return null;
+	if (!__Oak_FS) __Oak_FS = require("fs");
+	return __Oak_FS;
+}
+function __oak_require_path() {
+	if (!__Is_Oak_Node) return null;
+	if (!__Oak_Path) __Oak_Path = require("path");
+	return __Oak_Path;
+}
+function __oak_require_child_process() {
+	if (!__Is_Oak_Node) return null;
+	if (!__Oak_ChildProc) __Oak_ChildProc = require("child_process");
+	return __Oak_ChildProc;
+}
+function __oak_io_error(message) {
+	return {
+		type: Symbol.for("error"),
+		error: __as_oak_string(String(message)),
+	};
+}
+function __oak_to_string_value(x) {
+	x = __as_oak_string(x);
+	if (__is_oak_string(x)) return x.valueOf();
+	if (x == null) return "";
+	return String(x);
+}
+function __oak_to_event_data(s) {
+	return {
+		type: Symbol.for("data"),
+		data: __as_oak_string(s ?? ""),
+	};
+}
+function __oak_get_vfs() {
+	if (typeof ___packed_vfs === "function") {
+		return ___packed_vfs();
+	}
+	return null;
+}
+
+function exec(path, args = [], stdin = "") {
+	if (__Is_Oak_Node) {
+		try {
+			const cp = __oak_require_child_process();
+			const result = cp.spawnSync(__oak_to_string_value(path),
+				(Array.isArray(args) ? args : []).map(__oak_to_string_value), {
+					input: __oak_to_string_value(stdin),
+					encoding: "latin1",
+				});
+			if (result.error) return __oak_io_error(result.error.message || result.error);
+			return {
+				type: Symbol.for("end"),
+				status: int(result.status ?? 0) ?? 0,
+				stdout: __as_oak_string(result.stdout ?? ""),
+				stderr: __as_oak_string(result.stderr ?? ""),
+			};
+		} catch (e) {
+			return __oak_io_error("exec() failed: " + e);
+		}
+	}
+	return __oak_io_error("exec() unavailable in this runtime");
+}
+
+function sysproc(library, name) {
+	const lib = __oak_to_string_value(library);
+	const proc = __oak_to_string_value(name);
+	return __oak_io_error(`Could not resolve procedure ${lib}!${proc}: sysproc() unavailable in this runtime`);
+}
+
+function syscall(target, ...args) {
+	if (target == null) return __oak_io_error("syscall() missing target");
+	return __oak_io_error("syscall() unavailable in this runtime");
+}
+
+function utf16(x) {
+	x = __as_oak_string(x);
+	if (!__is_oak_string(x)) {
+		throw new Error("utf16() expects a string");
+	}
+	const raw = x.valueOf();
+	let out = "";
+	for (let i = 0; i < raw.length; i++) {
+		const code = raw.charCodeAt(i);
+		out += String.fromCharCode(code & 0xff);
+		out += String.fromCharCode((code >> 8) & 0xff);
+	}
+	out += "\x00\x00";
+	return __as_oak_string(out);
 }
 
 // I/O
 function input() {
-	return { type: Symbol.for('error'), error: __as_oak_string('input() unavailable in this runtime') };
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const buf = Buffer.alloc(4096);
+			const count = fs.readSync(0, buf, 0, buf.length, null);
+			if (count <= 0) return __oak_io_error("eof");
+			return __oak_to_event_data(buf.subarray(0, count).toString("latin1").replace(/[\r\n]+$/, ""));
+		} catch (e) {
+			return __oak_io_error("input() failed: " + e);
+		}
+	}
+	if (typeof prompt === "function") {
+		const value = prompt("");
+		if (value == null) return __oak_io_error("eof");
+		return __oak_to_event_data(value);
+	}
+	return __oak_io_error("input() unavailable in this runtime");
 }
 function print(s) {
 	s = __as_oak_string(s);
@@ -343,34 +847,659 @@ function print(s) {
 	return s.length;
 }
 function ls() {
-	return { type: Symbol.for('error'), error: __as_oak_string('ls() unavailable in this runtime') };
+	const target = __oak_to_string_value(arguments[0] ?? ".");
+	const vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.listFiles === "function" && !__Is_Oak_Node) {
+		const names = vfs.listFiles() || [];
+		const normalized = target.replace(/\\/g, "/");
+		const prefix = normalized === "/" || normalized === "" ? "" : normalized + "/";
+		const result = [];
+		for (const fullName of names) {
+			const name = __oak_to_string_value(fullName);
+			if (prefix !== "" && !name.startsWith(prefix)) continue;
+			const rel = prefix === "" ? name : name.slice(prefix.length);
+			if (rel === "" || rel.includes("/")) continue;
+			result.push({ name: __as_oak_string(rel), dir: false });
+		}
+		return __oak_to_event_data(result);
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const list = fs.readdirSync(target, { withFileTypes: true }).map(entry => ({
+				name: __as_oak_string(entry.name),
+				dir: !!entry.isDirectory(),
+			}));
+			return __oak_to_event_data(list);
+		} catch (e) {
+			return __oak_io_error("ls() failed: " + e);
+		}
+	}
+	return __oak_io_error("ls() unavailable in this runtime");
 }
 function rm() {
-	return { type: Symbol.for('error'), error: __as_oak_string('rm() unavailable in this runtime') };
+	if (__Is_Oak_Node) {
+		try {
+			__oak_require_fs().rmSync(__oak_to_string_value(arguments[0]), { recursive: true, force: true });
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("rm() failed: " + e);
+		}
+	}
+	return __oak_io_error("rm() unavailable in this runtime");
 }
 function mkdir() {
-	return { type: Symbol.for('error'), error: __as_oak_string('mkdir() unavailable in this runtime') };
+	if (__Is_Oak_Node) {
+		try {
+			__oak_require_fs().mkdirSync(__oak_to_string_value(arguments[0]), { recursive: true });
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("mkdir() failed: " + e);
+		}
+	}
+	return __oak_io_error("mkdir() unavailable in this runtime");
 }
 function stat() {
-	return { type: Symbol.for('error'), error: __as_oak_string('stat() unavailable in this runtime') };
+	const target = __oak_to_string_value(arguments[0]);
+	vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.statFile === "function" && !__Is_Oak_Node) {
+		const st = vfs.statFile(target);
+		if (st == null) return __oak_to_event_data(null);
+		return __oak_to_event_data({
+			name: __as_oak_string(st.name ?? target),
+			len: int(st.size ?? 0) ?? 0,
+			dir: !!(st.dir ?? false),
+			mod: int(st.mod ?? 0) ?? 0,
+		});
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const path = __oak_require_path();
+			const st = fs.statSync(target);
+			return __oak_to_event_data({
+				name: __as_oak_string(path.basename(target)),
+				len: int(st.size) ?? 0,
+				dir: !!st.isDirectory(),
+				mod: int(Math.floor(st.mtimeMs / 1000)) ?? 0,
+			});
+		} catch (e) {
+			if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) return __oak_to_event_data(null);
+			return __oak_io_error("stat() failed: " + e);
+		}
+	}
+	return __oak_io_error("stat() unavailable in this runtime");
 }
 function open() {
-	return { type: Symbol.for('error'), error: __as_oak_string('open() unavailable in this runtime') };
+	const path = __oak_to_string_value(arguments[0]);
+	const flagAtom = arguments[1];
+	const flag = typeof flagAtom === "symbol" ? Symbol.keyFor(flagAtom) : __oak_to_string_value(flagAtom || "readwrite");
+	const vfs = __oak_get_vfs();
+	if (vfs && typeof vfs.readFile === "function" && !__Is_Oak_Node) {
+		const fd = __Oak_VirtualFDNext++;
+		let content = __oak_to_string_value(vfs.readFile(path) ?? "");
+		if (flag === "truncate") content = "";
+		__Oak_VirtualFDs.set(fd, { path, content, append: flag === "append", readonly: flag === "readonly" });
+		return { type: Symbol.for("file"), fd: int(fd) ?? fd };
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const map = { readonly: "r", readwrite: "w+", append: "a+", truncate: "w+" };
+			const fd = fs.openSync(path, map[flag] || "w+");
+			return { type: Symbol.for("file"), fd: int(fd) ?? fd };
+		} catch (e) {
+			return __oak_io_error("open() failed: " + e);
+		}
+	}
+	return __oak_io_error("open() unavailable in this runtime");
 }
 function close() {
-	return { type: Symbol.for('error'), error: __as_oak_string('close() unavailable in this runtime') };
+	const fd = int(arguments[0]);
+	if (__Oak_VirtualFDs.has(fd)) {
+		const file = __Oak_VirtualFDs.get(fd);
+		const vfs = __oak_get_vfs();
+		if (vfs && !file.readonly && typeof vfs.writeFile === "function") {
+			vfs.writeFile(file.path, __as_oak_string(file.content));
+		}
+		__Oak_VirtualFDs.delete(fd);
+		return { type: Symbol.for("end") };
+	}
+	if (__Is_Oak_Node) {
+		try {
+			__oak_require_fs().closeSync(fd);
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("close() failed: " + e);
+		}
+	}
+	return __oak_io_error("close() unavailable in this runtime");
 }
 function read() {
-	return { type: Symbol.for('error'), error: __as_oak_string('read() unavailable in this runtime') };
+	const fd = int(arguments[0]);
+	const offset = int(arguments[1]) ?? 0;
+	const length = int(arguments[2]) ?? 0;
+	if (__Oak_VirtualFDs.has(fd)) {
+		const file = __Oak_VirtualFDs.get(fd);
+		return __oak_to_event_data(file.content.slice(offset, offset + length));
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const buf = Buffer.alloc(length);
+			const count = fs.readSync(fd, buf, 0, length, offset);
+			return __oak_to_event_data(buf.subarray(0, count).toString("latin1"));
+		} catch (e) {
+			return __oak_io_error("read() failed: " + e);
+		}
+	}
+	return __oak_io_error("read() unavailable in this runtime");
 }
 function write() {
-	return { type: Symbol.for('error'), error: __as_oak_string('write() unavailable in this runtime') };
+	const fd = int(arguments[0]);
+	const offset = int(arguments[1]) ?? 0;
+	const data = __oak_to_string_value(arguments[2]);
+	if (__Oak_VirtualFDs.has(fd)) {
+		const file = __Oak_VirtualFDs.get(fd);
+		if (file.readonly) return __oak_io_error("write() failed: file is readonly");
+		if (file.append || offset < 0) {
+			file.content += data;
+		} else {
+			const start = file.content.slice(0, offset);
+			const end = file.content.slice(offset + data.length);
+			file.content = start + data + end;
+		}
+		return { type: Symbol.for("end") };
+	}
+	if (__Is_Oak_Node) {
+		try {
+			const fs = __oak_require_fs();
+			const buf = Buffer.from(data, "latin1");
+			if (offset < 0) {
+				fs.writeSync(fd, buf, 0, buf.length, null);
+			} else {
+				fs.writeSync(fd, buf, 0, buf.length, offset);
+			}
+			return { type: Symbol.for("end") };
+		} catch (e) {
+			return __oak_io_error("write() failed: " + e);
+		}
+	}
+	return __oak_io_error("write() unavailable in this runtime");
 }
-function listen() {
-	return { type: Symbol.for('error'), error: __as_oak_string('listen() unavailable in this runtime') };
+function listen(host, handler, cb) {
+	if (__Is_Oak_Node) {
+		const http = require('http');
+		const hostStr = __oak_to_string_value(host);
+		const [hostname, portStr] = hostStr.split(':');
+		const port = int(portStr) ?? 9090;
+		const server = http.createServer((nodeReq, nodeRes) => {
+			let bodyChunks = [];
+			nodeReq.on('data', chunk => bodyChunks.push(chunk));
+			nodeReq.on('end', () => {
+				const bodyBuf = Buffer.concat(bodyChunks);
+				const bodyStr = __as_oak_string(bodyBuf.toString('latin1'));
+				const hdrs = {};
+				for (const key of Object.keys(nodeReq.headers)) {
+					hdrs[key] = __as_oak_string(nodeReq.headers[key]);
+				}
+				const endFn = (args) => {
+					const resp = args[0] ?? {};
+					const status = int(resp.status) ?? 200;
+					const respHdrs = resp.headers ?? {};
+					const respBody = __oak_to_string_value(resp.body ?? '');
+					for (const k of Object.getOwnPropertyNames(respHdrs)) {
+						nodeRes.setHeader(k, __oak_to_string_value(respHdrs[k]));
+					}
+					nodeRes.writeHead(status);
+					nodeRes.end(Buffer.from(respBody, 'latin1'));
+					return null;
+				};
+				if (typeof handler === 'function') {
+					handler({
+						type: Symbol.for('req'),
+						req: {
+							method: __as_oak_string(nodeReq.method || 'GET'),
+							url: __as_oak_string(nodeReq.url || '/'),
+							headers: hdrs,
+							body: bodyStr,
+						},
+						end: endFn,
+					});
+				}
+			});
+		});
+		server.listen(port, hostname || '0.0.0.0');
+		return (...args) => { server.close(); return null; };
+	}
+	return __oak_io_error('listen() unavailable in this runtime');
 }
-function req() {
-	return { type: Symbol.for('error'), error: __as_oak_string('req() unavailable in this runtime') };
+function req(data, cb) {
+	const method = __oak_to_string_value((data && data.method) || 'GET');
+	const url = __oak_to_string_value((data && data.url) || '');
+	const headers = (data && data.headers) ? data.headers : {};
+	const body = (data && data.body != null && data.body !== null) ? __oak_to_string_value(data.body) : null;
+
+	function __oak_make_resp(status, respHeaders, respBody) {
+		const hdrs = {};
+		for (const k of Object.getOwnPropertyNames(respHeaders)) {
+			hdrs[k] = __as_oak_string(__oak_to_string_value(respHeaders[k]));
+		}
+		return {
+			type: Symbol.for('resp'),
+			resp: {
+				status: int(status) ?? 0,
+				headers: hdrs,
+				body: __as_oak_string(respBody ?? ''),
+			},
+		};
+	}
+
+	const fetchHeaders = {};
+	for (const k of Object.getOwnPropertyNames(headers)) {
+		fetchHeaders[k] = __oak_to_string_value(headers[k]);
+	}
+
+	if (__Is_Oak_Node) {
+		// Use Node.js built-in fetch (v18+) or fall back to http/https modules
+		if (typeof fetch === 'function') {
+			const opts = {
+				method,
+				headers: fetchHeaders,
+				redirect: 'follow',
+			};
+			if (body != null) opts.body = body;
+			const p = fetch(url, opts)
+				.then(r => r.arrayBuffer().then(buf => {
+					const bodyText = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join('');
+					const hdrsOut = {};
+					r.headers.forEach((v, k) => { hdrsOut[k] = v; });
+					return __oak_make_resp(r.status, hdrsOut, bodyText);
+				}))
+				.catch(e => __oak_io_error('req() failed: ' + e));
+			if (typeof cb === 'function') {
+				p.then(cb);
+				return null;
+			}
+			return __oak_io_error('req() requires a callback in async Node.js context');
+		}
+		// Node.js http/https fallback for older runtimes
+		try {
+			const parsedUrl = require('url').parse(url);
+			const mod = parsedUrl.protocol === 'https:' ? require('https') : require('http');
+			const bodyBuf = body != null ? Buffer.from(body, 'latin1') : null;
+			const reqOpts = {
+				hostname: parsedUrl.hostname,
+				port: parsedUrl.port,
+				path: parsedUrl.path || '/',
+				method,
+				headers: { ...fetchHeaders },
+			};
+			if (bodyBuf != null) reqOpts.headers['Content-Length'] = bodyBuf.length;
+			if (typeof cb === 'function') {
+				const nodeReq = mod.request(reqOpts, nodeRes => {
+					const chunks = [];
+					nodeRes.on('data', c => chunks.push(c));
+					nodeRes.on('end', () => {
+						const respBody = Buffer.concat(chunks).toString('latin1');
+						const hdrsOut = {};
+						for (const k of Object.keys(nodeRes.headers)) {
+							hdrsOut[k] = nodeRes.headers[k];
+						}
+						cb(__oak_make_resp(nodeRes.statusCode, hdrsOut, respBody));
+					});
+				});
+				nodeReq.on('error', e => cb(__oak_io_error('req() failed: ' + e)));
+				if (bodyBuf != null) nodeReq.write(bodyBuf);
+				nodeReq.end();
+				return null;
+			}
+			// sync path using spawnSync for Node without native sync http
+			const result = require('child_process').spawnSync(process.execPath, [
+				'-e',
+				`const http=require('${parsedUrl.protocol === 'https:' ? 'https' : 'http'}');`
+				+ `const o=${JSON.stringify(reqOpts)};`
+				+ `const r=[];`
+				+ `const q=http.request(o,res=>{res.on('data',c=>r.push(c));res.on('end',()=>{`
+				+ `const b=Buffer.concat(r).toString('latin1');`
+				+ `const h={};for(const k of Object.keys(res.headers))h[k]=res.headers[k];`
+				+ `process.stdout.write(JSON.stringify({s:res.statusCode,h,b}));})});`
+				+ `q.on('error',e=>{process.stdout.write(JSON.stringify({err:e.message}))});`
+				+ (bodyBuf != null ? `q.write(Buffer.from(${JSON.stringify(Array.from(bodyBuf))}));` : '')
+				+ `q.end();`,
+			], { encoding: 'latin1', timeout: 30000 });
+			if (result.error || result.status !== 0) {
+				return __oak_io_error('req() sync fallback failed');
+			}
+			const parsed = JSON.parse(result.stdout);
+			if (parsed.err) return __oak_io_error('req() failed: ' + parsed.err);
+			return __oak_make_resp(parsed.s, parsed.h, parsed.b);
+		} catch (e) {
+			return __oak_io_error('req() failed: ' + e);
+		}
+	}
+	// browser path — use fetch
+	if (typeof fetch === 'function') {
+		const opts = { method, headers: fetchHeaders, redirect: 'follow' };
+		if (body != null) opts.body = body;
+		const p = fetch(url, opts)
+			.then(r => r.arrayBuffer().then(buf => {
+				const bodyText = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join('');
+				const hdrsOut = {};
+				r.headers.forEach((v, k) => { hdrsOut[k] = v; });
+				return __oak_make_resp(r.status, hdrsOut, bodyText);
+			}))
+			.catch(e => __oak_io_error('req() failed: ' + e));
+		if (typeof cb === 'function') {
+			p.then(cb);
+			return null;
+		}
+		// return a promise-like synthetic result; Oak callers should use callback form
+		return __oak_io_error('req() in browser requires a callback');
+	}
+	return __oak_io_error('req() unavailable in this runtime');
+}
+
+// Raw sockets
+// The JS runtime currently does not expose Magnolia's synchronous stream
+// socket model. Define explicit builtins anyway so socket-backed stdlibs fail
+// with structured IO errors instead of crashing with ReferenceError.
+function __oak_socket_unavailable(fnName, cb) {
+	const err = __oak_io_error(fnName + '() unavailable in this runtime');
+	if (typeof cb === 'function') {
+		cb(err);
+		return null;
+	}
+	return err;
+}
+function socket_connect(address, options, cb) {
+	if (typeof options === 'function') {
+		cb = options;
+	}
+	return __oak_socket_unavailable('socket_connect', cb);
+}
+function socket_send(socket, data, cb) {
+	return __oak_socket_unavailable('socket_send', cb);
+}
+function socket_recv(socket, size, cb) {
+	return __oak_socket_unavailable('socket_recv', cb);
+}
+function socket_recv_exact(socket, size, cb) {
+	return __oak_socket_unavailable('socket_recv_exact', cb);
+}
+function socket_recv_line(socket, cb) {
+	return __oak_socket_unavailable('socket_recv_line', cb);
+}
+function socket_starttls(socket, options, cb) {
+	if (typeof options === 'function') {
+		cb = options;
+	}
+	return __oak_socket_unavailable('socket_starttls', cb);
+}
+function socket_close(socket, cb) {
+	return __oak_socket_unavailable('socket_close', cb);
+}
+function socket_listen(address, handler, options) {
+	return __oak_socket_unavailable('socket_listen');
+}
+
+// WebSocket
+let __Oak_WS_NextID = 1;
+const __Oak_WS_Map = new Map();
+function __oak_ws_socket_object(id) {
+	return { type: Symbol.for('websocket'), id: int(id) };
+}
+function __oak_ws_get(ws, fnName) {
+	if (ws == null || typeof ws !== 'object') {
+		return [null, __oak_io_error(fnName + '() expects a websocket')];
+	}
+	if (ws.type !== Symbol.for('websocket')) {
+		return [null, __oak_io_error(fnName + '() expects a websocket')];
+	}
+	const id = int(ws.id);
+	const entry = __Oak_WS_Map.get(id);
+	if (!entry) return [null, __oak_io_error('Websocket is not available')];
+	return [entry, null];
+}
+// Register post-connection message/close/error handlers on a socket.
+// Handles both Node.js ws EventEmitter API (server and client) and the
+// browser W3C WebSocket API.  Called after the connection is established so
+// that connection-phase errors can be handled separately by the caller.
+function __oak_ws_register(id, entry, conn) {
+	if (typeof conn.on === 'function') {
+		// Node.js ws EventEmitter API
+		conn.on('message', (rawData, isBinary) => {
+			let str;
+			if (typeof Buffer !== 'undefined' && Buffer.isBuffer(rawData)) {
+				str = rawData.toString('latin1');
+			} else if (Array.isArray(rawData)) {
+				// ws may give multiple buffers
+				str = Buffer.concat(rawData).toString('latin1');
+			} else if (typeof ArrayBuffer !== 'undefined' && rawData instanceof ArrayBuffer) {
+				str = Array.from(new Uint8Array(rawData)).map(b => String.fromCharCode(b)).join('');
+			} else {
+				str = String(rawData);
+			}
+			const msg = { type: Symbol.for('message'), opcode: isBinary ? 2 : 1, data: __as_oak_string(str) };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		});
+		conn.on('close', (code, reasonBuf) => {
+			entry.closed = true;
+			__Oak_WS_Map.delete(id);
+			const reason = reasonBuf ? reasonBuf.toString() : '';
+			const msg = { type: Symbol.for('closed'), code: int(code) ?? 0, reason: __as_oak_string(reason) };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		});
+		conn.on('error', () => {
+			const err = __oak_io_error('WebSocket error');
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(err);
+			else entry.msgQueue.push(err);
+		});
+	} else {
+		// W3C API (browser WebSocket)
+		if (typeof conn.binaryType !== 'undefined') conn.binaryType = 'arraybuffer';
+		conn.onmessage = evt => {
+			let data;
+			if (typeof ArrayBuffer !== 'undefined' && evt.data instanceof ArrayBuffer) {
+				data = __as_oak_string(Array.from(new Uint8Array(evt.data)).map(b => String.fromCharCode(b)).join(''));
+			} else {
+				data = __as_oak_string(String(evt.data));
+			}
+			const msg = { type: Symbol.for('message'), opcode: 1, data };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		};
+		conn.onclose = evt => {
+			entry.closed = true;
+			__Oak_WS_Map.delete(id);
+			const msg = { type: Symbol.for('closed'), code: int(evt.code) ?? 0, reason: __as_oak_string(evt.reason || '') };
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(msg);
+			else entry.msgQueue.push(msg);
+		};
+		conn.onerror = () => {
+			const err = __oak_io_error('WebSocket error');
+			if (entry.recvQueue.length > 0) entry.recvQueue.shift()(err);
+			else entry.msgQueue.push(err);
+		};
+	}
+}
+function ws_dial(url, headers, cb) {
+	if (typeof headers === 'function') { cb = headers; headers = {}; }
+	const urlStr = __oak_to_string_value(url);
+	let socket;
+	try {
+		if (__Is_Oak_Node) {
+			let WS;
+			try { WS = require('ws'); } catch (_) {
+				const err = __oak_io_error('ws_dial() requires the "ws" npm module in Node.js');
+				if (typeof cb === 'function') { cb(err); return null; }
+				return err;
+			}
+			const hdrs = {};
+			if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+				for (const key of Object.getOwnPropertyNames(headers)) {
+					hdrs[key] = __oak_to_string_value(headers[key]);
+				}
+			}
+			socket = new WS(urlStr, { headers: hdrs });
+		} else if (typeof WebSocket !== 'undefined') {
+			socket = new WebSocket(urlStr);
+		} else {
+			const err = __oak_io_error('ws_dial() unavailable in this runtime');
+			if (typeof cb === 'function') { cb(err); return null; }
+			return err;
+		}
+	} catch (e) {
+		const err = __oak_io_error('ws_dial() failed: ' + e);
+		if (typeof cb === 'function') { cb(err); return null; }
+		return err;
+	}
+	const id = __Oak_WS_NextID++;
+	const entry = { socket, msgQueue: [], recvQueue: [], closed: false };
+	__Oak_WS_Map.set(id, entry);
+	if (typeof cb === 'function') {
+		// For Node.js ws EventEmitter API
+		if (typeof socket.once === 'function') {
+			socket.once('open', () => {
+				__oak_ws_register(id, entry, socket);
+				cb({ type: Symbol.for('ok'), socket: __oak_ws_socket_object(id), status: 101, headers: {} });
+			});
+			socket.once('error', e => {
+				__Oak_WS_Map.delete(id);
+				cb(__oak_io_error('ws_dial() could not connect: ' + e));
+			});
+		} else {
+			// W3C API: onopen / onerror for connection phase, then hand off to __oak_ws_register
+			socket.onerror = () => {
+				__Oak_WS_Map.delete(id);
+				cb(__oak_io_error('ws_dial() could not connect'));
+			};
+			socket.onopen = () => {
+				__oak_ws_register(id, entry, socket);
+				cb({ type: Symbol.for('ok'), socket: __oak_ws_socket_object(id), status: 101, headers: {} });
+			};
+		}
+		return null;
+	}
+	// Non-callback path: register handlers immediately (connection may still be opening)
+	__oak_ws_register(id, entry, socket);
+	return { type: Symbol.for('ok'), socket: __oak_ws_socket_object(id), status: 0, headers: {} };
+}
+function ws_send(ws, data, opcode, cb) {
+	if (typeof opcode === 'function') { cb = opcode; opcode = 1; }
+	if (opcode == null) opcode = 1;
+	const [entry, err] = __oak_ws_get(ws, 'ws_send');
+	if (err) {
+		if (typeof cb === 'function') { cb(err); return null; }
+		return err;
+	}
+	try {
+		const isBinary = int(opcode) === 2;
+		const payload = isBinary
+			? Buffer.from(__oak_to_string_value(data), 'latin1')
+			: __oak_to_string_value(data);
+		entry.socket.send(payload);
+		const result = { type: Symbol.for('sent') };
+		if (typeof cb === 'function') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		const ferr = __oak_io_error('ws_send() failed: ' + e);
+		if (typeof cb === 'function') { cb(ferr); return null; }
+		return ferr;
+	}
+}
+function ws_recv(ws, cb) {
+	const [entry, err] = __oak_ws_get(ws, 'ws_recv');
+	if (err) {
+		if (typeof cb === 'function') { cb(err); return null; }
+		return err;
+	}
+	if (entry.msgQueue.length > 0) {
+		const msg = entry.msgQueue.shift();
+		if (typeof cb === 'function') { cb(msg); return null; }
+		return msg;
+	}
+	if (typeof cb === 'function') {
+		entry.recvQueue.push(cb);
+		return null;
+	}
+	return __oak_io_error('ws_recv() would block: no message available');
+}
+function ws_close(ws, code, reason, cb) {
+	if (typeof code === 'function') { cb = code; code = 1000; reason = ''; }
+	else if (typeof reason === 'function') { cb = reason; reason = ''; }
+	const [entry, err] = __oak_ws_get(ws, 'ws_close');
+	if (err) {
+		if (typeof cb === 'function') { cb(err); return null; }
+		return err;
+	}
+	const closeCode = int(code) ?? 1000;
+	const closeReason = __oak_to_string_value(reason || '');
+	try {
+		entry.socket.close(closeCode, closeReason);
+		const result = { type: Symbol.for('closed'), code: closeCode, reason: __as_oak_string(closeReason) };
+		if (typeof cb === 'function') { cb(result); return null; }
+		return result;
+	} catch (e) {
+		const ferr = __oak_io_error('ws_close() failed: ' + e);
+		if (typeof cb === 'function') { cb(ferr); return null; }
+		return ferr;
+	}
+}
+function ws_listen(host, path, handler) {
+	if (__Is_Oak_Node) {
+		let WSServer;
+		try {
+			const wsLib = require('ws');
+			WSServer = wsLib.WebSocketServer || wsLib.Server;
+		} catch (_) {
+			return __oak_io_error('ws_listen() requires the "ws" npm module in Node.js');
+		}
+		const hostStr = __oak_to_string_value(host);
+		const pathStr = __oak_to_string_value(path);
+		const colonIdx = hostStr.lastIndexOf(':');
+		const hostname = colonIdx > 0 ? hostStr.slice(0, colonIdx) : '0.0.0.0';
+		const port = int(colonIdx > 0 ? hostStr.slice(colonIdx + 1) : '9090') ?? 9090;
+		const wss = new WSServer({ host: hostname, port });
+		wss.on('connection', (conn, req) => {
+			const reqUrl = (req && req.url) ? req.url : pathStr;
+			// Filter by path (ignore query string when matching)
+			if (pathStr && pathStr !== '/' && reqUrl.split('?')[0] !== pathStr) {
+				conn.close(1008, 'Path not found');
+				return;
+			}
+			const hdrs = {};
+			if (req && req.headers) {
+				for (const k of Object.keys(req.headers)) {
+					hdrs[k] = __as_oak_string(req.headers[k]);
+				}
+			}
+			const id = __Oak_WS_NextID++;
+			const entry = { socket: conn, msgQueue: [], recvQueue: [], closed: false };
+			__Oak_WS_Map.set(id, entry);
+			__oak_ws_register(id, entry, conn);
+			if (typeof handler === 'function') {
+				handler({
+					type: Symbol.for('connect'),
+					socket: __oak_ws_socket_object(id),
+					req: {
+						method: __as_oak_string((req && req.method) || 'GET'),
+						url: __as_oak_string(reqUrl),
+						headers: hdrs,
+					},
+				});
+			}
+		});
+		wss.on('error', e => {
+			if (typeof handler === 'function') {
+				handler(__oak_io_error('ws_listen() server error: ' + e));
+			}
+		});
+		return (...args) => { wss.close(); return null; };
+	}
+	return __oak_io_error('ws_listen() unavailable in this runtime');
 }
 
 // math
@@ -401,19 +1530,117 @@ function log(b, n) {
 
 // runtime
 function ___runtime_lib() {
-	return null;
+	const name = __oak_to_string_value(arguments[0]);
+	const module = __Oak_Modules[name] || __Oak_Modules[(__Oak_Import_Aliases || {})[name]];
+	if (module == null) return null;
+	if (typeof module === "function") return __as_oak_string(module.toString());
+	if (typeof module === "object") return __as_oak_string("[bundled module object]");
+	return __as_oak_string(String(module));
 }
 function ___runtime_lib__oak_qm() {
-	return false;
+	const name = __oak_to_string_value(arguments[0]);
+	if (__Oak_Modules[name] != null) return true;
+	const alias = (__Oak_Import_Aliases || {})[name];
+	return alias != null && __Oak_Modules[alias] != null;
+}
+function ___stdlibs() {
+	const out = {};
+	for (const key of Object.getOwnPropertyNames(__Oak_Modules)) {
+		const module = __Oak_Modules[key];
+		if (typeof module === "function") {
+			out[key] = __as_oak_string(module.toString());
+		}
+	}
+	return out;
 }
 function ___runtime_gc() {
+	if (__Is_Oak_Node && typeof global === "object" && typeof global.gc === "function") global.gc();
 	return null;
 }
+function ___runtime_go_version() {
+	return __as_oak_string("js");
+}
 function ___runtime_mem() {
-	return { allocs: 0, frees: 0, live: 0, heap: 0, virt: 0, gcs: 0 };
+	if (__Is_Oak_Node && typeof process.memoryUsage === "function") {
+		const m = process.memoryUsage();
+		return {
+			allocs: int(m.heapTotal) ?? 0,
+			frees: 0,
+			live: int(m.heapUsed) ?? 0,
+			heap: int(m.heapUsed) ?? 0,
+			virt: int(m.rss) ?? 0,
+			gcs: 0,
+		};
+	}
+	return {
+		allocs: 0,
+		frees: 0,
+		live: 0,
+		heap: 0,
+		virt: 0,
+		gcs: 0,
+	};
 }
 function ___runtime_proc() {
-	return { pid: 0, exe: null, cwd: __as_oak_string('/'), argv: [] };
+	if (__Is_Oak_Node) {
+		let cpus = 1;
+		if (typeof require === "function") {
+			try {
+				const os = require("os");
+				if (os && typeof os.cpus === "function") {
+					const list = os.cpus() || [];
+					cpus = int(list.length) ?? 1;
+				}
+			} catch (_) {}
+		}
+		return {
+			pid: int(process.pid) ?? 0,
+			exe: __as_oak_string((process.argv && process.argv[0]) || ""),
+			cwd: __as_oak_string((typeof process.cwd === "function" ? process.cwd() : "")),
+			argv: (process.argv || []).map(__as_oak_string),
+			cpus,
+		};
+	}
+	return {
+		pid: 0,
+		exe: null,
+		cwd: __as_oak_string("/"),
+		argv: [__as_oak_string((typeof window === "object" && window.location ? window.location.href : ""))],
+		cpus: 1,
+	};
+}
+function ___runtime_sys_info() {
+	if (__Is_Oak_Node) {
+		let cpus = 1;
+		let arch = process.arch || "unknown";
+		let platform = process.platform || "unknown";
+		if (typeof require === "function") {
+			try {
+				const os = require("os");
+				if (os) {
+					if (typeof os.cpus === "function") {
+						const list = os.cpus() || [];
+						cpus = int(list.length) ?? 1;
+					}
+					if (typeof os.arch === "function") arch = os.arch() || arch;
+					if (typeof os.platform === "function") platform = os.platform() || platform;
+				}
+			} catch (_) {}
+		}
+		return {
+			os: __as_oak_string(platform),
+			arch: __as_oak_string(arch),
+			cpus: cpus,
+		};
+	}
+	return {
+		os: __as_oak_string("js"),
+		arch: __as_oak_string("js"),
+		cpus: 1,
+	};
+}
+function ___packed_vfs() {
+	return null;
 }
 
 // JavaScript interop
@@ -436,4 +1663,4 @@ function __oak_js_try(fn) {
 		}
 	}
 }
-(__oak_modularize(__Oak_String(''),function _(){return ((UA,contains__oak_qm,each)=>(({each}=__oak_module_import(__Oak_String('std'))),({contains__oak_qm}=__oak_module_import(__Oak_String('str'))),(UA=(navigator.userAgent??null)),each((Array.from)((document.querySelectorAll)(__Oak_String('.try-details'))),function _(el=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string(el),false)}),((__oak_cond)=>__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('Macintosh')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string((document.querySelector)(__Oak_String('.try-details.os-macos'))),true):__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('iPhone')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string((document.querySelector)(__Oak_String('.try-details.os-macos'))),true):__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('iPad')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string((document.querySelector)(__Oak_String('.try-details.os-macos'))),true):__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('Linux')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string((document.querySelector)(__Oak_String('.try-details.os-linux'))),true):((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string((document.querySelector)(__Oak_String('.try-details.os-other'))),true))(true),({UA,contains__oak_qm,each})))()}),__oak_modularize(__Oak_String('std'),function _(){return ((_asPredicate,_baseIterator,_hToN,_nToH,aloop,append,clamp,clone,compact,constantly,contains__oak_qm,debounce,__oak_js_default,each,entries,every,exclude,filter,find,first,flatten,fromEntries,fromHex,identity,indexOf,is,join,last,loop,map,merge,once,parallel,partition,println,range,reduce,reverse,rfind,rindexOf,separate,serial,slice,some,stdin,take,takeLast,toHex,uniq,values,zip)=>(identity=function identity(x=null){return x},is=function is(x=null){return function _(y=null){return __oak_eq(x,y)}},constantly=function constantly(x=null){return function _(){return x}},_baseIterator=function _baseIterator(v=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('string'))?__Oak_String(''):__oak_eq(__oak_cond,Symbol.for('list'))?[]:__oak_eq(__oak_cond,Symbol.for('object'))?({}):null)(type(v))},_asPredicate=function _asPredicate(pred=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('atom'))?((prop)=>((prop=string(pred)),function _(x=null){return __oak_acc(x,__oak_obj_key((prop)))}))():__oak_eq(__oak_cond,Symbol.for('string'))?function _(x=null){return __oak_acc(x,__oak_obj_key((pred)))}:__oak_eq(__oak_cond,Symbol.for('int'))?function _(x=null){return __oak_acc(x,__oak_obj_key((pred)))}:pred)(type(pred))},__oak_js_default=function __oak_js_default(x=null,base=null){return ((__oak_cond)=>__oak_eq(__oak_cond,null)?base:x)(x)},(_nToH=__Oak_String('0123456789abcdef')),toHex=function toHex(n=null){return ((sub)=>(sub=function sub(p=null,acc=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(p=null,acc=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__as_oak_string(__oak_acc(_nToH,__oak_obj_key((p)))+acc):__oak_trampoline(__oak_trampolined_sub,int((p/16)),__as_oak_string(__oak_acc(_nToH,__oak_obj_key(((p%16))))+acc)))((p<16))}),__oak_resolve_trampoline(__oak_trampolined_sub,p,acc)))()},sub(int(n),__Oak_String(''))))()},(_hToN=({0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:7,8:8,9:9,a:10,A:10,b:11,B:11,c:12,C:12,d:13,D:13,e:14,E:14,f:15,F:15})),fromHex=function fromHex(s=null){return ((sub)=>(sub=function sub(i=null,acc=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null,acc=null){let next;return ((__oak_cond)=>__oak_eq(__oak_cond,__oak_eq(i,len(s)))?acc:__oak_eq(__oak_cond,!__oak_eq(null,(next=__oak_acc(_hToN,__oak_obj_key((__oak_acc(s,__oak_obj_key((i)))))))))?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1),__as_oak_string((acc*16)+next)):null)(true)}),__oak_resolve_trampoline(__oak_trampolined_sub,i,acc)))()},sub(0,0)))()},clamp=function clamp(min=null,max=null,n=null,m=null){return ((n=((__oak_cond)=>__oak_eq(__oak_cond,true)?min:n)((n<min))),(m=((__oak_cond)=>__oak_eq(__oak_cond,true)?min:m)((m<min))),(m=((__oak_cond)=>__oak_eq(__oak_cond,true)?max:m)((m>max))),(n=((__oak_cond)=>__oak_eq(__oak_cond,true)?m:n)((n>m))),[n,m])},slice=function slice(xs=null,min=null,max=null){return ((sub)=>((min=__oak_js_default(min,0)),(max=__oak_js_default(max,len(xs))),([min=null,max=null]=clamp(0,len(xs),min,max)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,__oak_acc(xs,__oak_obj_key((i)))),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),min)))()},clone=function clone(x=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('string'))?__as_oak_string(__Oak_String('')+x):__oak_eq(__oak_cond,Symbol.for('list'))?slice(x):__oak_eq(__oak_cond,Symbol.for('object'))?reduce(keys(x),({}),function _(acc=null,key=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign((key),__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt[__oak_obj_key((key))]):(__oak_assgn_tgt[__oak_obj_key((key))])=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string(acc),__oak_acc(x,__oak_obj_key((key))))}):x)(type(x))},range=function range(start=null,end=null,step=null){return ((step=__oak_js_default(step,1)),((__oak_cond)=>__oak_eq(__oak_cond,true)?([start=null,end=null]=[0,start]):null)(__oak_eq(end,null)),((__oak_cond)=>__oak_eq(__oak_cond,0)?[]:((list,sub)=>((list=[]),((__oak_cond)=>__oak_eq(__oak_cond,true)?sub=function sub(n=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(n=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?(__oak_push(list,n),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(n+step))):list)((n<end))}),__oak_resolve_trampoline(__oak_trampolined_sub,n)))()}:sub=function sub(n=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(n=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?(__oak_push(list,n),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(n+step))):list)((n>end))}),__oak_resolve_trampoline(__oak_trampolined_sub,n)))()})((step>0)),sub(start)))())(step))},reverse=function reverse(xs=null){return ((sub)=>(sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,__oak_acc(xs,__oak_obj_key((i)))),(i-1)))((i<0))}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),(len(xs)-1))))()},map=function map(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,f(__oak_acc(xs,__oak_obj_key((i))),i)),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),0)))()},each=function each(xs=null,f=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?null:(f(__oak_acc(xs,__oak_obj_key((i))),i),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},filter=function filter(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:((x)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,x):null)(f((x=__oak_acc(xs,__oak_obj_key((i)))),i)),__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1))))())(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),0)))()},exclude=function exclude(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:((x)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,x):null)(!f((x=__oak_acc(xs,__oak_obj_key((i)))),i)),__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1))))())(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),0)))()},separate=function separate(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(is=null,isnt=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(is=null,isnt=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?[is,isnt]:((x)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(is,x):__oak_push(isnt,x))(f((x=__oak_acc(xs,__oak_obj_key((i)))),i)),__oak_trampoline(__oak_trampolined_sub,is,isnt,__as_oak_string(i+1))))())(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,is,isnt,i)))()},sub(_baseIterator(xs),_baseIterator(xs),0)))()},reduce=function reduce(xs=null,seed=null,f=null){return ((sub)=>(sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:__oak_trampoline(__oak_trampolined_sub,f(acc,__oak_acc(xs,__oak_obj_key((i))),i),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(seed,0)))()},flatten=function flatten(xs=null){return reduce(xs,[],append)},compact=function compact(xs=null){return filter(xs,function _(x=null){return !__oak_eq(x,null)})},some=function some(xs=null,pred=null){return ((pred=__oak_js_default(pred,identity)),reduce(xs,false,function _(acc=null,x=null,i=null){return (__oak_left=>__oak_left===true?true:__oak_or(__oak_left,pred(x,i)))(acc)}))},every=function every(xs=null,pred=null){return ((pred=__oak_js_default(pred,identity)),reduce(xs,true,function _(acc=null,x=null,i=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,pred(x,i)))(acc)}))},append=function append(xs=null,ys=null){return reduce(ys,xs,function _(zs=null,y=null){return __oak_push(zs,y)})},join=function join(xs=null,ys=null){return append(clone(xs),ys)},zip=function zip(xs=null,ys=null,zipper=null){return ((max,sub)=>((zipper=__oak_js_default(zipper,function _(x=null,y=null){return [x,y]})),(max=((__oak_cond)=>__oak_eq(__oak_cond,true)?len(xs):len(ys))((len(xs)<len(ys)))),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,zipper(__oak_acc(xs,__oak_obj_key((i))),__oak_acc(ys,__oak_obj_key((i))),i)),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub([],0)))()},partition=function partition(xs=null,by=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('int'))?reduce(xs,[],function _(acc=null,x=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?__oak_push(acc,[x]):(__oak_push(__oak_acc(acc,__oak_obj_key(((len(acc)-1)))),x),acc))((i%by))}):__oak_eq(__oak_cond,Symbol.for('function'))?((last)=>((last=function _(){return null}),reduce(xs,[],function _(acc=null,x=null){return ((__oak_js_this)=>(((__oak_cond)=>__oak_eq(__oak_cond,last)?__oak_push(__oak_acc(acc,__oak_obj_key(((len(acc)-1)))),x):__oak_push(acc,[x]))((__oak_js_this=by(x))),(last=__oak_js_this),acc))()})))():null)(type(by))},uniq=function uniq(xs=null,pred=null){return ((last,sub,ys)=>((pred=__oak_js_default(pred,identity)),(ys=_baseIterator(xs)),(last=function _(){return null}),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){let p;let x;return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?ys:((__oak_cond)=>__oak_eq(__oak_cond,last)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)):(__oak_push(ys,x),(last=p),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1))))((p=pred((x=__oak_acc(xs,__oak_obj_key((i))))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},first=function first(xs=null){return __oak_acc(xs,0)},last=function last(xs=null){return __oak_acc(xs,__oak_obj_key(((len(xs)-1))))},take=function take(xs=null,n=null){return slice(xs,0,n)},takeLast=function takeLast(xs=null,n=null){return slice(xs,(len(xs)-n))},find=function find(xs=null,pred=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?-1:((__oak_cond)=>__oak_eq(__oak_cond,true)?i:__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)))(pred(__oak_acc(xs,__oak_obj_key((i))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},rfind=function rfind(xs=null,pred=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,-1)?-1:((__oak_cond)=>__oak_eq(__oak_cond,true)?i:__oak_trampoline(__oak_trampolined_sub,(i-1)))(pred(__oak_acc(xs,__oak_obj_key((i))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub((len(xs)-1))))()},indexOf=function indexOf(xs=null,x=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?-1:((__oak_cond)=>__oak_eq(__oak_cond,x)?i:__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)))(__oak_acc(xs,__oak_obj_key((i)))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},rindexOf=function rindexOf(xs=null,x=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,-1)?-1:((__oak_cond)=>__oak_eq(__oak_cond,x)?i:__oak_trampoline(__oak_trampolined_sub,(i-1)))(__oak_acc(xs,__oak_obj_key((i)))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub((len(xs)-1))))()},contains__oak_qm=function contains__oak_qm(xs=null,x=null){return (indexOf(xs,x)>-1)},values=function values(obj=null){return map(keys(obj),function _(key=null){return __oak_acc(obj,__oak_obj_key((key)))})},entries=function entries(obj=null){return map(keys(obj),function _(key=null){return [key,__oak_acc(obj,__oak_obj_key((key)))]})},fromEntries=function fromEntries(entries=null){return reduce(entries,({}),function _(o=null,entry=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign((__oak_acc(entry,0)),__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt[__oak_obj_key((__oak_acc(entry,0)))]):(__oak_assgn_tgt[__oak_obj_key((__oak_acc(entry,0)))])=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string(o),__oak_acc(entry,1))})},merge=function merge(...os){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?null:reduce(os,__oak_acc(os,0),function _(acc=null,o=null){return (reduce(keys(o),acc,function _(root=null,k=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign((k),__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt[__oak_obj_key((k))]):(__oak_assgn_tgt[__oak_obj_key((k))])=__oak_assgn_val,__oak_assgn_tgt))(__as_oak_string(root),__oak_acc(o,__oak_obj_key((k))))}))}))(len(os))},once=function once(f=null){return ((called__oak_qm)=>((called__oak_qm=false),function _(...args){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((called__oak_qm=true),f(...args)):null)(!called__oak_qm)}))()},loop=function loop(max=null,f=null){return ((breaker,broken,ret,sub)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?([max=null,f=null]=[-1,max]):null)(__oak_eq(type(max),Symbol.for('function'))),(max=__oak_js_default(max,-1)),(ret=null),(broken=false),breaker=function breaker(x=null){return ((ret=x),(broken=true))},sub=function sub(count=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(count=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,broken)?ret:(f(count,breaker),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(count+1))))(true):null)(!__oak_eq(count,max))}),__oak_resolve_trampoline(__oak_trampolined_sub,count)))()},sub(0)))()},aloop=function aloop(max=null,f=null,done=null){return ((sub)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?([max=null,f=null,done=null]=[-1,max,f]):null)(__oak_eq(type(max),Symbol.for('function'))),(max=__oak_js_default(max,-1)),(done=__oak_js_default(done,function _(){return null})),sub=function sub(count=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?done():f(count,function _(){return sub(__as_oak_string(count+1))},done))(count)},sub(0)))()},serial=function serial(xs=null,f=null,done=null){return ((sub)=>((done=__oak_js_default(done,function _(){return null})),sub=function sub(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?done():f(__oak_acc(xs,__oak_obj_key((i))),i,function _(){return sub(__as_oak_string(i+1))},done))(i)},sub(0)))()},parallel=function parallel(xs=null,f=null,done=null){return ((broken__oak_qm,count)=>((done=__oak_js_default(done,function _(){return null})),(count=0),(broken__oak_qm=false),each(xs,function _(x=null,i=null){return (f(x,i,function _(){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((count=__as_oak_string(count+1)),((__oak_cond)=>__oak_eq(__oak_cond,true)?done():null)(__oak_eq(count,len(xs)))):null)(!broken__oak_qm)},function _(){return ((broken__oak_qm=true),done())}))})))()},debounce=function debounce(duration=null,firstCall=null,f=null){return ((dargs,debounced,target,waiting__oak_qm)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?([firstCall=null,f=null]=[Symbol.for('trailing'),firstCall]):null)(__oak_eq(f,null)),(dargs=null),(waiting__oak_qm=false),(target=(time()-duration)),debounced=function debounced(...args){return ((tcall)=>((tcall=time()),(dargs=args),((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,true)?((target=__as_oak_string(tcall+duration)),((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('leading'))?f(...dargs):__oak_eq(__oak_cond,Symbol.for('trailing'))?((waiting__oak_qm=true),wait((target-time()),function _(){return ((waiting__oak_qm=false),f(...dargs))})):null)(firstCall)):((timeout)=>((waiting__oak_qm=true),(timeout=(target-tcall)),(target=__as_oak_string(target+duration)),wait(timeout,function _(){return ((waiting__oak_qm=false),f(...dargs))})))())((target<=tcall)):null)(!waiting__oak_qm)))()}))()},stdin=function stdin(){return ((file)=>((file=__Oak_String('')),loop(function _(__oak_empty_ident0=null,__oak_js_break=null){return ((evt)=>((evt=input()),__oak_push(file,(evt.data??null)),((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('error'))?__oak_js_break(file):__oak_push(file,__Oak_String('\n')))((evt.type??null))))()})))()},println=function println(...xs){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?print(__Oak_String('\n')):((out)=>((out=reduce(slice(xs,1),string(__oak_acc(xs,0)),function _(acc=null,x=null){return (__as_oak_string(__as_oak_string(acc+__Oak_String(' '))+string(x)))})),print(__as_oak_string(out+__Oak_String('\n')))))())(len(xs))},({_asPredicate,_baseIterator,_hToN,_nToH,aloop,append,clamp,clone,compact,constantly,contains__oak_qm,debounce,__oak_js_default,each,entries,every,exclude,filter,find,first,flatten,fromEntries,fromHex,identity,indexOf,is,join,last,loop,map,merge,once,parallel,partition,println,range,reduce,reverse,rfind,rindexOf,separate,serial,slice,some,stdin,take,takeLast,toHex,uniq,values,zip})))()}),__oak_modularize(__Oak_String('str'),function _(){return ((_extend,_matchesAt__oak_qm,_replaceNonEmpty,_splitNonEmpty,_trimEndNonEmpty,_trimEndSpace,_trimStartNonEmpty,_trimStartSpace,checkRange,contains__oak_qm,cut,__oak_js_default,digit__oak_qm,endsWith__oak_qm,indexOf,join,letter__oak_qm,lower,lower__oak_qm,padEnd,padStart,reduce,replace,rindexOf,slice,space__oak_qm,split,startsWith__oak_qm,take,takeLast,trim,trimEnd,trimStart,upper,upper__oak_qm,word__oak_qm)=>(({__oak_js_default,slice,take,takeLast,reduce}=__oak_module_import(__Oak_String('std'))),checkRange=function checkRange(lo=null,hi=null){let checker;return checker=function checker(c=null){return ((p)=>((p=codepoint(c)),(__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(p<=hi)))((lo<=p))))()}},upper__oak_qm=function upper__oak_qm(c=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(c<=__Oak_String('Z'))))((c>=__Oak_String('A')))},lower__oak_qm=function lower__oak_qm(c=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(c<=__Oak_String('z'))))((c>=__Oak_String('a')))},digit__oak_qm=function digit__oak_qm(c=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(c<=__Oak_String('9'))))((c>=__Oak_String('0')))},space__oak_qm=function space__oak_qm(c=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(' '))?true:__oak_eq(__oak_cond,__Oak_String('\t'))?true:__oak_eq(__oak_cond,__Oak_String('\n'))?true:__oak_eq(__oak_cond,__Oak_String('\r'))?true:__oak_eq(__oak_cond,__Oak_String('\f'))?true:false)(c)},letter__oak_qm=function letter__oak_qm(c=null){return (__oak_left=>__oak_left===true?true:__oak_or(__oak_left,lower__oak_qm(c)))(upper__oak_qm(c))},word__oak_qm=function word__oak_qm(c=null){return (__oak_left=>__oak_left===true?true:__oak_or(__oak_left,digit__oak_qm(c)))(letter__oak_qm(c))},join=function join(strings=null,joiner=null){return ((joiner=__oak_js_default(joiner,__Oak_String(''))),((__oak_cond)=>__oak_eq(__oak_cond,0)?__Oak_String(''):reduce(slice(strings,1),__oak_acc(strings,0),function _(a=null,b=null){return __as_oak_string(__as_oak_string(a+joiner)+b)}))(len(strings)))},startsWith__oak_qm=function startsWith__oak_qm(s=null,prefix=null){return __oak_eq(take(s,len(prefix)),prefix)},endsWith__oak_qm=function endsWith__oak_qm(s=null,suffix=null){return __oak_eq(takeLast(s,len(suffix)),suffix)},_matchesAt__oak_qm=function _matchesAt__oak_qm(s=null,substr=null,idx=null){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?true:__oak_eq(__oak_cond,1)?__oak_eq(__oak_acc(s,__oak_obj_key((idx))),substr):((max,sub)=>((max=len(substr)),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?true:((__oak_cond)=>__oak_eq(__oak_cond,__oak_acc(substr,__oak_obj_key((i))))?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)):false)(__oak_acc(s,__oak_obj_key((__as_oak_string(idx+i))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))())(len(substr))},indexOf=function indexOf(s=null,substr=null){return ((max,sub)=>((max=(len(s)-len(substr))),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?i:((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)):-1)((i<max)))(_matchesAt__oak_qm(s,substr,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},rindexOf=function rindexOf(s=null,substr=null){return ((max,sub)=>((max=(len(s)-len(substr))),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?i:((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,(i-1)):-1)((i>0)))(_matchesAt__oak_qm(s,substr,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(max)))()},contains__oak_qm=function contains__oak_qm(s=null,substr=null){return (indexOf(s,substr)>=0)},cut=function cut(s=null,sep=null){let idx;return ((__oak_cond)=>__oak_eq(__oak_cond,-1)?[s,__Oak_String('')]:[slice(s,0,idx),slice(s,__as_oak_string(idx+len(sep)))])((idx=indexOf(s,sep)))},lower=function lower(s=null){return reduce(s,__Oak_String(''),function _(acc=null,c=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,char(__as_oak_string(codepoint(c)+32))):__oak_push(acc,c))(upper__oak_qm(c))})},upper=function upper(s=null){return reduce(s,__Oak_String(''),function _(acc=null,c=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,char((codepoint(c)-32))):__oak_push(acc,c))(lower__oak_qm(c))})},_replaceNonEmpty=function _replaceNonEmpty(s=null,old=null,__oak_js_new=null){return ((lnew,lold,sub)=>((lold=len(old)),(lnew=len(__oak_js_new)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(__as_oak_string(slice(acc,0,i)+__oak_js_new)+slice(acc,__as_oak_string(i+lold))),__as_oak_string(i+lnew)):((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1)):acc)((i<len(acc))))(_matchesAt__oak_qm(acc,old,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(s,0)))()},replace=function replace(s=null,old=null,__oak_js_new=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(''))?s:_replaceNonEmpty(s,old,__oak_js_new))(old)},_splitNonEmpty=function _splitNonEmpty(s=null,sep=null){return ((coll,lsep,sub)=>((coll=[]),(lsep=len(sep)),sub=function sub(acc=null,i=null,last=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null,last=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?(__oak_push(coll,slice(acc,last,i)),__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+lsep),__as_oak_string(i+lsep))):((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1),last):__oak_push(coll,slice(acc,last)))((i<len(acc))))(_matchesAt__oak_qm(acc,sep,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i,last)))()},sub(s,0,0)))()},split=function split(s=null,sep=null){return ((__oak_cond)=>__oak_eq(__oak_cond,null)?reduce(s,[],function _(acc=null,c=null){return __oak_push(acc,c)}):__oak_eq(__oak_cond,__Oak_String(''))?reduce(s,[],function _(acc=null,c=null){return __oak_push(acc,c)}):_splitNonEmpty(s,sep))(sep)},_extend=function _extend(pad=null,n=null){return ((part,sub,times)=>((times=int((n/len(pad)))),(part=(n%len(pad))),sub=function sub(base=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(base=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?__oak_push(base,slice(pad,0,part)):__oak_trampoline(__oak_trampolined_sub,__oak_push(base,pad),(i-1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,base,i)))()},sub(__Oak_String(''),times)))()},padStart=function padStart(s=null,n=null,pad=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?s:__oak_push(_extend(pad,(n-len(s))),s))((len(s)>=n))},padEnd=function padEnd(s=null,n=null,pad=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?s:__as_oak_string(s+_extend(pad,(n-len(s)))))((len(s)>=n))},_trimStartSpace=function _trimStartSpace(s=null){return ((firstNonSpace,subStart)=>(subStart=function subStart(i=null){return ((__oak_trampolined_subStart)=>((__oak_trampolined_subStart=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_subStart,__as_oak_string(i+1)):i)(space__oak_qm(__oak_acc(s,__oak_obj_key((i)))))}),__oak_resolve_trampoline(__oak_trampolined_subStart,i)))()},(firstNonSpace=subStart(0)),slice(s,firstNonSpace)))()},_trimStartNonEmpty=function _trimStartNonEmpty(s=null,prefix=null){return ((idx,lpref,max,sub)=>((max=len(s)),(lpref=len(prefix)),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+lpref)):i)(_matchesAt__oak_qm(s,prefix,i)):i)((i<max))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},(idx=sub(0)),slice(s,idx)))()},trimStart=function trimStart(s=null,prefix=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(''))?s:__oak_eq(__oak_cond,null)?_trimStartSpace(s):_trimStartNonEmpty(s,prefix))(prefix)},_trimEndSpace=function _trimEndSpace(s=null){return ((lastNonSpace,subEnd)=>(subEnd=function subEnd(i=null){return ((__oak_trampolined_subEnd)=>((__oak_trampolined_subEnd=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_subEnd,(i-1)):i)(space__oak_qm(__oak_acc(s,__oak_obj_key((i)))))}),__oak_resolve_trampoline(__oak_trampolined_subEnd,i)))()},(lastNonSpace=subEnd((len(s)-1))),slice(s,0,__as_oak_string(lastNonSpace+1))))()},_trimEndNonEmpty=function _trimEndNonEmpty(s=null,suffix=null){return ((idx,lsuf,sub)=>((lsuf=len(suffix)),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,(i-lsuf)):i)(_matchesAt__oak_qm(s,suffix,(i-lsuf))):i)((i>-1))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},(idx=sub(len(s))),slice(s,0,idx)))()},trimEnd=function trimEnd(s=null,suffix=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(''))?s:__oak_eq(__oak_cond,null)?_trimEndSpace(s):_trimEndNonEmpty(s,suffix))(suffix)},trim=function trim(s=null,part=null){return trimEnd(trimStart(s,part),part)},({_extend,_matchesAt__oak_qm,_replaceNonEmpty,_splitNonEmpty,_trimEndNonEmpty,_trimEndSpace,_trimStartNonEmpty,_trimStartSpace,checkRange,contains__oak_qm,cut,__oak_js_default,digit__oak_qm,endsWith__oak_qm,indexOf,join,letter__oak_qm,lower,lower__oak_qm,padEnd,padStart,reduce,replace,rindexOf,slice,space__oak_qm,split,startsWith__oak_qm,take,takeLast,trim,trimEnd,trimStart,upper,upper__oak_qm,word__oak_qm})))()}),(__Oak_Import_Aliases=({})),__oak_module_import(__Oak_String('')))
+(__oak_modularize(__Oak_String('/home/user/magnolia/www/src/app.js.oak'),function _(){return ((UA,contains__oak_qm,each)=>(({each}=__oak_module_import(__Oak_String('std'))),({contains__oak_qm}=__oak_module_import(__Oak_String('str'))),(UA=(navigator.userAgent??null)),each(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.from)(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.querySelectorAll)(__Oak_String('.try-details')))))(document,__oak_js_this)))))(Array,__oak_js_this),function _(el=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt.open)=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(el),false)}),((__oak_cond)=>__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('Macintosh')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt.open)=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.querySelector)(__Oak_String('.try-details.os-macos')))))(document,__oak_js_this)),true):__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('iPhone')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt.open)=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.querySelector)(__Oak_String('.try-details.os-macos')))))(document,__oak_js_this)),true):__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('iPad')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt.open)=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.querySelector)(__Oak_String('.try-details.os-macos')))))(document,__oak_js_this)),true):__oak_eq(__oak_cond,contains__oak_qm(UA,__Oak_String('Linux')))?((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt.open)=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.querySelector)(__Oak_String('.try-details.os-linux')))))(document,__oak_js_this)),true):((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign(open,__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt.open)=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt.open):(__oak_assgn_tgt.open)=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(((__oak_recv,__oak_saved)=>((__oak_js_this=__oak_recv),((__oak_ret)=>((__oak_js_this=__oak_saved),__oak_ret))((__oak_recv.querySelector)(__Oak_String('.try-details.os-other')))))(document,__oak_js_this)),true))(true),({UA,contains__oak_qm,each})))()}),__oak_modularize(__Oak_String('std'),function _(){return ((_asPredicate,_baseIterator,_hToN,_nToH,aloop,append,clamp,clone,compact,constantly,contains__oak_qm,debounce,__oak_js_default,each,entries,every,exclude,filter,find,first,flatten,fromEntries,fromHex,identity,indexOf,is,join,last,loop,map,merge,once,parallel,partition,println,range,reduce,reverse,rfind,rindexOf,separate,serial,slice,some,stdin,take,takeLast,toHex,uniq,values,zip)=>(identity=function identity(x=null){return x},is=function is(x=null){return function _(y=null){return __oak_eq(x,y)}},constantly=function constantly(x=null){return function _(){return x}},_baseIterator=function _baseIterator(v=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('string'))?__Oak_String(''):__oak_eq(__oak_cond,Symbol.for('list'))?[]:__oak_eq(__oak_cond,Symbol.for('object'))?({}):null)(type(v))},_asPredicate=function _asPredicate(pred=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('atom'))?((prop)=>((prop=string(pred)),function _(x=null){return __oak_acc(x,__oak_obj_key((prop)))}))():__oak_eq(__oak_cond,Symbol.for('string'))?function _(x=null){return __oak_acc(x,__oak_obj_key((pred)))}:__oak_eq(__oak_cond,Symbol.for('int'))?function _(x=null){return __oak_acc(x,__oak_obj_key((pred)))}:pred)(type(pred))},__oak_js_default=function __oak_js_default(x=null,base=null){return ((__oak_cond)=>__oak_eq(__oak_cond,null)?base:x)(x)},(_nToH=__Oak_String('0123456789abcdef')),toHex=function toHex(n=null){return ((sub)=>(sub=function sub(p=null,acc=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(p=null,acc=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__as_oak_string(__oak_acc(_nToH,__oak_obj_key((p)))+acc):__oak_trampoline(__oak_trampolined_sub,int((p/16)),__as_oak_string(__oak_acc(_nToH,__oak_obj_key(((p%16))))+acc)))((p<16))}),__oak_resolve_trampoline(__oak_trampolined_sub,p,acc)))()},sub(int(n),__Oak_String(''))))()},(_hToN=({0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:7,8:8,9:9,a:10,A:10,b:11,B:11,c:12,C:12,d:13,D:13,e:14,E:14,f:15,F:15})),fromHex=function fromHex(s=null){return ((sub)=>(sub=function sub(i=null,acc=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null,acc=null){let next;return ((__oak_cond)=>__oak_eq(__oak_cond,__oak_eq(i,len(s)))?acc:__oak_eq(__oak_cond,!__oak_eq(null,(next=__oak_acc(_hToN,__oak_obj_key((__oak_acc(s,__oak_obj_key((i)))))))))?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1),__as_oak_string((acc*16)+next)):null)(true)}),__oak_resolve_trampoline(__oak_trampolined_sub,i,acc)))()},sub(0,0)))()},clamp=function clamp(min=null,max=null,n=null,m=null){return ((n=((__oak_cond)=>__oak_eq(__oak_cond,true)?min:n)((n<min))),(m=((__oak_cond)=>__oak_eq(__oak_cond,true)?min:m)((m<min))),(m=((__oak_cond)=>__oak_eq(__oak_cond,true)?max:m)((m>max))),(n=((__oak_cond)=>__oak_eq(__oak_cond,true)?m:n)((n>m))),[n,m])},slice=function slice(xs=null,min=null,max=null){return ((sub)=>((min=__oak_js_default(min,0)),(max=__oak_js_default(max,len(xs))),([min=null,max=null]=clamp(0,len(xs),min,max)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,__oak_acc(xs,__oak_obj_key((i)))),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),min)))()},clone=function clone(x=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('string'))?__as_oak_string(__Oak_String('')+x):__oak_eq(__oak_cond,Symbol.for('list'))?slice(x):__oak_eq(__oak_cond,Symbol.for('object'))?reduce(keys(x),({}),function _(acc=null,key=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign((key),__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt[__oak_obj_key((key))])=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt[__oak_obj_key((key))]):(__oak_assgn_tgt[__oak_obj_key((key))])=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(acc),__oak_acc(x,__oak_obj_key((key))))}):x)(type(x))},range=function range(start=null,end=null,step=null){return ((step=__oak_js_default(step,1)),((__oak_cond)=>__oak_eq(__oak_cond,true)?([start=null,end=null]=[0,start]):null)(__oak_eq(end,null)),((__oak_cond)=>__oak_eq(__oak_cond,0)?[]:((list,sub)=>((list=[]),((__oak_cond)=>__oak_eq(__oak_cond,true)?sub=function sub(n=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(n=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?(__oak_push(list,n),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(n+step))):list)((n<end))}),__oak_resolve_trampoline(__oak_trampolined_sub,n)))()}:sub=function sub(n=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(n=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?(__oak_push(list,n),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(n+step))):list)((n>end))}),__oak_resolve_trampoline(__oak_trampolined_sub,n)))()})((step>0)),sub(start)))())(step))},reverse=function reverse(xs=null){return ((sub)=>(sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,__oak_acc(xs,__oak_obj_key((i)))),(i-1)))((i<0))}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),(len(xs)-1))))()},map=function map(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,f(__oak_acc(xs,__oak_obj_key((i))),i)),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),0)))()},each=function each(xs=null,f=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?null:(f(__oak_acc(xs,__oak_obj_key((i))),i),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},filter=function filter(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:((x)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,x):null)(f((x=__oak_acc(xs,__oak_obj_key((i)))),i)),__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1))))())(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),0)))()},exclude=function exclude(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:((x)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,x):null)(!f((x=__oak_acc(xs,__oak_obj_key((i)))),i)),__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1))))())(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(_baseIterator(xs),0)))()},separate=function separate(xs=null,f=null){return ((sub)=>((f=_asPredicate(f)),sub=function sub(is=null,isnt=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(is=null,isnt=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?[is,isnt]:((x)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(is,x):__oak_push(isnt,x))(f((x=__oak_acc(xs,__oak_obj_key((i)))),i)),__oak_trampoline(__oak_trampolined_sub,is,isnt,__as_oak_string(i+1))))())(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,is,isnt,i)))()},sub(_baseIterator(xs),_baseIterator(xs),0)))()},reduce=function reduce(xs=null,seed=null,f=null){return ((sub)=>(sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?acc:__oak_trampoline(__oak_trampolined_sub,f(acc,__oak_acc(xs,__oak_obj_key((i))),i),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(seed,0)))()},flatten=function flatten(xs=null){return reduce(xs,[],append)},compact=function compact(xs=null){return filter(xs,function _(x=null){return !__oak_eq(x,null)})},some=function some(xs=null,pred=null){return ((pred=__oak_js_default(pred,identity)),reduce(xs,false,function _(acc=null,x=null,i=null){return (__oak_left=>__oak_left===true?true:__oak_or(__oak_left,pred(x,i)))(acc)}))},every=function every(xs=null,pred=null){return ((pred=__oak_js_default(pred,identity)),reduce(xs,true,function _(acc=null,x=null,i=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,pred(x,i)))(acc)}))},append=function append(xs=null,ys=null){return reduce(ys,xs,function _(zs=null,y=null){return __oak_push(zs,y)})},join=function join(xs=null,ys=null){return append(clone(xs),ys)},zip=function zip(xs=null,ys=null,zipper=null){return ((max,sub)=>((zipper=__oak_js_default(zipper,function _(x=null,y=null){return [x,y]})),(max=((__oak_cond)=>__oak_eq(__oak_cond,true)?len(xs):len(ys))((len(xs)<len(ys)))),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?acc:__oak_trampoline(__oak_trampolined_sub,__oak_push(acc,zipper(__oak_acc(xs,__oak_obj_key((i))),__oak_acc(ys,__oak_obj_key((i))),i)),__as_oak_string(i+1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub([],0)))()},partition=function partition(xs=null,by=null){return ((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('int'))?reduce(xs,[],function _(acc=null,x=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?__oak_push(acc,[x]):(__oak_push(__oak_acc(acc,__oak_obj_key(((len(acc)-1)))),x),acc))((i%by))}):__oak_eq(__oak_cond,Symbol.for('function'))?((last)=>((last=function _(){return null}),reduce(xs,[],function _(acc=null,x=null){return ((__oak_js_this)=>(((__oak_cond)=>__oak_eq(__oak_cond,last)?__oak_push(__oak_acc(acc,__oak_obj_key(((len(acc)-1)))),x):__oak_push(acc,[x]))((__oak_js_this=by(x))),(last=__oak_js_this),acc))()})))():null)(type(by))},uniq=function uniq(xs=null,pred=null){return ((last,sub,ys)=>((pred=__oak_js_default(pred,identity)),(ys=_baseIterator(xs)),(last=function _(){return null}),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){let p;let x;return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?ys:((__oak_cond)=>__oak_eq(__oak_cond,last)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)):(__oak_push(ys,x),(last=p),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1))))((p=pred((x=__oak_acc(xs,__oak_obj_key((i))))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},first=function first(xs=null){return __oak_acc(xs,0)},last=function last(xs=null){return __oak_acc(xs,__oak_obj_key(((len(xs)-1))))},take=function take(xs=null,n=null){return slice(xs,0,n)},takeLast=function takeLast(xs=null,n=null){return slice(xs,(len(xs)-n))},find=function find(xs=null,pred=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?-1:((__oak_cond)=>__oak_eq(__oak_cond,true)?i:__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)))(pred(__oak_acc(xs,__oak_obj_key((i))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},rfind=function rfind(xs=null,pred=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,-1)?-1:((__oak_cond)=>__oak_eq(__oak_cond,true)?i:__oak_trampoline(__oak_trampolined_sub,(i-1)))(pred(__oak_acc(xs,__oak_obj_key((i))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub((len(xs)-1))))()},indexOf=function indexOf(xs=null,x=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?-1:((__oak_cond)=>__oak_eq(__oak_cond,x)?i:__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)))(__oak_acc(xs,__oak_obj_key((i)))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},rindexOf=function rindexOf(xs=null,x=null){return ((sub)=>(sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,-1)?-1:((__oak_cond)=>__oak_eq(__oak_cond,x)?i:__oak_trampoline(__oak_trampolined_sub,(i-1)))(__oak_acc(xs,__oak_obj_key((i)))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub((len(xs)-1))))()},contains__oak_qm=function contains__oak_qm(xs=null,x=null){return (indexOf(xs,x)>-1)},values=function values(obj=null){return map(keys(obj),function _(key=null){return __oak_acc(obj,__oak_obj_key((key)))})},entries=function entries(obj=null){return map(keys(obj),function _(key=null){return [key,__oak_acc(obj,__oak_obj_key((key)))]})},fromEntries=function fromEntries(entries=null){return reduce(entries,({}),function _(o=null,entry=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign((__oak_acc(entry,0)),__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt[__oak_obj_key((__oak_acc(entry,0)))])=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt[__oak_obj_key((__oak_acc(entry,0)))]):(__oak_assgn_tgt[__oak_obj_key((__oak_acc(entry,0)))])=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(o),__oak_acc(entry,1))})},merge=function merge(...os){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?null:reduce(os,__oak_acc(os,0),function _(acc=null,o=null){return (reduce(keys(o),acc,function _(root=null,k=null){return ((__oak_assgn_tgt,__oak_assgn_val)=>(__is_oak_string(__oak_assgn_tgt)?__oak_assgn_tgt.assign((k),__oak_assgn_val):Array.isArray(__oak_assgn_tgt)?((__oak_assgn_tgt[__oak_obj_key((k))])=__oak_assgn_val):__oak_assgn_val===__Oak_Empty?delete (__oak_assgn_tgt[__oak_obj_key((k))]):(__oak_assgn_tgt[__oak_obj_key((k))])=__oak_assgn_val,__oak_assgn_val))(__as_oak_string(root),__oak_acc(o,__oak_obj_key((k))))}))}))(len(os))},once=function once(f=null){return ((called__oak_qm)=>((called__oak_qm=false),function _(...args){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((called__oak_qm=true),f(...args)):null)(!called__oak_qm)}))()},loop=function loop(max=null,f=null){return ((breaker,broken,ret,sub)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?([max=null,f=null]=[-1,max]):null)(__oak_eq(type(max),Symbol.for('function'))),(max=__oak_js_default(max,-1)),(ret=null),(broken=false),breaker=function breaker(x=null){return ((ret=x),(broken=true))},sub=function sub(count=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(count=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,broken)?ret:(f(count,breaker),__oak_trampoline(__oak_trampolined_sub,__as_oak_string(count+1))))(true):null)(!__oak_eq(count,max))}),__oak_resolve_trampoline(__oak_trampolined_sub,count)))()},sub(0)))()},aloop=function aloop(max=null,f=null,done=null){return ((sub)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?([max=null,f=null,done=null]=[-1,max,f]):null)(__oak_eq(type(max),Symbol.for('function'))),(max=__oak_js_default(max,-1)),(done=__oak_js_default(done,function _(){return null})),sub=function sub(count=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?done():f(count,function _(){return sub(__as_oak_string(count+1))},done))(count)},sub(0)))()},serial=function serial(xs=null,f=null,done=null){return ((sub)=>((done=__oak_js_default(done,function _(){return null})),sub=function sub(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,len(xs))?done():f(__oak_acc(xs,__oak_obj_key((i))),i,function _(){return sub(__as_oak_string(i+1))},done))(i)},sub(0)))()},parallel=function parallel(xs=null,f=null,done=null){return ((broken__oak_qm,count)=>((done=__oak_js_default(done,function _(){return null})),(count=0),(broken__oak_qm=false),each(xs,function _(x=null,i=null){return (f(x,i,function _(){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((count=__as_oak_string(count+1)),((__oak_cond)=>__oak_eq(__oak_cond,true)?done():null)(__oak_eq(count,len(xs)))):null)(!broken__oak_qm)},function _(){return ((broken__oak_qm=true),done())}))})))()},debounce=function debounce(duration=null,firstCall=null,f=null){return ((dargs,debounced,target,waiting__oak_qm)=>(((__oak_cond)=>__oak_eq(__oak_cond,true)?([firstCall=null,f=null]=[Symbol.for('trailing'),firstCall]):null)(__oak_eq(f,null)),(dargs=null),(waiting__oak_qm=false),(target=(time()-duration)),debounced=function debounced(...args){return ((tcall)=>((tcall=time()),(dargs=args),((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,true)?((target=__as_oak_string(tcall+duration)),((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('leading'))?f(...dargs):__oak_eq(__oak_cond,Symbol.for('trailing'))?((waiting__oak_qm=true),wait((target-time()),function _(){return ((waiting__oak_qm=false),f(...dargs))})):null)(firstCall)):((timeout)=>((waiting__oak_qm=true),(timeout=(target-tcall)),(target=__as_oak_string(target+duration)),wait(timeout,function _(){return ((waiting__oak_qm=false),f(...dargs))})))())((target<=tcall)):null)(!waiting__oak_qm)))()}))()},stdin=function stdin(){return ((file)=>((file=__Oak_String('')),loop(function _(__oak_empty_ident0=null,__oak_js_break=null){return ((evt)=>((evt=input()),__oak_push(file,(evt.data??null)),((__oak_cond)=>__oak_eq(__oak_cond,Symbol.for('error'))?__oak_js_break(file):__oak_push(file,__Oak_String('\n')))((evt.type??null))))()})))()},println=function println(...xs){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?print(__Oak_String('\n')):((out)=>((out=reduce(slice(xs,1),string(__oak_acc(xs,0)),function _(acc=null,x=null){return (__as_oak_string(__as_oak_string(acc+__Oak_String(' '))+string(x)))})),print(__as_oak_string(out+__Oak_String('\n')))))())(len(xs))},({_asPredicate,_baseIterator,_hToN,_nToH,aloop,append,clamp,clone,compact,constantly,contains__oak_qm,debounce,__oak_js_default,each,entries,every,exclude,filter,find,first,flatten,fromEntries,fromHex,identity,indexOf,is,join,last,loop,map,merge,once,parallel,partition,println,range,reduce,reverse,rfind,rindexOf,separate,serial,slice,some,stdin,take,takeLast,toHex,uniq,values,zip})))()}),__oak_modularize(__Oak_String('str'),function _(){return ((_extend,_matchesAt__oak_qm,_replaceNonEmpty,_splitNonEmpty,_trimEndNonEmpty,_trimEndSpace,_trimStartNonEmpty,_trimStartSpace,checkRange,contains__oak_qm,cut,__oak_js_default,digit__oak_qm,endsWith__oak_qm,indexOf,join,letter__oak_qm,lower,lower__oak_qm,padEnd,padStart,reduce,replace,rindexOf,slice,space__oak_qm,split,startsWith__oak_qm,take,takeLast,trim,trimEnd,trimStart,upper,upper__oak_qm,word__oak_qm)=>(({__oak_js_default,slice,take,takeLast,reduce}=__oak_module_import(__Oak_String('std'))),checkRange=function checkRange(lo=null,hi=null){let checker;return checker=function checker(c=null){return ((p)=>((p=codepoint(c)),(__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(p<=hi)))((lo<=p))))()}},upper__oak_qm=function upper__oak_qm(c=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(c<=__Oak_String('Z'))))((c>=__Oak_String('A')))},lower__oak_qm=function lower__oak_qm(c=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(c<=__Oak_String('z'))))((c>=__Oak_String('a')))},digit__oak_qm=function digit__oak_qm(c=null){return (__oak_left=>__oak_left===false?false:__oak_and(__oak_left,(c<=__Oak_String('9'))))((c>=__Oak_String('0')))},space__oak_qm=function space__oak_qm(c=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(' '))?true:__oak_eq(__oak_cond,__Oak_String('\t'))?true:__oak_eq(__oak_cond,__Oak_String('\n'))?true:__oak_eq(__oak_cond,__Oak_String('\r'))?true:__oak_eq(__oak_cond,__Oak_String('\f'))?true:false)(c)},letter__oak_qm=function letter__oak_qm(c=null){return (__oak_left=>__oak_left===true?true:__oak_or(__oak_left,lower__oak_qm(c)))(upper__oak_qm(c))},word__oak_qm=function word__oak_qm(c=null){return (__oak_left=>__oak_left===true?true:__oak_or(__oak_left,digit__oak_qm(c)))(letter__oak_qm(c))},join=function join(strings=null,joiner=null){return ((joiner=__oak_js_default(joiner,__Oak_String(''))),((__oak_cond)=>__oak_eq(__oak_cond,0)?__Oak_String(''):reduce(slice(strings,1),__oak_acc(strings,0),function _(a=null,b=null){return __as_oak_string(__as_oak_string(a+joiner)+b)}))(len(strings)))},startsWith__oak_qm=function startsWith__oak_qm(s=null,prefix=null){return __oak_eq(take(s,len(prefix)),prefix)},endsWith__oak_qm=function endsWith__oak_qm(s=null,suffix=null){return __oak_eq(takeLast(s,len(suffix)),suffix)},_matchesAt__oak_qm=function _matchesAt__oak_qm(s=null,substr=null,idx=null){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?true:__oak_eq(__oak_cond,1)?__oak_eq(__oak_acc(s,__oak_obj_key((idx))),substr):((max,sub)=>((max=len(substr)),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,max)?true:((__oak_cond)=>__oak_eq(__oak_cond,__oak_acc(substr,__oak_obj_key((i))))?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)):false)(__oak_acc(s,__oak_obj_key((__as_oak_string(idx+i))))))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))())(len(substr))},indexOf=function indexOf(s=null,substr=null){return ((max,sub)=>((max=(len(s)-len(substr))),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?i:((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+1)):-1)((i<max)))(_matchesAt__oak_qm(s,substr,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(0)))()},rindexOf=function rindexOf(s=null,substr=null){return ((max,sub)=>((max=(len(s)-len(substr))),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?i:((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,(i-1)):-1)((i>0)))(_matchesAt__oak_qm(s,substr,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},sub(max)))()},contains__oak_qm=function contains__oak_qm(s=null,substr=null){return (indexOf(s,substr)>=0)},cut=function cut(s=null,sep=null){let idx;return ((__oak_cond)=>__oak_eq(__oak_cond,-1)?[s,__Oak_String('')]:[slice(s,0,idx),slice(s,__as_oak_string(idx+len(sep)))])((idx=indexOf(s,sep)))},lower=function lower(s=null){return reduce(s,__Oak_String(''),function _(acc=null,c=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,char(__as_oak_string(codepoint(c)+32))):__oak_push(acc,c))(upper__oak_qm(c))})},upper=function upper(s=null){return reduce(s,__Oak_String(''),function _(acc=null,c=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_push(acc,char((codepoint(c)-32))):__oak_push(acc,c))(lower__oak_qm(c))})},_replaceNonEmpty=function _replaceNonEmpty(s=null,old=null,__oak_js_new=null){return ((lnew,lold,sub)=>((lold=len(old)),(lnew=len(__oak_js_new)),sub=function sub(acc=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(__as_oak_string(slice(acc,0,i)+__oak_js_new)+slice(acc,__as_oak_string(i+lold))),__as_oak_string(i+lnew)):((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1)):acc)((i<len(acc))))(_matchesAt__oak_qm(acc,old,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i)))()},sub(s,0)))()},replace=function replace(s=null,old=null,__oak_js_new=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(''))?s:_replaceNonEmpty(s,old,__oak_js_new))(old)},_splitNonEmpty=function _splitNonEmpty(s=null,sep=null){return ((coll,lsep,sub)=>((coll=[]),(lsep=len(sep)),sub=function sub(acc=null,i=null,last=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(acc=null,i=null,last=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?(__oak_push(coll,slice(acc,last,i)),__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+lsep),__as_oak_string(i+lsep))):((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,acc,__as_oak_string(i+1),last):__oak_push(coll,slice(acc,last)))((i<len(acc))))(_matchesAt__oak_qm(acc,sep,i))}),__oak_resolve_trampoline(__oak_trampolined_sub,acc,i,last)))()},sub(s,0,0)))()},split=function split(s=null,sep=null){return ((__oak_cond)=>__oak_eq(__oak_cond,null)?reduce(s,[],function _(acc=null,c=null){return __oak_push(acc,c)}):__oak_eq(__oak_cond,__Oak_String(''))?reduce(s,[],function _(acc=null,c=null){return __oak_push(acc,c)}):_splitNonEmpty(s,sep))(sep)},_extend=function _extend(pad=null,n=null){return ((part,sub,times)=>((times=int((n/len(pad)))),(part=(n%len(pad))),sub=function sub(base=null,i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(base=null,i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,0)?__oak_push(base,slice(pad,0,part)):__oak_trampoline(__oak_trampolined_sub,__oak_push(base,pad),(i-1)))(i)}),__oak_resolve_trampoline(__oak_trampolined_sub,base,i)))()},sub(__Oak_String(''),times)))()},padStart=function padStart(s=null,n=null,pad=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?s:__oak_push(_extend(pad,(n-len(s))),s))((len(s)>=n))},padEnd=function padEnd(s=null,n=null,pad=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?s:__as_oak_string(s+_extend(pad,(n-len(s)))))((len(s)>=n))},_trimStartSpace=function _trimStartSpace(s=null){return ((firstNonSpace,subStart)=>(subStart=function subStart(i=null){return ((__oak_trampolined_subStart)=>((__oak_trampolined_subStart=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_subStart,__as_oak_string(i+1)):i)(space__oak_qm(__oak_acc(s,__oak_obj_key((i)))))}),__oak_resolve_trampoline(__oak_trampolined_subStart,i)))()},(firstNonSpace=subStart(0)),slice(s,firstNonSpace)))()},_trimStartNonEmpty=function _trimStartNonEmpty(s=null,prefix=null){return ((idx,lpref,max,sub)=>((max=len(s)),(lpref=len(prefix)),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,__as_oak_string(i+lpref)):i)(_matchesAt__oak_qm(s,prefix,i)):i)((i<max))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},(idx=sub(0)),slice(s,idx)))()},trimStart=function trimStart(s=null,prefix=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(''))?s:__oak_eq(__oak_cond,null)?_trimStartSpace(s):_trimStartNonEmpty(s,prefix))(prefix)},_trimEndSpace=function _trimEndSpace(s=null){return ((lastNonSpace,subEnd)=>(subEnd=function subEnd(i=null){return ((__oak_trampolined_subEnd)=>((__oak_trampolined_subEnd=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_subEnd,(i-1)):i)(space__oak_qm(__oak_acc(s,__oak_obj_key((i)))))}),__oak_resolve_trampoline(__oak_trampolined_subEnd,i)))()},(lastNonSpace=subEnd((len(s)-1))),slice(s,0,__as_oak_string(lastNonSpace+1))))()},_trimEndNonEmpty=function _trimEndNonEmpty(s=null,suffix=null){return ((idx,lsuf,sub)=>((lsuf=len(suffix)),sub=function sub(i=null){return ((__oak_trampolined_sub)=>((__oak_trampolined_sub=function _(i=null){return ((__oak_cond)=>__oak_eq(__oak_cond,true)?((__oak_cond)=>__oak_eq(__oak_cond,true)?__oak_trampoline(__oak_trampolined_sub,(i-lsuf)):i)(_matchesAt__oak_qm(s,suffix,(i-lsuf))):i)((i>-1))}),__oak_resolve_trampoline(__oak_trampolined_sub,i)))()},(idx=sub(len(s))),slice(s,0,idx)))()},trimEnd=function trimEnd(s=null,suffix=null){return ((__oak_cond)=>__oak_eq(__oak_cond,__Oak_String(''))?s:__oak_eq(__oak_cond,null)?_trimEndSpace(s):_trimEndNonEmpty(s,suffix))(suffix)},trim=function trim(s=null,part=null){return trimEnd(trimStart(s,part),part)},({_extend,_matchesAt__oak_qm,_replaceNonEmpty,_splitNonEmpty,_trimEndNonEmpty,_trimEndSpace,_trimStartNonEmpty,_trimStartSpace,checkRange,contains__oak_qm,cut,__oak_js_default,digit__oak_qm,endsWith__oak_qm,indexOf,join,letter__oak_qm,lower,lower__oak_qm,padEnd,padStart,reduce,replace,rindexOf,slice,space__oak_qm,split,startsWith__oak_qm,take,takeLast,trim,trimEnd,trimStart,upper,upper__oak_qm,word__oak_qm})))()}),(__Oak_Import_Aliases=({})),__oak_module_import(__Oak_String('/home/user/magnolia/www/src/app.js.oak')))

@@ -1,0 +1,426 @@
+// Public Magnolia/Oak API for JVM-input inspection, Builder conversion,
+// bounded execution, round-trip restoration, comparison and host commands.
+// All operations report {type: :ok|:error}; no Java VM is launched.
+
+std := import('std')
+str := import('str')
+fs := import('fs')
+path := import('path')
+app := import('./applet.oak')
+adapter := import('./build-applet.oak')
+bridge := import('./jvm-bridge.oak')
+jarWriter := import('./jvm-jar-write.oak')
+host := import('./applet-host.oak')
+json := import('json')
+
+fn _error(message) std.error(message)
+
+// One class-byte loader is shared by executable selection and whole-input
+// coverage. The latter deliberately accepts classes with no main/Applet.
+fn _rawLoad(entry, settings) {
+    settings := settings |> std.default({})
+    if type(settings) != :object -> settings <- {}
+    loaded := adapter._load({entry: entry, source: settings.source}, settings)
+    if loaded.type = :error {
+        true -> loaded
+        _ -> {
+            problem := ?
+            additional := settings.classFiles |> std.default([])
+            if type(additional) != :list -> problem <- 'classFiles must be a list'
+            if problem = ? -> additional |> std.each(fn(file) if problem = ? {
+                true -> {
+                    bytes := fs.readFile(file)
+                    if bytes = ? {true -> problem <- 'cannot read helper class ' + string(file),
+                        _ -> loaded.classes << bytes}
+                }
+            })
+            if problem != ? {true -> _error(problem), _ -> loaded}
+        }
+    }
+}
+
+// settings may specify entryClass, classFiles, classes (raw byte strings),
+// originalJar, params, options, optimize?, preserveJar? and adapterPath.
+fn load(entry, settings) {
+    settings := settings |> std.default({})
+    if type(settings) != :object -> settings <- {}
+    loaded := _rawLoad(entry, settings)
+    if loaded.type = :error {
+        true -> loaded
+        _ -> {
+            entryClass := settings.entryClass |> std.default(loaded.entry)
+            problem := ?
+            if entryClass = ? {
+                true -> {
+                    chosen := adapter.chooseEntry(loaded.classes)
+                    if chosen.type = :error {true -> problem <- chosen.message, _ -> entryClass <- chosen.value}
+                    if entryClass = ? & len(loaded.classes) = 1 & settings.options.method != ? ->
+                        entryClass <- app.inspect(loaded.classes.(0)).value.name
+                }
+            }
+            if entryClass = ? & problem = ? ->
+                problem <- 'no Applet or static main entry found; choose entryClass explicitly'
+            if problem = ? {
+                true -> {type: :ok, entry: entryClass, classes: loaded.classes, jar: loaded.jar,
+                    params: loaded.params, width: loaded.width, height: loaded.height,
+                    args: loaded.args}
+                _ -> _error(problem)
+            }
+        }
+    }
+}
+// Whole-input decoder inventory, including otherwise unreachable code.
+// No executable entry is required; successful decoding is not JVM parity.
+fn coverage(entry, settings) bridge.coverage(_rawLoad(entry, settings))
+
+fn inspect(entry, settings) {
+    opened := load(entry, settings)
+    if opened.type = :error {
+        true -> opened
+        _ -> {
+            classes := opened.classes |> std.map(fn(raw) {
+                cls := app.inspect(raw).value
+                {name: cls.name, super: cls.super, version: cls.major, fields: cls.fields,
+                    methods: cls.methods |> std.map(fn(method) {
+                        name: method.name, desc: method.desc, flags: method.flags,
+                        bytecodeLength: len(method.code |> std.default(''))
+                    })}
+            })
+            opts := settings |> std.default({})
+            opts <- opts.options |> std.default({})
+            checked := if settings.check? = true {
+                true -> app.compile(opened.classes, {entry: opened.entry,
+                    method: opts.method, desc: opts.desc |> std.default('()V'),
+                    paint?: opts.paint? = true})
+                _ -> ?
+            }
+            {type: :ok, entry: opened.entry, classes: classes,
+                preflight: if checked = ? {true -> ?, _ -> if checked.type = :error {
+                    true -> {type: :error, message: checked.message}
+                    _ -> {type: :ok, stats: checked.stats}
+                }}}
+        }
+    }
+}
+
+fn compile(entry, settings) {
+    opened := load(entry, settings)
+    if opened.type = :error {
+        true -> opened
+        _ -> {
+            opts := settings |> std.default({})
+            options := opts.options |> std.default({})
+            checked := bridge.link(opened, {
+                entry: opened.entry, method: options.method,
+                desc: options.desc |> std.default('()V'),
+                paint?: options.paint? = true, optimize?: opts.optimize? != false
+            })
+            if checked.type = :error {
+                true -> checked
+                _ -> {type: :ok, value: checked.value, stats: checked.stats,
+                    classes: opened.classes, jar: opened.jar, entry: opened.entry,
+                    params: opened.params, width: opened.width,
+                    height: opened.height, args: opened.args}
+            }
+        }
+    }
+}
+
+fn invocation(checked, settings) {
+    opts := settings |> std.default({})
+    params := std.clone(checked.params |> std.default({}))
+    options := std.clone(opts.options |> std.default({}))
+    std.keys(opts.params |> std.default({})) |> std.each(fn(key) {
+        params.(key) <- opts.params.(key)
+    })
+    options.width <- options.width |> std.default(checked.width |> std.default(320))
+    options.height <- options.height |> std.default(checked.height |> std.default(200))
+    options.args <- options.args |> std.default(checked.args |> std.default([]))
+    {params: params, options: options}
+}
+
+fn run(entry, settings) {
+    checked := compile(entry, settings)
+    if checked.type = :error {
+        true -> checked
+        _ -> {
+            inputs := invocation(checked, settings)
+            result := app.run(checked.value, inputs.params, inputs.options)
+            result.entry <- checked.entry
+            result.stats <- checked.stats
+            result
+        }
+    }
+}
+
+// Invoke Magnolia Builder directly. For programmatic conversion the default
+// is in-memory: caller may set settings.inMemory? = false to write output.
+fn convert(entry, output, settings) {
+    opts := settings |> std.default({})
+    cfg := {entry: entry, source: opts.source, output: output,
+        inMemory?: opts.inMemory? != false,
+        web?: str.endsWith?(output, '.js') | str.endsWith?(output, '.html'),
+        java?: str.endsWith?(output, '.java'),
+        applet: opts}
+    import('build').run(cfg)
+}
+
+fn archive(entry, settings) {
+    opened := load(entry, settings)
+    if opened.type = :error {
+        true -> opened
+        _ -> if opened.jar != ? {
+            true -> app.bundleJar(opened.classes, opened.entry, opened.jar)
+            _ -> app.bundle(opened.classes, opened.entry)
+        }
+    }
+}
+
+// Source is the generated Oak *text*. Restoration verifies embedded SHA-256
+// and returns original byte strings, not a compilation of edited Oak logic.
+fn restoreOak(source) app.fromOak(source)
+// Different operation: statically parse the named Oak method literals and
+// assemble verified same-layout edits into NEW JVM class-file bytes. No Oak
+// source is executed, and no external javac or JVM is needed to build them.
+fn recompileOak(source) import('./applet-recompile.oak').fromOak(source)
+fn _jarFromEdited(edited) if edited.originalJar = ? {
+    true -> _error('edited Oak has no original JAR to preserve; use a class directory')
+    _ -> if edited.changedInstructions = 0 {
+        true -> {type: :ok, value: edited.originalJar,
+            changedInstructions: 0, entry: edited.entry}
+        _ -> {
+            packed := jarWriter.repack(edited.originalJar, edited.value)
+            if packed.type = :error {
+                true -> packed
+                _ -> {type: :ok, value: packed.value,
+                    changedInstructions: edited.changedInstructions, entry: edited.entry}
+            }
+        }
+    }
+}
+fn recompileJar(source) {
+    edited := recompileOak(source)
+    if edited.type = :error {true -> edited, _ -> _jarFromEdited(edited)}
+}
+fn recompileTo(source, output) {
+    edited := recompileOak(source)
+    if edited.type = :error {
+        true -> edited
+        _ -> if type(output) != :string | output = '' {
+            true -> _error('recompileTo requires an output .class, .jar or directory')
+            _ -> {
+                suffix := str.lower(output)
+                if str.endsWith?(suffix, '.jar') {
+                    true -> if fs.statFile(output) != ? {
+                        true -> _error('refusing to overwrite ' + output)
+                        _ -> {
+                            jar := _jarFromEdited(edited)
+                            if jar.type = :error {
+                                true -> jar
+                                _ -> if fs.writeFile(output, jar.value) = ? {
+                                    true -> _error('could not write new JAR ' + output)
+                                    _ -> {type: :ok, output: output, files: [output],
+                                        changedInstructions: edited.changedInstructions}
+                                }
+                            }
+                        }
+                    }
+                    _ -> if str.endsWith?(suffix, '.zip') |
+                        str.endsWith?(suffix, '.applet.json') {
+                        true -> _error('edited ZIP/.applet.json output is not supported; use a class directory or JAR')
+                        _ -> if str.endsWith?(suffix, '.class') {
+                        true -> if len(edited.value) != 1 {
+                            true -> _error('multiple classes require an output directory')
+                            _ -> if fs.statFile(output) != ? {
+                                true -> _error('refusing to overwrite ' + output)
+                                _ -> if fs.writeFile(output, edited.value.(0)) = ? {
+                                    true -> _error('could not write class ' + output)
+                                    _ -> {type: :ok, output: output, files: [output],
+                                        changedInstructions: edited.changedInstructions}
+                                }
+                            }
+                        }
+                        _ -> {
+                            directory := path.resolve(output)
+                            files := edited.value |> std.map(fn(raw) path.resolve(
+                                app.inspect(raw).value.name + '.class', directory))
+                            problem := ?
+                            files |> std.each(fn(file) if problem = ? {
+                                true -> {
+                                    if !str.startsWith?(file, directory + '/') ->
+                                        problem <- 'unsafe class output path ' + file
+                                    if fs.statFile(file) != ? -> problem <- 'refusing to overwrite ' + file
+                                }
+                            })
+                            fn parents(location) if problem = ? {
+                                true -> {
+                                    parent := path.dir(location)
+                                    if parent != '' & parent != location -> parents(parent)
+                                    if location != '' & location != '/' & problem = ? {
+                                        true -> {
+                                            stat := fs.statFile(location)
+                                            if stat != ? & !stat.dir -> problem <- 'not a directory: ' + location
+                                            if stat = ? & mkdir(location).type = :error ->
+                                                problem <- 'cannot make directory ' + location
+                                        }
+                                    }
+                                }
+                            }
+                            if problem = ? -> parents(directory)
+                            files |> std.each(fn(file, i) if problem = ? {
+                                true -> {
+                                    parents(path.dir(file))
+                                    if problem = ? -> if fs.writeFile(file, edited.value.(i)) = ? ->
+                                        problem <- 'could not write class ' + file
+                                }
+                            })
+                            if problem != ? {
+                                true -> _error(problem)
+                                _ -> {type: :ok, output: directory, files: files,
+                                    changedInstructions: edited.changedInstructions}
+                            }
+                        }
+                    }
+                }
+                }
+            }
+        }
+    }
+}
+// The browser/Node host's restoreArchive() returns this verified JSON format.
+fn restoreArchive(source) app.unbundle(source)
+fn restoreFile(file) if data := fs.readFile(file) {
+    ? -> _error('cannot read converted Oak file: ' + file)
+    _ -> restoreOak(data)
+}
+
+// Exact class/JAR/archive restoration with no-overwrite guarantees. For
+// multi-class files use restoreOak(...).value to write each class explicitly.
+fn restoreTo(source, output) {
+    recovered := restoreOak(source)
+    if recovered.type = :error {
+        true -> recovered
+        _ -> {
+            bytes := if str.endsWith?(output, '.applet.json') | str.endsWith?(output, '.applet') {
+                true -> recovered.archive
+                _ -> if str.endsWith?(output, '.jar') | str.endsWith?(output, '.zip') {
+                    true -> recovered.jar
+                    _ -> if str.endsWith?(output, '.class') & len(recovered.value) = 1 {
+                        true -> recovered.value.(0)
+                        _ -> ?
+                    }
+                }
+            }
+            if bytes = ? {
+                true -> _error('no original bytes for requested output; use restoreOak for multiple classes')
+                _ -> if fs.statFile(output) != ? {
+                    true -> _error('refusing to overwrite ' + output)
+                    _ -> if fs.writeFile(output, bytes) = ? {
+                        true -> _error('could not write ' + output)
+                        _ -> {type: :ok, output: output, bytes: len(bytes)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Behavioral comparison covers observable stdout, return value and drawing
+// for the same bounded invocation. It is not an equivalence proof for a JVM.
+fn compare(entry, oakSource, settings) {
+    before := compile(entry, settings)
+    recovered := restoreOak(oakSource)
+    if before.type = :error | recovered.type = :error {
+        true -> if before.type = :error {true -> before, _ -> recovered}
+        _ -> {
+            opts := settings |> std.default({})
+            options := opts.options |> std.default({})
+            after := app.compile(recovered.value, {entry: recovered.entry,
+                method: options.method, desc: options.desc |> std.default('()V'),
+                paint?: options.paint? = true, optimize?: opts.optimize? != false})
+            if after.type = :error {
+                true -> after
+                _ -> {
+                    inputs := invocation(before, settings)
+                    params := inputs.params
+                    options <- inputs.options
+                    a := app.run(before.value, params, options)
+                    b := app.run(after.value, params, options)
+                    bytesMatch? := len(before.classes) = len(recovered.value)
+                    before.classes |> std.each(fn(raw, i) if i >= len(recovered.value) |
+                        raw != recovered.value.(i) -> bytesMatch? <- false)
+                    {type: :ok, equal?: a.type = b.type & a.output = b.output &
+                        a.value = b.value & json.serialize(a.draw) = json.serialize(b.draw),
+                        original: a, restored: b,
+                        bytesIdentical?: bytesMatch?,
+                        entryIdentical?: before.entry = recovered.entry}
+                }
+            }
+        }
+    }
+}
+
+// Session commands re-execute bounded bytecode from a fresh state. They do
+// not pretend to preserve JVM threads, event listeners, windows or instances.
+fn session(entry, settings) {
+    checked := compile(entry, settings)
+    if checked.type = :error {
+        true -> checked
+        _ -> {
+            opts := settings |> std.default({})
+            inputs := invocation(checked, settings)
+            {type: :ok, entry: checked.entry, classes: checked.classes,
+                program: checked.value, params: inputs.params,
+                options: inputs.options,
+                optimize?: opts.optimize? != false, last: ?, window: ?}
+        }
+    }
+}
+fn command(s, msg) if s.type = :ok & type(msg) = :object {
+    true -> if msg.type {
+        'setParameter' -> if type(msg.name) = :string &
+            (type(msg.value) = :string | msg.value = ?) {
+            true -> {s.params.(msg.name) <- msg.value, {type: :ok, params: s.params}}
+            _ -> _error('parameter requires a name and string or null value')
+        }
+        'run', 'paint', 'invoke' -> {
+            options := std.clone(s.options)
+            if msg.type = 'paint' -> options.paint? <- true
+            if msg.type = 'invoke' {
+                true -> {
+                    options.method <- msg.method
+                    options.desc <- msg.desc |> std.default('()V')
+                    options.args <- msg.args |> std.default([])
+                    options.paint? <- false
+                }
+            }
+            compiled := if msg.type = 'run' {
+                true -> {type: :ok, value: s.program}
+                _ -> app.compile(s.classes, {entry: s.entry, method: options.method,
+                    desc: options.desc |> std.default('()V'), paint?: options.paint? = true,
+                    optimize?: s.optimize?})
+            }
+            if compiled.type = :error {
+                true -> compiled
+                _ -> {
+                    result := app.run(compiled.value, s.params, options)
+                    s.last <- result
+                    if result.type = :ok & s.window != ? & len(result.draw) > 0 ->
+                        host.replayWeb(s.window, result.draw)
+                    result
+                }
+            }
+        }
+        'attachWeb' -> {
+            created := host.createWeb(s.entry, msg.width |> std.default(320),
+                msg.height |> std.default(200), msg.bridge)
+            if created.type = :ok -> s.window <- created.window
+            created
+        }
+        'event' -> host.sendEvent(s.window, msg)
+        'inspect' -> {type: :ok, entry: s.entry, kind: s.program.kind,
+            classes: std.keys(s.program.classes)}
+        _ -> _error('unsupported host command ' + string(msg.type))
+    }
+    _ -> _error('expected an active applet session and a command object')
+}

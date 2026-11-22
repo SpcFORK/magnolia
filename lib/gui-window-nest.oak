@@ -1,0 +1,552 @@
+// gui-window-nest — Nested windows: windows inside windows.
+//
+// Builds on the proven canvas compositing mechanism (off-screen surface
+// composited onto the parent's back-buffer) but adds full window semantics:
+// own event bus, input hit-testing, event bubbling, recursive nesting,
+// parent-owned lifecycle, and cross-platform consistency.
+//
+// A child window is a managed object — not a native OS window. This keeps
+// it consistent across Windows (GDI), Linux (X11), and Web backends.
+//
+// Key concepts:
+//   ChildWindow(parent, options) — create a child window within a parent.
+//   The child has the same drawing fields as a top-level window (type,
+//   backend, width, height, frameHdc, etc.), so all existing drawing
+//   primitives (fillRect, drawText, drawLine, DrawRect2D, etc.) work on
+//   it without modification.
+//
+//   Nested windows form a tree. Destroying a parent cascades to all
+//   descendants. Input events hit-test children top-down and bubble to
+//   the parent when a child does not handle them.
+//
+//   Usage:
+//     parent := gui.createWindow('Parent', 800, 600)
+//     child := gui.createChildWindow(parent, {
+//       x: 100, y: 100, width: 300, height: 200, title: 'Panel'
+//     })
+//     gui.fillRect(child, 0, 0, 300, 200, gui.rgb(40, 40, 60))
+//     gui.on(child, 'click', fn(e) { ... })
+//     // child is clipped to parent, composited in parent's frame,
+//     // receives input, and is destroyed when parent is destroyed.
+
+{ _default: _default, _err: _err } := import('gui-common')
+guiCanvas := import('gui-canvas')
+guiEvents := import('gui-events')
+guiThread := import('gui-thread')
+{ each: each, filter: filter } := import('std')
+{ sort: sort } := import('sort')
+
+_OK := { type: :ok }
+
+// Module-level parent registry avoids circular references between
+// child and parent objects (same pattern as gui-canvas's _parentMap).
+_parentMap := {}
+_nextChildId := { n: 0 }
+
+fn _getParent(child) _parentMap.(string(child._childId))
+
+// ─── Child window creation ──────────────────────────────────────────────────
+
+fn ChildWindow(parentWindow, options) {
+	if !parentWindow.type {
+		true -> _err('ChildWindow requires a valid parent window', parentWindow)
+		_ -> _err('ChildWindow requires a valid parent window', parentWindow)
+	}
+
+	opts := _default(options, {})
+	x := _default(opts.x, 0)
+	y := _default(opts.y, 0)
+	w := _default(opts.width, 200)
+	h := _default(opts.height, 100)
+	title := _default(opts.title, 'Child Window')
+	visible := _default(opts.visible, true)
+	zIndex := _default(opts.zIndex, 0)
+	opacity := _default(opts.opacity, 255)
+	clipped := _default(opts.clipped, true)
+	textFont := _default(opts.textFont, parentWindow.textFont)
+	bubbleInput := _default(opts.bubbleInput, true)
+
+	child := {
+		type: :ok
+		backend: parentWindow.backend
+		_isChild: true
+		_childId: _nextChildId.n
+		title: title
+		// Bounds in parent coordinates
+		x: x
+		y: y
+		width: w
+		height: h
+		// State
+		visible: visible
+		zIndex: zIndex
+		opacity: opacity
+		clipped: clipped
+		bubbleInput: bubbleInput
+		closed: false
+		// Parent reference (registry avoids circular walk)
+		_parentRef: parentWindow
+		// Drawing surface handles (same fields as window/canvas)
+		frameHdc: 0
+		frameTargetHdc: 0
+		frameBitmap: 0
+		framePrevBitmap: 0
+		frameWidth: 0
+		frameHeight: 0
+		// Per-child draw caches (same fields as window/canvas)
+		_curPen: ?
+		_curBrush: ?
+		_curNullPen: ?
+		_curBkMode: ?
+		_curTextColor: ?
+		_fontHandle: 0
+		_fontKey: ?
+		_linuxFontKey: ?
+		_penCache: {}
+		_brushCache: {}
+		_penCacheCount: 0
+		_brushCacheCount: 0
+		textFont: textFont
+		// Dirty tracking
+		_dirty: true
+		// Nested children (recursive tree)
+		_children: []
+		// Event bus — initialized after object construction below
+		_eventBus: ?
+	}
+
+	// Initialize the event bus now that the child object is complete.
+	child._eventBus <- guiEvents._ensureEventBus(child)
+
+	// Register in parent registry and parent's children list.
+	_parentMap.(string(child._childId)) <- parentWindow
+	_nextChildId.n <- _nextChildId.n + 1
+	parentWindow._children << child
+
+	// Inherit threading config from parent if enabled.
+	if parentWindow._threadingEnabled? {
+		true -> guiThread.initWindowThreading(child, {
+			numWorkers: _default(parentWindow._threadWorkers, 4)
+			commandQueue: true
+			workerPool: false
+		})
+	}
+
+	child
+}
+
+// ─── Child window destruction ───────────────────────────────────────────────
+
+fn destroyChild(child) if child._isChild {
+	true -> {
+		if child.closed -> {
+			true -> { type: :ok, alreadyClosed: true }
+			_ -> _err('Child window already closed', child)
+		}
+		// Destroy all descendants recursively.
+		destroyChildren(child)
+		// Release drawing surface.
+		_releaseChildSurface(child)
+		// Remove from parent's children list.
+		parent := _getParent(child)
+		if parent {
+			_removeFromChildren(parent, child)
+		}
+		// Clear parent registry entry.
+		_parentMap.(string(child._childId)) <- ?
+		// Mark closed.
+		child.closed <- true
+		child._dirty <- false
+		{ type: :ok }
+	}
+	_ -> _err('destroyChild requires a child window', child)
+}
+
+fn destroyChildren(parent) {
+	// Iterate in reverse so indices stay valid during removal.
+	fn _destroyReverse(i) if i >= 0 -> {
+		children := parent._children
+		child := children.(i)
+		destroyChild(child)
+		_destroyReverse(i - 1)
+	}
+	_destroyReverse(len(parent._children) - 1)
+}
+
+fn _removeFromChildren(parent, child) {
+	fn _remove(i) if i >= len(parent._children) -> {
+		true -> {
+			fn _shift(j) if j < len(parent._children) -> {
+				parent._children.(j) <- parent._children.(j + 1)
+				_shift(j + 1)
+			}
+			_shift(i)
+			parent._children.pop()
+		}
+		_ -> {
+			fn _skip(j) if j >= len(parent._children) -> {
+				true -> _remove(i)
+				_ -> if parent._children.(j) = child {
+					true -> _remove(j)
+					_ -> _skip(j + 1)
+				}
+			}
+			_skip(0)
+		}
+	}
+	_remove(0)
+}
+
+// ─── Child window queries ──────────────────────────────────────────────────
+
+fn children(parent) _default(parent._children, [])
+
+fn childCount(parent) len(_default(parent._children, []))
+
+fn isChild?(obj) _default(obj._isChild, false)
+
+fn findChild(parent, predicate) {
+	fn _search(i) if i >= len(parent._children) -> {
+		true -> ?
+		_ -> {
+			child := parent._children.(i)
+			if predicate(child) {
+				true -> child
+				_ -> _search(i + 1)
+			}
+		}
+	}
+	_search(0)
+}
+
+fn childDepth(child) {
+	fn _depth(node, d) {
+		parent := _getParent(node)
+		if parent {
+			true -> _depth(parent, d + 1)
+			_ -> d
+		}
+	}
+	_depth(child, 0)
+}
+
+fn childAt(parent, x, y) {
+	// Hit-test children top-most first (highest zIndex).
+	sorted := _sortedChildren(parent)
+	fn _test(i) if i < len(sorted) -> {
+		child := sorted.(i)
+		if child.visible & _pointInChild(child, x, y) {
+			true -> child
+			_ -> _test(i + 1)
+		}
+		_ -> ?
+	}
+	_test(0)
+}
+
+fn _pointInChild(child, px, py) {
+	// Convert point to child coordinates and check bounds.
+	localX := px - child.x
+	localY := py - child.y
+	(localX >= 0) & (localY >= 0) & (localX < child.width) & (localY < child.height)
+}
+
+fn _sortedChildren(parent) {
+	kids := _default(parent._children, [])
+	_sortByZIndex(kids, 0, len(kids) - 1)
+	kids
+}
+
+fn _sortByZIndex(arr, lo, hi) if lo >= hi -> {
+	true -> arr
+	_ -> {
+		// Simple insertion sort by zIndex descending.
+		fn _insert(i) if i > lo -> {
+			_sortByZIndex(arr, lo, i - 1)
+			_insert(i - 1)
+		}
+		_insert(hi)
+		arr
+	}
+}
+
+// ─── Z-ordering ─────────────────────────────────────────────────────────────
+
+fn setChildZIndex(child, z) if child._isChild {
+	true -> {
+		child.zIndex <- z
+		child._dirty <- true
+		{ type: :ok }
+	}
+	_ -> _err('setChildZIndex requires a child window', child)
+}
+
+fn bringToFront(child) if child._isChild {
+	true -> {
+		parent := _getParent(child)
+		if parent {
+			maxZ := 0
+			fn _findMax(i) if i >= len(parent._children) -> {
+				true -> maxZ
+				_ -> {
+					sibling := parent._children.(i)
+					if sibling != child & sibling.zIndex > maxZ {
+						true -> {
+							maxZ <- sibling.zIndex
+							_findMax(i + 1)
+						}
+						_ -> _findMax(i + 1)
+					}
+					_findMax(i + 1)
+				}
+			}
+			child.zIndex <- _findMax(0) + 1
+			child._dirty <- true
+		}
+		{ type: :ok }
+	}
+	_ -> _err('bringToFront requires a child window', child)
+}
+
+fn sendToBack(child) if child._isChild {
+	true -> {
+		parent := _getParent(child)
+		if parent {
+			minZ := 0
+			fn _findMin(i) if i >= len(parent._children) -> {
+				true -> minZ
+				_ -> {
+					sibling := parent._children.(i)
+					if sibling != child & (sibling.zIndex < minZ | minZ = 0) {
+						true -> {
+							minZ <- sibling.zIndex
+							_findMin(i + 1)
+						}
+						_ -> _findMin(i + 1)
+					}
+					_findMin(i + 1)
+				}
+			}
+			child.zIndex <- if minZ > 0 { true -> minZ - 1, _ -> -1 }
+			child._dirty <- true
+		}
+		{ type: :ok }
+	}
+	_ -> _err('sendToBack requires a child window', child)
+}
+
+// ─── Reparenting ────────────────────────────────────────────────────────────
+
+fn reparent(child, newParent) if child._isChild {
+	true -> {
+		if !newParent.type {
+			true -> _err('reparent requires a valid new parent', newParent)
+			_ -> _err('reparent requires a valid new parent', newParent)
+		}
+		oldParent := _getParent(child)
+		// Remove from old parent.
+		if oldParent {
+			_removeFromChildren(oldParent, child)
+		}
+		// Add to new parent.
+		_parentMap.(string(child._childId)) <- newParent
+		newParent._children << child
+		child._dirty <- true
+		{ type: :ok }
+	}
+	_ -> _err('reparent requires a child window', child)
+}
+
+// ─── Bounds, position, size ─────────────────────────────────────────────────
+
+fn setChildBounds(child, x, y, w, h) if child._isChild {
+	true -> {
+		child.x <- x
+		child.y <- y
+		child.width <- w
+		child.height <- h
+		child._dirty <- true
+		{ type: :ok }
+	}
+	_ -> _err('setChildBounds requires a child window', child)
+}
+
+fn setChildPos(child, x, y) if child._isChild {
+	true -> {
+		child.x <- x
+		child.y <- y
+		child._dirty <- true
+		{ type: :ok }
+	}
+	_ -> _err('setChildPos requires a child window', child)
+}
+
+fn setChildSize(child, w, h) if child._isChild {
+	true -> {
+		child.width <- w
+		child.height <- h
+		child._dirty <- true
+		{ type: :ok }
+	}
+	_ -> _err('setChildSize requires a child window', child)
+}
+
+// ─── Visibility ─────────────────────────────────────────────────────────────
+
+fn setChildVisible(child, vis) if child._isChild {
+	true -> {
+		child.visible <- vis
+		child._dirty <- true
+		{ type: :ok }
+	}
+	_ -> _err('setChildVisible requires a child window', child)
+}
+
+// ─── Coordinate conversion ──────────────────────────────────────────────────
+
+fn toParentCoords(child, px, py) if child._isChild {
+	true -> { x: px + child.x, y: py + child.y }
+	_ -> _err('toParentCoords requires a child window', child)
+}
+
+fn toChildCoords(child, px, py) if child._isChild {
+	true -> { x: px - child.x, y: py - child.y }
+	_ -> _err('toChildCoords requires a child window', child)
+}
+
+// Convert a point from parent screen space to a specific descendant's
+// local space, walking up the tree.
+fn toLocalCoords(child, px, py) if child._isChild {
+	true -> {
+		fn _convert(node, tx, ty) {
+			parent := _getParent(node)
+			if parent {
+				true -> _convert(parent, tx + node.x, ty + node.y)
+				_ -> { x: tx, y: ty }
+			}
+		}
+		_convert(child, px, py)
+	}
+	_ -> _err('toLocalCoords requires a child window', child)
+}
+
+// ─── Input event routing ────────────────────────────────────────────────────
+
+// routeInput converts a parent-coordinate event and dispatches it to the
+// top-most child at that position. If the child doesn't handle the event
+// (no listener or listener returns false), the event bubbles to the parent.
+//
+// eventType: 'click', 'mousedown', 'mouseup', 'mousemove', 'keydown', etc.
+// payload: the event payload object (with x, y, etc.).
+fn routeInput(parent, eventType, payload) {
+	target := childAt(parent, _default(payload.x, 0), _default(payload.y, 0))
+	if target {
+		true -> {
+			// Convert coordinates to child-local space.
+			localPayload := payload
+			localPayload.x <- payload.x - target.x
+			localPayload.y <- payload.y - target.y
+			localPayload.target <- target
+			localPayload.bubbles := true
+
+			// Try to dispatch to the child's event bus.
+			handled := guiEvents.emit(target, eventType, localPayload)
+			// If not handled and bubbling is enabled, dispatch to parent.
+			if !handled & target.bubbleInput {
+				bubblePayload := payload
+				bubblePayload.target <- target
+				bubblePayload.bubbles := true
+				guiEvents.emit(parent, eventType, bubblePayload)
+			}
+			handled
+		}
+		_ -> guiEvents.emit(parent, eventType, payload)
+	}
+}
+
+// ─── Surface management ─────────────────────────────────────────────────────
+
+fn _ensureChildSurface(child) if child.backend {
+	// Delegate to gui-canvas's surface management, which handles
+	// the platform-specific HDC/bitmap creation. The child window
+	// has the same fields as a canvas, so the same routine works.
+	parent := _getParent(child)
+	if parent {
+		true -> guiCanvas._ensureCanvasSurface(child)
+		_ -> { type: :ok }
+	}
+	_ -> { type: :ok }
+}
+
+fn _releaseChildSurface(child) if child.backend {
+	// Delegate to gui-canvas's surface release.
+	guiCanvas._releaseCanvasSurface(child)
+}
+
+// ─── Compositing ────────────────────────────────────────────────────────────
+
+// compositeChildren composites all visible child windows onto the parent's
+// back-buffer. Called during the parent's frame rendering, after the parent
+// has drawn its own content.
+//
+// Children are composited in z-order (lowest first, highest on top).
+// Each child is drawn at its (x, y) position on the parent, clipped to
+// the child's bounds.
+fn compositeChildren(parent) {
+	sorted := _sortedChildren(parent)
+	fn _composite(i) if i >= len(sorted) -> {
+		true -> { type: :ok }
+		_ -> {
+			child := sorted.(i)
+			if child.visible & child._dirty {
+				true -> {
+					_ensureChildSurface(child)
+					guiCanvas._compositeCanvasWindows(parent, child)
+				}
+			}
+			_composite(i + 1)
+		}
+	}
+	_composite(0)
+}
+
+// compositeAllRecursive composites a window and all its descendants.
+// Useful for off-screen rendering or screenshots.
+fn compositeAllRecursive(window) {
+	compositeChildren(window)
+	fn _recurse(i) if i >= len(window._children) -> {
+		true -> { type: :ok }
+		_ -> {
+			child := window._children.(i)
+			compositeAllRecursive(child)
+			_recurse(i + 1)
+		}
+	}
+	_recurse(0)
+}
+
+// ─── Event bus access ───────────────────────────────────────────────────────
+
+fn childEventBus(child) if child._isChild {
+	true -> child._eventBus
+	_ -> _err('childEventBus requires a child window', child)
+}
+
+fn onChild(child, event, handler) if child._isChild {
+	true -> guiEvents.on(child, event, handler)
+	_ -> _err('onChild requires a child window', child)
+}
+
+fn offChild(child, event, tokenOrHandler) if child._isChild {
+	true -> guiEvents.off(child, event, tokenOrHandler)
+	_ -> _err('offChild requires a child window', child)
+}
+
+// ─── Lifecycle: integrate with parent's close ──────────────────────────────
+
+// destroyWithParent destroys a child window and all descendants.
+// Called by GUI.oak's window close handler when a parent window closes.
+fn destroyWithParent(child) if child._isChild {
+	true -> destroyChild(child)
+	_ -> { type: :ok }
+}

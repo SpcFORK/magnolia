@@ -1,0 +1,378 @@
+// applet-oak — Magnolia's primary applet -> standalone Oak emitter.
+// Output has named, editable method-wise Oak IR AND the inlined runtime.
+// A comment contains an optional, SHA-256-verified lossless class archive.
+
+std := import('std')
+str := import('str')
+sort := import('sort')
+fs := import('fs')
+path := import('path')
+b64 := import('b64')
+crypto := import('crypto')
+
+fn _error(message) std.error(message)
+fn _sorted(value) sort.sort!(keys(value))
+fn _cleanComment(text) str.replace(str.replace(text, '\n', ' '), '\r', ' ')
+
+// Render arbitrary input only as escaped Oak data, never as executable source.
+_HEX := '0123456789abcdef'
+fn _quote(text) {
+    fn escape(c) if c {
+        '\\' -> '\\\\'
+        '\n' -> '\\n'
+        '\r' -> '\\r'
+        '\t' -> '\\t'
+        _ -> if c = char(39) {
+            true -> '\\' + char(39)
+            _ -> {
+                n := codepoint(c)
+                if n < 32 | n >= 127 {
+                    true -> '\\x' + _HEX.(n >> 4) + _HEX.(n & 15)
+                    _ -> c
+                }
+            }
+        }
+    }
+    char(39) + (std.range(len(text)) |> std.map(fn(i) escape(text.(i))) |> str.join('')) + char(39)
+}
+// JS bundles rename Oak identifiers ending in '?'; normalize those keys back
+// to identifier syntax rather than quoted strings when re-emitting source.
+// The reserved "super" field is accessed with computed keys in the runtime.
+fn _literal(value) if type(value) {
+    :null, :empty -> '?'
+    :string -> _quote(value)
+    :bool, :int, :float -> string(value)
+    :list -> '[' + (value |> std.map(_literal) |> str.join(', ')) + ']'
+    :object -> '{' + (_sorted(value) |> std.map(fn(key) (if key {
+        'static?', 'static__oak_qm' -> 'static?'
+        'paint?', 'paint__oak_qm' -> 'paint?'
+        'emitDraw?', 'emitDraw__oak_qm' -> 'emitDraw?'
+        _ -> _quote(key)
+    }) + ': ' + _literal(value.(key))) |> str.join('\n')) + '}'
+    _ -> '?'
+}
+
+_ARCHIVE_MARKER := '// @magnolia-applet-archive-v1:'
+fn _archiveComment(archive) if archive {
+    ? -> ''
+    _ -> _ARCHIVE_MARKER + b64.encodeBytes(std.range(len(archive)) |>
+        std.map(fn(i) codepoint(archive.(i)) & 255)) + '\n'
+}
+
+// This decoder does NOT execute or import any part of the supplied Oak source.
+// verifyArchive is lib/applet.oak's unbundle function (name + hash checks).
+fn fromOak(text, verifyArchive) if type(text) = :string & len(text) < 100663296 {
+    true -> {
+        parts := str.cut(text, _ARCHIVE_MARKER)
+        if parts.(1) = '' {
+            true -> _error('Oak source has no recoverable applet archive')
+            _ -> {
+                encoded := str.cut(parts.(1), '\n').(0)
+                bytes := b64.decodeBytes(encoded)
+                if bytes = ? | len(bytes) > 50331648 {
+                    true -> _error('invalid or oversized embedded applet archive')
+                    _ -> {
+                        archive := bytes |> std.map(char) |> str.join('')
+                        verified := verifyArchive(archive)
+                        if verified.type = :error {
+                            true -> verified
+                            _ -> {type: :ok, entry: verified.entry, value: verified.value, archive: archive, jar: verified.jar}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    _ -> _error('expected Oak source smaller than 96 MiB')
+}
+
+// Numeric prefix prevents sanitized Java names from colliding.
+fn _oakIdent(text) {
+    out := ''
+    fn step(i) if i >= len(text) | i >= 48 {
+        true -> out
+        _ -> {
+            c := text.(i)
+            n := codepoint(c)
+            out <- out + if (n >= 65 & n <= 90) | (n >= 97 & n <= 122) |
+                (n >= 48 & n <= 57) | c = '_' {true -> c, _ -> '_'}
+            step(i + 1)
+        }
+    }
+    step(0)
+}
+fn _mnemonic(op) if op {
+    0 -> 'nop'
+    1 -> 'aconst_null'
+    2, 3, 4, 5, 6, 7, 8 -> 'iconst_' + string(op - 3)
+    9, 10 -> 'lconst_' + string(op - 9)
+    11, 12, 13 -> 'fconst_' + string(op - 11)
+    14, 15 -> 'dconst_' + string(op - 14)
+    16 -> 'bipush'
+    17 -> 'sipush'
+    18, 19 -> 'ldc'
+    20 -> 'ldc2_w (exact long or IEEE double bits)'
+    21, 23, 25 -> 'load local'
+    22 -> 'lload (two slots)'
+    24 -> 'dload (two slots)'
+    26, 27, 28, 29, 42, 43, 44, 45 -> 'load local ' + string(if op >= 42 {true -> op - 42, _ -> op - 26})
+    30, 31, 32, 33 -> 'lload_' + string(op - 30)
+    34, 35, 36, 37 -> 'fload_' + string(op - 34)
+    38, 39, 40, 41 -> 'dload_' + string(op - 38)
+    54, 56, 58 -> 'store local'
+    55 -> 'lstore (two slots)'
+    57 -> 'dstore (two slots)'
+    59, 60, 61, 62, 75, 76, 77, 78 -> 'store local ' + string(if op >= 75 {true -> op - 75, _ -> op - 59})
+    63, 64, 65, 66 -> 'lstore_' + string(op - 63)
+    67, 68, 69, 70 -> 'fstore_' + string(op - 67)
+    71, 72, 73, 74 -> 'dstore_' + string(op - 71)
+    46, 50, 51, 52, 53 -> 'array load'
+    47 -> 'laload (two-slot long)'
+    48 -> 'faload'
+    49 -> 'daload (two-slot double)'
+    79, 83, 84, 85, 86 -> 'array store'
+    80 -> 'lastore (two-slot long)'
+    81 -> 'fastore'
+    82 -> 'dastore (two-slot double)'
+    87 -> 'pop'
+    88 -> 'pop2'
+    89 -> 'dup'
+    90 -> 'dup_x1'
+    91 -> 'dup_x2'
+    92 -> 'dup2 (two narrow values or one wide value)'
+    93 -> 'dup2_x1'
+    94 -> 'dup2_x2'
+    95 -> 'swap'
+    96 -> 'iadd'
+    97 -> 'ladd'
+    98 -> 'fadd'
+    99 -> 'dadd'
+    100 -> 'isub'
+    101 -> 'lsub'
+    102 -> 'fsub'
+    103 -> 'dsub'
+    104 -> 'imul'
+    105 -> 'lmul'
+    106 -> 'fmul'
+    107 -> 'dmul'
+    108 -> 'idiv'
+    109 -> 'ldiv'
+    110 -> 'fdiv'
+    111 -> 'ddiv'
+    112 -> 'irem'
+    113 -> 'lrem'
+    114 -> 'frem'
+    115 -> 'drem'
+    116 -> 'ineg'
+    117 -> 'lneg'
+    118 -> 'fneg'
+    119 -> 'dneg'
+    120, 122, 124 -> 'integer shift'
+    121 -> 'lshl'
+    123 -> 'lshr'
+    125 -> 'lushr'
+    126, 128, 130 -> 'integer bitwise'
+    127 -> 'land'
+    129 -> 'lor'
+    131 -> 'lxor'
+    132 -> 'iinc'
+    133 -> 'i2l'
+    134 -> 'i2f'
+    135 -> 'i2d'
+    136 -> 'l2i'
+    137 -> 'l2f'
+    138 -> 'l2d'
+    139 -> 'f2i'
+    140 -> 'f2l'
+    141 -> 'f2d'
+    142 -> 'd2i'
+    143 -> 'd2l'
+    144 -> 'd2f'
+    145 -> 'i2b'
+    146 -> 'i2c'
+    147 -> 'i2s'
+    148 -> 'lcmp'
+    149 -> 'fcmpl'
+    150 -> 'fcmpg'
+    151 -> 'dcmpl'
+    152 -> 'dcmpg'
+    153, 154, 155, 156, 157, 158 -> 'conditional branch'
+    159, 160, 161, 162, 163, 164 -> 'integer comparison branch'
+    165 -> 'if_acmpeq (reference identity)'
+    166 -> 'if_acmpne (reference identity)'
+    167 -> 'goto'
+    170 -> 'tableswitch'
+    171 -> 'lookupswitch'
+    172 -> 'ireturn'
+    173 -> 'lreturn'
+    174 -> 'freturn'
+    175 -> 'dreturn'
+    176 -> 'areturn'
+    177 -> 'return'
+    178 -> 'getstatic'
+    179 -> 'putstatic'
+    180 -> 'getfield'
+    181 -> 'putfield'
+    182 -> 'invokevirtual'
+    183 -> 'invokespecial'
+    184 -> 'invokestatic'
+    185 -> 'invokeinterface'
+    187 -> 'new'
+    188, 189 -> 'new array'
+    190 -> 'arraylength'
+    191 -> 'athrow'
+    192 -> 'checkcast'
+    193 -> 'instanceof'
+    196 -> 'wide local operation'
+    197 -> 'multianewarray (descriptor, dimensions)'
+    198, 199 -> 'null branch'
+    _ -> 'opcode_' + string(op)
+}
+
+// One Oak function per reachable JVM method, with a clear instruction index,
+// mnemonic, constant operands and explicit branch targets. The function's
+// returned Oak list is executed directly: editing an instruction changes the
+// generated Oak applet's behavior without re-running the class-file parser.
+fn _methodSource(program) {
+    functions := ''
+    classesText := ''
+    count := 0
+    _sorted(program.classes) |> std.each(fn(owner) {
+        cls := program.classes.(owner)
+        classesText <- classesText + '    ' + _quote(owner) + ': {\n' +
+            '        super: ' + _literal(cls.super) + '\n' +
+            '        interfaces: ' + _literal(cls.interfaces |> std.default([])) + '\n' +
+            '        fields: ' + _literal(cls.fields) + '\n' +
+            '        static: ' + _literal(cls.static) + '\n' +
+            '        methods: {\n'
+        _sorted(cls.methods) |> std.each(fn(signature) {
+            method := cls.methods.(signature)
+            fnName := 'applet_method_' + string(count) + '_' + _oakIdent(owner + '_' + signature)
+            count <- count + 1
+            functions <- functions + '// ' + _cleanComment(owner + '.' + signature) + '\nfn ' + fnName + '() [\n'
+            method.code |> std.each(fn(inst, i) {
+                comment := '// ' + string(i) + ': ' + _mnemonic(inst.(0))
+                if (inst.(0) >= 153 & inst.(0) <= 167) | inst.(0) = 198 | inst.(0) = 199 ->
+                    comment <- comment + ' -> instruction ' + string(inst.(1))
+                if inst.(0) = 170 | inst.(0) = 171 ->
+                    comment <- comment + ' (default -> instruction ' + string(inst.(1)) + ')'
+                if inst.(0) = 196 {
+                    true -> {
+                        action := if inst.(2).(0) {
+                            21 -> 'iload'
+                            22 -> 'lload'
+                            23 -> 'fload'
+                            24 -> 'dload'
+                            25 -> 'aload'
+                            54 -> 'istore'
+                            55 -> 'lstore'
+                            56 -> 'fstore'
+                            57 -> 'dstore'
+                            58 -> 'astore'
+                            132 -> 'iinc'
+                            _ -> 'unknown'
+                        }
+                        comment <- '// ' + string(i) + ': wide ' + action +
+                            ' local ' + string(inst.(1))
+                        if inst.(2).(0) = 132 ->
+                            comment <- comment + ' by ' + string(inst.(2).(1))
+                    }
+                }
+                if type(inst.(2)) = :list & inst.(0) != 170 &
+                    inst.(0) != 171 & inst.(0) != 196 ->
+                    comment <- comment + ' ' +
+                    _cleanComment(inst.(2) |> std.map(string) |> str.join('.'))
+                functions <- functions + '    ' + comment + '\n    ' + _literal(inst) + ',\n'
+            })
+            functions <- functions + ']\n\n'
+            classesText <- classesText + '            ' + _quote(signature) + ': {' +
+                'locals: ' + string(method.locals) + ', stack: ' + string(method.stack) +
+                ', argWidths: ' + _literal(method.argWidths |> std.default([])) +
+                ', handlers: ' + _literal(method.handlers |> std.default([])) +
+                ', static?: ' + string(method.static?) + ', code: ' + fnName + '()},\n'
+        })
+        classesText <- classesText + '        }\n    },\n'
+    })
+    functions + 'program := {entry: ' + _quote(program.entry) + ', kind: ' +
+        _literal(program.kind) + ', classes: {\n' + classesText + '}}\n'
+}
+
+fn _invocation(params, options) {
+    'params := ' + _literal(std.default(params, {})) + '\n' +
+    'options := ' + _literal(std.default(options, {})) + '\n' +
+    'drawEncoder := import(' + _quote('json') + ')\n' +
+    'println := std.println\n' +
+    'result := runtime.run(program, params, options)\n' +
+    'if result.output != ' + _quote('') + ' -> print(result.output)\n' +
+    'if result.type = :ok & options.paint? = true & len(result.draw) > 0 -> println(' +
+        _quote('__MAGNOLIA_DRAW_V1__:') + ' + drawEncoder.serialize({' +
+        'width: options.width, height: options.height, commands: result.draw}))\n' +
+    'if result.type = :error -> {\n' +
+    '    println(' + _quote('[applet] ') + ' + result.message)\n' +
+    '    exit(1)\n}\n' +
+    'if result.value != ? -> {\n' +
+    '    shown := runtime.valueText(result.value)\n' +
+    '    if shown.type = :error -> {\n' +
+    '        println(' + _quote('[applet] ') + ' + shown.message)\n' +
+    '        exit(1)\n' +
+    '    }\n' +
+    '    println(shown.value)\n' +
+    '}\n'
+}
+
+// Only the generated method bodies are editable by the reverse compiler.
+// Keep this header and the invocation separate from them: the recompiler
+// checks both against the archived original and the emitted invocation hash.
+fn header(archive) {
+    '// Applet -> Oak, generated by Magnolia. Edit the named method functions below.\n' +
+    '// Same-layout bytecode edits can become NEW class bytes via: magnolia build --entry EDITED.oak --output NEW.class\n' +
+    '// restoreOak instead recovers the archived ORIGINAL; arbitrary Oak is not a Java compiler.\n' +
+    _archiveComment(archive)
+}
+
+// Primary class->Oak path: readable instructions + runnable runtime in ONE
+// Oak source file. Magnolia is needed to execute Oak; no JVM is involved.
+fn standaloneSource(program, params, options, runtimePath, archive) {
+    runtimeSource := fs.readFile(runtimePath)
+    vmLibSource := fs.readFile(path.resolve('jvm-vm-libs.oak', path.dir(runtimePath)))
+    fpSource := fs.readFile(path.resolve('ieee754.oak', path.dir(runtimePath)))
+    int64Source := fs.readFile(path.resolve('int64.oak', path.dir(runtimePath)))
+    importLine := 'vmLib := import(' + char(39) + 'jvm-vm-libs' + char(39) + ')'
+    fpLine := 'fp := import(' + char(39) + 'ieee754' + char(39) + ')'
+    int64Line := 'longs := import(' + char(39) + 'int64' + char(39) + ')'
+    if runtimeSource = ? | vmLibSource = ? | fpSource = ? | int64Source = ? |
+        !str.contains?(runtimeSource, importLine) |
+        !str.contains?(runtimeSource, fpLine) |
+        !str.contains?(runtimeSource, int64Line) {
+        true -> _error('could not inline portable JVM VM libraries or IEEE values')
+        _ -> {
+            runtimeSource <- str.replace(runtimeSource, importLine, vmLibSource +
+                '\nvmLib := {jvmMethod: jvmMethod, jvmField: jvmField,\n' +
+                '    jvmNew: jvmNew, jvmReference: jvmReference,\n' +
+                '    jvmReferenceSubtype?: jvmReferenceSubtype?,\n' +
+                '    jvmThrowableParent: jvmThrowableParent,\n' +
+                '    jvmColorName: jvmColorName, jvmInvoke: jvmInvoke, jvmString: jvmString}')
+            runtimeSource <- str.replace(runtimeSource, fpLine, fpSource +
+                '\nfp := {f32: f32, f64: f64, float?: float?, double?: double?,\n' +
+                '    wide?: wide?, sign: sign, kind: kind, numeric: numeric,\n' +
+                '    fromNumber: fromNumber, fromLong: fromLong,\n' +
+                '    negative: negative, zero: zero,\n' +
+                '    infinity: infinity, nan: nan, binary: binary,\n' +
+                '    compare: compare, toInt: toInt, text: text}')
+            runtimeSource <- str.replace(runtimeSource, int64Line, int64Source +
+                '\nlongs := {u32: u32, s32: s32, long?: long?, long: long,\n' +
+                '    add: add, sub: sub, neg: neg, mul: mul, cmp: cmp,\n' +
+                '    and: and, or: or, xor: xor, shiftLeft: shiftLeft,\n' +
+                '    shiftRightUnsigned: shiftRightUnsigned, shiftRightSigned: shiftRightSigned,\n' +
+                '    divRem: divRem, toText: toText}')
+            invocation := _invocation(params, options)
+            {type: :ok, value: header(archive) +
+            '// @magnolia-applet-runtime-sha256-v1:' +
+            crypto.sha256(runtimeSource) + '\n' + runtimeSource +
+            '\nruntime := {run: run, valueText: valueText}\n' +
+            '// @magnolia-applet-invocation-sha256-v1:' +
+            crypto.sha256(invocation) + '\n' +
+            _methodSource(program) + invocation}
+        }
+    }
+}
