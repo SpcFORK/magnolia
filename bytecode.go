@@ -86,6 +86,16 @@ const (
 	opHOFFilter opcode = 57 // pop subject; push elements where f(elem, i) == true
 	opHOFEach   opcode = 58 // pop subject; call f(elem, i); push null
 	opHOFReduce opcode = 59 // pop seed, pop subject; push f(acc, elem, i) fold
+
+	// Superinstruction (M1 TODO-10, §7.5): fuses the ubiquitous comparison-
+	// match prologue `LOAD_LOCAL s; CONST_INT imm; LT; DUP; CONST_TRUE; EQ;
+	// JUMP_FALSE; POP(+POP)` (9 dispatches) into one. Operand: u16 local
+	// slot, i32 immediate, i32 else-target. Emitted only inside function
+	// bodies (top-level phantom-local semantics stay on the generic path).
+	// Falls through when locals[slot] < imm (Eq-true), else jumps after
+	// consuming the condition; the else path pushes null for no-match
+	// fall-through, matching the tree-walker (fixes the cond-leak bug).
+	opLtLocalJumpTrue opcode = 60
 )
 
 var opcodeNames = [...]string{
@@ -106,6 +116,7 @@ var opcodeNames = [...]string{
 	"CALL_SPREAD",
 	"LOAD_UPVAL_FAST", "STORE_UPVAL_FAST",
 	"HOF_MAP", "HOF_FILTER", "HOF_EACH", "HOF_REDUCE",
+	"LT_LOCAL_JUMP_TRUE",
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +921,15 @@ func (co *compiler) compileIf(n ifExprNode) {
 }
 
 func (co *compiler) compileIfTail(n ifExprNode, isTail bool) {
+	// Superinstruction fast path (M1 TODO-10, §7.5): `if local < imm` with a
+	// literal-true arm (+ optional wildcard) is the hottest pattern in the
+	// corpus (fib, loop counters, AVM1) — 9 dispatches fuse into 1.
+	if co.parentLocals != nil {
+		if sl, imm, ok := co.matchLtLocalImmTrue(n); ok {
+			co.compileLtLocalImmTrue(n, sl, imm, isTail)
+			return
+		}
+	}
 	co.compileNode(n.cond)
 	var endJumps []int
 
@@ -992,9 +1012,84 @@ func (co *compiler) compileIfTail(n ifExprNode, isTail bool) {
 		}
 	}
 
+	// No-match fall-through parity (tree-walker returns null): the last
+	// non-wildcard group's false path reaches endTarget with the condition
+	// still on the stack — pop it and push null. With a trailing wildcard,
+	// the wildcard always matches and consumes the condition itself.
+	if len(groups) > 0 && !groups[len(groups)-1].hasWildcard {
+		co.emitOp(opPop)
+		co.emitOp(opConstNull)
+	}
 	endTarget := co.offset()
 	for _, off := range endJumps {
 		co.patchI32(off, endTarget)
+	}
+}
+
+// matchLtLocalImmTrue reports whether the if-expression has the superinstr
+// shape: cond = `local < imm-literal`, first arm targets literal true, and
+// the final arm (when present) is a wildcard. Returns the local slot and
+// immediate.
+func (co *compiler) matchLtLocalImmTrue(n ifExprNode) (int, int64, bool) {
+	bin, ok := n.cond.(binaryNode)
+	if !ok || bin.op != less {
+		return 0, 0, false
+	}
+	id, ok := bin.left.(identifierNode)
+	if !ok {
+		return 0, 0, false
+	}
+	slot := co.resolveLocal(id.payload)
+	if slot < 0 {
+		return 0, 0, false
+	}
+	lit, ok := bin.right.(intNode)
+	if !ok {
+		return 0, 0, false
+	}
+	if len(n.branches) == 0 {
+		return 0, 0, false
+	}
+	if tb, ok := n.branches[0].target.(boolNode); !ok || !tb.payload {
+		return 0, 0, false
+	}
+	if len(n.branches) == 1 {
+		return slot, lit.payload, true
+	}
+	if len(n.branches) == 2 {
+		if _, ok := n.branches[1].target.(emptyNode); ok {
+			return slot, lit.payload, true
+		}
+	}
+	return 0, 0, false
+}
+
+// compileLtLocalImmTrue emits the fused comparison-match superinstruction.
+func (co *compiler) compileLtLocalImmTrue(n ifExprNode, slot int, imm int64, isTail bool) {
+	co.emitOp(opLtLocalJumpTrue)
+	co.emitU16(slot)
+	co.emitI32(int(imm))
+	elseSite := co.offset()
+	co.emitI32(0)
+
+	co.compileNodeTail(n.branches[0].body, isTail)
+	if len(n.branches) == 2 {
+		// Else target = start of the wildcard body (its value is the result).
+		co.emitOp(opJump)
+		endSite := co.offset()
+		co.emitI32(0)
+		co.patchI32(elseSite, co.offset())
+		co.compileNodeTail(n.branches[1].body, isTail)
+		co.patchI32(endSite, co.offset())
+	} else {
+		// No wildcard: else jumps to an emitted null (no-match parity with
+		// the tree-walker); the match path skips it.
+		co.emitOp(opJump)
+		skipNull := co.offset()
+		co.emitI32(0)
+		co.patchI32(elseSite, co.offset())
+		co.emitOp(opConstNull)
+		co.patchI32(skipNull, co.offset())
 	}
 }
 
@@ -1343,6 +1438,12 @@ func disassemble(chunk *bytecodeChunk) string {
 			v := int(bc[i+1]) | int(bc[i+2])<<8
 			fmt.Fprintf(&sb, " fn#%d", v)
 			advance = 3
+		case opLtLocalJumpTrue:
+			s := int(bc[i+1]) | int(bc[i+2])<<8
+			imm := int32(uint32(bc[i+3]) | uint32(bc[i+4])<<8 | uint32(bc[i+5])<<16 | uint32(bc[i+6])<<24)
+			tgt := int32(uint32(bc[i+7]) | uint32(bc[i+8])<<8 | uint32(bc[i+9])<<16 | uint32(bc[i+10])<<24)
+			fmt.Fprintf(&sb, " @%d <%d else->%d", s, imm, tgt)
+			advance = 11
 		case opLoadUpvalFast, opStoreUpvalFast:
 			d := int(bc[i+1]) | int(bc[i+2])<<8
 			s := int(bc[i+3]) | int(bc[i+4])<<8
@@ -2130,6 +2231,38 @@ func (vm *VM) run() (Value, *runtimeError) {
 					topScope.values = topLocals
 				}
 				topLocals[slot] = val
+			}
+
+		case opLtLocalJumpTrue:
+			slot := vm.fetchU16()
+			imm := vm.fetchI32()
+			target := vm.fetchI32()
+			var cond Value
+			frame := vm.currentFrame()
+			if frame != nil {
+				var lv Value = null
+				if slot < len(frame.locals) {
+					lv = frame.locals[slot]
+				}
+				if li, ok := lv.(IntValue); ok {
+					cond = BoolValue(li < IntValue(imm))
+				} else {
+					cond = vmLt(lv, makeIntValue(int64(imm)))
+				}
+			} else {
+				// Top level: mirror opLoadLocal's topLocals read.
+				var lv Value = null
+				if slot < len(topLocals) {
+					lv = topLocals[slot]
+				}
+				cond = vmLt(lv, makeIntValue(int64(imm)))
+			}
+			if bv, ok := cond.(BoolValue); ok && bool(bv) {
+				// Match: fall through to the true arm (cond consumed).
+			} else {
+				// No match (incl. non-bool cond): jump to the else stream —
+				// wildcard body, or an emitted null for the 1-arm shape.
+				vm.pc = target
 			}
 
 		case opHOFMap, opHOFFilter, opHOFEach, opHOFReduce:
