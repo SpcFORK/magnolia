@@ -1126,8 +1126,20 @@ func (co *compiler) compileFunction(n *fnNode) {
 func (co *compiler) hofCallbackFnIdx(arg astNode) (int, bool) {
 	switch cb := arg.(type) {
 	case fnNode:
+		// The callback is an inner fnNode of the enclosing function: its
+		// body may capture enclosing locals, so the enclosing function must
+		// heap-scope its frames (TODO-08 induction). The HOF fast path
+		// bypasses compileNode(fnNode), which is where the normal marking
+		// happens — without this mark, callbacks defined inside a slab-frame
+		// function silently resolve captured locals to null (TODO-14 fix).
+		if len(co.fnScopeFlags) > 0 {
+			co.fnScopeFlags[len(co.fnScopeFlags)-1] = true
+		}
 		return co.emitFunctionBody(&cb), true
 	case *fnNode:
+		if len(co.fnScopeFlags) > 0 {
+			co.fnScopeFlags[len(co.fnScopeFlags)-1] = true
+		}
 		return co.emitFunctionBody(cb), true
 	}
 	return 0, false
