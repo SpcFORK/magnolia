@@ -15,7 +15,7 @@ Every item maps 1-to-1 to its governing design section (`§X.Y`) and carries an 
 - [x] **TODO-01 (`-> §3.3, §6.1`)**: Restore Go build/test hygiene across `CGO_ENABLED=1` and `CGO_ENABLED=0`: keep `package main` headers/stubs in `syscalln_unix.go` and `sysproc_other.go`, resolve leftover upstream Git merge conflict markers in `lib/std.oak`, `lib/bytes.oak`, `lib/gui-common.oak`, and `lib/jvm-vm-libs.oak`, and clean up duplicate `lib.go` registrations (preserving 100% of Java/JVM/applet/MIDP/SWF/UI modules in the opt-in section while adding the 4 missing embeds reported by `TestStdlibRegistryCoversLibDirectory`). **DONE:** all four sub-items landed; `go test ./...` green under both CGO modes; 28 duplicate embed-var blocks deduplicated; `gui-render-core`, `gui-window-nest`, `obj`, `web-pipeline` embedded; conflict markers resolved (HEAD-side shared-helper abstractions kept — each had exactly one definition); the newly-embedded `lib/gui-window-nest.oak` was repaired from a half-finished mechanical match-conversion (see §3.4).
 - [ ] **TODO-02 (`-> §3.1.9, §6.1`)**: Unify self-hosted Oak tokenizer/parser/macro tools (`lib/syntax-tokenize.oak`, `lib/syntax-parse.oak`, `lib/syntax-macros.oak`, `lib/transpile.oak`) with Go host (`token.go`, `parse.go`) for `**` (`:power`), `==` (`:deepEq`), `~` (`:tilde`), `fn {}` empty-body rewrite, and `:class` macro/transpiler traversal, while preserving all parser-sugar invariants (`|>`, `with`, `cs`, `if`, `.(ident)`).
 - [x] **TODO-03 (`-> §3.2.8, §6.2`)** — **DONE** (commit `e84d394`): Fix `bench_test.go` so lexing/parsing/AST-optimization and bytecode compilation are separated from `b.N` execution loops (`b.ResetTimer()`), adding `BenchmarkEvalPreparsed*` and `BenchmarkBytecodePrecompiled*` alongside end-to-end benchmarks.
-- [ ] **TODO-04 (`-> §2.2, §6.3, §11.1`)**: Create the cross-language benchmark & differential-oracle suite (`bench/` + `/tmp/ref/`) comparing **Goose** (`aardappel/goose`), **C++ (`g++`/`clang++ -O3 -march=native`)**, **Baseline Magnolia**, and **Magnolia-Hyper** across compute, recursion, region/tree allocation (`records`/`btree`), pointer-relinking (`lru`), stream fusion (`|>`/`with`), and runtime value specialization workloads.
+- [x] **TODO-04 (`-> §2.2, §6.3, §11.1`)** — **DONE** (commit THIS: `bench/todo04/` suite, differential oracle all-OK across magnolia -n/-b, goose native, g++ -O3) Create the cross-language benchmark & differential-oracle suite (`bench/` + `/tmp/ref/`) comparing **Goose** (`aardappel/goose`), **C++ (`g++`/`clang++ -O3 -march=native`)**, **Baseline Magnolia**, and **Magnolia-Hyper** across compute, recursion, region/tree allocation (`records`/`btree`), pointer-relinking (`lru`), stream fusion (`|>`/`with`), and runtime value specialization workloads.
 
 ### Phase B — Go Host Engine & `bytecode.go` Overhaul (Milestone M1)
 - [x] **TODO-05 (`-> §3.1.0, §3.1.1, §3.1.4, §7.6`)** — **DONE** (commit `88963d8`): Remove the unreachable dead `n.op == pipeArrow` operator branch in `bytecode.go` (`compileNodeTail` — left over from assuming `|>` was a `binaryNode`) and implement shared multi-target `if` body deduplication (`parse.go` splits `a, b -> body` into multiple `ifBranch` entries sharing the identical `body` AST node reference) in `compileIfTail`.
@@ -426,7 +426,35 @@ Key readings:
 - Eval (tree-walker) columns unchanged by design: TODO-06's lock-gating removes
   atomics, not allocations; TODO-09 (lexical coordinates) is the next eval-side win.
 
-`~` Baseline captured pre-commit but ledgered under `e84d394` (M0).*
+`~` Baseline captured pre-commit but ledgered under `e84d394` (M0).
+
+#### §11.2.2 Cross-language results (TODO-04, `bench/todo04/`, min-of-3, this sandbox 2026-11-26)
+
+All six workloads verified checksum-identical across all four engines
+(differential oracle). Oak columns include a ~25–30 ms process floor
+(startup + parse + std import); `-n`/`-b` ratios unaffected. Full protocol
++ anti-DCE/anti-collapse/anti-constfold measures documented in
+`bench/todo04/README.md`.
+
+| workload | magnolia `-n` | magnolia `-b` | goose (native) | c++ `-O3` |
+| :--- | ---: | ---: | ---: | ---: |
+| fib (Σ fib20..27) | 1,264 ms | 146 ms | 1.30 ms | 2.03 ms |
+| arith (1M tail calls) | 1,215 ms | 209 ms | 1.16 ms | 1.08 ms |
+| sieve (100k) | 451 ms | 93 ms | 0.39 ms | 0.14 ms |
+| lru (60k ops) | 617 ms | 158 ms | 0.78 ms | 2.08 ms |
+| records (trees d4..12) | 90 ms | 27 ms | 0.32 ms | 0.30 ms |
+| pipe (20k HOF chain) | 141 ms | 35 ms | 0.30 ms | 0.03 ms |
+
+Findings:
+- **Magnolia-Hyper `-b` = 3.5–8.7× over its own tree-walker** on every shape
+  (the M1 TODO-05..12 work), but ~3–4 orders behind native — the M2 AOT
+  backends are the planned closers.
+- Goose beats idiomatic C++ on **lru** (0.78 vs 2.08 ms; grow-only arena vs
+  `unordered_map`) — reproduces Goose's own published lru result on this box —
+  and is parity on records; C++ wins pipe ~10× (fused loop vs generic HOF
+  dispatch), the admitted Goose ceiling that Magnolia-Hyper's in-frame opHOF*
+  fusion (§7.8) targets for its own backend.
+- lru is also the reference workload for TODO-16 (2GB VM-region bump stacks).*
 
 | Workload | Goose | C++ `-O3 -march=native` | Baseline Magnolia | Magnolia-Hyper `--bytecode` | Magnolia-Hyper `--c` | Magnolia-Hyper JIT |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

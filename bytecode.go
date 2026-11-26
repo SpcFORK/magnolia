@@ -2657,6 +2657,17 @@ func (vm *VM) run() (Value, *runtimeError) {
 					break
 				}
 			}
+			// Object identity parity with the tree-walker's eq (evalBinaryOp):
+			// `=` on object records compares map identity. Deep Eq here would
+			// recurse infinitely on cyclic graphs (lru nodes, parent links).
+			if lo, ok := left.(ObjectValue); ok {
+				if ro, ok2 := right.(ObjectValue); ok2 {
+					vm.push(BoolValue(ifaceDataPtr(lo) == ifaceDataPtr(ro)))
+				} else {
+					vm.push(BoolValue(false))
+				}
+				break
+			}
 			// Fast path for single-byte string comparison (dominant in char loops)
 			if ls, ok := left.(*StringValue); ok {
 				if rs, ok := right.(*StringValue); ok {
@@ -2671,6 +2682,14 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opNeq:
 			right := vm.pop()
 			left := vm.pop()
+			if lo, ok := left.(ObjectValue); ok {
+				if ro, ok2 := right.(ObjectValue); ok2 {
+					vm.push(BoolValue(ifaceDataPtr(lo) != ifaceDataPtr(ro)))
+				} else {
+					vm.push(BoolValue(true))
+				}
+				break
+			}
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok {
 					vm.push(BoolValue(li != ri))
