@@ -130,25 +130,50 @@ fn _typeOf(node, fnCtx) if _t(node) {
 		}
 		_ -> :unknown
 	}
-	:fnCall -> if _calleeName(node) {
-		'map' -> :list
-		'filter' -> :list
-		'each' -> :null
-		'reduce' -> if node.args {
+	:fnCall -> {
+		name := _calleeName(node)
+		if name {
 			? -> :unknown
-			_ -> _typeOf(_arg(node, 1), fnCtx) // type of the seed
+			_ -> if name {
+				'map' -> :list
+				'filter' -> :list
+				'each' -> :null
+				'reduce' -> if node.args {
+					? -> :unknown
+					_ -> _typeOf(_arg(node, 1), fnCtx) // type of the seed
+				}
+				'len' -> :int
+				'type' -> :atom
+				'string' -> :string
+				'int' -> :int
+				'float' -> :float
+				'range' -> :list
+				'keys' -> :list
+				'values' -> :list
+				'slice' -> :list
+				'append' -> :list
+				_ -> {
+					// call-graph stage: consult the known return type of a
+					// same-bundle function (unless shadowed by a local).
+					// NOTE: the nested `if`s MUST be wrapped in `{}` blocks —
+					// an `if` directly as a match-arm value silently
+					// mis-parses in the Go parser (found by differential
+					// probing, TODO-14).
+					if fnCtx.bindings.(name) {
+						? -> {
+							if fnCtx.out.functions.(name) {
+								? -> :unknown
+								_ -> if fnCtx.out.functions.(name).returns {
+									? -> :unknown
+									_ -> fnCtx.out.functions.(name).returns
+								}
+							}
+						}
+						_ -> :unknown
+					}
+				}
+			}
 		}
-		'len' -> :int
-		'type' -> :atom
-		'string' -> :string
-		'int' -> :int
-		'float' -> :float
-		'range' -> :list
-		'keys' -> :list
-		'values' -> :list
-		'slice' -> :list
-		'append' -> :list
-		_ -> :unknown
 	}
 	:ifExpr -> {
 		acc := ?
@@ -538,14 +563,53 @@ fn _fnAnalyze(fnNode, out) {
 		fused: outermost
 		fusedCount: outerCount
 		returns: _typeOf(fnNode.body, fnCtx)
+		node: fnNode
+		ctx: fnCtx
 	}
 	?
 }
 
+// _inferReturns is the call-graph stage of the type pass (§4 pass 2, second
+// stage): recompute every function's return type until fixpoint so that
+// user-fn call results flow bottom-up (e.g. g returns int -> f's
+// `g()` arm is int). Recursion converges conservatively at :unknown.
+// Bounded to 16 sweeps (deep chains longer than that are re-run next build).
+fn _inferReturns(out) {
+	fn sweep() {
+		changed := false
+		names := keys(out.functions)
+		fn scan(j) if j < len(names) {
+			true -> {
+				rec := out.functions.(names.(j))
+				t := _typeOf(rec.node.body, rec.ctx)
+				if t != rec.returns {
+					true -> {
+						rec.returns <- t
+						changed <- true
+					}
+					_ -> ?
+				}
+				scan(j + 1)
+			}
+			_ -> ?
+		}
+		scan(0)
+		changed
+	}
+	fn loop(i) if i < 16 {
+		true -> if sweep() {
+			true -> loop(i + 1)
+			_ -> ?
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
 // analyze runs the MIR passes over a bundle of top-level AST nodes.
 // Returns {version, functions, diagnostics, anonCount}.
-fn analyze(nodes) {
-	out := {version: 'mir-0.1', functions: {}, diagnostics: [], anonCount: 0}
+	fn analyze(nodes) {
+	out := {version: 'mir-0.2', functions: {}, diagnostics: [], anonCount: 0}
 	fn scan(i) if i < len(nodes) {
 		true -> {
 			if _t(nodes.(i)) {
@@ -557,6 +621,8 @@ fn analyze(nodes) {
 		_ -> ?
 	}
 	scan(0)
+	// call-graph stage: bottom-up return-type fixpoint
+	_inferReturns(out)
 	{
 		version: out.version
 		functions: out.functions
