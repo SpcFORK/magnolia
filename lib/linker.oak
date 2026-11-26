@@ -161,10 +161,12 @@ fn linkELF(textCode, dataBytes, entrySymbol, arch) {
 	phdrSize := 56       // Program header size
 	phdrCount := 2       // .text + .data
 
-	textOffset := ehdrSize + (phdrSize * phdrCount)
+	// p_offset must be congruent to p_vaddr modulo the page size (Linux
+	// binfmt_elf requirement) — page-align past the header + phdrs
+	textOffset := 4096
 	textSize := len(textCode)
 
-	// Align data to page boundary
+	// Align data to page boundary (offset ≡ vaddr mod pagesize)
 	dataOffset := textOffset + textSize
 	dataAlignedOffset := dataOffset
 	if dataOffset % 4096 > 0 -> dataAlignedOffset <- dataOffset + (4096 - (dataOffset % 4096))
@@ -212,13 +214,12 @@ fn linkELF(textCode, dataBytes, entrySymbol, arch) {
 	w.writeQword(dataSize)           // p_memsz
 	w.writeQword(4096)               // p_align
 
-	// --- .text section ---
+	// --- .text section (at page-aligned offset 4096) ---
+	w.padTo(textOffset)
 	w.writeBytes(textCode)
 
-	// Pad to data section
-	w.padTo(4096)
-
-	// --- .data section ---
+	// --- .data section (at its page-aligned offset) ---
+	w.padTo(dataAlignedOffset)
 	w.writeBytes(dataBytes)
 
 	{
