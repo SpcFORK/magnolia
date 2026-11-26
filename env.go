@@ -1450,6 +1450,10 @@ func (c *Context) oakWinMsgLoop(args []Value) (Value, *runtimeError) {
 }
 
 func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
+	// From this point the engine may run Oak code concurrently: flip the
+	// global lock gate before the spawned goroutine can observe it
+	// (M1 TODO-06, §7.3). Monotonic - never flips back to false.
+	engConcurrent.Store(true)
 	if len(args) < 1 {
 		return nil, &runtimeError{
 			reason: "go requires at least 1 argument (function to run)",
@@ -2133,6 +2137,9 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ctx *Context) oakListen(args []Value) (Value, *runtimeError) {
+	// listen() spawns concurrent event goroutines: flip the lock gate
+	// (M1 TODO-06). Monotonic - never flips back to false.
+	engConcurrent.Store(true)
 	if err := ctx.requireArgLen("listen", args, 2); err != nil {
 		return nil, err
 	}

@@ -139,7 +139,7 @@ fn ChildWindow(parentWindow, options) {
 
 fn destroyChild(child) if child._isChild {
 	true -> {
-		if child.closed -> {
+		if child.closed {
 			true -> { type: :ok, alreadyClosed: true }
 			_ -> _err('Child window already closed', child)
 		}
@@ -149,7 +149,7 @@ fn destroyChild(child) if child._isChild {
 		_releaseChildSurface(child)
 		// Remove from parent's children list.
 		parent := _getParent(child)
-		if parent {
+		if parent != ? -> {
 			_removeFromChildren(parent, child)
 		}
 		// Clear parent registry entry.
@@ -174,7 +174,7 @@ fn destroyChildren(parent) {
 }
 
 fn _removeFromChildren(parent, child) {
-	fn _remove(i) if i >= len(parent._children) -> {
+	fn _remove(i) if i >= len(parent._children) {
 		true -> {
 			fn _shift(j) if j < len(parent._children) -> {
 				parent._children.(j) <- parent._children.(j + 1)
@@ -184,7 +184,7 @@ fn _removeFromChildren(parent, child) {
 			parent._children.pop()
 		}
 		_ -> {
-			fn _skip(j) if j >= len(parent._children) -> {
+			fn _skip(j) if j >= len(parent._children) {
 				true -> _remove(i)
 				_ -> if parent._children.(j) = child {
 					true -> _remove(j)
@@ -206,7 +206,7 @@ fn childCount(parent) len(_default(parent._children, []))
 fn isChild?(obj) _default(obj._isChild, false)
 
 fn findChild(parent, predicate) {
-	fn _search(i) if i >= len(parent._children) -> {
+	fn _search(i) if i >= len(parent._children) {
 		true -> ?
 		_ -> {
 			child := parent._children.(i)
@@ -222,7 +222,7 @@ fn findChild(parent, predicate) {
 fn childDepth(child) {
 	fn _depth(node, d) {
 		parent := _getParent(node)
-		if parent {
+		if parent != ? {
 			true -> _depth(parent, d + 1)
 			_ -> d
 		}
@@ -233,11 +233,13 @@ fn childDepth(child) {
 fn childAt(parent, x, y) {
 	// Hit-test children top-most first (highest zIndex).
 	sorted := _sortedChildren(parent)
-	fn _test(i) if i < len(sorted) -> {
-		child := sorted.(i)
-		if child.visible & _pointInChild(child, x, y) {
-			true -> child
-			_ -> _test(i + 1)
+	fn _test(i) if i < len(sorted) {
+		true -> {
+			child := sorted.(i)
+			if child.visible & _pointInChild(child, x, y) {
+				true -> child
+				_ -> _test(i + 1)
+			}
 		}
 		_ -> ?
 	}
@@ -257,7 +259,7 @@ fn _sortedChildren(parent) {
 	kids
 }
 
-fn _sortByZIndex(arr, lo, hi) if lo >= hi -> {
+fn _sortByZIndex(arr, lo, hi) if lo >= hi {
 	true -> arr
 	_ -> {
 		// Simple insertion sort by zIndex descending.
@@ -284,9 +286,9 @@ fn setChildZIndex(child, z) if child._isChild {
 fn bringToFront(child) if child._isChild {
 	true -> {
 		parent := _getParent(child)
-		if parent {
+		if parent != ? -> {
 			maxZ := 0
-			fn _findMax(i) if i >= len(parent._children) -> {
+			fn _findMax(i) if i >= len(parent._children) {
 				true -> maxZ
 				_ -> {
 					sibling := parent._children.(i)
@@ -311,9 +313,9 @@ fn bringToFront(child) if child._isChild {
 fn sendToBack(child) if child._isChild {
 	true -> {
 		parent := _getParent(child)
-		if parent {
+		if parent != ? -> {
 			minZ := 0
-			fn _findMin(i) if i >= len(parent._children) -> {
+			fn _findMin(i) if i >= len(parent._children) {
 				true -> minZ
 				_ -> {
 					sibling := parent._children.(i)
@@ -345,7 +347,7 @@ fn reparent(child, newParent) if child._isChild {
 		}
 		oldParent := _getParent(child)
 		// Remove from old parent.
-		if oldParent {
+		if oldParent != ? -> {
 			_removeFromChildren(oldParent, child)
 		}
 		// Add to new parent.
@@ -420,7 +422,7 @@ fn toLocalCoords(child, px, py) if child._isChild {
 	true -> {
 		fn _convert(node, tx, ty) {
 			parent := _getParent(node)
-			if parent {
+			if parent != ? {
 				true -> _convert(parent, tx + node.x, ty + node.y)
 				_ -> { x: tx, y: ty }
 			}
@@ -440,7 +442,7 @@ fn toLocalCoords(child, px, py) if child._isChild {
 // payload: the event payload object (with x, y, etc.).
 fn routeInput(parent, eventType, payload) {
 	target := childAt(parent, _default(payload.x, 0), _default(payload.y, 0))
-	if target {
+	if target != ? {
 		true -> {
 			// Convert coordinates to child-local space.
 			localPayload := payload
@@ -452,7 +454,7 @@ fn routeInput(parent, eventType, payload) {
 			// Try to dispatch to the child's event bus.
 			handled := guiEvents.emit(target, eventType, localPayload)
 			// If not handled and bubbling is enabled, dispatch to parent.
-			if !handled & target.bubbleInput {
+			if !handled & target.bubbleInput -> {
 				bubblePayload := payload
 				bubblePayload.target <- target
 				bubblePayload.bubbles := true
@@ -466,21 +468,24 @@ fn routeInput(parent, eventType, payload) {
 
 // ─── Surface management ─────────────────────────────────────────────────────
 
-fn _ensureChildSurface(child) if child.backend {
+fn _ensureChildSurface(child) if child.backend != ? {
 	// Delegate to gui-canvas's surface management, which handles
 	// the platform-specific HDC/bitmap creation. The child window
 	// has the same fields as a canvas, so the same routine works.
-	parent := _getParent(child)
-	if parent {
-		true -> guiCanvas._ensureCanvasSurface(child)
-		_ -> { type: :ok }
+	true -> {
+		parent := _getParent(child)
+		if parent != ? {
+			true -> guiCanvas._ensureCanvasSurface(child)
+			_ -> { type: :ok }
+		}
 	}
 	_ -> { type: :ok }
 }
 
-fn _releaseChildSurface(child) if child.backend {
+fn _releaseChildSurface(child) if child.backend != ? {
 	// Delegate to gui-canvas's surface release.
-	guiCanvas._releaseCanvasSurface(child)
+	true -> guiCanvas._releaseCanvasSurface(child)
+	_ -> { type: :ok }
 }
 
 // ─── Compositing ────────────────────────────────────────────────────────────
@@ -494,7 +499,7 @@ fn _releaseChildSurface(child) if child.backend {
 // the child's bounds.
 fn compositeChildren(parent) {
 	sorted := _sortedChildren(parent)
-	fn _composite(i) if i >= len(sorted) -> {
+	fn _composite(i) if i >= len(sorted) {
 		true -> { type: :ok }
 		_ -> {
 			child := sorted.(i)
@@ -514,7 +519,7 @@ fn compositeChildren(parent) {
 // Useful for off-screen rendering or screenshots.
 fn compositeAllRecursive(window) {
 	compositeChildren(window)
-	fn _recurse(i) if i >= len(window._children) -> {
+	fn _recurse(i) if i >= len(window._children) {
 		true -> { type: :ok }
 		_ -> {
 			child := window._children.(i)
