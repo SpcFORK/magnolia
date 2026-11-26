@@ -197,6 +197,70 @@ fn transpileInst(inst) if inst.op {
 		_ -> { type: :identifier, tok: _tok(), val: _regName(inst.a) }
 	}
 
+	// plain ret (no frame teardown), %a = result — top level only
+	:ir_retq -> {
+		type: :fnCall
+		tok: _tok()
+		function: { type: :identifier, tok: _tok(), val: '__retq' }
+		args: if inst.a != ? {
+			true -> [{ type: :identifier, tok: _tok(), val: _regName(inst.a) }]
+			_ -> []
+		}
+		restArg: ?
+	}
+
+	// %dst = SysV arg register #a
+	:ir_arg -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: '__arg' }
+			args: [{ type: :int, tok: _tok(), val: inst.a }]
+			restArg: ?
+		}
+	}
+
+	// %dst = stack-passed arg #a ([rbp + 16 + 8*(a-6)])
+	:ir_stkarg -> {
+		type: :assignment
+		tok: _tok()
+		local?: true
+		left: { type: :identifier, tok: _tok(), val: _regName(inst.dst) }
+		right: {
+			type: :fnCall
+			tok: _tok()
+			function: { type: :identifier, tok: _tok(), val: '__stkarg' }
+			args: [{ type: :int, tok: _tok(), val: inst.a }]
+			restArg: ?
+		}
+	}
+
+	// function prologue: push rbp; mov rbp,rsp; sub rsp,#a
+	:ir_frame -> {
+		type: :fnCall
+		tok: _tok()
+		function: { type: :identifier, tok: _tok(), val: '__frame' }
+		args: [{ type: :int, tok: _tok(), val: inst.a }]
+		restArg: ?
+	}
+
+	// %dst = %cond ? %a : %b (branchless select)
+	:ir_cmov -> {
+		type: :ifExpr
+		tok: _tok()
+		cond: { type: :identifier, tok: _tok(), val: _regName(inst.a) }
+		branches: [{
+			type: :ifBranch
+			tok: _tok()
+			target: { type: :bool, tok: _tok(), val: true }
+			body: { type: :identifier, tok: _tok(), val: _regName(inst.b) }
+		}]
+	}
+
 	// goto label
 	:ir_jmp -> {
 		type: :fnCall
@@ -441,6 +505,11 @@ fn renderIR(irProgram) {
 			'  ' + _regName(inst.dst) + ' = call ' + _regName(inst.a) + '(' + argNames + ')'
 		}
 		:ir_ret -> '  ret ' + _regName(inst.a)
+		:ir_retq -> '  retq ' + if inst.a != ? { true -> _regName(inst.a), _ -> '?' }
+		:ir_arg -> '  ' + _regName(inst.dst) + ' = arg#' + string(inst.a)
+		:ir_stkarg -> '  ' + _regName(inst.dst) + ' = stkarg#' + string(inst.a)
+		:ir_frame -> '  frame ' + string(inst.a)
+		:ir_cmov -> '  ' + _regName(inst.dst) + ' = cmov ' + _regName(inst.a) + ' ? ' + _regName(inst.b)
 		:ir_jmp -> '  jmp ' + if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
 		:ir_jz -> '  jz ' + _regName(inst.a) + ', ' + if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
 		:ir_jnz -> '  jnz ' + _regName(inst.a) + ', ' + if inst.extra != ? { true -> inst.extra.label, _ -> '?' }
