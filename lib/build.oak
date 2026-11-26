@@ -75,6 +75,8 @@ Ts? := false
 Lua? := false
 Java? := false
 Graph? := false
+C? := false
+CC? := false
 Target := 'oak'
 Output := ?
 Includes := []
@@ -102,6 +104,8 @@ fn applyConfig(config) {
 		Lua?: Lua?
 		Java?: Java?
 		Graph?: Graph?
+		C?: C?
+		CC?: CC?
 		Target: Target
 		Output: Output
 		Includes: Includes
@@ -133,6 +137,8 @@ fn applyConfig(config) {
 	Lua? <- state.Lua?
 	Java? <- state.Java?
 	Graph? <- state.Graph?
+	C? <- state.C?
+	CC? <- state.CC?
 	Target <- state.Target
 	Output <- state.Output
 	Includes <- state.Includes
@@ -1258,6 +1264,14 @@ fn renderGoBundle(bundleNode) {
 	codegenGo.renderGoBundle(bundleNode)
 }
 
+// renderCBundle transpiles the Oak AST bundle to self-contained C11
+// ("Goose+ Mode", TODO-14). --cc additionally invokes the system compiler
+// to produce a native binary next to the emitted source.
+fn renderCBundle(bundleNode) {
+	codegenC := import('codegen-c')
+	codegenC.renderCBundle(bundleNode)
+}
+
 // renderNativeBundle compiles the Oak AST bundle to native machine code
 // and links it into an executable binary.
 fn renderNativeBundle(bundleNode) {
@@ -1536,6 +1550,7 @@ fn renderBundle(bundleNode) {
 		renderGoBundle
 		renderNativeBundle
 		renderGraphBundle
+		renderCBundle
 	)
 }
 
@@ -1578,6 +1593,21 @@ fn runOak(config) {
 			? -> {type: :error, message: format('[oak build] Could not write bundle to {{0}}', Output)}
 			_ -> {
 				Log(format('[oak build] Bundle written to {{0}}', Output))
+				if CC? {
+					// --cc: compile the emitted C with the system compiler
+					true -> {
+						ccOut := if str.endsWith?(Output, '.c') {
+							true -> str.slice(Output, 0, len(Output) - 2)
+							_ -> Output + '.out'
+						}
+						ccRes := exec('gcc', ['-O3', '-march=native', '-o', ccOut, Output, '-lm'], '')
+						if ccRes.status = 0 {
+							true -> Log(format('[oak build] Native binary written to {{0}}', ccOut))
+							_ -> std.println('[oak build] gcc failed:\n' + ccRes.stderr)
+						}
+					}
+					_ -> ?
+				}
 				{type: :ok, value: BundleFile, target: Target}
 			}
 		}

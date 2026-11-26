@@ -178,6 +178,9 @@ var libsyntaxparse string
 //go:embed lib/mir.oak
 var libmir string
 
+//go:embed lib/codegen-c.oak
+var libcodegenC string
+
 //go:embed lib/syntax-macros.oak
 var libsyntaxmacros string
 
@@ -862,6 +865,7 @@ var stdlibs = map[string]string{
 	"syntax-tokenize":                 libsyntaxtokenize,
 	"syntax-parse":                    libsyntaxparse,
 	"mir":                             libmir,
+	"codegen-c":                       libcodegenC,
 	"syntax-macros":                   libsyntaxmacros,
 	"syntax-print":                    libsyntaxprint,
 	"syntaxfmt":                       libsyntaxfmt,
@@ -1115,6 +1119,7 @@ var stdlibAutoLoadOrder = []string{
 	"syntax-parse",
 	"syntax-macros",
 	"mir",
+	"codegen-c",
 	"syntax-print",
 	"syntaxfmt",
 	"Virtual",

@@ -493,6 +493,20 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 		return c.LoadLib(pathStr)
 	}
 
+	// Embedded sources (stdlib libs and CLI commands) reference each other
+	// with './name.ext' relative paths that have no meaning on disk; map
+	// them back onto the embedded library set so the bundled lib tree is
+	// self-contained.
+	if strings.HasPrefix(c.currentFile, "(") {
+		base := strings.TrimPrefix(pathStr, "./")
+		if ext := filepath.Ext(base); ext != "" {
+			base = base[:len(base)-len(ext)]
+		}
+		if base != pathStr && isStdLib(base) {
+			return c.LoadLib(base)
+		}
+	}
+
 	supportedExts := []string{".oak", ".ok", ".mag", ".mg"}
 	candidatePaths := make([]string, 0, len(supportedExts))
 	inputExt := filepath.Ext(pathStr)
