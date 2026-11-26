@@ -69,6 +69,59 @@ cs VirtualMachine {
 		}
 	}
 
+	// deep structural equality -- mirrors the Go host's Value.Eq used by
+	// ==/!= (Oak's own = via shallowEqual would compare containers by
+	// identity and report false for equal-valued distinct lists/objects)
+	fn deepEq(l, r) if type(l) {
+		:list -> {
+			if type(r) = :list {
+				true -> {
+					if len(l) = len(r) {
+						true -> {
+							fn eqAt(i) if i < len(l) {
+								true -> {
+									if deepEq(l.(i), r.(i)) {
+										true -> eqAt(i + 1)
+										_ -> false
+									}
+								}
+								_ -> true
+							}
+							eqAt(0)
+						}
+						_ -> false
+					}
+				}
+				_ -> false
+			}
+		}
+		:object -> {
+			if type(r) = :object {
+				true -> {
+					lk := builtinKeys(l)
+					rk := builtinKeys(r)
+					if len(lk) = len(rk) {
+						true -> {
+							fn eqKey(i) if i < len(lk) {
+								true -> {
+									if rk |> contains?(lk.(i)) & deepEq(l.(lk.(i)), r.(lk.(i))) {
+										true -> eqKey(i + 1)
+										_ -> false
+									}
+								}
+								_ -> true
+							}
+							eqKey(0)
+						}
+						_ -> false
+					}
+				}
+				_ -> false
+			}
+		}
+		_ -> l = r
+	}
+
 	fn evalBinaryOp(op, left, right) if op {
 		:plus -> if type(left) {
 			:int -> left + right
@@ -88,10 +141,11 @@ cs VirtualMachine {
 		:pushArrow -> left << right
 		:greater -> left > right
 		:less -> left < right
-		:eq -> left = right
+		:eq -> deepEq(left, right)
+		:deepEq -> deepEq(left, right)
 		:geq -> left >= right
 		:leq -> left <= right
-		:neq -> left != right
+		:neq -> !deepEq(left, right)
 		_ -> ?
 	}
 
