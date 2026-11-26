@@ -2,6 +2,12 @@
 
 package main
 
+// oakJITCallSupported reports whether oakSyscallN can invoke an arbitrary
+// native function pointer. The portable fallback maps onto syscall.Syscall,
+// which interprets the target as a kernel syscall number — calling JIT
+// code through it would crash, so the JIT call builtin reports unsupported.
+const oakJITCallSupported = false
+
 import "syscall"
 
 // oakSyscallN is the portable fallback raw-syscall trampoline used when CGO is

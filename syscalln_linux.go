@@ -2,6 +2,7 @@
 
 package main
 
+
 /*
 #include <stdint.h>
 #include <errno.h>
@@ -36,6 +37,10 @@ static uintptr_t oak_call_function(uintptr_t address, uintptr_t *a,
 import "C"
 
 import "syscall"
+
+// oakJITCallSupported reports whether oakSyscallN can invoke an arbitrary
+// native function pointer (required by the ___runtime_jit_call builtin).
+const oakJITCallSupported = true
 
 func oakSyscallN(trap uintptr, args ...uintptr) (uintptr, uintptr, syscall.Errno) {
 	if trap == 0 {

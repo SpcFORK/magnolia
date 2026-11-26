@@ -101,6 +101,10 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("utf16", c.oakUTF16)
 	c.LoadFunc("bits", c.oakBits)
 	c.LoadFunc("addr", c.oakAddr)
+	// executable-memory bridge for lib/jit.oak runtime value specialization
+	c.LoadFunc("___runtime_jit_compile", c.oakRuntimeJITCompile)
+	c.LoadFunc("___runtime_jit_call", c.oakRuntimeJITCall)
+	c.LoadFunc("___runtime_jit_free", c.oakRuntimeJITFree)
 	c.LoadFunc("pointer", c.oakPointer) // convert integer or string to a pointer value
 	c.LoadFunc("memread", c.oakMemRead)
 	c.LoadFunc("memwrite", c.oakMemWrite)
