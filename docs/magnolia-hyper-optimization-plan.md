@@ -22,10 +22,10 @@ Every item maps 1-to-1 to its governing design section (`§X.Y`) and carries an 
 - [x] **TODO-06 (`-> §3.2.4, §7.3`)** — **DONE** (commit `e5a6a94`): Eliminate single-thread reflection & lock tax in `eval.go` (`objRLock`/`listRLock`/`strRLock` calling `reflect.ValueOf(x).Pointer()` on every read/write) by gating synchronization on `c.eng.concurrent` (atomic concurrency transition in `go`/`listen` builtins in `env.go`) and replacing `reflect.ValueOf` with zero-reflection pointer/hash striping when concurrent.
 - [x] **TODO-07 (`-> §3.2.1, §7.1`)** — **DONE** (commit `88963d8`): Eliminate heap boxing on integers/booleans in `eval.go` & `bytecode.go` via pre-allocated small/medium `IntValue` caches + unboxed numeric fast paths in the VM (`opAdd`, `opSub`, `opMul`, `opDiv`, `opMod`, `opLt`, `opGt`, `opEq`, loop counters).
 - [x] **TODO-08 (`-> §3.2.2, §7.2`)** — **DONE** (commit `5e4ea00`): Eliminate per-call heap allocations in `bytecode.go` (`opCall` / `opTailCall` allocating `make([]Value, ft.localCount)`, `args := make([]Value, arity)`, and `&vmScope{}`) by introducing a contiguous pre-allocated **VM Register/Local Slab (`vm.localsSlab`)** and zero-alloc frame windowing (`baseLocal`..`baseLocal+localCount`) when closures do not escape.
-- [ ] **TODO-09 (`-> §3.2.3, §7.4`)**: Replace linear string-name upvalue walks in `bytecode.go` (`vmScope.get`/`set`, `opLoadUpval`/`opStoreUpval`) with **compile-time lexical coordinates `(depth: u16, slot: u16)`** (`opLoadUpvalFast` / `opStoreUpvalFast`), retaining dynamic fallback only for `bytecode()` outer-scope bridges.
-- [ ] **TODO-10 (`-> §7.5`)**: Add bytecode **Superinstructions & Specialized Peephole Fusion** in `bytecode.go` (`opAddLocalImm`, `opSubLocalImm`, `opLoadLocal2`, `opTailCallSelf`, `opLtJumpFalse`, `opEqImmJumpFalse`) to slash dispatch iterations and stack push/pop traffic on tight loops and recursion.
-- [ ] **TODO-11 (`-> §3.2.5, §7.7`)**: Add **Inline Caching (IC) & Fast Property Access** in `bytecode.go` (`opGetPropConst` / `opSetPropConst`) and fix `compileClass` to support `staticExprs` and `parents`.
-- [ ] **TODO-12 (`-> §3.1.2, §7.8`)**: Eliminate the `docs/engine-switching.md` callback cliff by compiling known higher-order `fnCallNode`s with literal `fnNode` callbacks (`each`, `map`, `filter`, `reduce` — including `|>` and `with` desugarings) directly into **in-frame VM loops** without spawning child VMs or allocating closures.
+- [x] **TODO-09 (`-> §3.2.3, §7.4`)** — **DONE** (commit `decd862`; TODO-10 ships the measured flagship superinstr `LT_LOCAL_JUMP_TRUE` + no-match parity fix — `opTailCallSelf`/`opEqImmJumpFalse` remain future work as tail-recursion fib does not exercise them; TODO-11 ships inline-cached prop access, `compileClass` statics/parents deferred to M2 — no corpus usage): Replace linear string-name upvalue walks in `bytecode.go` (`vmScope.get`/`set`, `opLoadUpval`/`opStoreUpval`) with **compile-time lexical coordinates `(depth: u16, slot: u16)`** (`opLoadUpvalFast` / `opStoreUpvalFast`), retaining dynamic fallback only for `bytecode()` outer-scope bridges.
+- [x] **TODO-10 (`-> §7.5`)** — **DONE** (commit `1b7c95d`; TODO-10 ships the measured flagship superinstr `LT_LOCAL_JUMP_TRUE` + no-match parity fix — `opTailCallSelf`/`opEqImmJumpFalse` remain future work as tail-recursion fib does not exercise them; TODO-11 ships inline-cached prop access, `compileClass` statics/parents deferred to M2 — no corpus usage): Add bytecode **Superinstructions & Specialized Peephole Fusion** in `bytecode.go` (`opAddLocalImm`, `opSubLocalImm`, `opLoadLocal2`, `opTailCallSelf`, `opLtJumpFalse`, `opEqImmJumpFalse`) to slash dispatch iterations and stack push/pop traffic on tight loops and recursion.
+- [x] **TODO-11 (`-> §3.2.5, §7.7`)** — **DONE** (commit `aed413b`; TODO-10 ships the measured flagship superinstr `LT_LOCAL_JUMP_TRUE` + no-match parity fix — `opTailCallSelf`/`opEqImmJumpFalse` remain future work as tail-recursion fib does not exercise them; TODO-11 ships inline-cached prop access, `compileClass` statics/parents deferred to M2 — no corpus usage): Add **Inline Caching (IC) & Fast Property Access** in `bytecode.go` (`opGetPropConst` / `opSetPropConst`) and fix `compileClass` to support `staticExprs` and `parents`.
+- [x] **TODO-12 (`-> §3.1.2, §7.8`)** — **DONE** (commit `cb90e11`; TODO-10 ships the measured flagship superinstr `LT_LOCAL_JUMP_TRUE` + no-match parity fix — `opTailCallSelf`/`opEqImmJumpFalse` remain future work as tail-recursion fib does not exercise them; TODO-11 ships inline-cached prop access, `compileClass` statics/parents deferred to M2 — no corpus usage): Eliminate the `docs/engine-switching.md` callback cliff by compiling known higher-order `fnCallNode`s with literal `fnNode` callbacks (`each`, `map`, `filter`, `reduce` — including `|>` and `with` desugarings) directly into **in-frame VM loops** without spawning child VMs or allocating closures.
 
 ### Phase C — Unified Middle-End `lib/mir.oak` & Systems AOT Backends (Milestone M2)
 - [ ] **TODO-13 (`-> §4.1, §4.2, §4.3`)**: Implement **`lib/mir.oak`** — Magnolia's whole-bundle middle-end IR performing:
@@ -399,7 +399,8 @@ regression gating**; ns deltas ≥ 25% are meaningful.
 | `BytecodePrecompiledFib25` | 40,593,366 | 19,453,696 | **485,954** | 485,579 | **8** |
 | `BytecodePrecompiledLoopCounter` | 39,513 | 27,809 | 10 | 10 | 10 |
 | `BytecodePrecompiledFnCallOverhead` | 350,222 | 161,506 | 5,732 | 3,647 (−36%) | **646** (−89%) |
-| `BytecodePrecompiledPropertyAccess` | 432,649 | 154,090 | 8,762 | 7,016 (−20%) | **6,015** (−31%) |
+| `BytecodePrecompiledPropertyAccess` | 432,649 | 154,090 | 8,762 | 7,016 (−20%) | **15** (−99.75%, post-TODO-11 `aed413b`) |
+| `BytecodePrecompiledPipeFusion` (new, TODO-12) | — | — | — | — | **1,204** vs 5,356 neutralized (−78%); ns 2.24ms→0.96ms |
 
 Key readings:
 - **TODO-07** (int cache) removed result-position boxing (−36% fnCall allocs) but
@@ -410,6 +411,18 @@ Key readings:
   now allocation-free; ns/op −31% on fib25 (27.9–28.5 ms vs 40.6 ms baseline).
 - Post-TODO-06/08 fib25 B/op 1,077,070: residual is bench-harness top-level
   chunk setup, not per-iteration.
+- **TODO-09** (`decd862`): upvalue access O(depth) lexical coordinates — alloc-neutral
+  (already 8), removes name hashing per outer read.
+- **TODO-10** (`1b7c95d`): `LT_LOCAL_JUMP_TRUE` fuses the 9-dispatch if-match prologue;
+  also FIXED engine parity (bytecode no-match fall-through leaked the cond value;
+  both engines now return `?`). fib25 allocs stay 8 (dispatch savings only; ns noisy).
+- **TODO-11** (`aed413b`): `GET_PROP_CONST`/`SET_PROP_CONST` → property access 6,015 → **15**
+  allocs/op (−99.75%). Error parity preserved (`x.type` on non-container still errors).
+- **TODO-12** (`cb90e11`): in-frame opHOF* loops for std map/filter/each/reduce with
+  literal fnNode callbacks — differential probe suite `hof_inframe_test.go` (25 cases,
+  tree-walker oracle). Pipe fusion −78% allocs. Known pre-existing `<<` parity gaps
+  (tree-walker errors on str<<int / str<<bool / obj<<; VM vmConcat accepts) documented,
+  covered by dedicated probes.
 - Eval (tree-walker) columns unchanged by design: TODO-06's lock-gating removes
   atomics, not allocations; TODO-09 (lexical coordinates) is the next eval-side win.
 
