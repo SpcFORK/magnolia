@@ -25,6 +25,7 @@
 	append: append
 	len: len
 	indexOf: indexOf
+	keys: keys
 } := import('std')
 {
 	replace: replace
@@ -36,6 +37,8 @@
 {
 	format: format
 } := import('fmt')
+
+mir := import('mir')
 
 // ---------------------------------------------------------------------------
 // Go reserved words — identifiers matching these are mangled
@@ -86,6 +89,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"math/rand"
 	"net/http"
 	"os"
@@ -143,10 +147,7 @@ func __oak_acc(obj OakValue, key OakValue) OakValue {
 	}
 	switch o := obj.(type) {
 	case OakObject:
-		if k, ok := key.(string); ok {
-			return o[k]
-		}
-		return nil
+		return o[__as_oak_string(key)]
 	case OakList:
 		switch k := key.(type) {
 		case int:
@@ -547,11 +548,804 @@ var filter OakValue = OakFn(func(__oak_args ...OakValue) OakValue {
 '
 
 // ---------------------------------------------------------------------------
+// TODO-15 v1.5: dynamic numeric ops (int-preserving) + native std stub
+// ---------------------------------------------------------------------------
+
+GoStdNatives := [
+	'func __oak_num2(a, b OakValue) (int64, int64, float64, float64, bool) {'
+	'\tai, ok1 := a.(int)'
+	'\tbi, ok2 := b.(int)'
+	'\tif ok1 && ok2 { return int64(ai), int64(bi), 0, 0, true }'
+	'\treturn 0, 0, __oak_to_float(a), __oak_to_float(b), false'
+	'}'
+	'func __oak_add(a, b OakValue) OakValue {'
+	'\tif x, y, _, _, isInt := __oak_num2(a, b); isInt { return int(x + y) }'
+	'\tif sa, ok := a.(string); ok { return sa + __as_oak_string(b) }'
+	'\tif sb, ok := b.(string); ok { return __as_oak_string(a) + sb }'
+	'\tla, okl := a.(OakList)'
+	'\tlb, okr := b.(OakList)'
+	'\tif okl && okr { return append(append(OakList{}, la...), lb...) }'
+	'\treturn __oak_to_float(a) + __oak_to_float(b)'
+	'}'
+	'func __oak_sub(a, b OakValue) OakValue {'
+	'\tif x, y, _, _, isInt := __oak_num2(a, b); isInt { return int(x - y) }'
+	'\treturn __oak_to_float(a) - __oak_to_float(b)'
+	'}'
+	'func __oak_mul(a, b OakValue) OakValue {'
+	'\tif x, y, _, _, isInt := __oak_num2(a, b); isInt { return int(x * y) }'
+	'\treturn __oak_to_float(a) * __oak_to_float(b)'
+	'}'
+	'func __oak_div(a, b OakValue) OakValue {'
+	'\tif x, y, _, _, isInt := __oak_num2(a, b); isInt {'
+	'\t\tif y == 0 { return int(0) }'
+	'\t\treturn int(x / y)'
+	'\t}'
+	'\treturn __oak_to_float(a) / __oak_to_float(b)'
+	'}'
+	'func __oak_mod(a, b OakValue) OakValue {'
+	'\tif x, y, _, _, isInt := __oak_num2(a, b); isInt {'
+	'\t\tif y == 0 { return int(0) }'
+	'\t\treturn int(x % y)'
+	'\t}'
+	'\td := __oak_to_float(b)'
+	'\treturn __oak_to_float(a) - d*float64(int(__oak_to_float(a)/d))'
+	'}'
+	'func __oak_neg(a OakValue) OakValue {'
+	'\tif x, ok := a.(int); ok { return int(-x) }'
+	'\treturn -__oak_to_float(a)'
+	'}'
+	'var __oak_go_range = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\ta, b, c := 0, 0, 1'
+	'\tif len(__oak_args) > 0 { a = int(__oak_to_float(__oak_args[0])) }'
+	'\tif len(__oak_args) > 1 { b = int(__oak_to_float(__oak_args[1])) }'
+	'\tif len(__oak_args) > 2 { c = int(__oak_to_float(__oak_args[2])) }'
+	'\tif c == 0 { c = 1 }'
+	'\tout := OakList{}'
+	'\tif c > 0 { for i := a; i < b; i += c { out = append(out, int(i)) } }'
+	'\tif c < 0 { for i := a; i > b; i += c { out = append(out, int(i)) } }'
+	'\treturn out'
+	'})'
+	'var __oak_sortedKeys = func(m OakObject) []string {'
+	'\tks := make([]string, 0, len(m))'
+	'\tfor k := range m { ks = append(ks, k) }'
+	'\tsort.Strings(ks)'
+	'\treturn ks'
+	'}'
+	'var __oak_go_each = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return nil }'
+	'\tf, _ := __oak_args[1].(OakFn)'
+	'\tswitch xs := __oak_args[0].(type) {'
+	'\tcase OakList:'
+	'\t\tfor i, v := range xs { if f != nil { f(v, int(i)) } }'
+	'\tcase OakObject:'
+	'\t\tfor _, k := range __oak_sortedKeys(xs) { if f != nil { f(xs[k], k) } }'
+	'\tcase string:'
+	'\t\tfor i, r := range xs { if f != nil { f(string(r), int(i)) } }'
+	'\t}'
+	'\treturn nil'
+	'})'
+	'var __oak_go_map = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return OakList{} }'
+	'\tf, _ := __oak_args[1].(OakFn)'
+	'\tout := OakList{}'
+	'\tif f == nil { return out }'
+	'\tswitch xs := __oak_args[0].(type) {'
+	'\tcase OakList:'
+	'\t\tfor i, v := range xs { out = append(out, f(v, int(i))) }'
+	'\tcase OakObject:'
+	'\t\tfor _, k := range __oak_sortedKeys(xs) { out = append(out, f(xs[k], k)) }'
+	'\tcase string:'
+	'\t\tfor i, r := range xs { out = append(out, f(string(r), int(i))) }'
+	'\t}'
+	'\treturn out'
+	'})'
+	'var __oak_go_reduce = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 3 { return nil }'
+	'\tacc := __oak_args[1]'
+	'\tf, _ := __oak_args[2].(OakFn)'
+	'\tif f == nil { return acc }'
+	'\tswitch xs := __oak_args[0].(type) {'
+	'\tcase OakList:'
+	'\t\tfor i, v := range xs { acc = f(acc, v, int(i)) }'
+	'\tcase OakObject:'
+	'\t\tfor _, k := range __oak_sortedKeys(xs) { acc = f(acc, xs[k], k) }'
+	'\tcase string:'
+	'\t\tfor i, r := range xs { acc = f(acc, string(r), int(i)) }'
+	'\t}'
+	'\treturn acc'
+	'})'
+	'var __oak_go_append = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return __oak_args[0] }'
+	'\tif l, ok := __oak_args[0].(OakList); ok {'
+	'\t\treturn append(append(OakList{}, l...), __oak_args[1])'
+	'\t}'
+	'\treturn __oak_push(__oak_args[0], __oak_args[1])'
+	'})'
+	'var __oak_go_clone = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return nil }'
+	'\tswitch v := __oak_args[0].(type) {'
+	'\tcase OakList:'
+	'\t\tout := make(OakList, len(v))'
+	'\t\tcopy(out, v)'
+	'\t\treturn out'
+	'\tcase OakObject:'
+	'\t\tout := OakObject{}'
+	'\t\tfor k, x := range v { out[k] = x }'
+	'\t\treturn out'
+	'\t}'
+	'\treturn __oak_args[0]'
+	'})'
+	'var __oak_go_default = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return nil }'
+	'\tif __oak_args[0] == nil {'
+	'\t\tif len(__oak_args) > 1 { return __oak_args[1] }'
+	'\t\treturn nil'
+	'\t}'
+	'\treturn __oak_args[0]'
+	'})'
+	'var __oak_go_contains = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return false }'
+	'\tswitch xs := __oak_args[0].(type) {'
+	'\tcase OakList:'
+	'\t\tfor _, v := range xs { if __oak_eq(v, __oak_args[1]) { return true } }'
+	'\tcase string:'
+	'\t\treturn strings.Contains(xs, __as_oak_string(__oak_args[1]))'
+	'\tcase OakObject:'
+	'\t\t_, ok := xs[__as_oak_string(__oak_args[1])]'
+	'\t\treturn ok'
+	'\t}'
+	'\treturn false'
+	'})'
+	'var __oak_go_indexOf = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return int(-1) }'
+	'\tswitch xs := __oak_args[0].(type) {'
+	'\tcase OakList:'
+	'\t\tfor i, v := range xs { if __oak_eq(v, __oak_args[1]) { return int(i) } }'
+	'\tcase string:'
+	'\t\treturn int(strings.Index(xs, __as_oak_string(__oak_args[1])))'
+	'\t}'
+	'\treturn int(-1)'
+	'})'
+	'var __oak_go_join = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return "" }'
+	'\tl, _ := __oak_args[0].(OakList)'
+	'\tparts := make([]string, len(l))'
+	'\tfor i, v := range l { parts[i] = __as_oak_string(v) }'
+	'\treturn strings.Join(parts, __as_oak_string(__oak_args[1]))'
+	'})'
+	'var __oak_go_first = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return nil }'
+	'\tif l, ok := __oak_args[0].(OakList); ok && len(l) > 0 { return l[0] }'
+	'\treturn nil'
+	'})'
+	'var __oak_go_last = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return nil }'
+	'\tif l, ok := __oak_args[0].(OakList); ok && len(l) > 0 { return l[len(l)-1] }'
+	'\treturn nil'
+	'})'
+	'var __oak_go_take = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return OakList{} }'
+	'\tl, _ := __oak_args[0].(OakList)'
+	'\tn := int(__oak_to_float(__oak_args[1]))'
+	'\tif n > len(l) { n = len(l) }'
+	'\tif n < 0 { n = 0 }'
+	'\tout := make(OakList, n)'
+	'\tcopy(out, l[:n])'
+	'\treturn out'
+	'})'
+	'var __oak_go_reverse = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return OakList{} }'
+	'\tl, _ := __oak_args[0].(OakList)'
+	'\tout := make(OakList, len(l))'
+	'\tfor i, v := range l { out[len(l)-1-i] = v }'
+	'\treturn out'
+	'})'
+	'var __oak_go_identity = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return nil }'
+	'\treturn __oak_args[0]'
+	'})'
+	'var __oak_go_error = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tmsg := ""'
+	'\tif len(__oak_args) > 0 { msg = __as_oak_string(__oak_args[0]) }'
+	'\treturn OakObject{"type": "error", "message": msg}'
+	'})'
+	'var __oak_go_println = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tparts := make([]string, len(__oak_args))'
+	'\tfor i, v := range __oak_args { parts[i] = __as_oak_string(v) }'
+	'\tfmt.Println(strings.Join(parts, " "))'
+	'\treturn nil'
+	'})'
+	'var __oak_go_sin = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return float64(0) }'
+	'\treturn math.Sin(__oak_to_float(__oak_args[0]))'
+	'})'
+	'var __oak_go_cos = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 1 { return float64(0) }'
+	'\treturn math.Cos(__oak_to_float(__oak_args[0]))'
+	'})'
+	'var __oak_go_pow = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return float64(0) }'
+	'\treturn math.Pow(__oak_to_float(__oak_args[0]), __oak_to_float(__oak_args[1]))'
+	'})'
+	'var __oak_go_time = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\treturn float64(time.Now().UnixNano()) / 1e9'
+	'})'
+	'var __oak_go_wait = OakFn(func(__oak_args ...OakValue) OakValue {'
+	'\tif len(__oak_args) < 2 { return nil }'
+	'\td := time.Duration(__oak_to_float(__oak_args[0]) * float64(time.Second))'
+	'\tif f, ok := __oak_args[1].(OakFn); ok {'
+	'\t\ttime.AfterFunc(d, func() { f() })'
+	'\t} else {'
+	'\t\ttime.Sleep(d)'
+	'\t}'
+	'\treturn nil'
+	'})'
+	'func __oak_setv(obj OakValue, key OakValue, val OakValue) OakValue {'
+	'\tswitch o := obj.(type) {'
+	'\tcase OakObject:'
+	'\t\to[__as_oak_string(key)] = val'
+	'\t\treturn val'
+	'\tcase OakList:'
+	'\t\tif i, ok := key.(int); ok {'
+	'\t\t\tif i >= 0 && i < len(o) { o[i] = val; return val }'
+	'\t\t}'
+	'\t\tif f, ok := key.(float64); ok {'
+	'\t\t\ti := int(f)'
+	'\t\t\tif i >= 0 && i < len(o) { o[i] = val; return val }'
+	'\t\t}'
+	'\tcase string:'
+	'\t\tif i, ok := key.(int); ok {'
+	'\t\t\tif i >= 0 && i < len(o) {'
+	'\t\t\t\tb := []byte(o)'
+	'\t\t\t\tb[i] = __as_oak_string(val)[0]'
+	'\t\t\t\treturn string(b)'
+	'\t\t\t}'
+	'\t\t}'
+	'}'
+	'\treturn nil'
+	'}'
+	'func __oak_fast_int_args(args []OakValue, k int) ([]int64, bool) {'
+	'\tif len(args) < k { return nil, false }'
+	'\tout := make([]int64, k)'
+	'\tfor i := 0; i < k; i++ {'
+	'\t\tv, ok := args[i].(int)'
+	'\t\tif !ok { return nil, false }'
+	'\t\tout[i] = int64(v)'
+	'\t}'
+	'\treturn out, true'
+	'}'
+	'// __oak_std_module is the native stand-in for runtime-library modules;'
+	'// runtime libs are never transpiled into the bundle.'
+	'var __oak_std_module = OakObject{'
+	'\t"range": __oak_go_range, "map": __oak_go_map, "each": __oak_go_each,'
+	'\t"filter": filter, "reduce": __oak_go_reduce, "append": __oak_go_append,'
+	'\t"slice": slice, "clone": __oak_go_clone, "default": __oak_go_default,'
+	'\t"keys": keys, "values": values, "contains?": __oak_go_contains,'
+	'\t"indexOf": __oak_go_indexOf, "join": __oak_go_join,'
+	'\t"first": __oak_go_first, "last": __oak_go_last, "take": __oak_go_take,'
+	'\t"reverse": __oak_go_reverse, "identity": __oak_go_identity,'
+	'\t"error": __oak_go_error, "println": __oak_go_println,'
+	'\t"print": __oak_go_print, "sin": __oak_go_sin, "cos": __oak_go_cos,'
+	'\t"pow": __oak_go_pow, "time": __oak_go_time, "wait": __oak_go_wait,'
+	'\t"int": __oak_go_int, "float": __oak_go_float64, "string": __oak_go_string,'
+	'\t"type": __oak_go_type, "len": __oak_go_len, "char": char,'
+	'\t"codepoint": codepoint, "rand": __oak_go_rand,'
+	'}'
+]
+
+GoRuntimePreambleFull := GoRuntimePreamble + (GoStdNatives |> join('\n')) + '\n'
+// RuntimeLibs lists standard-library modules provided natively by the Go
+// runtime preamble (__oak_std_module); their Oak sources are never bundled.
+GoRuntimeLibs := [
+	'std', 'str', 'math', 'math-base', 'math-geo', 'math-stats', 'sort'
+	'random', 'fs', 'fmt', 'json', 'msgpack', 'datetime', 'path'
+	'compression', 'dataprot', 'http', 'socket', 'test', 'debug', 'cli'
+	'md', 'mermaid', 'crypto', 'bitwise', 'bytes', 'sample', 'hex'
+	'ieee754', 'int64', 'unicode-units', 'image'
+]
+
+fn isGoRuntimeLib(name) if GoRuntimeLibs |> indexOf(name) {
+	-1 -> false
+	_ -> true
+}
+
+// ---------------------------------------------------------------------------
+// TODO-15 v2: MIR-typed fast companions (plan §8.2)
+//
+// For every named function whose MIR lattice proves int-only params, locals,
+// and return type, emit a monomorphized Go companion
+//   func __mg_fast_<name>(p0 int64, ...) int64
+// with direct scalar operators, Go-native if/else arms, self-tail-recursion
+// lowered to a for loop (param rebind + continue), and direct calls between
+// typed companions. The dynamic OakFn keeps its original body but tries the
+// fast path first when every actual argument is an Oak int. Untyped code
+// falls back to the dynamic path unchanged.
+// ---------------------------------------------------------------------------
+
+// _tvOK reports whether node fits the typed int subset. cmp?=true marks
+// cond position (comparisons and bool literals allowed there only).
+// tnames is the set of functions with typed companions (calls to them are
+// direct); rec supplies the binding-type lattice for identifier checks.
+fn _tvOK(node, rec, tnames, cmp?) if node.type {
+	:int -> !cmp?
+	:identifier -> if rec.bindings.(node.val) {
+		? -> false
+		_ -> if rec.bindings.(node.val).type = :int {
+			true -> true
+			_ -> rec.bindings.(node.val).kind = :param & rec.bindings.(node.val).type = :unknown
+		}
+	}
+	:binary -> if node.op {
+		:plus, :minus, :times, :divide, :modulus -> !cmp? & _tvOK(node.left, rec, tnames, false) & _tvOK(node.right, rec, tnames, false)
+		:eq, :neq, :less, :greater, :leq, :geq -> cmp? & _tvOK(node.left, rec, tnames, false) & _tvOK(node.right, rec, tnames, false)
+		_ -> false
+	}
+	:unary -> node.op = :minus & !cmp? & _tvOK(node.right, rec, tnames, false)
+	:fnCall -> if node.function.type = :identifier {
+		true -> if tnames.(node.function.val) {
+			? -> node.function.val = rec.name // self-recursion is fine
+			_ -> _tvArgsOK(node.args, rec, tnames)
+		}
+		_ -> false
+	}
+	:ifExpr -> !cmp? & _tifOK(node, rec, tnames)
+	:block -> !cmp? & _tblkOK(node, rec, tnames)
+	_ -> false
+}
+
+fn _tvArgsOK(args, rec, tnames) if args {
+	? -> true
+	_ -> {
+		ok := true
+		fn scan(i) if ok {
+			false -> ?
+			_ -> if i < len(args) {
+				true -> {
+					if !_tvOK(args.(i), rec, tnames, false) {
+						true -> ok <- false
+						_ -> ?
+					}
+					scan(i + 1)
+				}
+				_ -> ?
+			}
+		}
+		scan(0)
+		ok
+	}
+}
+
+fn _tifOK(node, rec, tnames) {
+	ok := _tvOK(node.cond, rec, tnames, true)
+	fn arms(i) if ok {
+		false -> ?
+		_ -> if i < len(node.branches) {
+			true -> {
+				br := node.branches.(i)
+				if br.target.type {
+					:empty -> ?
+					:int -> ?
+					:bool -> ?
+					_ -> ok <- false
+				}
+				if ok {
+					true -> if !_tvOK(br.body, rec, tnames, false) {
+						true -> ok <- false
+						_ -> ?
+					}
+					_ -> ?
+				}
+				arms(i + 1)
+			}
+			_ -> ?
+		}
+	}
+	arms(0)
+	ok
+}
+
+fn _tblkOK(node, rec, tnames) {
+	n := if node.exprs {
+		? -> 0
+		_ -> len(node.exprs)
+	}
+	if n = 0 {
+		true -> false
+		_ -> {
+			ok := true
+			fn scan(i) if ok {
+				false -> ?
+				_ -> if i < n {
+					true -> {
+						if i < n - 1 {
+							true -> if !_tstmtOK(node.exprs.(i), rec, tnames) {
+								true -> ok <- false
+								_ -> ?
+							}
+							_ -> if !_tvOK(node.exprs.(i), rec, tnames, false) {
+								true -> ok <- false
+								_ -> ?
+							}
+						}
+						scan(i + 1)
+					}
+					_ -> ?
+				}
+			}
+			scan(0)
+			ok
+		}
+	}
+}
+
+fn _tstmtOK(node, rec, tnames) if node.type {
+	:assignment -> if node.left.type = :identifier & node.local? {
+		true -> if rec.bindings.(node.left.val) {
+			? -> false
+			_ -> rec.bindings.(node.left.val).type = :int & _tvOK(node.right, rec, tnames, false)
+		}
+		_ -> false
+	}
+	_ -> false
+}
+
+// _typedFnOK decides full eligibility of a MIR fn record against the current
+// typed set (fixpoint input).
+fn _typedFnOK(rec, tnames) {
+	ok := rec.returns = :int
+	if rec.node.restArg {
+		?, '' -> ?
+		_ -> ok <- false
+	}
+	if ok {
+		true -> if rec.params {
+			? -> ?
+			_ -> {
+				fn ps(i) if ok {
+					false -> ?
+					_ -> if i < len(rec.params) {
+						true -> {
+							if rec.bindings.(rec.params.(i)) {
+								? -> ok <- false
+								_ -> if rec.bindings.(rec.params.(i)).type != :int {
+									true -> if rec.bindings.(rec.params.(i)).kind = :param & rec.bindings.(rec.params.(i)).type = :unknown {
+										true -> ?
+										_ -> ok <- false
+									}
+									_ -> ?
+								}
+							}
+							ps(i + 1)
+						}
+						_ -> ?
+					}
+				}
+				ps(0)
+			}
+		}
+		_ -> ?
+	}
+	if ok {
+		true -> {
+			names := rec.bindings |> keys()
+			fn bs(i) if ok {
+				false -> ?
+				_ -> if i < len(names) {
+					true -> {
+						if rec.bindings.(names.(i)).type != :int {
+							true -> ok <- false
+							_ -> ?
+						}
+						bs(i + 1)
+					}
+					_ -> ?
+				}
+			}
+			bs(0)
+		}
+		_ -> ?
+	}
+	if ok {
+		true -> if !_tvOK(rec.node.body, rec, tnames, false) {
+			true -> ok <- false
+			_ -> ?
+		}
+		_ -> ?
+	}
+	ok
+}
+
+// computeTypedSet runs the fixpoint: repeatedly admit fns whose bodies only
+// call already-typed fns. Returns {names: {}, recs: {}}.
+fn computeTypedSet(mirOut) {
+	res := {names: {}, recs: {}}
+	if mirOut {
+		? -> res
+		_ -> {
+			// 1-deep helpers with explicit state params — nested captured
+			// member stores are silently dropped by the host VM
+			fn admit(st, nm) if _typedFnOK(mirOut.functions.(nm), st.names) {
+				true -> {
+					st.names.(nm) <- true
+					st.recs.(nm) <- mirOut.functions.(nm)
+					true
+				}
+				_ -> false
+			}
+			fn scan(st, names, i, changed) if i < len(names) {
+				true -> {
+					nc := changed
+					if st.names.(names.(i)) {
+						? -> if admit(st, names.(i)) {
+							true -> nc <- true
+							_ -> ?
+						}
+						_ -> ?
+					}
+					scan(st, names, i + 1, nc)
+				}
+				_ -> ?
+			}
+			fn loop(st, i) if i < 16 {
+				true -> {
+					if scan(st, mirOut.functions |> keys(), 0, false) {
+						true -> loop(st, i + 1)
+						_ -> ?
+					}
+				}
+				_ -> ?
+			}
+			loop(res, 0)
+		}
+	}
+	res
+}
+
+// renderTVal renders a typed int64 value expression.
+fn renderTVal(node, rec) if node.type {
+	:int -> string(node.val)
+	:identifier -> goIdent(node.val)
+	:binary -> if node.op {
+		:plus -> '(' + renderTVal(node.left, rec) + ' + ' + renderTVal(node.right, rec) + ')'
+		:minus -> '(' + renderTVal(node.left, rec) + ' - ' + renderTVal(node.right, rec) + ')'
+		:times -> '(' + renderTVal(node.left, rec) + ' * ' + renderTVal(node.right, rec) + ')'
+		:divide -> if node.right.type = :int {
+			true -> if node.right.val != 0 {
+				true -> '(' + renderTVal(node.left, rec) + ' / ' + string(node.right.val) + ')'
+				_ -> '0'
+			}
+			_ -> '(' + renderTVal(node.left, rec) + ' / ' + renderTVal(node.right, rec) + ')'
+		}
+		:modulus -> if node.right.type = :int {
+			true -> if node.right.val != 0 {
+				true -> '(' + renderTVal(node.left, rec) + ' % ' + string(node.right.val) + ')'
+				_ -> '0'
+			}
+			_ -> '(' + renderTVal(node.left, rec) + ' % ' + renderTVal(node.right, rec) + ')'
+		}
+		_ -> '0'
+	}
+	:unary -> if node.op {
+		:minus -> '(-' + renderTVal(node.right, rec) + ')'
+		_ -> '0'
+	}
+	:fnCall -> '__mg_fast_' + goIdent(node.function.val) + '(' + (node.args |> map(fn(a) renderTVal(a, rec)) |> join(', ')) + ')'
+	_ -> '0'
+}
+
+// renderTCond renders a typed bool (cond-position) expression.
+fn renderTCond(node, rec) if node.type {
+	:binary -> if node.op {
+		:eq -> '(' + renderTVal(node.left, rec) + ' == ' + renderTVal(node.right, rec) + ')'
+		:neq -> '(' + renderTVal(node.left, rec) + ' != ' + renderTVal(node.right, rec) + ')'
+		:less -> '(' + renderTVal(node.left, rec) + ' < ' + renderTVal(node.right, rec) + ')'
+		:greater -> '(' + renderTVal(node.left, rec) + ' > ' + renderTVal(node.right, rec) + ')'
+		:leq -> '(' + renderTVal(node.left, rec) + ' <= ' + renderTVal(node.right, rec) + ')'
+		:geq -> '(' + renderTVal(node.left, rec) + ' >= ' + renderTVal(node.right, rec) + ')'
+		_ -> 'false'
+	}
+	:bool -> if node.val {
+		true -> 'true'
+		_ -> 'false'
+	}
+	_ -> 'false'
+}
+
+// _isSelfCall reports a bare self-call f(...).
+fn _isSelfCall(node, rec) node.type = :fnCall & node.function.type = :identifier & node.function.val = rec.name
+
+// renderTTail renders a tail-position value: self-call -> param rebind +
+// continue; otherwise -> return expr. Block bodies recurse as stmt lists.
+fn renderTTail(node, rec, out) if node.type {
+	:block -> {
+		n := if node.exprs {
+			? -> 0
+			_ -> len(node.exprs)
+		}
+		fn scan(i) if i < n {
+			true -> {
+				if i = n - 1 {
+					true -> renderTTail(node.exprs.(i), rec, out)
+					_ -> renderTStmt(node.exprs.(i), rec, out)
+				}
+				scan(i + 1)
+			}
+			_ -> ?
+		}
+		scan(0)
+	}
+	:ifExpr -> {
+		// if/else-if/else chain over ordered equality arms
+		fn arms(i) if i < len(node.branches) {
+			true -> {
+				br := node.branches.(i)
+				if br.target.type {
+					:empty -> out << '} else {'
+					_ -> if i = 0 {
+						true -> out << 'if ' + renderTCond(node.cond, rec) + ' == ' + renderTCond(br.target, rec) + ' {'
+						_ -> out << '} else if ' + renderTCond(br.target, rec) + ' {'
+					}
+				}
+				renderTTail(br.body, rec, out)
+				arms(i + 1)
+			}
+			_ -> ?
+		}
+		arms(0)
+		// close all opened braces: count non-empty targets
+		opens := 0
+		fn count(i) if i < len(node.branches) {
+			true -> {
+				if node.branches.(i).target.type != :empty {
+					true -> opens <- opens + 1
+					_ -> ?
+				}
+				count(i + 1)
+			}
+			_ -> ?
+		}
+		count(0)
+		fn close(i) if i < opens {
+			true -> {
+				out << '}'
+				close(i + 1)
+			}
+			_ -> ?
+		}
+		close(0)
+	}
+	_ -> if _isSelfCall(node, rec) {
+		true -> {
+			fn bind(i) if i < len(rec.params) {
+				true -> {
+					if i < len(node.args) {
+						true -> out << goIdent(rec.params.(i)) + ' = ' + renderTVal(node.args.(i), rec)
+						_ -> out << goIdent(rec.params.(i)) + ' = 0'
+					}
+					bind(i + 1)
+				}
+				_ -> ?
+			}
+			bind(0)
+			out << 'continue'
+		}
+		_ -> out << 'return ' + renderTVal(node, rec)
+	}
+}
+
+// renderTStmt renders a non-tail statement (int assignments only).
+fn renderTStmt(node, rec, out) if node.type {
+	:assignment -> out << goIdent(node.left.val) + ' = ' + renderTVal(node.right, rec)
+	_ -> ?
+}
+
+// renderTypedCompanion emits the monomorphized Go function for one rec.
+fn renderTypedCompanion(rec) {
+	out := []
+	sig := []
+	if rec.params {
+		? -> ?
+		_ -> {
+			fn ps(i) if i < len(rec.params) {
+				true -> {
+					sig << goIdent(rec.params.(i)) + ' int64'
+					ps(i + 1)
+				}
+				_ -> ?
+			}
+			ps(0)
+		}
+	}
+	header := 'func __mg_fast_' + goIdent(rec.name) + '(' + (sig |> join(', ')) + ') int64 {'
+	out << header
+	out << '\tfor {'
+	// prologue: non-param int locals
+	paramSet := {}
+	if rec.params {
+		? -> ?
+		_ -> {
+			fn pset(i) if i < len(rec.params) {
+				true -> {
+					paramSet.(rec.params.(i)) <- true
+					pset(i + 1)
+				}
+				_ -> ?
+			}
+			pset(0)
+		}
+	}
+	bnames := rec.bindings |> keys()
+	fn locals(i) if i < len(bnames) {
+		true -> {
+			if paramSet.(bnames.(i)) {
+				? -> out << '\tvar ' + goIdent(bnames.(i)) + ' int64'
+				_ -> ?
+			}
+			locals(i + 1)
+		}
+		_ -> ?
+	}
+	locals(0)
+	renderTTail(rec.node.body, rec, out)
+	out << '\t}'
+	out << '}'
+	out |> join('\n')
+}
+
+// ---------------------------------------------------------------------------
 // renderGoBundle -- main entry point called by the build system
 // ---------------------------------------------------------------------------
 
 fn renderGoBundle(bundleNode) {
-	output := GoRuntimePreamble
+	output := GoRuntimePreambleFull
+
+	// --- TODO-15 v2: MIR-typed fast companions -----------------------------
+	// Collect user-module body nodes (runtime libs are native stubs) and run
+	// the MIR analysis to find int-only functions worth monomorphizing.
+	mirNodes := []
+	fn appendAll(dst, xs, i) if xs {
+		? -> ?
+		_ -> if i < len(xs) {
+			true -> {
+				dst.(len(dst)) <- xs.(i)
+				appendAll(dst, xs, i + 1)
+			}
+			_ -> ?
+		}
+	}
+	fn gatherInto(exprs, i) if exprs {
+		? -> ?
+		_ -> if i < len(exprs) {
+			true -> {
+				e := exprs.(i)
+				if e.type = :fnCall & e.function.type = :identifier & e.function.val = '__oak_modularize' {
+					true -> if len(e.args) > 1 & e.args.(0).type = :string & !isGoRuntimeLib(e.args.(0).val) {
+						true -> if e.args.(1).type = :function & e.args.(1).body.type = :block & e.args.(1).body.exprs != ? {
+							true -> appendAll(mirNodes, e.args.(1).body.exprs, 0)
+						}
+					}
+				}
+				gatherInto(exprs, i + 1)
+			}
+			_ -> ?
+		}
+	}
+	if bundleNode.type = :block & bundleNode.exprs != ? {
+		true -> gatherInto(bundleNode.exprs, 0)
+		_ -> ?
+	}
+	typedSet := computeTypedSet(mir.analyze(mirNodes))
+	typedNames := typedSet.names
+	typedRecs := typedSet.recs
+	// emit the monomorphized companions right after the preamble
+	fn companion(i, ns, acc) if i < len(ns) {
+		true -> companion(i + 1, ns, acc + renderTypedCompanion(typedRecs.(ns.(i))) + '\n')
+		_ -> acc
+	}
+	if env().('MGO_NO_FAST') = ? {
+		true -> output <- output + companion(0, keys(typedRecs), '')
+		_ -> ?
+	}
 
 	// renderReturnExpr renders "return OakValue(expr)" but handles
 	// assignments specially since Go assignments are statements, not expressions.
@@ -596,11 +1390,25 @@ fn renderGoBundle(bundleNode) {
 			if expr.type = :assignment & expr.local? -> expr.local? <- false
 			if i = lastIdx {
 				true -> result <- result + renderReturnExpr(expr)
-				_ -> result <- result + renderNode(expr) + '; '
+				_ -> result <- result + renderStatement(expr) + '; '
 			}
 			if wasLocal != ? -> expr.local? <- wasLocal
 		})
 		result
+	}
+
+	// renderStatement renders a statement-position expression. `xs << v`
+	// must rebind xs (Go append can reallocate), mirroring the C backend's
+	// `l = mg_push(l, r);` emission.
+	fn renderStatement(node) if node.type {
+		:binary -> if node.op {
+			:pushArrow -> if node.left.type = :identifier {
+				true -> goIdent(node.left.val) + ' = __oak_push(' + goIdent(node.left.val) + ', ' + renderNode(node.right) + ')'
+				_ -> renderNode(node)
+			}
+			_ -> renderNode(node)
+		}
+		_ -> renderNode(node)
 	}
 
 	fn renderNode(node) if node {
@@ -644,16 +1452,16 @@ fn renderGoBundle(bundleNode) {
 			}) |> join(', ')) + '}'
 
 			:unary -> if node.op {
-				:minus -> '(-__oak_to_float(' + renderNode(node.right) + '))'
+				:minus -> '__oak_neg(' + renderNode(node.right) + ')'
 				:exclam -> '(!__oak_to_bool(' + renderNode(node.right) + '))'
 			}
 
 			:binary -> if node.op {
-				:plus -> '(__as_oak_string(' + renderNode(node.left) + ') + __as_oak_string(' + renderNode(node.right) + '))'
-				:minus -> '(__oak_to_float(' + renderNode(node.left) + ') - __oak_to_float(' + renderNode(node.right) + '))'
-				:times -> '(__oak_to_float(' + renderNode(node.left) + ') * __oak_to_float(' + renderNode(node.right) + '))'
-				:divide -> '(__oak_to_float(' + renderNode(node.left) + ') / __oak_to_float(' + renderNode(node.right) + '))'
-				:modulus -> '(int(__oak_to_float(' + renderNode(node.left) + ')) % int(__oak_to_float(' + renderNode(node.right) + ')))'
+				:plus -> '__oak_add(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:minus -> '__oak_sub(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:times -> '__oak_mul(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:divide -> '__oak_div(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
+				:modulus -> '__oak_mod(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
 				:exponent -> 'math.Pow(__oak_to_float(' + renderNode(node.left) + '), __oak_to_float(' + renderNode(node.right) + '))'
 				:rshift -> '(int(__oak_to_float(' + renderNode(node.left) + ')) >> int(__oak_to_float(' + renderNode(node.right) + ')))'
 				:pushArrow -> '__oak_push(' + renderNode(node.left) + ', ' + renderNode(node.right) + ')'
@@ -679,11 +1487,10 @@ fn renderGoBundle(bundleNode) {
 			:assignment -> if node.left.type {
 				:propertyAccess -> {
 					container := renderNode(node.left.left)
-					key := if node.left.right.type {
-						:identifier -> goStr(node.left.right.val)
-						_ -> renderNode(node.left.right)
+					if node.left.right.type = :identifier {
+						true -> '__oak_set(' + container + ', ' + goStr(node.left.right.val) + ', ' + renderNode(node.right) + ')'
+						_ -> '__oak_setv(' + container + ', ' + renderNode(node.left.right) + ', ' + renderNode(node.right) + ')'
 					}
-					'__oak_set(' + container + ', ' + key + ', ' + renderNode(node.right) + ')'
 				}
 				:object -> {
 					prefix := ''
@@ -744,7 +1551,23 @@ fn renderGoBundle(bundleNode) {
 
 			:ifExpr -> 'func() OakValue {' + {
 				result := ''
-				result <- result + '__oak_cond := ' + renderNode(node.cond) + '; '
+				condExpr := renderNode(node.cond)
+				// `if x := e { ... }` — assignments in cond position are not
+				// valid Go expressions; hoist to a statement and use the var
+				fn hoistCondAssign() if node.cond.type = :assignment & node.cond.left.type = :identifier {
+					true -> {
+						cname := goIdent(node.cond.left.val)
+						if node.cond.local? {
+							true -> result <- result + 'var ' + cname + ' OakValue; '
+							_ -> ?
+						}
+						result <- result + cname + ' = ' + renderNode(node.cond.right) + '; '
+						condExpr <- cname
+					}
+					_ -> ?
+				}
+				hoistCondAssign()
+				result <- result + '__oak_cond := ' + condExpr + '; '
 				hasElse := false
 				node.branches |> each(fn(br, i) {
 					prefix := if i { 0 -> 'if ', _ -> ' else if ' }
@@ -780,6 +1603,26 @@ fn renderGoBundle(bundleNode) {
 						true -> renderHoistedBlockExprs(node.body.exprs)
 						_ -> renderReturnExpr(node.body)
 					}
+					// typed fn: try the monomorphized companion first when
+					// every actual argument is an Oak int
+					if node.name {
+						?, '' -> ?
+						_ -> if (typedNames.(node.name) != ?) & (env().('MGO_NO_FAST') = ?) {
+							true -> {
+								k := len(node.args)
+								fn ivs(i, acc) if i < k {
+									true -> ivs(i + 1, acc + 'iv[' + string(i) + ']' + if i < k - 1 {
+										true -> ', '
+										_ -> ''
+									})
+									_ -> acc
+								}
+								fastCall := '__mg_fast_' + goIdent(node.name) + '(' + ivs(0, '') + ')'
+								bodyStr <- 'if iv, ok := __oak_fast_int_args(__oak_args, ' + string(k) + '); ok { return int(' + fastCall + ') }; ' + bodyStr
+							}
+							_ -> ?
+						}
+					}
 					argBindings + restBinding + bodyStr
 				} + '})'
 				// Named functions: just assignment (var is hoisted by block)
@@ -789,10 +1632,15 @@ fn renderGoBundle(bundleNode) {
 				}
 			}
 
-			:fnCall -> {
-				fnStr := renderNode(node.function)
-				argsStr := node.args |> map(renderNode) |> join(', ')
-				fnStr + '.(' + 'OakFn' + ')(' + argsStr + ')'
+			:fnCall -> if node.function.type = :identifier & node.function.val = '__oak_modularize' & len(node.args) > 1 & node.args.(0).type = :string & isGoRuntimeLib(node.args.(0).val) {
+				// runtime-library modules (std, str, ...) are provided natively
+				// by __oak_std_module and never transpiled into the bundle
+				true -> '__oak_modularize.(OakFn)(' + goStr(node.args.(0).val) + ', OakFn(func(__oak_args ...OakValue) OakValue { return __oak_std_module }))'
+				_ -> {
+					fnStr := renderNode(node.function)
+					argsStr := node.args |> map(renderNode) |> join(', ')
+					fnStr + '.(' + 'OakFn' + ')(' + argsStr + ')'
+				}
 			}
 
 			_ -> 'nil /* unhandled: ' + string(node.type) + ' */'
@@ -846,6 +1694,9 @@ fn renderGoBundle(bundleNode) {
 		// Regular assignments: assign then return the left-hand side
 		node.type = :assignment & !(node.left.type = :propertyAccess) ->
 			renderNode(node) + '; return OakValue(' + renderNode(node.left) + ')'
+		// `xs << v` tail: rebind xs (append may reallocate) then return it
+		node.type = :binary & node.op = :pushArrow & node.left.type = :identifier ->
+			goIdent(node.left.val) + ' = __oak_push(' + goIdent(node.left.val) + ', ' + renderNode(node.right) + '); return OakValue(' + goIdent(node.left.val) + ')'
 		_ -> 'return OakValue(' + renderNode(node) + ')'
 	}
 

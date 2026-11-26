@@ -485,7 +485,7 @@ fn _fnAnalyze(fnNode, out) {
 		}
 	}
 	if fnNode.restArg {
-		? -> ?
+		?, '' -> ? // absent rest arg (the Go parser yields '' not null)
 		_ -> fnCtx.bindings.(fnNode.restArg) <- {kind: :param, mutable?: false, type: :list}
 	}
 	// passes 1+3+diagnostics: walk the body at the function's own level
@@ -569,6 +569,103 @@ fn _fnAnalyze(fnNode, out) {
 	?
 }
 
+// _inferParams is the param-type stage of the type pass: params register as
+// :unknown; a param used in arithmetic/comparison against an int-typed
+// operand (or returned directly from an int-returning fn) is :int. Iterated
+// with the return fixpoint so chained inferences converge.
+fn _inferParams(out) {
+	names := keys(out.functions)
+	fn inferRec(j) if j < len(names) {
+		true -> {
+			rec := out.functions.(names.(j))
+			ctx := rec.ctx
+			// walk body: hint params on int-context usage
+			fn walk(node) if _t(node) {
+				:binary -> {
+					op := node.op
+					if op {
+						:plus, :minus, :times, :divide, :modulus, :eq, :neq, :less, :greater, :leq, :geq -> {
+							lt := _typeOf(node.left, ctx)
+							rt := _typeOf(node.right, ctx)
+							if _t(node.left) = :identifier {
+								true -> if ctx.bindings.(node.left.val) {
+									? -> ?
+									_ -> if ctx.bindings.(node.left.val).kind = :param & ctx.bindings.(node.left.val).type = :unknown & rt = :int {
+										true -> ctx.bindings.(node.left.val).type <- :int
+										_ -> ?
+									}
+								}
+								_ -> ?
+							}
+							if _t(node.right) = :identifier {
+								true -> if ctx.bindings.(node.right.val) {
+									? -> ?
+									_ -> if ctx.bindings.(node.right.val).kind = :param & ctx.bindings.(node.right.val).type = :unknown & lt = :int {
+										true -> ctx.bindings.(node.right.val).type <- :int
+										_ -> ?
+									}
+								}
+								_ -> ?
+							}
+						}
+						_ -> ?
+					}
+					walk(node.left)
+					walk(node.right)
+				}
+				:unary -> walk(node.right)
+				:block -> if node.exprs {
+					? -> ?
+					_ -> {
+						fn es(i) if i < len(node.exprs) {
+							true -> {
+								walk(node.exprs.(i))
+								es(i + 1)
+							}
+							_ -> ?
+						}
+						es(0)
+					}
+				}
+				:ifExpr -> if node.branches {
+					? -> ?
+					_ -> {
+						walk(node.cond)
+						fn bs(i) if i < len(node.branches) {
+							true -> {
+								walk(node.branches.(i).body)
+								bs(i + 1)
+							}
+							_ -> ?
+						}
+						bs(0)
+					}
+				}
+				:assignment -> walk(node.right)
+				_ -> ?
+			}
+			walk(rec.node.body)
+			// param returned directly from an int-returning fn is int
+			if rec.returns = :int {
+				true -> if _t(rec.node.body) = :identifier {
+					true -> if ctx.bindings.(rec.node.body.val) {
+						? -> ?
+						_ -> if ctx.bindings.(rec.node.body.val).kind = :param {
+							true -> ctx.bindings.(rec.node.body.val).type <- :int
+							_ -> ?
+						}
+					}
+					_ -> ?
+				}
+				_ -> ?
+			}
+			inferRec(j + 1)
+		}
+		_ -> ?
+	}
+	inferRec(0)
+}
+
 // _inferReturns is the call-graph stage of the type pass (§4 pass 2, second
 // stage): recompute every function's return type until fixpoint so that
 // user-fn call results flow bottom-up (e.g. g returns int -> f's
@@ -596,9 +693,13 @@ fn _inferReturns(out) {
 		scan(0)
 		changed
 	}
+	_inferParams(out)
 	fn loop(i) if i < 16 {
 		true -> if sweep() {
-			true -> loop(i + 1)
+			true -> {
+				_inferParams(out)
+				loop(i + 1)
+			}
 			_ -> ?
 		}
 		_ -> ?

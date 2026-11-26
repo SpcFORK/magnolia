@@ -68,7 +68,7 @@ out
 `
 
 const mirDriverWant = "n=5 ops=map,filter,reduce lit=truetruetrue fusedCount=1 returns=int " +
-	"fib.n.mutable=false fib.returns=unknown caps.local.region=shared caps.out.region=shared " +
+	"fib.n.mutable=false fib.returns=int caps.local.region=shared caps.out.region=shared " +
 	"diag=1 d0=trappy/ifTrueOnNonBool/object"
 
 func runMirDriver(t *testing.T, bytecode bool) string {
