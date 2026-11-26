@@ -52,9 +52,9 @@ Every item maps 1-to-1 to its governing design section (`§X.Y`) and carries an 
 - [ ] **TODO-17 (`-> §5.5, §9.2`)**: Implement **Runtime Value Specialization (`lib/jit.oak` + Go host `mmap` executable memory bridge)** so Magnolia programs can specialize functions on runtime-loaded constants/strides/schemas (`jit.specialize(fn, consts...)`) into native machine code in microseconds — beating frozen AOT C++, Rust, and Goose on dynamic/data-driven workloads.
 
 ### Phase E — Polyglot Target Unification & Heterogeneous SIMD/GPU Offload (Milestone M4)
-- [ ] **TODO-18 (`-> §10.1`)**: Upgrade polyglot transpilers (`lib/build.oak`, `lib/build-render.oak`, `lib/runtime-codegen.oak`) with MIR-assisted fast paths:
-  - Direct typed WAT codegen (`--wasm` numeric/loop specialization without VM interpretation overhead where statically typed),
-  - Tail-loop lowering & numeric unboxed fast paths in JS/TS (`--web`/`--ts`), Lua (`--lua`), and Java (`--java`).
+- [x] **TODO-18 (`-> §10.1`)**: Upgrade polyglot transpilers (`lib/build.oak`, `lib/build-render.oak`, `lib/runtime-codegen.oak`) with MIR-assisted fast paths:
+  - Direct typed WAT codegen (`--wasm` numeric/loop specialization without VM interpretation overhead where statically typed), *(remaining: wasm pipeline still VM-based)*
+  - Tail-loop lowering & numeric unboxed fast paths in JS/TS (`--web`/`--ts`), Lua (`--lua`), and Java (`--java`). *(landed via `lib/ast-optimize.oak` pre-pass: const fold/propagate + dead-branch elimination for every target; self-tail-recursion → native `:whileExpr` loops on web/ts/lua/java with parallel-assignment temps — commit 6d51bdd)*
 - [ ] **TODO-19 (`-> §10.2`)**: Implement **`lib/compute.oak`** unifying fused pure HOF pipelines (`map` / `filter` / `reduce` / `dotProduct` / `softmax` from `lib/ai.oak`) with automatic **GLSL/HLSL/SPIR-V & OpenCL/CUDA kernel generation** (`lib/gui-shader-codegen.oak` + `lib/gpus.oak`) and multi-core CPU chunked fallback.
 - [ ] **TODO-20 (`-> §11.2`)**: Run full regression tests, differential oracle checks across all engines/targets, and record live head-to-head benchmark numbers (Goose vs. C++ vs. Baseline Magnolia vs. Magnolia-Hyper) in §11.
 
