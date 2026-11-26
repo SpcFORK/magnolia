@@ -96,6 +96,12 @@ const (
 	// consuming the condition; the else path pushes null for no-match
 	// fall-through, matching the tree-walker (fixes the cond-leak bug).
 	opLtLocalJumpTrue opcode = 60
+
+	// Inline-cached property access (M1 TODO-11, §7.7). Operand: u16
+	// constant-pool index of the interned property name. Avoids pushing a
+	// key *StringValue per access (zero alloc) and skips the key pop.
+	opGetPropConst opcode = 61 // pop obj; push obj.<name>
+	opSetPropConst opcode = 62 // pop val, pop obj; obj.<name> = val; push val
 )
 
 var opcodeNames = [...]string{
@@ -117,6 +123,7 @@ var opcodeNames = [...]string{
 	"LOAD_UPVAL_FAST", "STORE_UPVAL_FAST",
 	"HOF_MAP", "HOF_FILTER", "HOF_EACH", "HOF_REDUCE",
 	"LT_LOCAL_JUMP_TRUE",
+	"GET_PROP_CONST", "SET_PROP_CONST",
 }
 
 // ---------------------------------------------------------------------------
@@ -751,13 +758,14 @@ func (co *compiler) compileNodeTail(node astNode, isTail bool) {
 	case propertyAccessNode:
 		co.compileNode(n.left)
 		if ident, ok := n.right.(identifierNode); ok {
+			// Inline cache (M1 TODO-11): constant key fused into the op.
 			idx := co.addString(ident.payload)
-			co.emitOp(opConstStr)
+			co.emitOp(opGetPropConst)
 			co.emitU16(idx)
 		} else {
 			co.compileNode(n.right)
+			co.emitOp(opGetProp)
 		}
-		co.emitOp(opGetProp)
 
 	case listNode:
 		for _, elem := range n.elems {
@@ -859,14 +867,16 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 	case propertyAccessNode:
 		co.compileNode(left.left)
 		if ident, ok := left.right.(identifierNode); ok {
+			// Inline cache (M1 TODO-11): constant key fused into the op.
 			idx := co.addString(ident.payload)
-			co.emitOp(opConstStr)
+			co.compileNode(n.right)
+			co.emitOp(opSetPropConst)
 			co.emitU16(idx)
 		} else {
 			co.compileNode(left.right)
+			co.compileNode(n.right)
+			co.emitOp(opSetProp)
 		}
-		co.compileNode(n.right)
-		co.emitOp(opSetProp)
 
 	case listNode:
 		co.compileNode(n.right)
@@ -892,12 +902,12 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 			// Keys in destructuring patterns are property names, not variable refs
 			if ident, ok := entry.key.(identifierNode); ok {
 				idx := co.addString(ident.payload)
-				co.emitOp(opConstStr)
+				co.emitOp(opGetPropConst)
 				co.emitU16(idx)
 			} else {
 				co.compileNode(entry.key)
+				co.emitOp(opGetProp)
 			}
-			co.emitOp(opGetProp)
 			if ident, ok := entry.val.(identifierNode); ok {
 				idx := co.declareLocal(ident.payload)
 				co.emitOp(opStoreLocal)
@@ -1437,6 +1447,14 @@ func disassemble(chunk *bytecodeChunk) string {
 		case opHOFMap, opHOFFilter, opHOFEach, opHOFReduce:
 			v := int(bc[i+1]) | int(bc[i+2])<<8
 			fmt.Fprintf(&sb, " fn#%d", v)
+			advance = 3
+		case opGetPropConst, opSetPropConst:
+			v := int(bc[i+1]) | int(bc[i+2])<<8
+			if v < len(chunk.constants) {
+				fmt.Fprintf(&sb, " '%s'", chunk.constants[v].str)
+			} else {
+				fmt.Fprintf(&sb, " #%d", v)
+			}
 			advance = 3
 		case opLtLocalJumpTrue:
 			s := int(bc[i+1]) | int(bc[i+2])<<8
@@ -2765,6 +2783,48 @@ func (vm *VM) run() (Value, *runtimeError) {
 			key := vm.pop()
 			obj := vm.pop()
 			vmSetProp(obj, key, val)
+			vm.push(val)
+
+		case opGetPropConst:
+			idx := vm.fetchU16()
+			keyStr := vm.chunk.constants[idx].str
+			obj := vm.pop()
+			switch o := obj.(type) {
+			case ObjectValue:
+				if v, ok := o[keyStr]; ok {
+					vm.push(v)
+				} else {
+					vm.push(null)
+				}
+			case ClassValue:
+				if v, ok := o.static[keyStr]; ok {
+					vm.push(v)
+				} else {
+					vm.push(null)
+				}
+			default:
+				sv := StringValue(keyStr)
+				res, errMsg := vmGetProp(obj, &sv)
+				if errMsg != "" {
+					return nil, vm.vmError(errMsg)
+				}
+				vm.push(res)
+			}
+
+		case opSetPropConst:
+			idx := vm.fetchU16()
+			keyStr := vm.chunk.constants[idx].str
+			val := vm.pop()
+			obj := vm.pop()
+			switch o := obj.(type) {
+			case ObjectValue:
+				mu := objLock(o)
+				o[keyStr] = val
+				mu.Unlock()
+			default:
+				sv := StringValue(keyStr)
+				vmSetProp(obj, &sv, val)
+			}
 			vm.push(val)
 
 		case opJump:
