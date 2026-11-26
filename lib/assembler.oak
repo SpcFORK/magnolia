@@ -1,9 +1,22 @@
 // assembler -- Multi-architecture assembler for Magnolia
 //
-// Assembles textual assembly source (x86-64 AT&T/Intel syntax and
-// ARM64) into machine code bytes.  The assembler operates in two passes:
-//   1. Label collection — scan for labels and record offsets
-//   2. Instruction encoding — emit bytes with resolved label references
+// Assembles textual assembly source (x86-64 and ARM64) into machine code
+// bytes.  The x86-64 assembler parses a dst-first (Intel operand order)
+// dialect: registers written with a '%' prefix (rax, r8), immediates with
+// '$' or bare digits, memory operands as disp(base) like -8(%rbp).
+// Supported mnemonics: mov (reg/imm/mem forms), add/or/and/sub/xor/cmp,
+// not/neg, test, idiv, imul, cqo, leave, movzx, movsxd, shl/shr/sar,
+// setcc, cmovcc, push/pop, call/jmp/jcc family, ret, nop, syscall, int3,
+// hlt.  Labels end with ':'; branch targets resolve through rel32
+// relocations after emission.
+//
+// Implementation notes:
+//   - All state (code bytes, labels, relocations) is threaded as explicit
+//     parameters through the emission routines — captured mutation is
+//     unreliable at fn-in-fn-in-fn depth in this dialect.
+//   - Match arms evaluate pattern expressions and compare them to the
+//     matched value, so boolean helper calls cannot be arm patterns;
+//     classification uses sequential arrow-ifs instead.
 //
 // This module is used by the native codegen target and can also be
 // called directly from Oak programs for inline assembly or JIT scenarios.
@@ -52,6 +65,8 @@ x86_64Regs := {
 	r8: 8, r9: 9, r10: 10, r11: 11, r12: 12, r13: 13, r14: 14, r15: 15
 	eax: 0, ecx: 1, edx: 2, ebx: 3, esp: 4, ebp: 5, esi: 6, edi: 7
 	al: 0, cl: 1, dl: 2, bl: 3, spl: 4, bpl: 5, sil: 6, dil: 7
+	r8d: 8, r9d: 9, r10d: 10, r11d: 11, r12d: 12, r13d: 13, r14d: 14, r15d: 15
+	r8b: 8, r9b: 9, r10b: 10, r11b: 11, r12b: 12, r13b: 13, r14b: 14, r15b: 15
 }
 
 // ---------------------------------------------------------------------------
@@ -107,19 +122,24 @@ fn tokenizeAsm(source) {
 				parts |> each(fn(part, idx) {
 					part <- part |> trim() |> replace('\t', '')
 					if part = '' -> ()
-					// classify part into a kind for match dispatch
-					kind := if part {
-						',' -> 'comma'
-						endsWith?(part, ':') -> 'label'
-						startsWith?(part, '.') -> 'directive'
-						startsWith?(part, '$') | startsWith?(part, '#') -> 'imm'
-						startsWith?(part, '%') | startsWith?(part, '$') -> 'reg'
-						_ -> 'other'
-					}
+					// classify part into a kind for dispatch.
+					// NOTE: match arms evaluate pattern expressions and compare
+					// them to the matched value, so boolean helper calls cannot
+					// be arm patterns — sequential arrow-ifs instead.
+					kind := 'other'
+					if part = ',' -> kind <- 'comma'
+					if endsWith?(part, ':') -> kind <- 'label'
+					if startsWith?(part, '.') -> kind <- 'directive'
+					if startsWith?(part, '$') | startsWith?(part, '#') -> kind <- 'imm'
+					if startsWith?(part, '%') -> kind <- 'reg'
+					if startsWith?(part, '-') | startsWith?(part, '0') | startsWith?(part, '1') | startsWith?(part, '2') | startsWith?(part, '3') | startsWith?(part, '4') | startsWith?(part, '5') | startsWith?(part, '6') | startsWith?(part, '7') | startsWith?(part, '8') | startsWith?(part, '9') -> kind <- 'imm'
+					// memory operands last: -8(%rbp) also matches the '-' check
+					if strContains?(part, '(') -> kind <- 'mem'
 					if kind {
 						'comma' -> tokens << { type: TOK_COMMA, val: ',' }
 						'label' -> tokens << { type: TOK_LABEL, val: slice(part, 0, len(part) - 1) }
 						'directive' -> tokens << { type: TOK_DIRECTIVE, val: part }
+						'mem' -> tokens << { type: TOK_MEM, val: part }
 						'imm' -> tokens << { type: TOK_IMM, val: part }
 						'reg' -> tokens << { type: TOK_REG, val: part |> replace('%', '') |> replace(',', '') }
 						_ -> {
@@ -138,6 +158,8 @@ fn tokenizeAsm(source) {
 								}
 							}
 						}
+					}
+				})
 			}
 		}
 		tokens << { type: TOK_NEWLINE, val: '\n' }
@@ -154,236 +176,569 @@ fn assembleX86_64(source) {
 	tokens := tokenizeAsm(source)
 	code := []
 	labels := {}
-	relocations := []
-	sections := { current: '.text' }
+	relocs := []
 
-	// Helper to emit bytes
-	fn emitByte(b) code << (b & 255)
-	fn emitDword(d) {
-		emitByte(d & 255)
-		emitByte((d >> 8) & 255)
-		emitByte((d >> 16) & 255)
-		emitByte((d >> 24) & 255)
+	// Helper to emit bytes (list passed explicitly — captured mutation is
+	// unreliable at fn-in-fn-in-fn depth, so all state is threaded as params)
+	fn emitByte(lst, b) lst << (b & 255)
+	fn emitDword(lst, d) {
+		emitByte(lst, d & 255)
+		emitByte(lst, (d >> 8) & 255)
+		emitByte(lst, (d >> 16) & 255)
+		emitByte(lst, (d >> 24) & 255)
 	}
-	fn emitQword(q) {
-		emitDword(q & 4294967295)
-		emitDword((q >> 32) & 4294967295)
+	fn emitQword(lst, q) {
+		emitDword(lst, q & 4294967295)
+		emitDword(lst, (q >> 32) & 4294967295)
 	}
 
 	fn regNum(name) {
 		clean := name |> replace('%', '') |> replace(',', '') |> lower()
 		x86_64Regs.(clean) |> default(0)
 	}
-
 	fn rexW(r, b) 0x48 | (if r > 7 { true -> 4, _ -> 0 }) | (if b > 7 { true -> 1, _ -> 0 })
 	fn modRM(mod, reg, rm) ((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
-
 	fn parseImm(val) {
 		clean := val |> replace('$', '') |> replace('#', '') |> replace(',', '')
 		int(clean)
 	}
 
-	// Process tokens instruction by instruction
-	idx := [0]
-	fn peek() if idx.0 < len(tokens) { true -> tokens.(idx.0), _ -> ? }
-	fn advance() {
-		t := tokens.(idx.0)
-		idx.0 <- idx.0 + 1
-		t
+	// operand kinds: 0 = register, 1 = immediate, 2 = memory, 3 = symbol
+	fn parseMem(tok) {
+		parts := tok.val |> split('(')
+		dispPart := parts.(0) |> trim()
+		disp := 0
+		if dispPart != '' {
+			true -> disp <- parseImm(dispPart)
+		}
+		inner := '?'
+		if len(parts) > 1 {
+			true -> inner <- parts.(1) |> split(')') |> slice(0, 1) |> join('') |> trim() |> replace('%', '') |> lower()
+		}
+		{
+			disp: disp
+			base: x86_64Regs.(inner) |> default(-1)
+			sib?: inner = 'rsp' | inner = 'esp'
+		}
 	}
-	fn skipCommas() {
-		fn loop() if peek() {
-			? -> ?
-			_ -> if peek().type = TOK_COMMA {
-				true -> {
-					advance()
-					loop()
+	fn classifyOp(tok) if tok.type {
+		TOK_REG -> { kind: 0, reg: regNum(tok.val) }
+		TOK_IMM -> { kind: 1, val: parseImm(tok.val) }
+		TOK_MEM -> { kind: 2, mem: parseMem(tok) }
+		_ -> { kind: 3, val: tok.val }
+	}
+	fn oneOp(tokens, i) if tokens.(i).type = TOK_COMMA {
+		true -> { op: classifyOp(tokens.(i + 1)), next: i + 2 }
+		_ -> { op: classifyOp(tokens.(i)), next: i + 1 }
+	}
+	fn twoOps(tokens, i) {
+		a := oneOp(tokens, i)
+		b := oneOp(tokens, a.next)
+		{ a: a.op, b: b.op, next: b.next }
+	}
+	// mod bits for a displacement: 0 when none needed, 1 for disp8, 2 for disp32
+	fn memMod(disp, base, sib) if disp = 0 & base != 5 & !sib {
+		true -> 0
+		_ -> if -128 <= disp & disp <= 127 {
+			true -> 1
+			_ -> 2
+		}
+	}
+	// emit modrm + sib + displacement for a memory operand with the given
+	// reg field (register-to-memory direction handled by the opcode)
+	fn emitMemOperand(lst, regField, mem) {
+		mBase := mem.base
+		disp := mem.disp
+		if mBase = -1 {
+			true -> {
+				emitByte(lst, modRM(0, regField, 5))
+				emitDword(lst, disp)
+			}
+			_ -> {
+				mod := memMod(disp, mBase, mem.sib?)
+				rm := if mem.sib? {
+					true -> 4
+					_ -> mBase
+				}
+				emitByte(lst, modRM(mod, regField, rm))
+				if mem.sib? {
+					true -> emitByte(lst, 0x24) // SIB: no index, base rsp
+				}
+				if mod = 1 {
+					true -> emitByte(lst, disp & 255)
+				}
+				if mod = 2 {
+					true -> emitDword(lst, disp)
 				}
 			}
 		}
-		loop()
+	}
+	// emit a rel32 branch placeholder + relocation record
+	fn emitRelBranch(lst, relocLst, opcodes, symbol) {
+		opcodes |> each(fn(b) emitByte(lst, b))
+		relocLst << { offset: len(lst), symbol: symbol, type: :rel32 }
+		emitDword(lst, 0)
 	}
 
-	fn assembleInstruction(mnemonic) if mnemonic |> lower() {
-		'nop' -> emitByte(0x90)
-		'ret' -> emitByte(0xC3)
-		'syscall' -> (
-			emitByte(0x0F)
-			emitByte(0x05)
-		)
-		'int3' -> emitByte(0xCC)
-		'hlt' -> emitByte(0xF4)
+	// Assemble one instruction: consumes operand tokens from i, appends
+	// machine bytes to codeLst, relocation records to relocLst.
+	// Returns { next: tokenIndexAfterInstruction }.
+	fn assembleInstruction(mnemonic, tokens, i, codeLst, relocLst) if mnemonic {
+		'nop' -> {
+			emitByte(codeLst, 0x90)
+			{ next: i }
+		}
+		'ret' -> {
+			emitByte(codeLst, 0xC3)
+			{ next: i }
+		}
+		'syscall' -> {
+			emitByte(codeLst, 0x0F)
+			emitByte(codeLst, 0x05)
+			{ next: i }
+		}
+		'int3' -> {
+			emitByte(codeLst, 0xCC)
+			{ next: i }
+		}
+		'hlt' -> {
+			emitByte(codeLst, 0xF4)
+			{ next: i }
+		}
 		'push' -> {
-			skipCommas()
-			op := advance()
-			if op.type = TOK_REG {
+			op := oneOp(tokens, i)
+			if op.op.kind = 0 {
 				true -> {
-					r := regNum(op.val)
-					if r > 7 -> emitByte(0x41)
-					emitByte(0x50 + (r & 7))
+					r := op.op.reg
+					if r > 7 -> emitByte(codeLst, 0x41)
+					emitByte(codeLst, 0x50 + (r & 7))
 				}
 			}
+			{ next: op.next }
 		}
 		'pop' -> {
-			skipCommas()
-			op := advance()
-			if op.type = TOK_REG {
+			op := oneOp(tokens, i)
+			if op.op.kind = 0 {
 				true -> {
-					r := regNum(op.val)
-					if r > 7 -> emitByte(0x41)
-					emitByte(0x58 + (r & 7))
+					r := op.op.reg
+					if r > 7 -> emitByte(codeLst, 0x41)
+					emitByte(codeLst, 0x58 + (r & 7))
 				}
 			}
+			{ next: op.next }
 		}
+		// --- mov: dst,src with reg/imm/mem operands (Intel order) ---
 		'mov' -> {
-			skipCommas()
-			dst := advance()
-			skipCommas()
-			src := advance()
-			if dst.type = TOK_REG & src.type = TOK_REG {
+			ops := twoOps(tokens, i)
+			if ops.a.kind = 0 & ops.b.kind = 0 {
 				true -> {
-					d := regNum(dst.val)
-					s := regNum(src.val)
-					emitByte(rexW(s, d))
-					emitByte(0x89)
-					emitByte(modRM(3, s, d))
-				}
-				_ -> if dst.type = TOK_REG & src.type = TOK_IMM {
-					true -> {
-						d := regNum(dst.val)
-						imm := parseImm(src.val)
-						emitByte(rexW(0, d))
-						emitByte(0xB8 + (d & 7))
-						emitQword(imm)
-					}
+					emitByte(codeLst, rexW(ops.b.reg, ops.a.reg))
+					emitByte(codeLst, 0x89)
+					emitByte(codeLst, modRM(3, ops.b.reg, ops.a.reg))
 				}
 			}
-		}
-		'add' -> {
-			skipCommas()
-			dst := advance()
-			skipCommas()
-			src := advance()
-			if dst.type = TOK_REG & src.type = TOK_REG {
+			if ops.a.kind = 0 & ops.b.kind = 1 {
 				true -> {
-					d := regNum(dst.val)
-					s := regNum(src.val)
-					emitByte(rexW(s, d))
-					emitByte(0x01)
-					emitByte(modRM(3, s, d))
+					emitByte(codeLst, rexW(0, ops.a.reg))
+					emitByte(codeLst, 0xB8 + (ops.a.reg & 7))
+					emitQword(codeLst, ops.b.val)
 				}
 			}
-		}
-		'sub' -> {
-			skipCommas()
-			dst := advance()
-			skipCommas()
-			src := advance()
-			if dst.type = TOK_REG & src.type = TOK_REG {
+			if ops.a.kind = 0 & ops.b.kind = 2 {
 				true -> {
-					d := regNum(dst.val)
-					s := regNum(src.val)
-					emitByte(rexW(s, d))
-					emitByte(0x29)
-					emitByte(modRM(3, s, d))
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.mem.base))
+					emitByte(codeLst, 0x8B)
+					emitMemOperand(codeLst, ops.a.reg, ops.b.mem)
 				}
 			}
-		}
-		'xor' -> {
-			skipCommas()
-			dst := advance()
-			skipCommas()
-			src := advance()
-			if dst.type = TOK_REG & src.type = TOK_REG {
+			if ops.a.kind = 2 & ops.b.kind = 0 {
 				true -> {
-					d := regNum(dst.val)
-					s := regNum(src.val)
-					emitByte(rexW(s, d))
-					emitByte(0x31)
-					emitByte(modRM(3, s, d))
+					emitByte(codeLst, rexW(ops.b.reg, ops.a.mem.base))
+					emitByte(codeLst, 0x89)
+					emitMemOperand(codeLst, ops.b.reg, ops.a.mem)
 				}
 			}
+			if ops.a.kind = 2 & ops.b.kind = 1 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.mem.base))
+					emitByte(codeLst, 0xC7)
+					emitMemOperand(codeLst, 0, ops.a.mem)
+					emitDword(codeLst, ops.b.val)
+				}
+			}
+			{ next: ops.next }
 		}
+		// --- ALU family (Intel order: dst, src) ---
+		'add', 'or', 'and', 'sub', 'xor', 'cmp' -> {
+			ops := twoOps(tokens, i)
+			base := if mnemonic {
+				'add' -> 0x00
+				'or' -> 0x08
+				'and' -> 0x20
+				'sub' -> 0x28
+				'xor' -> 0x30
+				_ -> 0x38
+			}
+			ext := if mnemonic {
+				'add' -> 0
+				'or' -> 1
+				'and' -> 4
+				'sub' -> 5
+				'xor' -> 6
+				_ -> 7
+			}
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.b.reg, ops.a.reg))
+					emitByte(codeLst, base + 1)
+					emitByte(codeLst, modRM(3, ops.b.reg, ops.a.reg))
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 1 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.reg))
+					emitByte(codeLst, 0x81)
+					emitByte(codeLst, modRM(3, ext, ops.a.reg))
+					emitDword(codeLst, ops.b.val)
+				}
+			}
+			if ops.a.kind = 2 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.b.reg, ops.a.mem.base))
+					emitByte(codeLst, base + 1)
+					emitMemOperand(codeLst, ops.b.reg, ops.a.mem)
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 2 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.mem.base))
+					emitByte(codeLst, base + 3)
+					emitMemOperand(codeLst, ops.a.reg, ops.b.mem)
+				}
+			}
+			if ops.a.kind = 2 & ops.b.kind = 1 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.mem.base))
+					emitByte(codeLst, 0x81)
+					emitMemOperand(codeLst, ext, ops.a.mem)
+					emitDword(codeLst, ops.b.val)
+				}
+			}
+			{ next: ops.next }
+		}
+		// --- unary rm64 ops: not /2, neg /3 ---
+		'not', 'neg' -> {
+			op := oneOp(tokens, i)
+			ext := if mnemonic {
+				'not' -> 2
+				_ -> 3
+			}
+			if op.op.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(0, op.op.reg))
+					emitByte(codeLst, 0xF7)
+					emitByte(codeLst, modRM(3, ext, op.op.reg))
+				}
+			}
+			if op.op.kind = 2 {
+				true -> {
+					emitByte(codeLst, rexW(0, op.op.mem.base))
+					emitByte(codeLst, 0xF7)
+					emitMemOperand(codeLst, ext, op.op.mem)
+				}
+			}
+			{ next: op.next }
+		}
+		// --- test r/m64: reg,reg or reg,imm ---
+		'test' -> {
+			ops := twoOps(tokens, i)
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.b.reg, ops.a.reg))
+					emitByte(codeLst, 0x85)
+					emitByte(codeLst, modRM(3, ops.b.reg, ops.a.reg))
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 1 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.reg))
+					emitByte(codeLst, 0xF7)
+					emitByte(codeLst, modRM(3, 0, ops.a.reg))
+					emitDword(codeLst, ops.b.val)
+				}
+			}
+			{ next: ops.next }
+		}
+		// --- idiv r/m64 (signed; F7 /7 — /6 is the unsigned div) ---
+		'idiv' -> {
+			op := oneOp(tokens, i)
+			if op.op.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(0, op.op.reg))
+					emitByte(codeLst, 0xF7)
+					emitByte(codeLst, modRM(3, 7, op.op.reg))
+				}
+			}
+			if op.op.kind = 2 {
+				true -> {
+					emitByte(codeLst, rexW(0, op.op.mem.base))
+					emitByte(codeLst, 0xF7)
+					emitMemOperand(codeLst, 7, op.op.mem)
+				}
+			}
+			{ next: op.next }
+		}
+		// --- imul r64, r/m64 (two-operand form) ---
+		'imul' -> {
+			ops := twoOps(tokens, i)
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.reg))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, 0xAF)
+					emitByte(codeLst, modRM(3, ops.a.reg, ops.b.reg))
+				}
+			}
+			{ next: ops.next }
+		}
+		'cqo', 'cqto' -> {
+			emitByte(codeLst, 0x48)
+			emitByte(codeLst, 0x99)
+			{ next: i }
+		}
+		'leave' -> {
+			emitByte(codeLst, 0xC9)
+			{ next: i }
+		}
+		// --- movzx r64, r/m8 ---
+		'movzx', 'movzbq' -> {
+			ops := twoOps(tokens, i)
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.reg))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, 0xB6)
+					emitByte(codeLst, modRM(3, ops.a.reg, ops.b.reg))
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 2 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.mem.base))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, 0xB6)
+					emitMemOperand(codeLst, ops.a.reg, ops.b.mem)
+				}
+			}
+			{ next: ops.next }
+		}
+		// --- movsxd r64, r/m32 ---
+		'movsxd' -> {
+			ops := twoOps(tokens, i)
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.reg))
+					emitByte(codeLst, 0x63)
+					emitByte(codeLst, modRM(3, ops.a.reg, ops.b.reg))
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 2 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.mem.base))
+					emitByte(codeLst, 0x63)
+					emitMemOperand(codeLst, ops.a.reg, ops.b.mem)
+				}
+			}
+			{ next: ops.next }
+		}
+		// --- shift family: r/m64 by imm8 or cl ---
+		'shl', 'shr', 'sar' -> {
+			ops := twoOps(tokens, i)
+			ext := if mnemonic {
+				'shl' -> 6
+				'shr' -> 5
+				_ -> 7
+			}
+			if ops.a.kind = 0 & ops.b.kind = 1 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.reg))
+					emitByte(codeLst, 0xC1)
+					emitByte(codeLst, modRM(3, ext, ops.a.reg))
+					emitByte(codeLst, ops.b.val & 63)
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.reg))
+					emitByte(codeLst, 0xD3)
+					emitByte(codeLst, modRM(3, ext, ops.a.reg))
+				}
+			}
+			if ops.a.kind = 2 & ops.b.kind = 1 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.mem.base))
+					emitByte(codeLst, 0xC1)
+					emitMemOperand(codeLst, ext, ops.a.mem)
+					emitByte(codeLst, ops.b.val & 63)
+				}
+			}
+			if ops.a.kind = 2 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(0, ops.a.mem.base))
+					emitByte(codeLst, 0xD3)
+					emitMemOperand(codeLst, ext, ops.a.mem)
+				}
+			}
+			{ next: ops.next }
+		}
+		// --- branches (rel32, resolved by relocations) ---
 		'call' -> {
-			skipCommas()
-			target := advance()
-			// Near relative call (32-bit offset, placeholder)
-			emitByte(0xE8)
-			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
-			emitDword(0)
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0xE8], op.op.val)
+			{ next: op.next }
 		}
 		'jmp' -> {
-			skipCommas()
-			target := advance()
-			emitByte(0xE9)
-			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
-			emitDword(0)
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0xE9], op.op.val)
+			{ next: op.next }
 		}
 		'je', 'jz' -> {
-			skipCommas()
-			target := advance()
-			emitByte(0x0F)
-			emitByte(0x84)
-			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
-			emitDword(0)
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x84], op.op.val)
+			{ next: op.next }
 		}
 		'jne', 'jnz' -> {
-			skipCommas()
-			target := advance()
-			emitByte(0x0F)
-			emitByte(0x85)
-			relocations << { offset: len(code), symbol: target.val, type: :rel32 }
-			emitDword(0)
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x85], op.op.val)
+			{ next: op.next }
 		}
-		'cmp' -> {
-			skipCommas()
-			dst := advance()
-			skipCommas()
-			src := advance()
-			if dst.type = TOK_REG & src.type = TOK_REG {
+		'jl' -> {
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x8C], op.op.val)
+			{ next: op.next }
+		}
+		'jg' -> {
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x8F], op.op.val)
+			{ next: op.next }
+		}
+		'jle' -> {
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x8E], op.op.val)
+			{ next: op.next }
+		}
+		'jge' -> {
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x8D], op.op.val)
+			{ next: op.next }
+		}
+		'js' -> {
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x88], op.op.val)
+			{ next: op.next }
+		}
+		'jns' -> {
+			op := oneOp(tokens, i)
+			emitRelBranch(codeLst, relocLst, [0x0F, 0x89], op.op.val)
+			{ next: op.next }
+		}
+		// --- setcc r/m8 ---
+		'sete', 'setne', 'setl', 'setg', 'setle', 'setge', 'sets', 'setns' -> {
+			op := oneOp(tokens, i)
+			cc := if mnemonic {
+				'sete' -> 0x94
+				'setne' -> 0x95
+				'setl' -> 0x9C
+				'setg' -> 0x9F
+				'setle' -> 0x9E
+				'setge' -> 0x9D
+				'sets' -> 0x98
+				_ -> 0x99
+			}
+			if op.op.kind = 0 {
 				true -> {
-					d := regNum(dst.val)
-					s := regNum(src.val)
-					emitByte(rexW(s, d))
-					emitByte(0x39)
-					emitByte(modRM(3, s, d))
+					emitByte(codeLst, 0x40 | (if op.op.reg > 7 { true -> 1, _ -> 0 }))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, cc)
+					emitByte(codeLst, modRM(3, 0, op.op.reg))
 				}
 			}
+			if op.op.kind = 2 {
+				true -> {
+					emitByte(codeLst, 0x40 | (if op.op.mem.base > 7 { true -> 1, _ -> 0 }))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, cc)
+					emitMemOperand(codeLst, 0, op.op.mem)
+				}
+			}
+			{ next: op.next }
 		}
+		// --- cmovcc r64, r/m64 ---
+		'cmove', 'cmovne', 'cmovl', 'cmovg', 'cmovle', 'cmovge' -> {
+			ops := twoOps(tokens, i)
+			cc := if mnemonic {
+				'cmove' -> 0x44
+				'cmovne' -> 0x45
+				'cmovl' -> 0x4C
+				'cmovg' -> 0x4F
+				'cmovle' -> 0x4E
+				_ -> 0x4D
+			}
+			if ops.a.kind = 0 & ops.b.kind = 0 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.reg))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, cc)
+					emitByte(codeLst, modRM(3, ops.a.reg, ops.b.reg))
+				}
+			}
+			if ops.a.kind = 0 & ops.b.kind = 2 {
+				true -> {
+					emitByte(codeLst, rexW(ops.a.reg, ops.b.mem.base))
+					emitByte(codeLst, 0x0F)
+					emitByte(codeLst, cc)
+					emitMemOperand(codeLst, ops.a.reg, ops.b.mem)
+				}
+			}
+			{ next: ops.next }
+		}
+		_ -> { next: i }
 	}
 
-	// Main assembly loop
-	fn assembleLoop() if idx.0 < len(tokens) {
+	// Main assembly loop (state threaded via params; label/directive handling
+	// at the loop level keeps captured mutation out of deep recursion)
+	fn assembleLoop(tokens, i, codeLst, labelTbl, relocLst) if i < len(tokens) {
 		true -> {
-			tok := advance()
+			tok := tokens.(i)
 			if tok.type {
-				:label -> labels.(tok.val) <- len(code)
+				:label -> {
+					labelTbl.(tok.val) <- len(codeLst)
+					assembleLoop(tokens, i + 1, codeLst, labelTbl, relocLst)
+				}
 				:directive -> {
-					if tok.val = '.text' -> sections.current <- '.text'
-					if tok.val = '.data' -> sections.current <- '.data'
-					if tok.val = '.global' | tok.val = '.globl' -> {
-						skipCommas()
-						advance()  // consume symbol name
+					if tok.val = '.global' | tok.val = '.globl' {
+						true -> assembleLoop(tokens, i + 2, codeLst, labelTbl, relocLst)
+						_ -> assembleLoop(tokens, i + 1, codeLst, labelTbl, relocLst)
 					}
 				}
-				:mnemonic -> assembleInstruction(tok.val)
-				:newline -> ?
-				:comment -> ?
+				:mnemonic -> {
+					res := assembleInstruction(tok.val, tokens, i + 1, codeLst, relocLst)
+					assembleLoop(tokens, res.next, codeLst, labelTbl, relocLst)
+				}
+				_ -> assembleLoop(tokens, i + 1, codeLst, labelTbl, relocLst)
 			}
-			assembleLoop()
 		}
+		_ -> ?
 	}
 
-	assembleLoop()
+	assembleLoop(tokens, 0, code, labels, relocs)
 
 	// Resolve relocations
-	relocations |> each(fn(rel) {
+	relocs |> each(fn(rel) {
 		if labels.(rel.symbol) != ? {
 			true -> {
 				target := labels.(rel.symbol)
 				source := rel.offset + 4  // after the 4-byte placeholder
 				offset := target - source
-				// Patch the 4-byte offset
 				code.(rel.offset) <- offset & 255
 				code.(rel.offset + 1) <- (offset >> 8) & 255
 				code.(rel.offset + 2) <- (offset >> 16) & 255
@@ -395,8 +750,7 @@ fn assembleX86_64(source) {
 	{
 		code: code
 		labels: labels
-		relocations: relocations
-		sections: sections
+		relocations: relocs
 	}
 }
 
