@@ -151,7 +151,11 @@ fn createIRCompiler() {
 	// st.0 = current name->vreg env; st.1 = [name, label] fn pairs.
 	// Captured-list index ops are reliable at closure depth where captured
 	// object member writes and beyond-first param bindings are not.
-	st := [{}, []]
+	// fnTablePairs aliases st.1 through a directly-captured variable so the
+	// compile() result can hand it out (object-member fns cannot read the
+	// st pair reliably).
+	fnTablePairs := []
+	st := [{}, fnTablePairs]
 
 	fn freshReg() {
 		r := nextReg.0
@@ -520,11 +524,12 @@ fn createIRCompiler() {
 				instructions: instructions
 				stringPool: stringPool
 				functionPool: functionPool
-				fnTable: st.1
+				fnTable: fnTablePairs
 				regCount: nextReg.0
 			}
 		}
 		compileNode: compileNode
+		getFnTable: fn() fnTablePairs
 		getInstructions: fn() instructions
 		getStringPool: fn() stringPool
 		getFunctionPool: fn() functionPool
@@ -962,24 +967,30 @@ fn createX86_64Generator() {
 	}
 
 	{
-		compile: fn(irProgram) {
+		// opts is ? or { fnEntry: label } — fnEntry mode emits only the IR
+		// instructions (no _start prologue / print+exit), so the code at the
+		// entry label is directly callable with SysV integer args.
+		compile: fn(irProgram, opts) {
 			frame := 8 * (irProgram.regCount + 8)
 			frame <- frame + (16 - frame % 16) % 16
-			// _start: frame setup, call top-level, print+exit
-			emitByte(0x55) // push rbp
-			emitByte(0x48)
-			emitByte(0x89)
-			emitByte(0xE5) // mov rbp, rsp
-			emitByte(0x48)
-			emitByte(0x81)
-			emitByte(0xEC) // sub rsp, frame (imm32)
-			emitDword(frame)
-			emitBranch([0xE8], 'main_top')
-			emitMovRR(7, 0) // mov rdi, rax
-			emitBranch([0xE8], 'print_exit') // call print helper (prints rdi, exits 0)
-			labelPairs << ['print_exit', len(code)]
-			emitPrintExit()
-			emitByte(0xC3)
+			fnEntryMode := opts != ? & opts.fnEntry != ?
+			if !fnEntryMode -> {
+				// _start: frame setup, call top-level, print+exit
+				emitByte(0x55) // push rbp
+				emitByte(0x48)
+				emitByte(0x89)
+				emitByte(0xE5) // mov rbp, rsp
+				emitByte(0x48)
+				emitByte(0x81)
+				emitByte(0xEC) // sub rsp, frame (imm32)
+				emitDword(frame)
+				emitBranch([0xE8], 'main_top')
+				emitMovRR(7, 0) // mov rdi, rax
+				emitBranch([0xE8], 'print_exit') // call print helper (prints rdi, exits 0)
+				labelPairs << ['print_exit', len(code)]
+				emitPrintExit()
+				emitByte(0xC3)
+			}
 			// pass 2: emit machine bytes (labels recorded at actual offsets)
 			emitInsts(irProgram.instructions, 0, frame)
 			// pass 3: patch branch/call rel32s
@@ -1054,7 +1065,7 @@ fn createARM64Generator() {
 	}
 
 	{
-		compile: fn(irProgram) {
+		compile: fn(irProgram, opts) {
 			irProgram.instructions |> each(compileIR)
 			{
 				code: code
@@ -1080,5 +1091,5 @@ fn compileToNative(ast, arch) {
 		_ -> createX86_64Generator()
 	}
 
-	generator.compile(irProgram)
+	generator.compile(irProgram, ?)
 }
