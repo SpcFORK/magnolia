@@ -43,6 +43,7 @@ syntax := import('syntax')
 bundleUtils := import('bundle-utils')
 transform := import('ast-transform')
 transpile := import('transpile')
+astOptimize := import('ast-optimize')
 packModule := import('pack')
 buildIncludes := import('build-includes')
 buildIdent := import('build-ident')
@@ -918,6 +919,19 @@ fn renderLuaBundle(bundleNode) {
 				}
 			}
 		}
+		:whileExpr -> (if stmtMode {
+			true -> ''
+			_ -> '(function() '
+		}) + 'while ' + renderChild(node.cond) + ' do\n' + {
+			result := ''
+			node.body.exprs |> each(fn(expr) {
+				result <- result + renderNodeMode(expr, true) + '\n'
+			})
+			result
+		} + 'end' + (if stmtMode {
+			true -> ''
+			_ -> '\nreturn nil\nend)()'
+		})
 		:fnCall -> renderChild(node.function) + '(' + (node.args |> map(renderNode) |> join(', ')) + ')'
 	}
 
@@ -1248,6 +1262,17 @@ fn renderJavaBundle(bundleNode) {
 				_ -> javaIdent(node.name) + ' = ' + fnBody
 			}
 		}
+		:whileExpr -> '((Function<Void, Object>) (__oak_v) -> {\n' << {
+			result := 'while (Boolean.TRUE.equals(' << renderNode(node.cond) << ')) {\n'
+			if node.body.decls != ? -> node.body.decls |> each(fn(d) {
+				result <- result << 'Object ' << javaIdent(d) << ' = null;\n'
+			})
+			node.body.exprs |> each(fn(expr) {
+				result <- result << renderNode(expr) << ';\n'
+			})
+			result <- result << '}\n'
+			result
+		} << 'return null;\n}).apply(null)'
 		:fnCall -> '((Function<Object[], Object>) ' << renderNode(node.function) << ').apply(new Object[]{' << node.args |> map(renderNode) |> join(', ') << '})'
 	}
 
@@ -1580,7 +1605,15 @@ fn runOak(config) {
 	// compile the import map into a bundle with an entrypoint and render to
 	// bundle program text
 	moduleKeys := ModuleNodes |> keys() |> sort!()
-	compiledModules := pmap(moduleKeys, fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()])
+	// MIR-assisted fast paths (plan §10.1): the AST pre-pass folds constants
+	// and propagates literal bindings for every target. Tail-call lowering to
+	// :whileExpr is gated to targets whose renderer supports the node type.
+	lowerTail := Target = 'web' | Target = 'ts' | Target = 'lua' | Target = 'java'
+	compiledModules := pmap(moduleKeys, fn(name) {
+		optd := name |> cachedParse() |> transform.wrapBlock()
+		optd <- astOptimize.optimizeProgram(optd, lowerTail)
+		[ name, optd |> transpile.transpileNode() |> analyzeNode() |> wrapModule() ]
+	})
 	BundleFile := compiledModules |>
 		wrapBundle(AbsoluteEntry) |>
 		renderBundle()
