@@ -1,0 +1,498 @@
+// ast-wat -- direct typed WAT codegen for statically int-typed functions
+// (plan §10.1 "direct typed WAT codegen: numeric/loop specialization without
+// VM interpretation overhead where statically typed").
+//
+// emitTypedWAT(bundleNode) scans the bundled module for top-level functions
+// whose bodies are statically int-only and emits real WebAssembly functions
+// for them (i64 params/results), instead of leaving every call to the
+// embedded `oak.run` interpreter. Qualification is deliberately conservative:
+//
+//   - params only (no captured nonlocals, no restArg);
+//   - int literals, i64 arithmetic (+ - *), bitwise (& | ^) and shifts
+//     (<< >>, arithmetic right shift like the host), and signed comparisons;
+//     `/` and `%` are excluded (host `/` yields floats);
+//   - two-branch if-expressions with bool/empty targets and bool conditions;
+//   - direct calls to other qualified functions (mutual recursion resolves
+//     through a fixpoint pass), arity-matched;
+//   - :whileExpr statements with bool conditions and assignment bodies
+//     (assignments bind params or introduce i64 locals);
+//   - bools are encoded as i64 0/1, so every export is (result i64).
+//
+// Functions that do not qualify keep running through the embedded source;
+// qualified functions are additionally exported under their own names so
+// hosts can call the compiled fast path directly.
+
+{
+	map: map
+	each: each
+	len: len
+	filter: filter
+	reduce: reduce
+	keys: keys
+	entries: entries
+	slice: slice
+	default: default
+} := import('std')
+{
+	join: join
+} := import('str')
+
+sort! := import('sort').sort!
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+fn _bad() { ok: false, b: false }
+fn _of(b) { ok: true, b: b }
+
+fn _isArithOp(op) if op {
+	:plus, :minus, :times, :and, :or, :xor, :lshift, :rshift -> true
+	_ -> false
+}
+
+fn _isCmpOp(op) if op {
+	:eq, :neq, :greater, :less, :lt, :gt, :geq, :leq -> true
+	_ -> false
+}
+
+// _san maps an Oak identifier to a WAT-safe symbol (idents may contain
+// operator characters like ? ! < >).
+fn _san(name) name |> reduce('', fn(acc, c) acc << if c {
+	'?' -> '_qm'
+	'!' -> '_bang'
+	'<' -> '_lt'
+	'>' -> '_gt'
+	'=' -> '_eq'
+	'+' -> '_plus'
+	'-' -> '_minus'
+	'*' -> '_times'
+	'/' -> '_div'
+	'%' -> '_mod'
+	'&' -> '_amp'
+	'|' -> '_pipe'
+	'^' -> '_caret'
+	'~' -> '_tilde'
+	'@' -> '_at'
+	'#' -> '_hash'
+	'.' -> '_dot'
+	':' -> '_colon'
+	_ -> c
+})
+
+fn _fname(name) '$oak_' << _san(name)
+
+// _reserved protects the module's own export names.
+fn _exportName(name) if name {
+	'run', 'main', 'bundle_ptr', 'bundle_len' -> 'fn_' << name
+	_ -> name
+}
+
+// _arithWat maps arithmetic/bitwise/shift ops to i64 instructions.
+fn _arithWat(op) if op {
+	:plus -> 'i64.add'
+	:minus -> 'i64.sub'
+	:times -> 'i64.mul'
+	:and -> 'i64.and'
+	:or -> 'i64.or'
+	:xor -> 'i64.xor'
+	:lshift -> 'i64.shl'
+	:rshift -> 'i64.shr_s'
+	_ -> ?
+}
+
+// _cmpWat maps comparison ops to i64 instructions. Comparisons yield i32 in
+// wasm, so callers wrap with i64.extend_i32_u to keep the everything-is-i64
+// encoding.
+fn _cmpWat(op) if op {
+	:eq -> 'i64.eq'
+	:neq -> 'i64.ne'
+	:greater, :gt -> 'i64.gt_s'
+	:less, :lt -> 'i64.lt_s'
+	:geq -> 'i64.ge_s'
+	:leq -> 'i64.le_s'
+	_ -> ?
+}
+
+// ---------------------------------------------------------------------------
+// qualification analysis
+// ---------------------------------------------------------------------------
+
+// _exprInfo returns { ok, b } for an expression: ok means it can compile to
+// typed i64 WAT, b means it yields a bool (encoded 0/1). ctx fields:
+//   params  - object set of parameter names (int-typed)
+//   locals  - object mapping assigned-name -> 'i' | 'b' (mutated as found)
+//   fns     - object name -> { b, arity } of qualified callees
+fn _exprInfo(node, ctx) if node {
+	? -> _bad()
+	_ -> if node.type {
+		:int -> _of(false)
+		:bool -> _of(true)
+		:identifier -> {
+			if ctx.params.(node.val) {
+				? -> if ctx.locals.(node.val) {
+					'b' -> _of(true)
+					'i' -> _of(false)
+					_ -> _bad()
+				}
+				_ -> _of(false)
+			}
+		}
+		:unary -> {
+			info := _exprInfo(node.right, ctx)
+			if info.ok {
+				true -> if node.op {
+					:minus -> if info.b {
+						true -> _bad()
+						_ -> _of(false)
+					}
+					:exclam -> _of(true)
+					_ -> _bad()
+				}
+				_ -> _bad()
+			}
+		}
+		:binary -> {
+			l := _exprInfo(node.left, ctx)
+			r := _exprInfo(node.right, ctx)
+			if l.ok & r.ok {
+				true -> if _isArithOp(node.op) {
+					true -> if l.b | r.b {
+						true -> _bad()
+						_ -> _of(false)
+					}
+					_ -> if _isCmpOp(node.op) {
+						true -> if l.b = r.b {
+							true -> _of(true)
+							_ -> _bad()
+						}
+						_ -> _bad()
+					}
+				}
+				_ -> _bad()
+			}
+		}
+		:ifExpr -> _ifInfo(node, ctx)
+		:fnCall -> _callInfo(node, ctx)
+		:block -> _blockInfo(node, ctx)
+		_ -> _bad()
+	}
+}
+
+// _ifInfo types a two-branch if: bool condition, one true-target arm and one
+// empty/false-target arm, both arms compiling with the same bool-ness.
+fn _ifInfo(node, ctx) if len(node.branches) = 2 {
+	true -> {
+		cond := _exprInfo(node.cond, ctx)
+		if cond.ok & cond.b {
+			true -> {
+				tArm := _armWith(node, 'true')
+				eArm := _armWith(node, 'else')
+				if tArm != ? & eArm != ? {
+					true -> {
+						a := _exprInfo(tArm, ctx)
+						e := _exprInfo(eArm, ctx)
+						if a.ok & e.ok & a.b = e.b {
+							true -> _of(a.b)
+							_ -> _bad()
+						}
+					}
+					_ -> _bad()
+				}
+			}
+			_ -> _bad()
+		}
+	}
+	_ -> _bad()
+}
+
+// _armWith finds the arm matching `true` or the else-arm (empty/false target).
+fn _armWith(node, which) {
+	found := ?
+	node.branches |> each(fn(br) {
+		match := if which {
+			'true' -> br.target.type = :bool & br.target.val = true
+			_ -> br.target.type = :empty | (br.target.type = :bool & br.target.val = false)
+		}
+		if match {
+			true -> if found = ? -> found <- br.body
+		}
+	})
+	found
+}
+
+fn _callInfo(node, ctx) if node.function.type = :identifier {
+	true -> {
+		callee := ctx.fns.(node.function.val)
+		if callee {
+			? -> if node.function.val = ctx.selfName & len(node.args) = ctx.selfArity {
+				// self-recursion seeds the fixpoint (assumed int result)
+				true -> if _argsOkIn(node.args, ctx, 0) {
+					true -> _of(false)
+					_ -> _bad()
+				}
+				_ -> _bad()
+			}
+			_ -> if len(node.args) = callee.arity {
+				true -> if _argsOkIn(node.args, ctx, 0) {
+					true -> _of(callee.b)
+					_ -> _bad()
+				}
+				_ -> _bad()
+			}
+		}
+	}
+	_ -> _bad()
+}
+
+fn _argsOkIn(args, ctx, i) if i < len(args) {
+	true -> {
+		info := _exprInfo(args.(i), ctx)
+		if info.ok {
+			true -> _argsOkIn(args, ctx, i + 1)
+			_ -> false
+		}
+	}
+	_ -> true
+}
+
+fn _blockInfo(node, ctx) if len(node.exprs) > 0 {
+	true -> {
+		stmtsOk := _stmtsOk(node.exprs, ctx, 0, len(node.exprs) - 1)
+		if stmtsOk {
+			true -> _exprInfo(node.exprs.(len(node.exprs) - 1), ctx)
+			_ -> _bad()
+		}
+	}
+	_ -> _bad()
+}
+
+// _stmtsOk checks every non-final expression is a valid typed statement.
+fn _stmtsOk(exprs, ctx, i, last) if i < last {
+	true -> if _stmtOk(exprs.(i), ctx) {
+		true -> _stmtsOk(exprs, ctx, i + 1, last)
+		_ -> false
+	}
+	_ -> true
+}
+
+fn _stmtOk(node, ctx) if node.type {
+	:assignment -> {
+		if node.left.type = :identifier {
+			true -> {
+				info := _exprInfo(node.right, ctx)
+				if info.ok {
+					true -> {
+						name := node.left.val
+						if ctx.params.(name) {
+							? -> ctx.locals.(name) <- if info.b {
+								true -> 'b'
+								_ -> 'i'
+							}
+						}
+						true
+					}
+					_ -> false
+				}
+			}
+			_ -> false
+		}
+	}
+	:whileExpr -> {
+		cond := _exprInfo(node.cond, ctx)
+		if cond.ok & cond.b & node.body.type = :block {
+			true -> _stmtsOk(node.body.exprs, ctx, 0, len(node.body.exprs))
+			_ -> false
+		}
+	}
+	_ -> false
+}
+
+// _fnTyped?(fnNode, qualified) -> { ok, b, locals, arity }
+fn _fnTyped?(fnNode, qualified) {
+	paramsOk := fnNode.restArg = '' | fnNode.restArg = ?
+	if paramsOk {
+		true -> {
+			ctx := { params: {}, locals: {}, fns: qualified, n: 0, selfName: fnNode.name, selfArity: len(fnNode.args) }
+			fnNode.args |> each(fn(a) if type(a) = :string {
+				true -> ctx.params.(a) := true
+			})
+			info := _exprInfo(fnNode.body, ctx)
+			{ ok: info.ok, b: info.b, locals: ctx.locals, arity: len(fnNode.args) }
+		}
+		_ -> { ok: false, b: false, locals: {}, arity: 0 }
+	}
+}
+
+// _qualify runs the fixpoint: a fn qualifies when its body only references
+// params/locals and calls already-qualified fns; passes repeat until stable
+// so mutual recursion qualifies together.
+fn _qualify(fns, qualified) {
+	before := len(qualified |> keys())
+	_qualifyPass(fns, qualified, 0)
+	if len(qualified |> keys()) > before {
+		true -> _qualify(fns, qualified)
+	}
+}
+
+fn _qualifyPass(fns, qualified, i) if i < len(fns) {
+	true -> {
+		fnN := fns.(i)
+		if qualified.(fnN.name) {
+			? -> {
+				info := _fnTyped?(fnN, qualified)
+				if info.ok {
+					true -> qualified.(fnN.name) := {
+						fnode: fnN
+						b: info.b
+						locals: info.locals
+						arity: info.arity
+					}
+				}
+			}
+		}
+		_qualifyPass(fns, qualified, i + 1)
+	}
+	_ -> ?
+}
+
+// ---------------------------------------------------------------------------
+// emission
+// ---------------------------------------------------------------------------
+
+fn _emitExpr(node, ctx) if node.type {
+	:int -> '(i64.const ' << string(node.val) << ')'
+	:identifier -> '(local.get $' << _san(node.val) << ')'
+	:unary -> if node.op {
+		:minus -> '(i64.sub (i64.const 0) ' << _emitExpr(node.right, ctx) << ')'
+		:exclam -> '(select (i64.const 0) (i64.const 1) ' << _emitExpr(node.right, ctx) << ')'
+	}
+	:binary -> if _arithWat(node.op) {
+		? -> '(i64.extend_i32_u (' << _cmpWat(node.op) << ' ' << _emitExpr(node.left, ctx) << ' ' << _emitExpr(node.right, ctx) << '))'
+		_ -> '(' << _arithWat(node.op) << ' ' << _emitExpr(node.left, ctx) << ' ' << _emitExpr(node.right, ctx) << ')'
+	}
+	:ifExpr -> {
+		tArm := _armWith(node, 'true')
+		eArm := _armWith(node, 'else')
+		'(if (result i64) (i32.wrap_i64 ' << _emitExpr(node.cond, ctx) << ') (then ' << _emitExpr(tArm, ctx) << ') (else ' << _emitExpr(eArm, ctx) << '))'
+	}
+	:fnCall -> {
+		parts := node.args |> map(fn(a) _emitExpr(a, ctx)) |> join(' ')
+		'(call ' << _fname(node.function.val) << if len(parts) {
+			0 -> ')'
+			_ -> ' ' << parts << ')'
+		}
+	}
+	:block -> {
+		stmts := _emitStmts(node.exprs, ctx, 0, len(node.exprs) - 1, '')
+		stmts << _emitExpr(node.exprs.(len(node.exprs) - 1), ctx)
+	}
+	_ -> '(i64.const 0)'
+}
+
+// _emitStmts concatenates statement WAT for exprs 0..last-1.
+fn _emitStmts(exprs, ctx, i, last, acc) if i < last {
+	true -> _emitStmts(exprs, ctx, i + 1, last, acc << _emitStmt(exprs.(i), ctx))
+	_ -> acc
+}
+
+fn _emitStmt(node, ctx) if node.type {
+	:assignment -> '(local.set $' << _san(node.left.val) << ' ' << _emitExpr(node.right, ctx) << ')'
+	:whileExpr -> {
+		ctx.n <- ctx.n + 1
+		label := '$oak_loop_' << string(ctx.n)
+		'(loop ' << label << ' (if (i32.wrap_i64 ' << _emitExpr(node.cond, ctx) << ') (then ' << _emitStmts(node.body.exprs, ctx, 0, len(node.body.exprs), '') << '(br ' << label << '))))'
+	}
+	_ -> ''
+}
+
+// _collectFns gathers named function definitions. Bundled modules arrive
+// wrapped in nameless :function nodes and __oak_modularize fnCalls, so the
+// walk descends through those wrappers into the module bodies. Nested
+// definitions are also collected; they only qualify when they reference no
+// captured bindings (params-only rule).
+fn _collectFns(exprs, acc) if len(exprs) {
+	0 -> acc
+	_ -> {
+		e := exprs.0
+		rest := exprs |> slice(1, len(exprs))
+		if e.type {
+			:function -> if e.name != '' & e.name != ? {
+				true -> _collectFns(rest, acc << e)
+				_ -> _collectFns(e.body.exprs |> default([]), acc)
+			}
+			:fnCall -> {
+				withFn := if e.function.type = :function {
+					true -> _collectFns(e.function.body.exprs |> default([]), acc)
+					_ -> acc
+				}
+				_collectFns(rest, _fnsInArgs(e.args |> default([]), withFn))
+			}
+			:block -> _collectFns(rest, _collectFns(e.exprs |> default([]), acc))
+			_ -> _collectFns(rest, acc)
+		}
+	}
+}
+
+fn _fnsInArgs(args, acc) if len(args) {
+	0 -> acc
+	_ -> if args.0.type = :function {
+		true -> _fnsInArgs(args |> slice(1, len(args)), _collectFns(args.0.body.exprs |> default([]), acc))
+		_ -> _fnsInArgs(args |> slice(1, len(args)), acc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+
+// emitTypedWAT compiles every statically int-typed top-level function of the
+// bundle to a WAT (func ...) and returns { wat, names }. wat is designed to
+// be spliced into the oak --wasm module before its closing paren; names lists
+// the functions that were compiled (empty when none qualified).
+fn emitTypedWAT(bundleNode) if bundleNode {
+	? -> { wat: '', names: [] }
+	_ -> if type(bundleNode.exprs) != :list {
+		// parse-error objects and other non-block inputs compile nothing
+		true -> { wat: '', names: [] }
+		_ -> {
+			fns := _collectFns(bundleNode.exprs, [])
+	qualified := {}
+	_qualify(fns, qualified)
+	names := qualified |> keys() |> sort!()
+	pieces := names |> map(fn(name) {
+		info := qualified.(name)
+		// rebuild a fresh emit context per function
+		ctx := { params: {}, locals: info.locals, fns: qualifiedCtx(qualified), n: 0 }
+		info.fnode.args |> each(fn(a) if type(a) = :string {
+			true -> ctx.params.(a) := true
+		})
+		body := if info.fnode.body.type = :block {
+			true -> {
+				stmts := _emitStmts(info.fnode.body.exprs, ctx, 0, len(info.fnode.body.exprs), '')
+				stmts << _emitExpr(info.fnode.body.exprs.(len(info.fnode.body.exprs) - 1), ctx)
+			}
+			_ -> _emitExpr(info.fnode.body, ctx)
+		}
+		params := info.fnode.args |> map(fn(a) ' (param $' << _san(a) << ' i64)') |> join('')
+		localDecls := info.locals |> keys() |> filter(fn(name2) ctx.params.(name2) = ?) |> sort!() |> map(fn(name2) '\n\t\t(local $' << _san(name2) << ' i64)') |> join('')
+		'\n\t;; typed fast path (plan §10.1)\n\t(func ' << _fname(name) << ' (export "' << _exportName(name) << '")' << params << ' (result i64)' << localDecls << '\n\t\t' << body << '\n\t)'
+	})
+			{
+				wat: if len(names) {
+					0 -> ''
+					_ -> pieces |> join('')
+				}
+				names: names
+			}
+		}
+	}
+}
+
+fn qualifiedCtx(qualified) {
+	out := {}
+	qualified |> entries() |> each(fn(entry) {
+		out.(entry.0) := { b: entry.1.b, arity: entry.1.arity }
+	})
+	out
+}

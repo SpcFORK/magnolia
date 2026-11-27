@@ -271,6 +271,9 @@ var libjit string
 //go:embed lib/ast-optimize.oak
 var libastoptimize string
 
+//go:embed lib/ast-wat.oak
+var libastwat string
+
 //go:embed lib/applet.oak
 var libapplet string
 
@@ -903,6 +906,7 @@ var stdlibs = map[string]string{
 	"ast-ir":                          libastir,
 	"jit":                             libjit,
 	"ast-optimize":                    libastoptimize,
+	"ast-wat":                         libastwat,
 	"applet":                          libapplet,
 	"applet-api":                          libappletapi,
 	"applet-bytecode":                          libappletbytecode,
@@ -1147,6 +1151,7 @@ var stdlibAutoLoadOrder = []string{
 	"ast-ir",
 	"jit",
 	"ast-optimize",
+	"ast-wat",
 	"codegen-go",
 	"codegen-native",
 	"assembler",
