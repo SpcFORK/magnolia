@@ -56,7 +56,7 @@ Every item maps 1-to-1 to its governing design section (`§X.Y`) and carries an 
   - Direct typed WAT codegen (`--wasm` numeric/loop specialization without VM interpretation overhead where statically typed) *(landed via `lib/ast-wat.oak`: statically int-typed functions compile to real i64 wasm funcs exported as direct fast paths; differential oracle match with the host — commit b08 follow-up)*
   - Tail-loop lowering & numeric unboxed fast paths in JS/TS (`--web`/`--ts`), Lua (`--lua`), and Java (`--java`). *(landed via `lib/ast-optimize.oak` pre-pass: const fold/propagate + dead-branch elimination for every target; self-tail-recursion → native `:whileExpr` loops on web/ts/lua/java with parallel-assignment temps — commits 6d51bdd + ast-wat)*
 - [x] **TODO-19 (`-> §10.2`)**: Implement **`lib/compute.oak`** unifying fused pure HOF pipelines (`map` / `filter` / `reduce` / `dotProduct` / `softmax` from `lib/ai.oak`) with automatic **GLSL/HLSL/SPIR-V & OpenCL/CUDA kernel generation** (`lib/gui-shader-codegen.oak` + `lib/gpus.oak`) and multi-core CPU chunked fallback. *(landed: tagged expression IR with fusion (map/filter collapse + same-sweep reduce), OpenCL C / CUDA C / GLSL 430 / HLSL 5.0 kernel generation, full OpenCL launch lifecycle via lib/gpus.oak FFI with transparent CPU fallback, go()-worker chunked CPU execution with deterministic worker-ordered partials; SPIR-V emission deferred to external tooling — commits 158ebf4 + core)*
-- [ ] **TODO-20 (`-> §11.2`)**: Run full regression tests, differential oracle checks across all engines/targets, and record live head-to-head benchmark numbers (Goose vs. C++ vs. Baseline Magnolia vs. Magnolia-Hyper) in §11.
+- [x] **TODO-20 (`-> §11.2`)**: Run full regression tests, differential oracle checks across all engines/targets, and record live head-to-head benchmark numbers (Goose vs. C++ vs. Baseline Magnolia vs. Magnolia-Hyper) in §11. *(landed: micro-bench allocs/op gate re-run — zero regressions vs §11.2.1 (8/10/646/15 bytecode allocs intact); 7-workload cross-language differential oracle incl. new `computefuse` + `fib35` workloads (`bench/todo04/results.csv`, oracle OK ×7; oak workloads reconstructed from committed cpp sources, all 6 original checksums reproduced); `bench/todo20/oracle.sh` interpreter/web/C/Go target oracle 6/6; §11.3 head-to-head filled incl. `--c` column — fib35 `--c` 647 ms (4× over `-b`), records near-cpp parity, pipe transpiles; three `--c` gaps surfaced as the M2 C-backend worklist (sieve element-store, lru `<<` rebound-list push, go()/chan runtime); goose column auto-skips when compiler absent — commit series 74df5b5..)*
 
 ---
 
@@ -464,11 +464,52 @@ Findings:
 
 | Workload | Goose | C++ `-O3 -march=native` | Baseline Magnolia | Magnolia-Hyper `--bytecode` | Magnolia-Hyper `--c` | Magnolia-Hyper JIT |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `fib35` | — | — | — | — | — | — |
-| `arith_loop` | — | — | — | — | — | — |
-| `sieve` | — | — | — | — | — | — |
-| `lru` | — | — | — | — | — | — |
-| `records` | — | — | — | — | — | — |
+| `fib35` | — | 18.4 ms | 27,394 ms | 2,592 ms | **647 ms** | — |
+| `arith_loop` | — | 1.01 ms | 1,269 ms | 207 ms | 1,208 ms * | — |
+| `sieve` | — | 0.14 ms | 453 ms | 72 ms | ✗ null | — |
+| `lru` | — | 2.10 ms | 738 ms | 144 ms | ✗ len(?) | — |
+| `records` | — | 0.30 ms | 43 ms | 12 ms | **13.5 ms** | — |
 | `particles_soa` | — | — | — | — | — | — |
-| `pipe_fusion` | — | — | — | — | — | — |
+| `pipe_fusion` | — | 0.03 ms | 331 ms | 318 ms | ✗ transpile | — |
 | `stride_jit` | — | — | — | — | — | — |
+
+#### §11.3.1 TODO-20 regression gate + differential oracle + head-to-head ledger (2026-11-26, this sandbox, min-of-3)
+
+**Goose is unavailable in this sandbox** (compiler binary not present) — its
+column is `—` everywhere; the runner skips it gracefully
+(`bench/todo04/run_bench.py` auto-detects).
+
+**Micro-benchmark allocs/op regression gate** (`go test -bench
+'BenchmarkEvalPreparsed|BenchmarkBytecodePrecompiled' -benchtime=300x`): every
+benchmark matches the §11.2.1 ledger exactly — EvalPreparsed 2,988,449 /
+3,029 / 24,660 / 23,025 allocs; BytecodePrecompiled **8 / 10 / 646 / 15**
+allocs; PipeFusion 5,830 eval / 1,198 bytecode (vs 1,204 prior, within
+noise). No allocation regressions from TODO-15..19.
+
+**Cross-language differential oracle** (`bench/todo04/`, 7 workloads incl.
+new `computefuse`): every engine prints the identical checksum on every
+workload (`results.csv`, oracle OK ×7). The oak workloads were reconstructed
+in TODO-20 from the committed cpp sources (the originals were never
+committed); all six reproduce the TODO-04 checksums exactly (fib 503283,
+arith 500000500042, sieve 9592, lru 14968, records 30005, pipe 133346667).
+Reconstruction-shape differences make records/pipe rows not directly
+comparable to §11.2.2 (records −2×, pipe −b 3× on this box; fib/arith/sieve/
+lru reproduce within noise).
+
+**AOT `--c` target findings** (differential oracle across the C backend):
+
+| Workload | `--c` result | note |
+| :--- | :--- | :--- |
+| `fib35` | ✓ `9227465` | 647 ms = 4× faster than `-b`, 42× over `-n` |
+| `arith_loop` | ✓ numeric parity | prints `%g` float format; 1,208 ms — generated C lacks TCO, slower than `-b` (10× gap to close in M2) |
+| `sieve` | ✗ prints `?` | list-element store through recursion loses the value |
+| `lru` | ✗ runtime error | `? does not support a len()` — `<<` push on a rebound list |
+| `records` | ✓ `30005` | 13.5 ms, near-cpp parity |
+| `pipe` | ✓ `133346667` | std-HOF chains transpile; 104.5 ms |
+| `computefuse` | ✗ transpile error | compute.oak's go()/chan multi-core path has no C-bundle runtime yet |
+
+`fib35` oracle: `-n` = `-b` = `--c` = C++ = **9227465** (byte-identical).
+The three `--c` gaps (sieve element-store, lru `<<` rebound-list push,
+go()/chan runtime) are the concrete M2 C-backend worklist surfaced by this
+gate. `particles_soa` / `stride_jit` remain M2-pending workloads (JIT not
+built).

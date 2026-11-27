@@ -28,7 +28,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 MAGNOLIA = os.environ.get("MAGNOLIA_BIN", "/tmp/ref/magnolia")
 GOOSE = os.environ.get("GOOSE_BIN", "/tmp/ref/goose/build/goose")
 
-WORKLOADS = ["fib", "arith", "sieve", "lru", "records", "pipe"]
+WORKLOADS = ["fib", "arith", "sieve", "lru", "records", "pipe", "computefuse"]
 
 
 def sh(cmd, **kw):
@@ -47,8 +47,12 @@ def build_all():
         if r.returncode != 0:
             sys.exit(f"magnolia build failed:\n{r.stderr}")
 
-    # Goose: compile each program to a native binary
-    for w in WORKLOADS:
+    # Goose: compile each program to a native binary (skipped gracefully when
+    # the goose compiler is unavailable — column reported as '-')
+    goose_ok = os.path.exists(GOOSE)
+    if not goose_ok:
+        print(f"goose compiler not found at {GOOSE}: skipping goose column")
+    for w in (WORKLOADS if goose_ok else []):
         src = os.path.join(HERE, "goose", f"{w}.goose")
         dst = os.path.join(HERE, "goose", w)
         if not os.path.exists(dst):
@@ -116,6 +120,8 @@ def main():
     todo04 = sys.argv[0] if False else os.path.join(REPO, "docs", "magnolia-hyper-optimization-plan.md")
     workloads = [w for w in WORKLOADS if args.filter in w]
     kinds = ["magnolia-n", "magnolia-b", "goose", "cpp"]
+    if not os.path.exists(GOOSE):
+        kinds.remove("goose")
 
     rows = []
     for w in workloads:
@@ -129,6 +135,9 @@ def main():
                     best = dt
             checksums.add(csum)
             entry[kind] = best
+        for kind in ("goose",):
+            if kind not in kinds:
+                entry[kind] = None
         entry["oracle_ok"] = len(checksums) == 1
         entry["checksum"] = sorted(checksums)[0] if len(checksums) else "?"
         rows.append(entry)
@@ -141,12 +150,14 @@ def main():
     print("(values are per-rep wall time; each engine's REPS is normalized out)")
     csv_lines = ["workload,checksum,magnolia_n,magnolia_b,goose,cpp,oracle_ok"]
     for e in rows:
+        goose_s = f"{e['goose']*1e6:>11.0f}us" if e['goose'] is not None else f"{'skip':>12}"
+        goose_v = f"{e['goose']:.4f}" if e['goose'] is not None else "-"
         print(f"{e['workload']:<10} {e['checksum']:<16} "
               f"{e['magnolia-n']*1e6:>11.0f}us {e['magnolia-b']*1e6:>11.0f}us "
-              f"{e['goose']*1e6:>11.0f}us {e['cpp']*1e6:>11.0f}us  "
+              f"{goose_s} {e['cpp']*1e6:>11.0f}us  "
               f"{'OK' if e['oracle_ok'] else 'MISMATCH'}")
         csv_lines.append(f"{e['workload']},{e['checksum']},{e['magnolia-n']:.4f},"
-                         f"{e['magnolia-b']:.4f},{e['goose']:.4f},{e['cpp']:.4f},{e['oracle_ok']}")
+                         f"{e['magnolia-b']:.4f},{goose_v},{e['cpp']:.4f},{e['oracle_ok']}")
 
     out = os.path.join(HERE, "results.csv")
     with open(out, "w") as f:

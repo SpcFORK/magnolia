@@ -71,3 +71,23 @@ Readings (per plan §2.2):
 3. The lru/pipe rows are the shape evidence for Magnolia-Hyper's planned wins:
    pointer-relinking (2GB VM-region bump stacks, TODO-16) and stream fusion
    (§7.8 in-frame HOF loops already implemented in the VM).
+
+## TODO-20 addendum (2026-11-26)
+
+- The `oak/` workloads were lost from the worktree (never committed in
+  TODO-04) and were **reconstructed** from the committed `cpp/` sources.
+  All six reproduce the committed checksums exactly — verified against
+  `results.csv` (fib 503283, arith 500000500042, sieve 9592, lru 14968,
+  records 30005, pipe 133346667). Reconstruction-shape differences mean the
+  records/pipe timing rows are not directly comparable to the §11.2.2
+  snapshot; fib/arith/sieve/lru reproduce within noise.
+- New workload `computefuse` (oak + cpp): fused `compute.oak` pipeline
+  (map-squ + reduce) over 20k ints, 50 reps; checksum cross-verified oak ↔
+  C++ (computefuse=50). Exercises the TODO-19 fused-pipeline path.
+- New workload `fib35` (oak + cpp): single naive fib(35) for the M2
+  head-to-head table (§11.3.1). Oracle: `-n` = `-b` = `--c` = C++ = 9227465.
+- Goose: the compiler binary is not available in this sandbox; the runner
+  now skips the goose column gracefully instead of aborting (reported `-`
+  in the CSV, excluded from the oracle set).
+- Full re-run results (7 workloads, min-of-3): `results.csv`; analysis and
+  the `--c` target gap list live in plan §11.3.1.
