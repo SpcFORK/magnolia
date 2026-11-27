@@ -659,6 +659,324 @@ fn _foldPartials(ch, w, seed) if w <= 0 {
 }
 
 // ---------------------------------------------------------------------------
+// GPU marshalling (f32 LE byte strings via ieee754 + bits)
+// ---------------------------------------------------------------------------
+
+fn _u32Bytes(n) {
+	v := int(n)
+	[v % 256, int(v / 256) % 256, int(v / 65536) % 256, int(v / 16777216) % 256]
+}
+
+fn _u64Bytes(v) {
+	w := int(v)
+	[
+		w % 256
+		int(w / 256) % 256
+		int(w / 65536) % 256
+		int(w / 16777216) % 256
+		int(w / 1099511627776) % 256
+		int(w / 281474976710656) % 256
+		0
+		0
+	]
+}
+
+// _readU64LE assembles a little-endian u64 from a byte string.
+fn _readU64LE(bs) {
+	bl := bits(bs)
+	_num(bl.(0)) + _num(bl.(1)) * 256 + _num(bl.(2)) * 65536 +
+		_num(bl.(3)) * 16777216 + _num(bl.(4)) * 1099511627776 +
+		_num(bl.(5)) * 281474976710656 + _num(bl.(6)) * 72057594037927936
+}
+
+fn _readU32LE(bs) {
+	bl := bits(bs)
+	_num(bl.(0)) + _num(bl.(1)) * 256 + _num(bl.(2)) * 65536 + _num(bl.(3)) * 16777216
+}
+
+// _f32ToNum decodes an IEEE-754 binary32 bit pattern to a host number.
+fn _f32ToNum(u) {
+	sign := if u >= 2147483648 {
+		true -> 0 - 1
+		_ -> 1
+	}
+	e := int(u / 8388608) % 256
+	frac := u % 8388608
+	if e = 0 {
+		true -> sign * frac * pow(2.0, -149)
+		_ -> if e = 255 {
+			true -> sign * 3.4e38
+			_ -> sign * (1 + frac / 8388608.0) * pow(2.0, e - 127)
+		}
+	}
+}
+
+// _packF32 encodes a list of numbers as an f32 little-endian byte string.
+fn _packF32(list) {
+	fn sub(i, acc) if i < len(list) {
+		true -> sub(i + 1, append(acc, _u32Bytes(ieee.fromNumber(_num(list.(i)), false).bits)))
+		_ -> acc
+	}
+	bits(sub(0, []))
+}
+
+// _unpackF32 decodes count f32 values from a byte string.
+fn _unpackF32(bs, count) {
+	bl := bits(bs)
+	fn sub(i, acc) if i < count {
+		true -> {
+			u := _num(bl.(i * 4)) + _num(bl.(i * 4 + 1)) * 256 +
+				_num(bl.(i * 4 + 2)) * 65536 + _num(bl.(i * 4 + 3)) * 16777216
+			sub(i + 1, append(acc, [_f32ToNum(u)]))
+		}
+		_ -> acc
+	}
+	sub(0, [])
+}
+
+// _paramValue finds the value for one param name in [name, value] pairs.
+fn _paramValue(paramPairs, name, i) if i < len(paramPairs) {
+	true -> if paramPairs.(i).(0) = name {
+		true -> _num(paramPairs.(i).(1))
+		_ -> _paramValue(paramPairs, name, i + 1)
+	}
+	_ -> 0
+}
+
+// ---------------------------------------------------------------------------
+// OpenCL launch path (via lib/gpus.oak FFI)
+// ---------------------------------------------------------------------------
+
+_openclSymbols := [
+	'clGetPlatformIDs'
+	'clGetDeviceIDs'
+	'clCreateContext'
+	'clCreateCommandQueue'
+	'clCreateBuffer'
+	'clCreateProgramWithSource'
+	'clBuildProgram'
+	'clCreateKernel'
+	'clSetKernelArg'
+	'clEnqueueNDRangeKernel'
+	'clEnqueueWriteBuffer'
+	'clEnqueueReadBuffer'
+	'clFinish'
+	'clReleaseMemObject'
+	'clReleaseKernel'
+	'clReleaseProgram'
+	'clReleaseCommandQueue'
+	'clReleaseContext'
+]
+
+// _resolveOpencl resolves every required symbol or returns { type: :error }.
+fn _resolveOpencl() {
+	procs := {}
+	bad := ''
+	_openclSymbols |> each(fn(sym) if bad = '' {
+		true -> {
+			r := gpus.resolve(sym, [])
+			if r.type = :ok {
+				true -> procs.(sym) := r.proc
+				_ -> bad <- sym + ': ' + default(r.error, 'unresolved')
+			}
+		}
+	})
+	if bad != '' {
+		true -> { type: :error, error: bad }
+		_ -> { type: :ok, procs: procs }
+	}
+}
+
+// _status reads a signed cl_int written into a 4-byte out buffer.
+fn _status(buf) {
+	u := _readU32LE(buf)
+	if u >= 2147483648 {
+		true -> u - 4294967296
+		_ -> u
+	}
+}
+
+// _openclRun executes one fused program on the first OpenCL device.
+// Returns { type: :ok, out } or { type: :error, error }.
+fn _openclRun(prog, xs, paramPairs) {
+	r := _resolveOpencl()
+	if r.type = :error {
+		true -> r
+		_ -> {
+			p := r.procs
+			n := len(xs)
+			src := openclSource(prog, 'oak_compute')
+			platBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+			st := syscall(p.('clGetPlatformIDs'), 1, pointer(platBuf), pointer(0))
+			if st != 0 {
+				true -> { type: :error, error: 'clGetPlatformIDs=' + string(st) }
+				_ -> {
+					platform := _readU64LE(platBuf)
+					devBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+					st2 := syscall(p.('clGetDeviceIDs'), platform, 2, 1, pointer(devBuf), pointer(0))
+					if st2 != 0 {
+						true -> { type: :error, error: 'clGetDeviceIDs=' + string(st2) }
+						_ -> _openclCtx(p, src, prog, xs, paramPairs, n, devBuf)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _openclCtx(p, src, prog, xs, paramPairs, n, devBuf) {
+	errBuf := bits([0, 0, 0, 0])
+	ctx := syscall(p.('clCreateContext'), pointer(0), 1, pointer(devBuf), pointer(0), pointer(0), pointer(errBuf))
+	if _status(errBuf) != 0 {
+		true -> { type: :error, error: 'clCreateContext=' + string(_status(errBuf)) }
+		_ -> {
+			queue := syscall(p.('clCreateCommandQueue'), ctx, _readU64LE(devBuf), 0, pointer(errBuf))
+			if _status(errBuf) != 0 {
+				true -> { type: :error, error: 'clCreateCommandQueue=' + string(_status(errBuf)) }
+				_ -> _openclBuild(p, src, prog, xs, paramPairs, n, devBuf, ctx, queue)
+			}
+		}
+	}
+}
+
+fn _openclBuild(p, src, prog, xs, paramPairs, n, devBuf, ctx, queue) {
+	errBuf := bits([0, 0, 0, 0])
+	srcLen := _u64Bytes(len(src))
+	progH := syscall(p.('clCreateProgramWithSource'), ctx, 1, pointer(src), pointer(srcLen), pointer(errBuf))
+	if _status(errBuf) != 0 {
+		true -> { type: :error, error: 'clCreateProgramWithSource=' + string(_status(errBuf)) }
+		_ -> {
+			st := syscall(p.('clBuildProgram'), progH, 1, pointer(devBuf), pointer(0), pointer(0), pointer(0))
+			if st != 0 {
+				true -> { type: :error, error: 'clBuildProgram=' + string(st) }
+				_ -> {
+					kerr := bits([0, 0, 0, 0])
+					nameBuf := 'oak_compute'
+					kernel := syscall(p.('clCreateKernel'), progH, pointer(nameBuf), pointer(kerr))
+					if _status(kerr) != 0 {
+						true -> { type: :error, error: 'clCreateKernel=' + string(_status(kerr)) }
+						_ -> _openclBuffers(p, prog, xs, paramPairs, n, ctx, queue, kernel, progH)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _openclBuffers(p, prog, xs, paramPairs, n, ctx, queue, kernel, progH) {
+	errBuf := bits([0, 0, 0, 0])
+	xBytes := _packF32(xs)
+	groups := int(n / 256)
+	if n % 256 > 0 {
+		true -> groups <- groups + 1
+	}
+	if groups < 1 {
+		true -> groups <- 1
+	}
+	isReduce := prog.reduce != ?
+	outSize := if isReduce {
+		true -> groups * 4
+		_ -> n * 4
+	}
+	inBuf := syscall(p.('clCreateBuffer'), ctx, 4, n * 4, pointer(0), pointer(errBuf))
+	if _status(errBuf) != 0 {
+		true -> { type: :error, error: 'clCreateBuffer(in)=' + string(_status(errBuf)) }
+		_ -> {
+			outBuf := syscall(p.('clCreateBuffer'), ctx, 1, outSize, pointer(0), pointer(errBuf))
+			if _status(errBuf) != 0 {
+				true -> { type: :error, error: 'clCreateBuffer(out)=' + string(_status(errBuf)) }
+				_ -> {
+					stw := syscall(p.('clEnqueueWriteBuffer'), queue, inBuf, 1, 0, n * 4, pointer(xBytes), 0, pointer(0), pointer(0))
+					if stw != 0 {
+						true -> { type: :error, error: 'clEnqueueWriteBuffer=' + string(stw) }
+						_ -> _openclLaunch(p, prog, xs, paramPairs, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx)
+					}
+				}
+			}
+		}
+	}
+}
+
+// _setArgs binds kernel args: in buffer, out buffer, n, then params.
+fn _setArgs(p, kernel, prog, paramPairs, inBuf, outBuf, n) {
+	inH := _u64Bytes(inBuf)
+	outH := _u64Bytes(outBuf)
+	nBuf := _u32Bytes(n)
+	st0 := syscall(p.('clSetKernelArg'), kernel, 0, 8, pointer(inH))
+	st1 := syscall(p.('clSetKernelArg'), kernel, 1, 8, pointer(outH))
+	st2 := syscall(p.('clSetKernelArg'), kernel, 2, 4, pointer(nBuf))
+	if st0 != 0 | st1 != 0 | st2 != 0 {
+		true -> { type: :error, error: 'clSetKernelArg(base)=' + string(st0) + ',' + string(st1) + ',' + string(st2) }
+		_ -> {
+			bad := ''
+			prog.params |> each(fn(pn, idx) if bad = '' {
+				true -> {
+					val := _paramValue(paramPairs, pn, 0)
+					vBuf := _u32Bytes(ieee.fromNumber(val, false).bits)
+					st := syscall(p.('clSetKernelArg'), kernel, 3 + idx, 4, pointer(vBuf))
+					if st != 0 {
+						true -> bad <- 'clSetKernelArg(' + pn + ')=' + string(st)
+					}
+				}
+			})
+			if bad != '' {
+				true -> { type: :error, error: bad }
+				_ -> { type: :ok }
+			}
+		}
+	}
+}
+
+fn _openclLaunch(p, prog, xs, paramPairs, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx) {
+	argRes := _setArgs(p, kernel, prog, paramPairs, inBuf, outBuf, n)
+	if argRes.type = :error {
+		true -> argRes
+		_ -> _openclDispatch(p, prog, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx)
+	}
+}
+
+fn _openclDispatch(p, prog, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx) {
+	gws := _u64Bytes(groups * 256)
+	st := syscall(p.('clEnqueueNDRangeKernel'), queue, kernel, 1, pointer(0), pointer(gws), pointer(0), 0, pointer(0), pointer(0))
+	if st != 0 {
+		true -> { type: :error, error: 'clEnqueueNDRangeKernel=' + string(st) }
+		_ -> {
+			stf := syscall(p.('clFinish'), queue)
+			outHost := bits(_zeroBytes(outSize))
+			strd := syscall(p.('clEnqueueReadBuffer'), queue, outBuf, 1, 0, outSize, pointer(outHost), 0, pointer(0), pointer(0))
+			if stf != 0 | strd != 0 {
+				true -> { type: :error, error: 'read=' + string(stf) + ',' + string(strd) }
+				_ -> {
+					syscall(p.('clReleaseMemObject'), inBuf)
+					syscall(p.('clReleaseMemObject'), outBuf)
+					syscall(p.('clReleaseKernel'), kernel)
+					syscall(p.('clReleaseProgram'), progH)
+					syscall(p.('clReleaseCommandQueue'), queue)
+					syscall(p.('clReleaseContext'), ctx)
+					if prog.reduce != ? {
+						true -> { type: :ok, out: _reducePartials(outHost, groups) }
+						_ -> { type: :ok, out: _unpackF32(outHost, n) }
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _zeroBytes(count) {
+	fn sub(i, acc) if i < count {
+		true -> sub(i + 1, append(acc, [0]))
+	}
+	sub(0, [])
+}
+
+// _reducePartials sums the per-workgroup f32 partials.
+fn _reducePartials(outHost, groups) {
+	vals := _unpackF32(outHost, groups)
+	vals |> reduce(0, fn(acc, v) acc + v)
+}
+
+// ---------------------------------------------------------------------------
 // public kernels
 // ---------------------------------------------------------------------------
 
@@ -681,15 +999,41 @@ fn _mkOpts(opts) {
 	o
 }
 
-// _exec runs a fused program: GPU when available/allowed/large enough, else
-// the multi-core CPU path. The GPU path lands with the OpenCL runtime; on
-// any GPU failure it falls back to CPU transparently.
-fn _exec(prog, xs, paramPairs, o) {
-	_runMapCpu(prog, xs, paramPairs, o.workers)
+// _gpuEligible? decides whether the OpenCL path may run: allowed by opts,
+// large enough, no filter-elementwise program (GPU output gaps), GPU present.
+fn _gpuEligible?(prog, n, o) if o.force = 'cpu' {
+	true -> false
+	_ -> if n < o.threshold & o.force != 'gpu' {
+		true -> false
+		_ -> if prog.kept != ? & prog.reduce = ? {
+			true -> false
+			_ -> device().type = :gpu
+		}
+	}
 }
 
-fn _execReduce(prog, xs, paramPairs, o) {
-	_runReduceCpu(prog, xs, paramPairs, o.workers)
+// _exec runs a fused program: OpenCL when eligible, else multi-core CPU.
+// Any GPU failure falls back to CPU transparently.
+fn _exec(prog, xs, paramPairs, o) if _gpuEligible?(prog, len(xs), o) {
+	true -> {
+		r := _openclRun(prog, xs, paramPairs)
+		if r.type = :ok {
+			true -> r.out
+			_ -> _runMapCpu(prog, xs, paramPairs, o.workers)
+		}
+	}
+	_ -> _runMapCpu(prog, xs, paramPairs, o.workers)
+}
+
+fn _execReduce(prog, xs, paramPairs, o) if _gpuEligible?(prog, len(xs), o) {
+	true -> {
+		r := _openclRun(prog, xs, paramPairs)
+		if r.type = :ok {
+			true -> r.out
+			_ -> _runReduceCpu(prog, xs, paramPairs, o.workers)
+		}
+	}
+	_ -> _runReduceCpu(prog, xs, paramPairs, o.workers)
 }
 
 // pipeline(stages, xs, paramPairs?, opts?) fuses the stage list and executes
