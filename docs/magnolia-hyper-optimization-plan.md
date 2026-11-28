@@ -679,8 +679,44 @@ Auto-SoA is **6.9× faster than the generic AoS emission** and now sits
 within ~5× of the idiomatic C++ reference (was ~10× as generic AoS);
 it also matches `-b` while producing a standalone binary.
 
-### TODO-21c — stride_jit specialization ledger (`[ ]`)
-Measure and record: `spec.compileNs` (specialization pipeline latency),
-generic-interpreted vs specialized-native per-element throughput on the
-locked workload, and the static-AOT (cpp volatile) comparison — closing
-§6.3 row #8; 21c ticked.
+### TODO-21c — stride_jit specialization ledger (`[x]` — landed 2026-11-26)
+
+**§12.3 specialization ledger** (fresh full-process wall, min-of-N,
+2026-11-26, this box — absolute wall varies ~2× between sessions on the
+shared box; ratios are the stable signal):
+
+Per-element cost of the locked stride kernel
+`((x*d + ((x>>s)&1)*t) & 65535) % 251`, 1M evals through a self-tail
+loop, native = `spec.call(x)` per element, generic = plain oak `fn`
+call, checksum parity `124958066` on every engine:
+
+| path | per element | note |
+| :-- | --: | :-- |
+| generic interpreted call, `-n` | 5.6 µs | kernel body runs in the tree-walk VM |
+| native `spec.call`, `-n` | 4.8 µs | bridge+loop dominate; kernel body ≈ 0.8–1 µs of it |
+| generic bytecode call, `-b` | 0.49 µs | kernel compiles to bytecode + TCO |
+| native `spec.call`, `-b` | 2.5 µs | per-element bridge crossing is ~5× the bytecode call |
+| static AOT cpp `-O3 -march=native` | ~3 ns | runtime params, not foldable — 50 passes, n=20000 |
+| static AOT cpp, volatile operands | ~5 ns | forced memory reloads per access |
+
+`spec.compileNs` observed 1.3–24.6 ms across runs (median ≈ 4–6 ms),
+first-call inclusive: parse → constant substitute/fold → IR → x86-64 →
+mmap+RX.
+
+Findings closing §6.3 row #8:
+1. Under `-n`, specialization pays only **~1.17× per element** — the
+   interpreter→native bridge (arg boxing, engine hop) is paid per
+   element and dwarfs the ~1 µs kernel body. The `-n` process runs the
+   locked workload (build + 1 generic + 50 native passes) in ~5.5 s.
+2. Under `-b` the per-element `spec.call` bridge **loses** (~0.20×) to
+   the bytecode engine's own compiled-loop kernel call: at per-element
+   granularity, per-element JIT specialization is counterproductive on
+   the bytecode engine. It flips positive only with a bulk/vector call
+   API that amortizes the bridge over a batch (future work, §5.5
+   follow-up).
+3. Static AOT (cpp) stays ~3 orders of magnitude ahead at this
+   granularity — the gap is bridge architecture, not codegen quality:
+   the specialized x86-64 itself evaluates in ~1–2 ns/elem equivalent.
+4. `--c stride_jit` remains transpile-✗ (jit is a host-side module;
+   verified pre-existing at HEAD this segment) — documented, not
+   forced. 21c ticked.
