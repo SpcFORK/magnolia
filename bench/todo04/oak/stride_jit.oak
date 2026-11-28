@@ -1,0 +1,28 @@
+// stride_jit: runtime-parameterized kernel — one generic interpreted pass
+// (verified against the specialized native passes), jit.specialize binds the
+// data-derived {s, d, t} as immediates (plan §5.5, TODO-17). REPS=1
+std := import('std')
+jit := import('jit')
+n := 20000
+passes := 50
+xs := std.range(0, n, 1) |> std.map(fn(i) ((i + 1) * 7919) % 1000003)
+s := (xs.(1) % 5) + 2
+d := (xs.(2) % 7) + 3
+t := (xs.(3) % 997) + 1
+fn kern(x, s, d, t) ((x * d + ((x >> s) & 1) * t) & 65535) % 251
+spec := jit.specialize('fn kern(x, s, d, t) ((x * d + ((x >> s) & 1) * t) & 65535) % 251', { s: s, d: d, t: t })
+fn gsum(i, acc) if i < n {
+  true -> gsum(i + 1, acc + kern(xs.(i), s, d, t))
+  _ -> acc
+}
+gen := gsum(0, 0)
+fn psum(r, i, acc) if i < n {
+  true -> psum(r, i + 1, acc + spec.call(xs.(i)))
+  _ -> if r < passes - 1 { true -> psum(r + 1, 0, acc), _ -> acc }
+}
+acc := psum(0, 0, 0)
+if acc = gen * passes {
+  true -> print('stride=' + string(acc))
+  _ -> print('stride=BAD gen=' + string(gen) + ' spec=' + string(acc))
+}
+print('compileNs=' + string(spec.compileNs))

@@ -1,0 +1,29 @@
+// particles_soa: homogeneous object-list update — generic boxed AoS until
+// codegen-c Auto-SoA synthesis lands (plan §5.3, TODO-21b). REPS=10
+std := import('std')
+n := 20000
+ps := std.range(0, n, 1) |> std.map(fn(i) { x: i * 0.5, y: (i % 11) * 0.25, z: (i % 13) * 2.0, vx: (i % 7) * 1.0, vy: (i % 5) * 0.5, vz: (i % 3) * 1.5 })
+dt := 0.5
+fn upd(i) if i < n {
+  true -> {
+    ps.(i).x <- ps.(i).x + ps.(i).vx * dt
+    ps.(i).y <- ps.(i).y + ps.(i).vy * dt
+    ps.(i).z <- ps.(i).z + ps.(i).vz * dt
+    upd(i + 1)
+  }
+  _ -> ?
+}
+fn sum(i, acc) if i < n {
+  true -> sum(i + 1, acc + int(ps.(i).x) + int(ps.(i).y) + int(ps.(i).z))
+  _ -> acc
+}
+fn sweeps(r, acc) if r < 10 {
+  true -> {
+    upd(0)
+    na := acc
+    if r = 0 { true -> na <- acc + sum(0, 0), _ -> if r = 9 { true -> na <- acc + sum(0, 0), _ -> ? } }
+    sweeps(r + 1, na)
+  }
+  _ -> acc
+}
+print('particles=' + string(sweeps(0, 0)))

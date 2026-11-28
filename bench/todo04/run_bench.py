@@ -28,7 +28,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 MAGNOLIA = os.environ.get("MAGNOLIA_BIN", "/tmp/ref/magnolia")
 GOOSE = os.environ.get("GOOSE_BIN", "/tmp/ref/goose/build/goose")
 
-WORKLOADS = ["fib", "arith", "sieve", "lru", "records", "pipe", "computefuse"]
+WORKLOADS = ["fib", "arith", "sieve", "lru", "records", "pipe", "computefuse", "particles_soa", "stride_jit"]
 
 
 def sh(cmd, **kw):

@@ -576,7 +576,7 @@ Specialization, plan §5.5) — are planned and executed here.
   pure performance feature, so oracle parity can be locked before the
   optimizer lands.
 
-### TODO-21a — workload + reference landing (`[ ]`)
+### TODO-21a — workload + reference landing (`[x]` — landed 2026-11-26)
 1. `bench/todo04/cpp/particles_soa.cpp` — idiomatic AoS
    `struct Particle {x,y,z,vx,vy,vz}` `std::vector`, n=20000, 10 update
    sweeps (x += vx·dt etc., volatile-derived dt), checkpoint sums at
@@ -591,6 +591,31 @@ Specialization, plan §5.5) — are planned and executed here.
    `--c` parity for `particles_soa` (generic path); `--c stride_jit`
    expected ✗ (jit is a host-side module — document, don't force).
    §6.3 table rows filled; 21a ticked.
+
+**§12.1 21a results** (run_bench --runs 3, 2026-11-26): full suite
+**oracle OK ×9** — particles_soa `201088676` (cpp = -n = -b = --c ✓) and
+stride_jit `125035100` (cpp = -n = -b ✓; the oak workload additionally
+verifies its 50 specialized native passes against one generic interpreted
+pass in-process). Per-rep µs (min-of-3):
+
+| workload | `-n` | `-b` | `--c` | cpp `-O3 -march=native` |
+| :-- | --: | --: | --: | --: |
+| `particles_soa` (per update sweep) | 92,970 | 25,105 | 16,600 (generic AoS) | **11** |
+| `stride_jit` (per process: build + 1 generic + 50 native passes) | 2.60 s | 1.39 s | ✗ transpile | **6** |
+
+`spec.compileNs` measured 3.5–4.3 ms end-to-end (parse → constant
+substitute/fold → IR → x86-64 → mmap+RX), first-call inclusive.
+
+**Findings recorded while landing 21a:**
+- **`-b` int32 literal wrap (engine bug, TODO-22 candidate)**: the
+  bytecode engine wraps bare integer literals ≥ 2^31 — `-n` prints
+  `2654435761`, `-b` prints `-1640531525`-class values for the same
+  source. The original stride data multiplier hit this; the workload now
+  uses an int32-safe multiplier (7919) so all engines agree. Engine fix
+  deferred (bytecode constant pool widening) — not a C-backend item.
+- particles checksums required summing per-field truncations
+  (`int(x)+int(y)+int(z)`) in BOTH languages; truncating the double sum
+  once diverges from Oak's per-field `int()` semantics.
 
 ### TODO-21b — Auto-AoS→SoA synthesis in the C backend (`[ ]`)
 `MG_SOA` columnar value in the CRuntime (64B-aligned `double` columns,
