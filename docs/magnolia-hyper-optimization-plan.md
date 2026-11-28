@@ -617,7 +617,7 @@ substitute/fold → IR → x86-64 → mmap+RX), first-call inclusive.
   (`int(x)+int(y)+int(z)`) in BOTH languages; truncating the double sum
   once diverges from Oak's per-field `int()` semantics.
 
-### TODO-21b — Auto-AoS→SoA synthesis in the C backend (`[ ]`)
+### TODO-21b — Auto-AoS→SoA synthesis in the C backend (`[x]` — landed 2026-11-26)
 `MG_SOA` columnar value in the CRuntime (64B-aligned `double` columns,
 per-field static int/float tag) + synthesis in `codegen-c`:
 1. **Build site**: `xs := std.range(...) |> std.map(fn(...) { k: numeric... })`
@@ -631,6 +631,53 @@ per-field static int/float tag) + synthesis in `codegen-c`:
    fields, float fields, guard-abort) byte-parity with `-n`; full 13-probe
    ladder + oracle + `go test ./...` stay green; AoS-vs-SoA-vs-cpp
    timing recorded in §12.1; 21b ticked.
+
+**§12.2 21b results** (2026-11-26): all landed in `lib/codegen-c.oak`
+(section banner `// ---- Auto-AoS->SoA synthesis (§5.3 / TODO-21b) ----`,
+~40 fns, deps-first). `MG_SOA` tag + 64B-aligned `double` columns
+(`aligned_alloc(64, …)`), per-field static int/float tag, build-site
+synthesis for homogeneous numeric object literals from
+`range |> map`, lowered `xs.(i).k` read/write via `mg_soa_get`/
+`mg_soa_set`, `len(xs)` via `mg_len`. Strict all-uses validation
+(`soaAllOk` walks every other module statement; any non-lowered use of
+the bind name → `st.soaAcc.bad` → synthesis aborts, fully generic
+emission). The emitter follows the host-VM-safe discipline of §12.2's
+debugging: sequential fn bodies, constant-only match arms,
+`std.each`/`std.map` iteration with a flag object, self-tail-only
+recursion — the nested-arm call patterns that deadlocked the first
+attempt are gone.
+
+Validation detail:
+- **9-probe SoA ladder** byte-parity with `-n`: read-only int fields,
+  int arithmetic on fields, float fields, float write-through, build +
+  `len`, direct `ps.(0).x` read, self-tail arg reads, int+int mixed
+  fields, and guard-abort (string field → generic, exact output).
+- **13-probe C-backend regression ladder** (closure, method call, list
+  writes, string, recursion, HOF chains, if-chains, chan, dynamic
+  object fields, float loops, fn-value dispatch, SoA end-to-end):
+  12/13 exact; the one divergence (`chan_recv(ch).data` envelope
+  accessor) is pre-existing at HEAD — bare `chan_recv` has parity.
+- oracle 6/6, `go test ./...` green, all 8 generic workloads exact
+  (`--c` bundle+gcc+run); `particles_soa` exact **with** SoA firing
+  (5 real call sites). `stride_jit --c` remains transpile-✗ (verified
+  pre-existing at HEAD; jit is a host-side module — documented, not
+  forced).
+
+AoS-vs-SoA-vs-cpp timing on `particles_soa` (full-process wall,
+min-of-3, gcc/g++ `-O2`, this box — apples-to-apples pair is the two
+`--c` columns, same generated runtime, same machine):
+
+| engine | time | checksum |
+| :-- | --: | :-- |
+| `-n` interpreter | 1.61 s | `201088676` |
+| `-b` bytecode JIT | 358 ms | `201088676` |
+| `--c` generic boxed AoS (SoA disabled) | 165 ms | `201088676` |
+| `--c` auto-SoA (synthesized columns) | **24 ms** | `201088676` |
+| cpp `-O2` reference | 5 ms | `201088676` |
+
+Auto-SoA is **6.9× faster than the generic AoS emission** and now sits
+within ~5× of the idiomatic C++ reference (was ~10× as generic AoS);
+it also matches `-b` while producing a standalone binary.
 
 ### TODO-21c — stride_jit specialization ledger (`[ ]`)
 Measure and record: `spec.compileNs` (specialization pipeline latency),

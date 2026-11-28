@@ -32,17 +32,18 @@ CRuntime := '#include <stdio.h>
 #include <stdint.h>
 #include <math.h>
 
-enum { MG_INT = 0, MG_FLOAT, MG_BOOL, MG_ATOM, MG_STR, MG_LIST, MG_OBJ, MG_NULLV, MG_CLOSURE, MG_CHAN };
+enum { MG_INT = 0, MG_FLOAT, MG_BOOL, MG_ATOM, MG_STR, MG_LIST, MG_OBJ, MG_NULLV, MG_CLOSURE, MG_CHAN, MG_SOA };
 
 typedef struct mg_val mg_val_t;
 typedef struct mg_list mg_list_t;
 typedef struct mg_obj mg_obj_t;
 typedef struct mg_closure mg_closure_t;
 typedef struct mg_chan mg_chan_t;
+typedef struct mg_soa mg_soa_t;
 struct mg_chan { mg_list_t* buf; };
 typedef mg_val_t (*mg_fn_t)(void* env, mg_val_t* args, int nargs);
 
-struct mg_val { uint8_t tag; union { int64_t i; double d; int b; uint32_t a; struct { char* p; int64_t n; } s; mg_list_t* l; mg_obj_t* o; mg_closure_t* c; struct mg_chan* ch; } u; };
+struct mg_val { uint8_t tag; union { int64_t i; double d; int b; uint32_t a; struct { char* p; int64_t n; } s; mg_list_t* l; mg_obj_t* o; mg_closure_t* c; struct mg_chan* ch; struct mg_soa* soa; } u; };
 struct mg_list { int64_t len, cap; mg_val_t* data; };
 struct mg_obj { int64_t len, cap; char** keys; mg_val_t* vals; };
 struct mg_closure { mg_fn_t fp; void* env; };
@@ -95,6 +96,32 @@ static void mg_obj_set(mg_obj_t* o, const char* k, mg_val_t v) {
     o->vals[o->len++] = v;
 }
 static mg_val_t mg_mkobj(mg_obj_t* o) { mg_val_t r; r.tag = MG_OBJ; r.u.o = o; return r; }
+struct mg_soa { int64_t len; int nf; char** keys; double** cols; int* isint; };
+static mg_val_t mg_mksoa(mg_soa_t* s) { mg_val_t r; r.tag = MG_SOA; r.u.soa = s; return r; }
+static double mg_to_d(mg_val_t v) { return v.tag == MG_FLOAT ? v.u.d : (v.tag == MG_INT ? (double)v.u.i : 0.0); }
+static mg_soa_t* mg_soa_new(int nf, int64_t cap) {
+    mg_soa_t* s = (mg_soa_t*)malloc(sizeof(mg_soa_t));
+    int64_t c = cap > 1 ? cap : 1;
+    s->len = 0; s->nf = nf;
+    s->keys = (char**)calloc((size_t)nf, sizeof(char*));
+    s->cols = (double**)malloc((size_t)nf * sizeof(double*));
+    s->isint = (int*)calloc((size_t)nf, sizeof(int));
+    for (int j = 0; j < nf; j++) s->cols[j] = (double*)aligned_alloc(64, ((size_t)c * 8 + 63) & ~(size_t)63);
+    return s;
+}
+static mg_val_t mg_soa_get(mg_val_t v, mg_val_t k, int f) {
+    mg_soa_t* s = v.u.soa;
+    int64_t i = k.tag == MG_INT ? k.u.i : -1;
+    if (i < 0 || i >= s->len) return mg_mknull();
+    if (s->isint[f]) return mg_mkint((int64_t)s->cols[f][i]);
+    return mg_mkfloat(s->cols[f][i]);
+}
+static void mg_soa_set(mg_val_t v, mg_val_t k, int f, mg_val_t val) {
+    mg_soa_t* s = v.u.soa;
+    int64_t i = k.tag == MG_INT ? k.u.i : -1;
+    if (i < 0 || i >= s->len) return;
+    if (val.tag == MG_INT || val.tag == MG_FLOAT) s->cols[f][i] = mg_to_d(val);
+}
 static mg_val_t mg_mkclo(mg_closure_t* c) { mg_val_t r; r.tag = MG_CLOSURE; r.u.c = c; return r; }
 
 static char** mg_atom_names = 0;
@@ -120,6 +147,7 @@ static void mg_print(mg_val_t v) {
         printf("}");
         break;
     }
+    case MG_SOA: printf("<soa>");
     default: printf("<closure>");
     }
 }
@@ -128,6 +156,7 @@ static int64_t mg_len(mg_val_t v) {
     if (v.tag == MG_LIST) return v.u.l->len;
     if (v.tag == MG_STR) return v.u.s.n;
     if (v.tag == MG_OBJ) return v.u.o->len;
+    if (v.tag == MG_SOA) return v.u.soa->len;
     return 0;
 }
 
@@ -732,6 +761,8 @@ fn renderCBundle(bundleNode) {
 		hoisted: []
 		globals: {}
 		globalDecls: []
+		soaBinds: {}
+		soaAcc: ?
 	}
 	// depth-1 mutation helpers: captured-var writes from 2+ fn scopes are
 	// unreliable in the host VM, so all st mutations from deep scopes route
@@ -1581,6 +1612,468 @@ fn renderCBundle(bundleNode) {
 		}
 	}
 
+	// ---- Auto-AoS->SoA synthesis (§5.3 / TODO-21b) ----
+	// A module-scope binding built by `xs := std.range(...) |> std.map(fn(p) { ...numeric... })`
+	// compiles to a columnar mg_soa_t (64B-aligned double columns, per-field
+	// static int/float tag) when EVERY use of the binding anywhere in the
+	// module (top level AND fn bodies) is xs.(i).k reads / xs.(i).k <- v
+	// writes / len(xs). Field exprs may reference only int literals, float
+	// literals (floats the field), and the callback param under + - * / % & |
+	// ^ << >> — anything else aborts synthesis and the binding stays fully
+	// generic (never partially lowered). type()/string() and string-concat
+	// contexts over soa reads are banned: a float-typed column read back as
+	// int/float per the static tag could diverge there.
+	//
+	// HOST-VM DISCIPLINE (§12.2): every fn body is SEQUENTIAL — calls only
+	// at fn-body level, match arms contain only constants, list iteration
+	// goes through std.each/std.map with single-call callbacks and a
+	// st.soaAcc flag object (the collectLocals-proven shape), and the only
+	// recursion is arm-body-level self-tail with params (loop-lowered).
+
+	fn soaKey(name) st.curModule + '.' + name
+
+	fn soaLookup(name) st.soaBinds.(soaKey(name))
+
+	fn soaHas(name) if soaLookup(name) {
+		? -> false
+		_ -> true
+	}
+
+	fn soaReadShape(n2, name) if n2.type {
+		:propertyAccess -> if n2.right.type {
+			:identifier -> if n2.left.type {
+				:propertyAccess -> if n2.left.left.type {
+					:identifier -> n2.left.left.val = name
+					_ -> false
+				}
+				_ -> false
+			}
+			_ -> false
+		}
+		_ -> false
+	}
+	fn soaIsFieldRead(n2) if n2.type {
+		:propertyAccess -> if n2.right.type {
+			:identifier -> if n2.left.type {
+				:propertyAccess -> if n2.left.left.type {
+					:identifier -> soaHas(n2.left.left.val)
+					_ -> false
+				}
+				_ -> false
+			}
+			_ -> false
+		}
+		_ -> false
+	}
+
+	fn soaIsBuildAssign(node) if node.left.type {
+		:identifier -> soaHas(node.left.val)
+		_ -> false
+	}
+
+	fn soaIsFieldWrite(node) if node.left.type {
+		:propertyAccess -> soaIsFieldRead(node.left)
+		_ -> false
+	}
+
+	fn soaFieldIdx(sh, key) {
+		fn f(j) if j < len(sh.keys) {
+			true -> if sh.keys.(j) = key { true -> j, _ -> f(j + 1) }
+			_ -> -1
+		}
+		f(0)
+	}
+
+	fn soaNote() st.soaAcc.bad <- true
+
+	fn soaCheck(x, name, strict) {
+		b := soaBad(x, name, strict)
+		if b {
+			true -> soaNote()
+			_ -> ?
+		}
+	}
+
+	fn soaListBad(l, name, strict) if l {
+		? -> false
+		_ -> {
+			st.soaAcc <- { bad: false }
+			l |> std.each(fn(x) soaCheck(x, name, strict))
+			st.soaAcc.bad
+		}
+	}
+
+	fn soaTgtBad(t, name, strict) if t {
+		? -> false
+		_ -> soaBad(t, name, strict)
+	}
+
+	fn soaCheckBr(br, name, strict) {
+		tb := soaBad(br.body, name, strict)
+		tg := soaTgtBad(br.target, name, strict)
+		bad := tb | tg
+		if bad {
+			true -> soaNote()
+			_ -> ?
+		}
+	}
+
+	fn soaBrBad(brs, name, strict) if brs {
+		? -> false
+		_ -> {
+			st.soaAcc <- { bad: false }
+			brs |> std.each(fn(br) soaCheckBr(br, name, strict))
+			st.soaAcc.bad
+		}
+	}
+
+	fn soaCheckEnt(ent, name, strict) {
+		v := ent.val
+		exportRef := !strict & v.type = :identifier & v.val = name
+		b := if exportRef {
+			true -> false
+			_ -> soaBad(v, name, strict)
+		}
+		if b {
+			true -> soaNote()
+			_ -> ?
+		}
+	}
+
+	fn soaEntsBad(ents, name, strict) if ents {
+		? -> false
+		_ -> {
+			st.soaAcc <- { bad: false }
+			ents |> std.each(fn(e) soaCheckEnt(e, name, strict))
+			st.soaAcc.bad
+		}
+	}
+
+	fn soaBadBin(n2, name, strict) {
+		s2 := if !strict & n2.op = :plus & (n2.left.type = :string | n2.right.type = :string) {
+			true -> true
+			_ -> strict
+		}
+		l := soaBad(n2.left, name, s2)
+		r := soaBad(n2.right, name, s2)
+		l | r
+	}
+
+	fn soaBadPA(n2, name, strict) {
+		skip := !strict & soaReadShape(n2, name)
+		isId := n2.right.type = :identifier
+		lv := if skip {
+			true -> false
+			_ -> soaBad(n2.left, name, strict)
+		}
+		rv := if skip | isId {
+			true -> false
+			_ -> soaBad(n2.right, name, strict)
+		}
+		lv | rv
+	}
+
+	fn soaBadCall(n2, name, strict) {
+		cn := calleeName(n2)
+		isLen := !strict & cn = 'len' & len(n2.args) = 1 & n2.args.0.type = :identifier & n2.args.0.val = name
+		isTS := !strict & (cn = 'type' | cn = 'string')
+		s2 := if isTS {
+			true -> true
+			_ -> strict
+		}
+		lv := if isLen {
+			true -> false
+			_ -> soaBad(n2.function, name, strict)
+		}
+		rv := if isLen {
+			true -> false
+			_ -> soaListBad(n2.args, name, s2)
+		}
+		lv | rv
+	}
+
+	fn soaBadAssign(n2, name, strict) {
+		skip := !strict & soaReadShape(n2.left, name)
+		lv := if skip {
+			true -> false
+			_ -> soaBad(n2.left, name, strict)
+		}
+		rv := soaBad(n2.right, name, strict)
+		lv | rv
+	}
+
+	fn soaBadIf(n2, name, strict) {
+		c := soaBad(n2.cond, name, strict)
+		b := soaBrBad(n2.branches, name, strict)
+		c | b
+	}
+
+	fn soaBadUn(n2, name, strict) soaBad(n2.right, name, strict)
+
+	fn soaBad(n2, name, strict) if n2.type {
+		:identifier -> n2.val = name
+		:binary -> soaBadBin(n2, name, strict)
+		:unary -> soaBadUn(n2, name, strict)
+		:propertyAccess -> soaBadPA(n2, name, strict)
+		:fnCall -> soaBadCall(n2, name, strict)
+		:list -> soaListBad(n2.elems, name, strict)
+		:object -> soaEntsBad(n2.entries, name, strict)
+		:assignment -> soaBadAssign(n2, name, strict)
+		:block -> soaListBad(n2.exprs, name, strict)
+		:ifExpr -> soaBadIf(n2, name, strict)
+		:function -> soaListBad(n2.body.exprs, name, strict)
+		:int -> false
+		:float -> false
+		:string -> false
+		:bool -> false
+		:atom -> false
+		:null -> false
+		_ -> true
+	}
+
+	// soaNumKind under the restricted field grammar: 0 not-numeric/unknown,
+	// 1 int, 2 float. param is the callback's single parameter name.
+	fn soaNumKind(n2, param) if n2.type {
+		:int -> 1
+		:float -> 2
+		:identifier -> if n2.val = param { true -> 1, _ -> 0 }
+		:block -> if n2.exprs {
+			? -> 0
+			_ -> if len(n2.exprs) = 1 {
+				true -> soaNumKind(n2.exprs.0, param)
+				_ -> 0
+			}
+		}
+		:binary -> if n2.op {
+			:plus -> soaNumD(n2, param)
+			:minus -> soaNumD(n2, param)
+			:times -> soaNumD(n2, param)
+			:divide -> soaNumD(n2, param)
+			:modulus -> soaNumD(n2, param)
+			:and -> soaNumD(n2, param)
+			:or -> soaNumD(n2, param)
+			:xor -> soaNumD(n2, param)
+			:lshift -> soaNumD(n2, param)
+			:rshift -> soaNumD(n2, param)
+			_ -> 0
+		}
+		:unary -> if n2.op { :minus -> soaNumKind(n2.right, param), _ -> 0 }
+		_ -> 0
+	}
+	fn soaNumD(n2, param) {
+		lk := soaNumKind(n2.left, param)
+		rk := soaNumKind(n2.right, param)
+		if lk = 0 | rk = 0 {
+			true -> 0
+			_ -> if lk = 2 | rk = 2 { true -> 2, _ -> 1 }
+		}
+	}
+
+	fn soaObjOf(b, param) if b.type {
+		:object -> b
+		:block -> if len(b.exprs) = 1 {
+			true -> soaObjOf(b.exprs.0, param)
+			_ -> ?
+		}
+		_ -> ?
+	}
+
+	fn soaKinds(ents, param, i, nf, ks) if i < nf {
+		true -> {
+			ks.(len(ks)) <- soaNumKind(ents.(i).val, param)
+			soaKinds(ents, param, i + 1, nf, ks)
+		}
+		_ -> ?
+	}
+
+	fn soaCheckKind(k) if k {
+		0 -> soaNote()
+		_ -> ?
+	}
+
+	fn soaKeysOf(ents, kk, i, nf) {
+		keys := []
+		soaKeysPush(ents, keys, i, nf)
+		{ keys: keys, kinds: kk }
+	}
+
+	fn soaKeysPush(ents, keys, i, nf) if i < nf {
+		true -> {
+			keys.(len(keys)) <- ents.(i).key.val
+			soaKeysPush(ents, keys, i + 1, nf)
+		}
+		_ -> ?
+	}
+
+	fn soaEntsShape(ents, param) {
+		nf := len(ents)
+		ks := []
+		soaKinds(ents, param, 0, nf, ks)
+		st.soaAcc <- { bad: false }
+		ks |> std.each(fn(k) soaCheckKind(k))
+		if st.soaAcc.bad {
+			true -> ?
+			_ -> soaKeysOf(ents, ks, 0, nf)
+		}
+	}
+
+	fn soaObjShape(cb, param) {
+		obj := soaObjOf(cb.body, param)
+		if obj {
+			? -> ?
+			_ -> soaEntsShape(obj.entries, param)
+		}
+	}
+
+	fn soaParamOf(cb) if cb.args {
+		? -> ''
+		_ -> if len(cb.args) > 0 {
+			true -> cb.args.0
+			_ -> ''
+		}
+	}
+
+	// soaChain: the assignment RHS must be exactly map(range(...), fnLit)
+	fn soaChain(node) {
+		ch := collectChain(node)
+		if ch {
+			? -> ?
+			_ -> if len(ch) = 1 & ch.0.op = 'map' {
+				true -> ch.0
+				_ -> ?
+			}
+		}
+	}
+
+	fn soaAllOk(exprs, skip, name) {
+		st.soaAcc <- { bad: false }
+		pairs := exprs |> std.map(fn(e, i) { e: e, i: i })
+		pairs |> std.each(fn(p) soaCheckStmt(p, skip, name))
+		if st.soaAcc.bad {
+			true -> false
+			_ -> true
+		}
+	}
+
+	fn soaCheckStmt(p, skip, name) {
+		go := p.i != skip
+		b := if go {
+			true -> soaBad(p.e, name, false)
+			_ -> false
+		}
+		if b {
+			true -> soaNote()
+			_ -> ?
+		}
+	}
+
+	// soaChainShape: gate the chain on a range subject, classify the
+	// callback's object literal, validate every other statement
+	fn soaChainShape(c0, exprs, idx, name) {
+		subj := c0.subject
+		ok := subj.type = :fnCall & calleeName(subj) = 'range' & len(subj.args) >= 2
+		param := soaParamOf(c0.cb)
+		sh := soaObjShape(c0.cb, param)
+		useIt := if ok { true -> 1, _ -> 0 }
+		sh2 := if useIt { 1 -> sh, _ -> ? }
+		good := if sh2 { ? -> 0, _ -> 1 }
+		verdict := if good { 1 -> soaAllOk(exprs, idx, name), _ -> 0 }
+		if verdict {
+			true -> sh2
+			_ -> ?
+		}
+	}
+
+	fn soaScanStmt(e, exprs) if e.type {
+		:assignment -> if e.left.type {
+			:identifier -> soaScanAssign(e, exprs)
+			_ -> ?
+		}
+		_ -> ?
+	}
+
+	fn soaScanAssign(e, exprs) {
+		c0 := if soaLookup(e.left.val) {
+			? -> soaChain(e.right)
+			_ -> ?
+		}
+		go := if c0 { ? -> 0, _ -> 1 }
+		sh := if go { 1 -> soaChainShape(c0, exprs, 0, e.left.val), _ -> ? }
+		if sh {
+			? -> ?
+			_ -> st.soaBinds.(soaKey(e.left.val)) <- sh
+		}
+	}
+
+	fn soaScanAll(exprs) {
+		fn w(j) if j < len(exprs) {
+			true -> {
+				soaScanStmt(exprs.(j), exprs)
+				w(j + 1)
+			}
+			_ -> ?
+		}
+		w(0)
+	}
+
+	fn soaEmitCols(c0, param, sp, out) {
+		obj := soaObjOf(c0.cb.body, param)
+		e2 := cEnv2({}, [param], ['mg_mkint(__mg_si)'])
+		fn setCols(j) if j < len(obj.entries) {
+			true -> {
+				fx := cStmt(obj.entries.(j).val, e2, out)
+				out.(len(out)) <- sp + '->cols[' + string(j) + '][__mg_r] = mg_to_d(' + fx + ');'
+				setCols(j + 1)
+			}
+			_ -> ?
+		}
+		setCols(0)
+	}
+
+	// emitSoaBuild: columnar build loop replacing the generic fused map
+	fn emitSoaBuild(node, env, out) {
+		sh := soaLookup(node.left.val)
+		c0 := soaChain(node.right)
+		subj := c0.subject
+		lo := cStmt(subj.args.0, env, out)
+		hi := cStmt(subj.args.1, env, out)
+		stp := if len(subj.args) > 2 {
+			true -> cStmt(subj.args.2, env, out)
+			_ -> 'mg_mkint(1)'
+		}
+		lv := hoist('int64_t')
+		hv := hoist('int64_t')
+		sv := hoist('int64_t')
+		lnv := hoist('int64_t')
+		out.(len(out)) <- lv + ' = (' + lo + ').u.i;'
+		out.(len(out)) <- hv + ' = (' + hi + ').u.i;'
+		out.(len(out)) <- sv + ' = (' + stp + ').u.i;'
+		out.(len(out)) <- lnv + ' = ' + hv + ' > ' + lv + ' ? (' + hv + ' - ' + lv + ' + ' + sv + ' - 1) / ' + sv + ' : 0;'
+		sp := hoist('mg_soa_t*')
+		out.(len(out)) <- sp + ' = mg_soa_new(' + string(len(sh.keys)) + ', ' + lnv + ');'
+		fn setMeta(j) if j < len(sh.keys) {
+			true -> {
+				out.(len(out)) <- sp + '->keys[' + string(j) + '] = strdup(' + cStringLit(sh.keys.(j)) + ');'
+				out.(len(out)) <- sp + '->isint[' + string(j) + '] = ' + string(if sh.kinds.(j) { 1 -> 1, _ -> 0 }) + ';'
+				setMeta(j + 1)
+			}
+			_ -> ?
+		}
+		setMeta(0)
+		out.(len(out)) <- 'for (int64_t __mg_si = ' + lv + ', __mg_r = 0; __mg_si < ' + hv + '; __mg_si += ' + sv + ', __mg_r++) {'
+		soaEmitCols(c0, soaParamOf(c0.cb), sp, out)
+		out.(len(out)) <- '}'
+		out.(len(out)) <- sp + '->len = ' + lnv + ';'
+		tgt := if env.(node.left.val) {
+			? -> if st.globals.(node.left.val) {
+				? -> '__mg_v_' + cIdent(node.left.val)
+				_ -> '__mg_g_' + cIdent(node.left.val)
+			}
+			_ -> env.(node.left.val)
+		}
+		out.(len(out)) <- tgt + ' = mg_mksoa(' + sp + ');'
+	}
+
 	// collect the local names declared in a body. Walks everything that
 	// shares the enclosing C scope: blocks, assignments, match arms, call
 	// args, operators, collections, and ANONYMOUS fn literals (fused HOF
@@ -1803,7 +2296,16 @@ fn renderCBundle(bundleNode) {
 			:minus -> 'mg_neg(' + cStmt(node.right, env, out) + ')'
 			_ -> 'mg_mknull()'
 		}
-		:propertyAccess -> {
+		:propertyAccess -> if soaIsFieldRead(node) {
+			true -> {
+				sh := soaLookup(node.left.left.val)
+				fi := soaFieldIdx(sh, node.right.val)
+				if fi < 0 {
+					true -> 'mg_mknull()'
+					_ -> 'mg_soa_get(' + cStmt(node.left.left, env, out) + ', ' + cStmt(node.left.right, env, out) + ', ' + string(fi) + ')'
+				}
+			}
+			_ -> {
 			// static key (identifier right) or dynamic key (any expr)
 			l := cStmt(node.left, env, out)
 			k := if node.right.type {
@@ -1815,6 +2317,7 @@ fn renderCBundle(bundleNode) {
 				_ -> cStmt(node.right, env, out)
 			}
 			'mg_at(' + l + ', ' + k + ')'
+			}
 		}
 		:fnCall -> if node.function.type = :propertyAccess {
 			// method call obj.m(...): TRUE dynamic dispatch through the
@@ -1915,7 +2418,22 @@ fn renderCBundle(bundleNode) {
 			arm(0, true)
 			rvar
 		}
-		:assignment -> {
+		:assignment -> if soaIsBuildAssign(node) {
+			true -> emitSoaBuild(node, env, out)
+			_ -> if soaIsFieldWrite(node) {
+				true -> {
+					sh := soaLookup(node.left.left.left.val)
+					fi := soaFieldIdx(sh, node.left.right.val)
+					if fi < 0 {
+						true -> 'mg_mknull()'
+						_ -> {
+							rhs := cStmt(node.right, env, out)
+							out.(len(out)) <- 'mg_soa_set(' + cStmt(node.left.left.left, env, out) + ', ' + cStmt(node.left.left.right, env, out) + ', ' + string(fi) + ', ' + rhs + ');'
+							rhs
+						}
+					}
+				}
+				_ -> {
 			rhs := cStmt(node.right, env, out)
 			if node.left.type {
 				:identifier -> {
@@ -1987,6 +2505,8 @@ fn renderCBundle(bundleNode) {
 					out.(len(out)) <- '/* destructuring assign: v2 */'
 					rhs
 				}
+			}
+			}
 			}
 		}
 		:list -> {
@@ -2444,7 +2964,19 @@ fn renderCBundle(bundleNode) {
 		_ -> ?
 	}
 	preReg(0)
+	// register SoA bindings for every module + the entry BEFORE any C
+	// emission — boxed fn bodies consult st.soaBinds during emitBoxedAll
+	fn soaPre(i) if i < len(st.moduleOrder) {
+		true -> {
+			st.curModule <- st.moduleOrder.(i)
+			soaScanAll(st.modules.(st.moduleOrder.(i)).body.exprs)
+			soaPre(i + 1)
+		}
+		_ -> ?
+	}
+	soaPre(0)
 	st.curModule <- ''
+	soaScanAll(entryExprs)
 
 	fn ensureAll(i) if i < len(entryExprs) {
 		true -> {
