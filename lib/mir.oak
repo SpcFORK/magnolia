@@ -1,0 +1,732 @@
+// mir -- Magnolia whole-bundle middle-end IR (M2 TODO-13, plan §4).
+//
+// Sea-of-Regions Typed SSA front-passes over the self-hosted AST node
+// schema ({type: :function/:block/:binary/:assignment/:identifier/:fnCall/
+// :ifExpr/:ifBranch/:propertyAccess/:list/:object/:int/:float/:bool/:string/
+// :atom/:null/:unary}). Four passes, each read-only over the input trees:
+//
+//   1. mutability -- `:=` bindings never targeted by `<-` (and never
+//      re-assigned) are pure SSA values: candidates for unboxed registers.
+//   2. types      -- bottom-up type lattice: :int/:float/:bool/:atom/
+//      :string/:list/:object/:null/:unknown; reassignment unions to
+//      :unknown on conflict. User-fn call return types report :unknown
+//      until the call-graph stage (§4 pass 2, second stage).
+//   3. fusion     -- map/filter/each/reduce chains (the parser-desugared
+//      `|>` / `with` shapes) collapse into FusedLoop descriptors, mirroring
+//      the VM's opHOF* rewrite (M1 TODO-12) so every backend agrees.
+//   4. regions    -- list/object bindings classified :region (never captured
+//      by an inner function, never returned) or :shared — the seed for the
+//      static Virtual Region Stack R_0..R_k (§5.1) and codegen-C restrict.
+//
+// Diagnostics include the known silent trap: `if obj { true -> A, _ -> B }`
+// on a non-boolean subject never matches (plan §7 warning).
+//
+// Exports (top-level bindings): analyze, version.
+
+std := import('std')
+keys := std.keys
+
+// --- node helpers ----------------------------------------------------------
+
+// _t returns the node's type tag atom, or :null for a null node.
+fn _t(node) if node { ? -> :null, _ -> node.type }
+
+// _isHof reports whether a callee name is a fusable HOF family.
+fn _isHof(name) if name {
+	? -> false
+	_ -> if name {
+		'map' -> true
+		'filter' -> true
+		'each' -> true
+		'reduce' -> true
+		_ -> false
+	}
+}
+
+// _calleeName extracts the callee's simple name from a fnCall node
+// (bare identifier or property access such as std.map), or null.
+fn _calleeName(node) if _t(node) {
+	:fnCall -> if _t(node.function) {
+		:identifier -> node.function.val
+		:propertyAccess -> if _t(node.function.right) {
+			:identifier -> node.function.right.val
+			_ -> ?
+		}
+		_ -> ?
+	}
+	_ -> ?
+}
+
+// _arg returns args.(i) when present, else null.
+fn _arg(node, i) if node.args {
+	? -> ?
+	_ -> if i < len(node.args) {
+		true -> node.args.(i)
+		_ -> ?
+	}
+}
+
+// --- pass 2: type lattice --------------------------------------------------
+
+// _unionType merges two lattice points; conflict degrades to :unknown.
+fn _unionType(a, b) if a {
+	? -> b
+	_ -> if a = b {
+		true -> a
+		_ -> if a {
+			:unknown -> b
+			_ -> if b {
+				:unknown -> a
+				_ -> :unknown
+			}
+		}
+	}
+}
+
+// _arithType classifies arithmetic binary results.
+fn _arithType(lt, rt) if lt {
+	:int -> if rt {
+		:int -> :int
+		:float -> :float
+		_ -> :unknown
+	}
+	:float -> :float
+	_ -> :unknown
+}
+
+// _typeOf infers the lattice type of an expression bottom-up (first cut,
+// flow-insensitive within one function; fnCtx supplies binding facts).
+fn _typeOf(node, fnCtx) if _t(node) {
+	:int -> :int
+	:float -> :float
+	:bool -> :bool
+	:string -> :string
+	:atom -> :atom
+	:null -> :null
+	:list -> :list
+	:object -> :object
+	:identifier -> if fnCtx.bindings.(node.val) {
+		? -> :unknown
+		_ -> fnCtx.bindings.(node.val).type
+	}
+	:binary -> if node.op {
+		:plus -> if _typeOf(node.left, fnCtx) {
+			:string -> :string
+			:unknown -> :unknown
+			_ -> _arithType(_typeOf(node.left, fnCtx), _typeOf(node.right, fnCtx))
+		}
+		:minus, :times, :divide, :modulus, :power ->
+			_arithType(_typeOf(node.left, fnCtx), _typeOf(node.right, fnCtx))
+		:pushArrow -> :list
+		:eq, :neq, :less, :greater, :leq, :geq, :and, :or -> :bool
+		_ -> :unknown
+	}
+	:unary -> if node.op {
+		:not -> :bool
+		:minus -> if _typeOf(node.right, fnCtx) {
+			:int -> :int
+			:float -> :float
+			_ -> :unknown
+		}
+		_ -> :unknown
+	}
+	:fnCall -> {
+		name := _calleeName(node)
+		if name {
+			? -> :unknown
+			_ -> if name {
+				'map' -> :list
+				'filter' -> :list
+				'each' -> :null
+				'reduce' -> if node.args {
+					? -> :unknown
+					_ -> _typeOf(_arg(node, 1), fnCtx) // type of the seed
+				}
+				'len' -> :int
+				'type' -> :atom
+				'string' -> :string
+				'int' -> :int
+				'float' -> :float
+				'range' -> :list
+				'keys' -> :list
+				'values' -> :list
+				'slice' -> :list
+				'append' -> :list
+				_ -> {
+					// call-graph stage: consult the known return type of a
+					// same-bundle function (unless shadowed by a local).
+					// NOTE: the nested `if`s MUST be wrapped in `{}` blocks —
+					// an `if` directly as a match-arm value silently
+					// mis-parses in the Go parser (found by differential
+					// probing, TODO-14).
+					if fnCtx.bindings.(name) {
+						? -> {
+							if fnCtx.out.functions.(name) {
+								? -> :unknown
+								_ -> if fnCtx.out.functions.(name).returns {
+									? -> :unknown
+									_ -> fnCtx.out.functions.(name).returns
+								}
+							}
+						}
+						_ -> :unknown
+					}
+				}
+			}
+		}
+	}
+	:ifExpr -> {
+		acc := ?
+		fn scan(i) if i < len(node.branches) {
+			true -> {
+				// note: `<-` (assign) not `:=` (declare) -- `:=` would shadow
+				// the captured acc inside the closure and lose the union.
+				acc <- _unionType(acc, _typeOf(node.branches.(i).body, fnCtx))
+				scan(i + 1)
+			}
+			_ -> ?
+		}
+		scan(0)
+		acc
+	}
+	:block -> if len(node.exprs) {
+		0 -> :null
+		_ -> _typeOf(node.exprs.(len(node.exprs) - 1), fnCtx)
+	}
+	:assignment -> _typeOf(node.right, fnCtx)
+	_ -> :unknown
+}
+
+// --- pass 1 + 3 + diagnostics: the walker ----------------------------------
+
+// _walk descends an expression, recording bindings, mutations, fusion
+// chains and diagnostics into fnCtx. inInner is true inside nested
+// function bodies (used by the region pass for capture detection).
+fn _walk(node, fnCtx, inInner) if _t(node) {
+	:block -> {
+		fn scan(i) if i < len(node.exprs) {
+			true -> {
+				_walk(node.exprs.(i), fnCtx, inInner)
+				scan(i + 1)
+			}
+			_ -> ?
+		}
+		scan(0)
+	}
+	:assignment -> {
+		// walk the RHS first so nested declarations/anon fns are recorded
+		// before the binding's type is computed from it
+		_walk(node.right, fnCtx, inInner)
+		if _t(node.left) {
+			:identifier -> {
+				name := node.left.val
+				isDecl := node.local? = true
+				if isDecl {
+					true -> if fnCtx.bindings.(name) {
+						? -> fnCtx.bindings.(name) <- {
+							kind: :local
+							mutable?: false
+							type: _typeOf(node.right, fnCtx)
+						}
+						_ -> ?
+					}
+					_ -> ?
+				}
+				if isDecl = false {
+					true -> if fnCtx.bindings.(name) {
+						? -> ?
+						_ -> {
+							b := fnCtx.bindings.(name)
+							b.mutable? <- true
+							b.type <- _unionType(b.type, _typeOf(node.right, fnCtx))
+						}
+					}
+					_ -> ?
+				}
+				if inInner {
+					true -> if fnCtx.bindings.(name) {
+						? -> ?
+						_ -> fnCtx.captured.(name) <- true
+					}
+					_ -> ?
+				}
+			}
+			_ -> ?
+		}
+	}
+	:identifier -> if inInner {
+		true -> if fnCtx.bindings.(node.val) {
+			? -> ?
+			_ -> fnCtx.captured.(node.val) <- true
+		}
+		_ -> ?
+	}
+	:binary -> {
+		_walk(node.left, fnCtx, inInner)
+		_walk(node.right, fnCtx, inInner)
+	}
+	:unary -> _walk(node.right, fnCtx, inInner)
+	:fnCall -> if _isHof(_calleeName(node)) {
+		true -> _fnVisitHof(node, fnCtx, inInner)
+		_ -> {
+			nArgs := if node.args { ? -> 0, _ -> len(node.args) }
+			fn scan(i) if i < nArgs {
+				true -> {
+					_walk(node.args.(i), fnCtx, inInner)
+					scan(i + 1)
+				}
+				_ -> ?
+			}
+			scan(0)
+		}
+	}
+	:ifExpr -> {
+		_walk(node.cond, fnCtx, inInner)
+		condType := _typeOf(node.cond, fnCtx)
+		fn scanBr(i) if i < len(node.branches) {
+			true -> {
+				br := node.branches.(i)
+				if _t(br.target) {
+					:bool -> if br.target.val {
+						true -> if condType {
+							:object -> {
+								fnCtx.traps.(fnCtx.trapCount) <- {kind: :ifTrueOnNonBool, type: condType}
+								fnCtx.trapCount <- fnCtx.trapCount + 1
+							}
+							:list -> {
+								fnCtx.traps.(fnCtx.trapCount) <- {kind: :ifTrueOnNonBool, type: condType}
+								fnCtx.trapCount <- fnCtx.trapCount + 1
+							}
+							:string -> {
+								fnCtx.traps.(fnCtx.trapCount) <- {kind: :ifTrueOnNonBool, type: condType}
+								fnCtx.trapCount <- fnCtx.trapCount + 1
+							}
+							_ -> ?
+						}
+						_ -> ?
+					}
+					_ -> ?
+				}
+				_walk(br.target, fnCtx, inInner)
+				_walk(br.body, fnCtx, inInner)
+				scanBr(i + 1)
+			}
+			_ -> ?
+		}
+		scanBr(0)
+	}
+	:propertyAccess -> _walk(node.left, fnCtx, inInner)
+	:object -> if node.entries {
+		? -> ?
+		_ -> {
+			fn scanE(i) if i < len(node.entries) {
+				true -> {
+					_walk(node.entries.(i).val, fnCtx, inInner)
+					scanE(i + 1)
+				}
+				_ -> ?
+			}
+			scanE(0)
+		}
+	}
+	:list -> if node.elems {
+		? -> ?
+		_ -> {
+			fn scanL(i) if i < len(node.elems) {
+				true -> {
+					_walk(node.elems.(i), fnCtx, inInner)
+					scanL(i + 1)
+				}
+				_ -> ?
+			}
+			scanL(0)
+		}
+	}
+	:function -> {
+		// nested function: analyze as its own entry, then walk its body
+		// against the ENCLOSING context with inInner=true so outer
+		// bindings referenced (or mutated) inside it are captured/marked.
+		_fnAnalyze(node, fnCtx.out)
+		_walk(node.body, fnCtx, true)
+	}
+	_ -> ?
+}
+
+// _fnVisitHof handles a map/filter/each/reduce call: walks the subject and
+// remaining args, collapses inner chains, and records every link (analyze
+// keeps only outermost links — their subject is not itself a HOF call).
+fn _fnVisitHof(node, fnCtx, inInner) {
+	name := _calleeName(node)
+	subject := _arg(node, 0)
+	innerChain := if _isHof(_calleeName(subject)) {
+		true -> {
+			_fnVisitHof(subject, fnCtx, inInner)
+			fnCtx.lastChain
+		}
+		_ -> {
+			_walk(subject, fnCtx, inInner)
+			?
+		}
+	}
+	// reduce: walk the seed; callback position differs
+	if name {
+		'reduce' -> _walk(_arg(node, 1), fnCtx, inInner)
+		_ -> ?
+	}
+	callback := if name {
+		'reduce' -> _arg(node, 2)
+		_ -> _arg(node, 1)
+	}
+	if _t(callback) {
+		:function -> ? // literal: fused, no arg walk needed
+		_ -> _walk(callback, fnCtx, inInner)
+	}
+	literal? := if _t(callback) {
+		:function -> true
+		_ -> false
+	}
+	stage := {op: name, callback: callback, literal?: literal?}
+	// inner? marks links consumed by an outer HOF call; analyze keeps only
+	// inner?=false links (the outermost, whose subject is walked directly).
+	chain := if innerChain {
+		? -> {ops: [name], subject: subject, stages: [stage], inner?: false}
+		_ -> {
+			ops: innerChain.ops << name
+			subject: innerChain.subject
+			stages: innerChain.stages << stage
+			inner?: true
+		}
+	}
+	fnCtx.lastChain <- chain
+	fnCtx.fused.(fnCtx.fusedCount) <- chain
+	fnCtx.fusedCount <- fnCtx.fusedCount + 1
+	?
+}
+
+// --- pass 4: regions -------------------------------------------------------
+
+// _tailIdents collects identifiers reachable from the tail expression
+// (used for return-escape classification).
+fn _tailIdents(node, acc, depth) if _t(node) {
+	:identifier -> acc.(node.val) <- true
+	:binary -> {
+		_tailIdents(node.left, acc, depth + 1)
+		_tailIdents(node.right, acc, depth + 1)
+	}
+	:propertyAccess -> _tailIdents(node.left, acc, depth + 1)
+	:fnCall -> if node.args {
+		? -> ?
+		_ -> {
+			fn scan(i) if i < len(node.args) {
+				true -> {
+					_tailIdents(node.args.(i), acc, depth + 1)
+					scan(i + 1)
+				}
+				_ -> ?
+			}
+			scan(0)
+		}
+	}
+	:ifExpr -> if node.branches {
+		? -> ?
+		_ -> {
+			fn scanB(i) if i < len(node.branches) {
+				true -> {
+					_tailIdents(node.branches.(i).body, acc, depth + 1)
+					scanB(i + 1)
+				}
+				_ -> ?
+			}
+			scanB(0)
+		}
+	}
+	:block -> if len(node.exprs) > 0 {
+		true -> _tailIdents(node.exprs.(len(node.exprs) - 1), acc, depth + 1)
+		_ -> ?
+	}
+	_ -> ?
+}
+
+// --- function-level driver -------------------------------------------------
+
+// _fnAnalyze runs all four passes over one function node and records the
+// result into out.functions.
+fn _fnAnalyze(fnNode, out) {
+	fname := if fnNode.name {
+		? -> {
+			out.anonCount <- out.anonCount + 1
+			'<anon>' + string(out.anonCount)
+		}
+		_ -> fnNode.name
+	}
+	fnCtx := {
+		name: fname
+		bindings: {}
+		captured: {}
+		fused: {}
+		fusedCount: 0
+		lastChain: ?
+		traps: {}
+		trapCount: 0
+		out: out
+	}
+	// params are bindings (mutable only if reassigned later)
+	if fnNode.args {
+		? -> ?
+		_ -> {
+			fn bp(i) if i < len(fnNode.args) {
+				true -> {
+					fnCtx.bindings.(fnNode.args.(i)) <- {kind: :param, mutable?: false, type: :unknown}
+					bp(i + 1)
+				}
+				_ -> ?
+			}
+			bp(0)
+		}
+	}
+	if fnNode.restArg {
+		?, '' -> ? // absent rest arg (the Go parser yields '' not null)
+		_ -> fnCtx.bindings.(fnNode.restArg) <- {kind: :param, mutable?: false, type: :list}
+	}
+	// passes 1+3+diagnostics: walk the body at the function's own level
+	_walk(fnNode.body, fnCtx, false)
+
+	// pass 3 post: keep only outermost chains (subject not itself a HOF call)
+	outermost := {}
+	outerCount := 0
+	fn fusedScan(i) if i < fnCtx.fusedCount {
+		true -> {
+			ch := fnCtx.fused.(i)
+			if ch.inner? {
+				true -> ? // inner link: superseded by its consumer
+				_ -> {
+					outermost.(outerCount) <- ch
+					outerCount <- outerCount + 1
+				}
+			}
+			fusedScan(i + 1)
+		}
+		_ -> ?
+	}
+	fusedScan(0)
+
+	// pass 4: regions — captured (inner-fn use) or returned (tail mention)
+	// bindings escape to :shared; the rest are region-local.
+	tailIds := {}
+	_tailIdents(fnNode.body, tailIds, 0)
+	names := keys(fnCtx.bindings)
+	fn reg(i) if i < len(names) {
+		true -> {
+			nm := names.(i)
+			b := fnCtx.bindings.(nm)
+			esc := if fnCtx.captured.(nm) {
+				? -> false
+				_ -> true
+			}
+			if b.kind = :param {
+				true -> esc <- true
+				_ -> ?
+			}
+			if tailIds.(nm) {
+				? -> ?
+				_ -> esc <- true
+			}
+			b.region <- if esc {
+				true -> :shared
+				_ -> :region
+			}
+			reg(i + 1)
+		}
+		_ -> ?
+	}
+	reg(0)
+
+	// propagate trap diagnostics with the function name attached
+	fn trapCopy(i) if i < fnCtx.trapCount {
+		true -> {
+			tr := fnCtx.traps.(i)
+			out.diagnostics.(len(out.diagnostics)) <- {
+				func: fname
+				kind: tr.kind
+				type: tr.type
+			}
+			trapCopy(i + 1)
+		}
+		_ -> ?
+	}
+	trapCopy(0)
+
+	out.functions.(fname) <- {
+		name: fname
+		params: fnNode.args
+		bindings: fnCtx.bindings
+		fused: outermost
+		fusedCount: outerCount
+		returns: _typeOf(fnNode.body, fnCtx)
+		node: fnNode
+		ctx: fnCtx
+	}
+	?
+}
+
+// _inferParams is the param-type stage of the type pass: params register as
+// :unknown; a param used in arithmetic/comparison against an int-typed
+// operand (or returned directly from an int-returning fn) is :int. Iterated
+// with the return fixpoint so chained inferences converge.
+fn _inferParams(out) {
+	names := keys(out.functions)
+	fn inferRec(j) if j < len(names) {
+		true -> {
+			rec := out.functions.(names.(j))
+			ctx := rec.ctx
+			// walk body: hint params on int-context usage
+			fn walk(node) if _t(node) {
+				:binary -> {
+					op := node.op
+					if op {
+						:plus, :minus, :times, :divide, :modulus, :eq, :neq, :less, :greater, :leq, :geq -> {
+							lt := _typeOf(node.left, ctx)
+							rt := _typeOf(node.right, ctx)
+							if _t(node.left) = :identifier {
+								true -> if ctx.bindings.(node.left.val) {
+									? -> ?
+									_ -> if ctx.bindings.(node.left.val).kind = :param & ctx.bindings.(node.left.val).type = :unknown & rt = :int {
+										true -> ctx.bindings.(node.left.val).type <- :int
+										_ -> ?
+									}
+								}
+								_ -> ?
+							}
+							if _t(node.right) = :identifier {
+								true -> if ctx.bindings.(node.right.val) {
+									? -> ?
+									_ -> if ctx.bindings.(node.right.val).kind = :param & ctx.bindings.(node.right.val).type = :unknown & lt = :int {
+										true -> ctx.bindings.(node.right.val).type <- :int
+										_ -> ?
+									}
+								}
+								_ -> ?
+							}
+						}
+						_ -> ?
+					}
+					walk(node.left)
+					walk(node.right)
+				}
+				:unary -> walk(node.right)
+				:block -> if node.exprs {
+					? -> ?
+					_ -> {
+						fn es(i) if i < len(node.exprs) {
+							true -> {
+								walk(node.exprs.(i))
+								es(i + 1)
+							}
+							_ -> ?
+						}
+						es(0)
+					}
+				}
+				:ifExpr -> if node.branches {
+					? -> ?
+					_ -> {
+						walk(node.cond)
+						fn bs(i) if i < len(node.branches) {
+							true -> {
+								walk(node.branches.(i).body)
+								bs(i + 1)
+							}
+							_ -> ?
+						}
+						bs(0)
+					}
+				}
+				:assignment -> walk(node.right)
+				_ -> ?
+			}
+			walk(rec.node.body)
+			// param returned directly from an int-returning fn is int
+			if rec.returns = :int {
+				true -> if _t(rec.node.body) = :identifier {
+					true -> if ctx.bindings.(rec.node.body.val) {
+						? -> ?
+						_ -> if ctx.bindings.(rec.node.body.val).kind = :param {
+							true -> ctx.bindings.(rec.node.body.val).type <- :int
+							_ -> ?
+						}
+					}
+					_ -> ?
+				}
+				_ -> ?
+			}
+			inferRec(j + 1)
+		}
+		_ -> ?
+	}
+	inferRec(0)
+}
+
+// _inferReturns is the call-graph stage of the type pass (§4 pass 2, second
+// stage): recompute every function's return type until fixpoint so that
+// user-fn call results flow bottom-up (e.g. g returns int -> f's
+// `g()` arm is int). Recursion converges conservatively at :unknown.
+// Bounded to 16 sweeps (deep chains longer than that are re-run next build).
+fn _inferReturns(out) {
+	fn sweep() {
+		changed := false
+		names := keys(out.functions)
+		fn scan(j) if j < len(names) {
+			true -> {
+				rec := out.functions.(names.(j))
+				t := _typeOf(rec.node.body, rec.ctx)
+				if t != rec.returns {
+					true -> {
+						rec.returns <- t
+						changed <- true
+					}
+					_ -> ?
+				}
+				scan(j + 1)
+			}
+			_ -> ?
+		}
+		scan(0)
+		changed
+	}
+	_inferParams(out)
+	fn loop(i) if i < 16 {
+		true -> if sweep() {
+			true -> {
+				_inferParams(out)
+				loop(i + 1)
+			}
+			_ -> ?
+		}
+		_ -> ?
+	}
+	loop(0)
+}
+
+// analyze runs the MIR passes over a bundle of top-level AST nodes.
+// Returns {version, functions, diagnostics, anonCount}.
+	fn analyze(nodes) {
+	out := {version: 'mir-0.2', functions: {}, diagnostics: [], anonCount: 0}
+	fn scan(i) if i < len(nodes) {
+		true -> {
+			if _t(nodes.(i)) {
+				:function -> _fnAnalyze(nodes.(i), out)
+				_ -> ?
+			}
+			scan(i + 1)
+		}
+		_ -> ?
+	}
+	scan(0)
+	// call-graph stage: bottom-up return-type fixpoint
+	_inferReturns(out)
+	{
+		version: out.version
+		functions: out.functions
+		diagnostics: out.diagnostics
+	}
+}

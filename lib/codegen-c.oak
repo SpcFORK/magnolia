@@ -1,0 +1,2718 @@
+// codegen-c -- Oak AST to self-contained C11 ("Goose+ Mode", TODO-14 §8.1)
+//
+// Consumes the bundled AST (the same :block-of-modules shape the other
+// renderers see) and emits one dependency-free .c file.
+//
+// v1 scope (correctness first, measured against bench/todo04 oracles):
+//   - Boxed dynamic values (mg_val_t) with native C control flow — the VM
+//     dispatch loop is eliminated entirely; gcc -O2/-O3 inlines the helpers.
+//   - Fused HOF loops: std.map/filter/each/reduce calls with literal fn
+//     callbacks inline into ONE C for-loop (no intermediate lists, no
+//     closure calls), including std.range subjects (zero materialization).
+//   - Self-tail-calls loop-lower to while(1) — constant C stack (arith's
+//     1M-deep tail recursion runs in O(1) stack).
+//   - Match arms compile as deep-equality chains (verified against both
+//     engines: literal targets match by equality, :empty is the wildcard,
+//     a non-matching subject yields null).
+//   - Typed scalar instances (unboxed int64/double registers), region
+//     stacks, Ptr32 and SoA synthesis are v2, fed by lib/mir.oak.
+//
+// Exports: renderCBundle
+
+std := import('std')
+str := import('str')
+
+// ---------------------------------------------------------------------------
+// C runtime preamble (verbatim; no single-quote char literals inside)
+// ---------------------------------------------------------------------------
+
+CRuntime := '#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+
+enum { MG_INT = 0, MG_FLOAT, MG_BOOL, MG_ATOM, MG_STR, MG_LIST, MG_OBJ, MG_NULLV, MG_CLOSURE, MG_CHAN };
+
+typedef struct mg_val mg_val_t;
+typedef struct mg_list mg_list_t;
+typedef struct mg_obj mg_obj_t;
+typedef struct mg_closure mg_closure_t;
+typedef struct mg_chan mg_chan_t;
+struct mg_chan { mg_list_t* buf; };
+typedef mg_val_t (*mg_fn_t)(void* env, mg_val_t* args, int nargs);
+
+struct mg_val { uint8_t tag; union { int64_t i; double d; int b; uint32_t a; struct { char* p; int64_t n; } s; mg_list_t* l; mg_obj_t* o; mg_closure_t* c; struct mg_chan* ch; } u; };
+struct mg_list { int64_t len, cap; mg_val_t* data; };
+struct mg_obj { int64_t len, cap; char** keys; mg_val_t* vals; };
+struct mg_closure { mg_fn_t fp; void* env; };
+
+static mg_val_t mg_mkint(int64_t v) { mg_val_t r; r.tag = MG_INT; r.u.i = v; return r; }
+static mg_val_t mg_mkfloat(double v) { mg_val_t r; r.tag = MG_FLOAT; r.u.d = v; return r; }
+static mg_val_t mg_mkbool(int v) { mg_val_t r; r.tag = MG_BOOL; r.u.b = v; return r; }
+static mg_val_t mg_mkatom(uint32_t v) { mg_val_t r; r.tag = MG_ATOM; r.u.a = v; return r; }
+static mg_val_t mg_mknull(void) { mg_val_t r; r.tag = MG_NULLV; r.u.i = 0; return r; }
+static mg_val_t mg_mkstr(char* p, int64_t n) { mg_val_t r; r.tag = MG_STR; r.u.s.p = p; r.u.s.n = n; return r; }
+static mg_val_t mg_mkstrc(const char* s) { return mg_mkstr(strdup(s), (int64_t)strlen(s)); }
+
+static mg_list_t* mg_list_new(int64_t cap) {
+    mg_list_t* l = (mg_list_t*)malloc(sizeof(mg_list_t));
+    l->len = 0; l->cap = cap > 4 ? cap : 4;
+    l->data = (mg_val_t*)malloc((size_t)l->cap * sizeof(mg_val_t));
+    return l;
+}
+static void mg_list_push(mg_list_t* l, mg_val_t v) {
+    if (l->len == l->cap) { l->cap *= 2; l->data = (mg_val_t*)realloc(l->data, (size_t)l->cap * sizeof(mg_val_t)); }
+    l->data[l->len++] = v;
+}
+static mg_val_t mg_mklist(mg_list_t* l) { mg_val_t r; r.tag = MG_LIST; r.u.l = l; return r; }
+
+static mg_obj_t* mg_obj_new(void) {
+    mg_obj_t* o = (mg_obj_t*)malloc(sizeof(mg_obj_t));
+    o->len = 0; o->cap = 8;
+    o->keys = (char**)malloc(8 * sizeof(char*));
+    o->vals = (mg_val_t*)malloc(8 * sizeof(mg_val_t));
+    return o;
+}
+static int64_t mg_obj_idx(mg_obj_t* o, const char* k) {
+    for (int64_t i = 0; i < o->len; i++) if (strcmp(o->keys[i], k) == 0) return i;
+    return -1;
+}
+static mg_val_t mg_obj_get(mg_obj_t* o, const char* k) {
+    int64_t i = mg_obj_idx(o, k);
+    if (i >= 0) return o->vals[i];
+    return mg_mknull();
+}
+static void mg_obj_set(mg_obj_t* o, const char* k, mg_val_t v) {
+    int64_t i = mg_obj_idx(o, k);
+    if (i >= 0) { o->vals[i] = v; return; }
+    if (o->len == o->cap) {
+        o->cap *= 2;
+        o->keys = (char**)realloc(o->keys, (size_t)o->cap * sizeof(char*));
+        o->vals = (mg_val_t*)realloc(o->vals, (size_t)o->cap * sizeof(mg_val_t));
+    }
+    o->keys[o->len] = strdup(k);
+    o->vals[o->len++] = v;
+}
+static mg_val_t mg_mkobj(mg_obj_t* o) { mg_val_t r; r.tag = MG_OBJ; r.u.o = o; return r; }
+static mg_val_t mg_mkclo(mg_closure_t* c) { mg_val_t r; r.tag = MG_CLOSURE; r.u.c = c; return r; }
+
+static char** mg_atom_names = 0;
+static int mg_atom_count = 0;
+
+static void mg_print(mg_val_t v) {
+    switch (v.tag) {
+    case MG_INT: printf("%lld", (long long)v.u.i); break;
+    case MG_FLOAT: printf("%g", v.u.d); break;
+    case MG_BOOL: printf(v.u.b ? "true" : "false"); break;
+    case MG_ATOM: printf(":%s", mg_atom_names[v.u.a]); break;
+    case MG_STR: fwrite(v.u.s.p, 1, (size_t)v.u.s.n, stdout); break;
+    case MG_NULLV: printf("?"); break;
+    case MG_LIST: {
+        printf("[");
+        for (int64_t i = 0; i < v.u.l->len; i++) { if (i) printf(", "); mg_print(v.u.l->data[i]); }
+        printf("]");
+        break;
+    }
+    case MG_OBJ: {
+        printf("{");
+        for (int64_t i = 0; i < v.u.o->len; i++) { if (i) printf(", "); printf("%s: ", v.u.o->keys[i]); mg_print(v.u.o->vals[i]); }
+        printf("}");
+        break;
+    }
+    default: printf("<closure>");
+    }
+}
+
+static int64_t mg_len(mg_val_t v) {
+    if (v.tag == MG_LIST) return v.u.l->len;
+    if (v.tag == MG_STR) return v.u.s.n;
+    if (v.tag == MG_OBJ) return v.u.o->len;
+    return 0;
+}
+
+static mg_val_t mg_string_of(mg_val_t v) {
+    char buf[80];
+    int n = 0;
+    if (v.tag == MG_STR) return v;
+    if (v.tag == MG_INT) n = snprintf(buf, 80, "%lld", (long long)v.u.i);
+    else if (v.tag == MG_FLOAT) n = snprintf(buf, 80, "%g", v.u.d);
+    else if (v.tag == MG_BOOL) n = snprintf(buf, 80, "%s", v.u.b ? "true" : "false");
+    else if (v.tag == MG_ATOM) n = snprintf(buf, 80, ":%s", mg_atom_names[v.u.a]);
+    else if (v.tag == MG_NULLV) n = snprintf(buf, 80, "?");
+    else n = snprintf(buf, 80, "<value>");
+    {
+        char* p = (char*)malloc((size_t)n + 1);
+        memcpy(p, buf, (size_t)n);
+        p[n] = 0;
+        return mg_mkstr(p, n);
+    }
+}
+
+static mg_val_t mg_strcat(mg_val_t a, mg_val_t b) {
+    mg_val_t r; r.tag = MG_STR;
+    r.u.s.n = a.u.s.n + b.u.s.n;
+    r.u.s.p = (char*)malloc((size_t)r.u.s.n + 1);
+    memcpy(r.u.s.p, a.u.s.p, (size_t)a.u.s.n);
+    memcpy(r.u.s.p + a.u.s.n, b.u.s.p, (size_t)b.u.s.n);
+    r.u.s.p[r.u.s.n] = 0;
+    return r;
+}
+
+static int mg_val_eq(mg_val_t a, mg_val_t b) {
+    if (a.tag != b.tag) return 0;
+    switch (a.tag) {
+    case MG_INT: return a.u.i == b.u.i;
+    case MG_FLOAT: return a.u.d == b.u.d;
+    case MG_BOOL: return a.u.b == b.u.b;
+    case MG_ATOM: return a.u.a == b.u.a;
+    case MG_NULLV: return 1;
+    case MG_STR: return a.u.s.n == b.u.s.n && memcmp(a.u.s.p, b.u.s.p, (size_t)a.u.s.n) == 0;
+    case MG_LIST: {
+        if (a.u.l->len != b.u.l->len) return 0;
+        for (int64_t i = 0; i < a.u.l->len; i++) if (!mg_val_eq(a.u.l->data[i], b.u.l->data[i])) return 0;
+        return 1;
+    }
+    case MG_OBJ: {
+        if (a.u.o->len != b.u.o->len) return 0;
+        for (int64_t i = 0; i < a.u.o->len; i++) {
+            mg_val_t bv = mg_obj_get(b.u.o, a.u.o->keys[i]);
+            if (bv.tag == MG_NULLV && mg_obj_idx(b.u.o, a.u.o->keys[i]) < 0) return 0;
+            if (!mg_val_eq(a.u.o->vals[i], bv)) return 0;
+        }
+        return 1;
+    }
+    default: return 0;
+    }
+}
+
+static int mg_truthy(mg_val_t v) { return !(v.tag == MG_NULLV || (v.tag == MG_BOOL && !v.u.b)); }
+
+static mg_val_t mg_call(mg_val_t f, mg_val_t* args, int n);
+static mg_val_t mg_mkclo(mg_closure_t* c);
+static mg_val_t mg_boxed_map(mg_val_t xs, mg_val_t f);
+static mg_val_t mg_boxed_filter(mg_val_t xs, mg_val_t f);
+static mg_val_t mg_boxed_each(mg_val_t xs, mg_val_t f);
+static mg_val_t mg_boxed_reduce(mg_val_t xs, mg_val_t seed, mg_val_t f);
+static mg_val_t mg_range(int64_t a, int64_t b, int64_t step);
+static mg_val_t mg_append(mg_val_t l, mg_val_t v);
+static mg_val_t mg_slice(mg_val_t l, int64_t lo, int64_t hi);
+static mg_val_t mg_keys(mg_val_t o);
+static mg_val_t mg_std_default(mg_val_t x, mg_val_t base) {
+    if (x.tag == MG_NULLV) return base;
+    return x;
+}
+static mg_val_t mg_std_every(mg_val_t xs, mg_val_t pred) {
+    if (xs.tag != MG_LIST) return mg_mkbool(0);
+    for (int64_t i = 0; i < xs.u.l->len; i++) {
+        mg_val_t a[2] = { xs.u.l->data[i], mg_mkint(i) };
+        if (!mg_truthy(mg_call(pred, a, 2))) return mg_mkbool(0);
+    }
+    return mg_mkbool(1);
+}
+static mg_val_t mg_clone(mg_val_t v) {
+    if (v.tag == MG_LIST) {
+        mg_list_t* out = mg_list_new(v.u.l->len > 0 ? v.u.l->len : 1);
+        for (int64_t i = 0; i < v.u.l->len; i++) mg_list_push(out, mg_clone(v.u.l->data[i]));
+        return mg_mklist(out);
+    }
+    if (v.tag == MG_OBJ) {
+        mg_obj_t* o = mg_obj_new();
+        for (int64_t i = 0; i < v.u.o->len; i++) mg_obj_set(o, v.u.o->keys[i], mg_clone(v.u.o->vals[i]));
+        return mg_mkobj(o);
+    }
+    return v;
+}
+static mg_val_t mg_std_ad_map(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_boxed_map(a[0], a[1]); }
+static mg_val_t mg_std_ad_filter(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_boxed_filter(a[0], a[1]); }
+static mg_val_t mg_std_ad_each(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_boxed_each(a[0], a[1]); }
+static mg_val_t mg_std_ad_reduce(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_boxed_reduce(a[0], a[1], a[2]); }
+static mg_val_t mg_std_ad_default(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_std_default(a[0], a[1]); }
+static mg_val_t mg_std_ad_every(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_std_every(a[0], a[1]); }
+static mg_val_t mg_std_ad_append(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_append(a[0], a[1]); }
+static mg_val_t mg_std_ad_keys(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_keys(a[0]); }
+static mg_val_t mg_std_ad_slice(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_slice(a[0], a[1].u.i, a[2].u.i); }
+static mg_val_t mg_std_ad_range(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_range(a[0].u.i, a[1].u.i, a[2].u.i); }
+static mg_val_t mg_std_ad_clone(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_clone(a[0]); }
+static mg_val_t mg_std_ad_len(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_mkint(mg_len(a[0])); }
+
+// ---- cooperative chan/go runtime (single-threaded, unbounded buffer) ----
+// go(f) queues the closure; chan_recv drains the task queue when the buffer
+// is empty, so every queued worker runs before a recv can starve. This
+// mirrors the interpreter cooperative scheduling closely enough for the
+// compute-module fan-out pattern (w senders, ordered receivers).
+static mg_list_t* __mg_taskq = 0;
+static int64_t __mg_task_head = 0;
+static mg_val_t mg_std_ad_makechan(void* e, mg_val_t* a, int n) {
+    (void)e; (void)n;
+    mg_chan_t* c = (mg_chan_t*)malloc(sizeof(mg_chan_t));
+    c->buf = mg_list_new(8);
+    mg_val_t r; r.tag = MG_CHAN; r.u.ch = c;
+    return r;
+}
+static mg_val_t mg_std_ad_chansend(void* e, mg_val_t* a, int n) {
+    (void)e; (void)n;
+    if (a[0].tag != MG_CHAN || n < 2) return mg_mknull();
+    mg_list_push(a[0].u.ch->buf, a[1]);
+    return mg_mknull();
+}
+static mg_val_t mg_callguard(mg_val_t f, mg_val_t* a, int n);
+static void __mg_run_one_task(void) {
+    if (__mg_taskq && __mg_task_head < __mg_taskq->len) {
+        mg_val_t t = __mg_taskq->data[__mg_task_head++];
+        mg_val_t none[1];
+        mg_callguard(t, none, 0);
+    }
+}
+static mg_val_t mg_std_ad_chanrecv(void* e, mg_val_t* a, int n) {
+    (void)e; (void)n;
+    if (a[0].tag != MG_CHAN) return mg_mknull();
+    mg_list_t* buf = a[0].u.ch->buf;
+    for (;;) {
+        if (buf->len > 0) {
+            mg_val_t v = buf->data[0];
+            for (int64_t i = 1; i < buf->len; i++) buf->data[i - 1] = buf->data[i];
+            buf->len--;
+            return v;
+        }
+        if (__mg_taskq && __mg_task_head < __mg_taskq->len) {
+            __mg_run_one_task();
+            continue;
+        }
+        return mg_mknull();
+    }
+}
+static mg_val_t mg_std_ad_chanclose(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_mknull(); }
+static mg_val_t mg_std_ad_go(void* e, mg_val_t* a, int n) {
+    (void)e; (void)n;
+    if (!__mg_taskq) __mg_taskq = mg_list_new(16);
+    mg_list_push(__mg_taskq, a[0]);
+    return mg_mknull();
+}
+static mg_val_t mg_add(mg_val_t a, mg_val_t b);
+static mg_val_t mg_join(mg_val_t l, mg_val_t sep) {
+    if (l.tag != MG_LIST) return mg_mknull();
+    mg_val_t out = mg_mkstrc("");
+    for (int64_t i = 0; i < l.u.l->len; i++) {
+        if (i > 0) out = mg_add(out, sep);
+        out = mg_add(out, mg_string_of(l.u.l->data[i]));
+    }
+    return out;
+}
+static mg_val_t mg_std_ad_join(void* e, mg_val_t* a, int n) { (void)e; (void)n; return mg_join(a[0], a[1]); }
+static mg_val_t mg_std_object(void) {
+    static mg_val_t s; static int init = 0;
+    if (init) return s;
+    init = 1;
+    static mg_closure_t cm = { mg_std_ad_map, 0 };
+    static mg_closure_t cf = { mg_std_ad_filter, 0 };
+    static mg_closure_t ce = { mg_std_ad_each, 0 };
+    static mg_closure_t cr = { mg_std_ad_reduce, 0 };
+    static mg_closure_t cd = { mg_std_ad_default, 0 };
+    static mg_closure_t cv = { mg_std_ad_every, 0 };
+    static mg_closure_t ca = { mg_std_ad_append, 0 };
+    static mg_closure_t ck = { mg_std_ad_keys, 0 };
+    static mg_closure_t cs = { mg_std_ad_slice, 0 };
+    static mg_closure_t cg = { mg_std_ad_range, 0 };
+    static mg_closure_t cc = { mg_std_ad_clone, 0 };
+    static mg_closure_t cl2 = { mg_std_ad_len, 0 };
+    static mg_closure_t cj = { mg_std_ad_join, 0 };
+    static mg_closure_t cmc = { mg_std_ad_makechan, 0 };
+    static mg_closure_t csd = { mg_std_ad_chansend, 0 };
+    static mg_closure_t crv = { mg_std_ad_chanrecv, 0 };
+    static mg_closure_t ccl = { mg_std_ad_chanclose, 0 };
+    static mg_closure_t cgo = { mg_std_ad_go, 0 };
+    mg_obj_t* o = mg_obj_new();
+    mg_obj_set(o, "map", mg_mkclo(&cm));
+    mg_obj_set(o, "filter", mg_mkclo(&cf));
+    mg_obj_set(o, "each", mg_mkclo(&ce));
+    mg_obj_set(o, "reduce", mg_mkclo(&cr));
+    mg_obj_set(o, "default", mg_mkclo(&cd));
+    mg_obj_set(o, "every", mg_mkclo(&cv));
+    mg_obj_set(o, "append", mg_mkclo(&ca));
+    mg_obj_set(o, "keys", mg_mkclo(&ck));
+    mg_obj_set(o, "slice", mg_mkclo(&cs));
+    mg_obj_set(o, "range", mg_mkclo(&cg));
+    mg_obj_set(o, "clone", mg_mkclo(&cc));
+    mg_obj_set(o, "len", mg_mkclo(&cl2));
+    mg_obj_set(o, "join", mg_mkclo(&cj));
+    mg_obj_set(o, "make_chan", mg_mkclo(&cmc));
+    mg_obj_set(o, "chan_send", mg_mkclo(&csd));
+    mg_obj_set(o, "chan_recv", mg_mkclo(&crv));
+    mg_obj_set(o, "chan_close", mg_mkclo(&ccl));
+    mg_obj_set(o, "go", mg_mkclo(&cgo));
+    s = mg_mkobj(o);
+    return s;
+}
+
+static int mg_atom_cap = 0;
+static char** mg_atom_heap = 0;
+static int mg_atom_intern(const char* name) {
+    for (int i = 0; i < mg_atom_count; i++)
+        if (strcmp(mg_atom_names[i], name) == 0) return i;
+    if (!mg_atom_heap) {
+        mg_atom_cap = mg_atom_count + 16;
+        mg_atom_heap = (char**)malloc((size_t)mg_atom_cap * sizeof(char*));
+        for (int i = 0; i < mg_atom_count; i++) mg_atom_heap[i] = mg_atom_names[i];
+        mg_atom_names = mg_atom_heap;
+    }
+    if (mg_atom_count >= mg_atom_cap) {
+        mg_atom_cap += 16;
+        mg_atom_names = (char**)realloc(mg_atom_names, (size_t)mg_atom_cap * sizeof(char*));
+    }
+    mg_atom_names[mg_atom_count] = strdup(name);
+    return mg_atom_count++;
+}
+static const char* mg_type_of(mg_val_t v) {
+    switch (v.tag) {
+    case MG_INT: return "int";
+    case MG_FLOAT: return "float";
+    case MG_BOOL: return "bool";
+    case MG_ATOM: return "atom";
+    case MG_STR: return "string";
+    case MG_LIST: return "list";
+    case MG_OBJ: return "object";
+    case MG_NULLV: return "null";
+    default: return "function";
+    }
+}
+static mg_val_t mg_type_atom(mg_val_t v) { return mg_mkatom(mg_atom_intern(mg_type_of(v))); }
+
+static mg_val_t mg_add(mg_val_t a, mg_val_t b) {
+    if (a.tag == MG_STR || b.tag == MG_STR) {
+        mg_val_t sa = a.tag == MG_STR ? a : mg_string_of(a);
+        mg_val_t sb = b.tag == MG_STR ? b : mg_string_of(b);
+        return mg_strcat(sa, sb);
+    }
+    if (a.tag == MG_FLOAT || b.tag == MG_FLOAT) {
+        double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+        double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+        return mg_mkfloat(x + y);
+    }
+    if (a.tag == MG_INT && b.tag == MG_INT) return mg_mkint(a.u.i + b.u.i);
+    return mg_mknull();
+}
+static mg_val_t mg_sub(mg_val_t a, mg_val_t b) {
+    if (a.tag == MG_FLOAT || b.tag == MG_FLOAT) {
+        double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+        double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+        return mg_mkfloat(x - y);
+    }
+    return mg_mkint(a.u.i - b.u.i);
+}
+static mg_val_t mg_mul(mg_val_t a, mg_val_t b) {
+    if (a.tag == MG_FLOAT || b.tag == MG_FLOAT) {
+        double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+        double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+        return mg_mkfloat(x * y);
+    }
+    return mg_mkint(a.u.i * b.u.i);
+}
+static mg_val_t mg_div(mg_val_t a, mg_val_t b) {
+    double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+    double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+    return mg_mkfloat(x / y);
+}
+static mg_val_t mg_mod(mg_val_t a, mg_val_t b) {
+    if (a.tag == MG_FLOAT || b.tag == MG_FLOAT) {
+        double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+        double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+        return mg_mkfloat(fmod(x, y));
+    }
+    return mg_mkint(a.u.i % b.u.i);
+}
+static mg_val_t mg_pow(mg_val_t a, mg_val_t b) {
+    double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+    double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+    double r = pow(x, y);
+    if (a.tag == MG_INT && b.tag == MG_INT) return mg_mkint((int64_t)r);
+    return mg_mkfloat(r);
+}
+static mg_val_t mg_neg(mg_val_t a) {
+    if (a.tag == MG_FLOAT) return mg_mkfloat(-a.u.d);
+    return mg_mkint(-a.u.i);
+}
+static mg_val_t mg_cmp_lt(mg_val_t a, mg_val_t b) {
+    if (a.tag == MG_STR && b.tag == MG_STR) return mg_mkbool(memcmp(a.u.s.p, b.u.s.p, (size_t)(a.u.s.n < b.u.s.n ? a.u.s.n : b.u.s.n)) < 0);
+    if (a.tag == MG_FLOAT || b.tag == MG_FLOAT) {
+        double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+        double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+        return mg_mkbool(x < y);
+    }
+    return mg_mkbool(a.u.i < b.u.i);
+}
+static mg_val_t mg_cmp_gt(mg_val_t a, mg_val_t b) {
+    if (a.tag == MG_STR && b.tag == MG_STR) return mg_mkbool(memcmp(a.u.s.p, b.u.s.p, (size_t)(a.u.s.n < b.u.s.n ? a.u.s.n : b.u.s.n)) > 0);
+    if (a.tag == MG_FLOAT || b.tag == MG_FLOAT) {
+        double x = a.tag == MG_FLOAT ? a.u.d : (double)a.u.i;
+        double y = b.tag == MG_FLOAT ? b.u.d : (double)b.u.i;
+        return mg_mkbool(x > y);
+    }
+    return mg_mkbool(a.u.i > b.u.i);
+}
+static mg_val_t mg_cmp_le(mg_val_t a, mg_val_t b) { return mg_mkbool(!mg_cmp_gt(a, b).u.b); }
+static mg_val_t mg_cmp_ge(mg_val_t a, mg_val_t b) { return mg_mkbool(!mg_cmp_lt(a, b).u.b); }
+static mg_val_t mg_eq(mg_val_t a, mg_val_t b) { return mg_mkbool(mg_val_eq(a, b)); }
+static mg_val_t mg_neq(mg_val_t a, mg_val_t b) { return mg_mkbool(!mg_val_eq(a, b)); }
+static mg_val_t mg_and(mg_val_t a, mg_val_t b) { return mg_mkbool(mg_truthy(a) && mg_truthy(b)); }
+static mg_val_t mg_or(mg_val_t a, mg_val_t b) { return mg_mkbool(mg_truthy(a) || mg_truthy(b)); }
+static mg_val_t mg_not(mg_val_t a) { return mg_mkbool(!mg_truthy(a)); }
+
+// uniform access: list/string indexing and object property lookup share
+// the .() syntax in Oak, so one helper dispatches on the receiver tag
+static mg_val_t mg_at(mg_val_t l, mg_val_t k) {
+    if (l.tag == MG_LIST) {
+        int64_t i = k.tag == MG_INT ? k.u.i : -1;
+        if (i < 0 || i >= l.u.l->len) return mg_mknull();
+        return l.u.l->data[i];
+    }
+    if (l.tag == MG_STR) {
+        int64_t i = k.tag == MG_INT ? k.u.i : -1;
+        if (i < 0 || i >= l.u.s.n) return mg_mknull();
+        char* p = (char*)malloc(2);
+        p[0] = l.u.s.p[i];
+        p[1] = 0;
+        return mg_mkstr(p, 1);
+    }
+    if (l.tag == MG_OBJ) {
+        mg_val_t ks = k.tag == MG_STR ? k : mg_string_of(k);
+        char buf[256];
+        int64_t m = ks.u.s.n > 255 ? 255 : ks.u.s.n;
+        memcpy(buf, ks.u.s.p, (size_t)m);
+        buf[m] = 0;
+        return mg_obj_get(l.u.o, buf);
+    }
+    return mg_mknull();
+}
+static mg_val_t mg_set_at(mg_val_t l, mg_val_t k, mg_val_t v) {
+    if (l.tag == MG_LIST) {
+        int64_t i = k.tag == MG_INT ? k.u.i : -1;
+        if (i >= 0 && i < l.u.l->len) l.u.l->data[i] = v;
+        return v;
+    }
+    if (l.tag == MG_OBJ) {
+        mg_val_t ks = k.tag == MG_STR ? k : mg_string_of(k);
+        char buf[256];
+        int64_t m = ks.u.s.n > 255 ? 255 : ks.u.s.n;
+        memcpy(buf, ks.u.s.p, (size_t)m);
+        buf[m] = 0;
+        mg_obj_set(l.u.o, buf, v);
+        return v;
+    }
+    return v;
+}
+
+static mg_val_t mg_range(int64_t a, int64_t b, int64_t step) {
+    mg_list_t* l = mg_list_new(16);
+    if (step > 0) { for (int64_t i = a; i < b; i += step) mg_list_push(l, mg_mkint(i)); }
+    else if (step < 0) { for (int64_t i = a; i > b; i += step) mg_list_push(l, mg_mkint(i)); }
+    return mg_mklist(l);
+}
+static mg_val_t mg_call(mg_val_t f, mg_val_t* args, int n);
+static mg_val_t mg_callguard(mg_val_t f, mg_val_t* a, int n) {
+    if (f.tag == MG_CLOSURE) return mg_call(f, a, n);
+    return mg_mknull();
+}
+static mg_val_t mg_std_fn(const char* name) {
+    mg_val_t f = mg_obj_get(mg_std_object().u.o, name);
+    if (f.tag == MG_CLOSURE) return f;
+    return mg_mknull();
+}
+static mg_val_t mg_call(mg_val_t f, mg_val_t* args, int n) {
+    return f.u.c->fp(f.u.c->env, args, n);
+}
+static mg_val_t mg_boxed_map(mg_val_t xs, mg_val_t f) {
+    mg_list_t* out = mg_list_new(mg_len(xs) > 0 ? mg_len(xs) : 1);
+    for (int64_t i = 0; i < xs.u.l->len; i++) {
+        mg_val_t a[2] = { xs.u.l->data[i], mg_mkint(i) };
+        mg_list_push(out, mg_call(f, a, 2));
+    }
+    return mg_mklist(out);
+}
+static mg_val_t mg_boxed_filter(mg_val_t xs, mg_val_t f) {
+    mg_list_t* out = mg_list_new(8);
+    for (int64_t i = 0; i < xs.u.l->len; i++) {
+        mg_val_t a[2] = { xs.u.l->data[i], mg_mkint(i) };
+        mg_val_t keep = mg_call(f, a, 2);
+        if (mg_truthy(keep)) mg_list_push(out, xs.u.l->data[i]);
+    }
+    return mg_mklist(out);
+}
+static mg_val_t mg_boxed_each(mg_val_t xs, mg_val_t f) {
+    for (int64_t i = 0; i < xs.u.l->len; i++) {
+        mg_val_t a[2] = { xs.u.l->data[i], mg_mkint(i) };
+        mg_call(f, a, 2);
+    }
+    return mg_mknull();
+}
+static mg_val_t mg_boxed_reduce(mg_val_t xs, mg_val_t seed, mg_val_t f) {
+    mg_val_t acc = seed;
+    for (int64_t i = 0; i < xs.u.l->len; i++) {
+        mg_val_t a[3] = { acc, xs.u.l->data[i], mg_mkint(i) };
+        acc = mg_call(f, a, 3);
+    }
+    return acc;
+}
+static mg_val_t mg_list_from(int64_t n, mg_val_t* a) {
+    mg_list_t* l = mg_list_new(n > 0 ? n : 1);
+    for (int64_t i = 0; i < n; i++) mg_list_push(l, a[i]);
+    return mg_mklist(l);
+}
+static mg_val_t mg_push(mg_val_t l, mg_val_t v) {
+    if (l.tag == MG_LIST) { mg_list_push(l.u.l, v); return l; }
+    if (l.tag == MG_STR) return mg_add(l, v); /* Oak << on strings = concat */
+    return l;
+}
+static mg_val_t mg_append(mg_val_t l, mg_val_t v) {
+    int64_t ln = (l.tag == MG_LIST ? l.u.l->len : 0) + (v.tag == MG_LIST ? v.u.l->len : 0);
+    mg_list_t* out = mg_list_new(ln > 0 ? ln : 1);
+    if (l.tag == MG_LIST) { for (int64_t i = 0; i < l.u.l->len; i++) mg_list_push(out, l.u.l->data[i]); }
+    if (v.tag == MG_LIST) { for (int64_t i = 0; i < v.u.l->len; i++) mg_list_push(out, v.u.l->data[i]); }
+    else mg_list_push(out, v);
+    return mg_mklist(out);
+}
+static mg_val_t mg_slice(mg_val_t l, int64_t lo, int64_t hi) {
+    int64_t n = mg_len(l);
+    if (lo < 0) lo = 0;
+    if (hi > n) hi = n;
+    mg_list_t* out = mg_list_new(hi > lo ? hi - lo : 1);
+    for (int64_t i = lo; i < hi; i++) mg_list_push(out, l.u.l->data[i]);
+    return mg_mklist(out);
+}
+static mg_val_t mg_keys(mg_val_t o) {
+    mg_list_t* out = mg_list_new(o.u.o->len);
+    for (int64_t i = 0; i < o.u.o->len; i++) {
+        mg_val_t s = mg_mkstr(strdup(o.u.o->keys[i]), (int64_t)strlen(o.u.o->keys[i]));
+        mg_list_push(out, s);
+    }
+    return mg_mklist(out);
+}
+static mg_val_t mg_boxed_int(mg_val_t v) {
+    if (v.tag == MG_INT) return v;
+    if (v.tag == MG_FLOAT) return mg_mkint((int64_t)v.u.d);
+    if (v.tag == MG_BOOL) return mg_mkint(v.u.b ? 1 : 0);
+    if (v.tag == MG_STR) return mg_mkint(strtoll(v.u.s.p, 0, 10));
+    return mg_mkint(0);
+}
+static mg_val_t mg_boxed_float(mg_val_t v) {
+    if (v.tag == MG_FLOAT) return v;
+    if (v.tag == MG_INT) return mg_mkfloat((double)v.u.i);
+    if (v.tag == MG_STR) return mg_mkfloat(strtod(v.u.s.p, 0));
+    return mg_mkfloat(0);
+}
+static mg_val_t mg_obj_lit(int n, mg_val_t* kv) {
+    mg_obj_t* o = mg_obj_new();
+    for (int i = 0; i < n; i += 2) {
+        char buf[256];
+        int64_t m = kv[i].u.s.n;
+        if (m > 255) m = 255;
+        memcpy(buf, kv[i].u.s.p, (size_t)m);
+        buf[m] = 0;
+        mg_obj_set(o, buf, kv[i + 1]);
+    }
+    return mg_mkobj(o);
+}
+'
+
+// ---------------------------------------------------------------------------
+// identifiers and string literals
+// ---------------------------------------------------------------------------
+
+CReserved := [
+	'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do'
+	'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if'
+	'int', 'long', 'register', 'return', 'short', 'signed', 'sizeof', 'static'
+	'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while'
+	'inline', 'restrict', 'bool', 'true', 'false', 'NULL'
+]
+
+fn cIdent(name) {
+	// module-qualified keys ('<mod>.<name>') flatten to '<mod>_<name>' —
+	// char-iteration flatten (str.replace/indexOf misfire inside the C-host
+	// VM: their len() resolves to the native fn VALUE, not the result)
+	fn flat1(nm, i, acc) if i < len(nm) {
+		true -> if nm.(i) = '.' {
+			true -> flat1(nm, i + 1, acc + '_')
+			_ -> flat1(nm, i + 1, acc + nm.(i))
+		}
+		_ -> acc
+	}
+	flattened := flat1(name, 0, '')
+	clean := if flattened {
+		'' -> '_'
+		_ -> flattened
+	}
+	fn scrub(s) if s {
+		'' -> s
+		_ -> {
+			c0 := s.(0)
+			ok0 := c0 = '_' | (c0 >= 'a' & c0 <= 'z') | (c0 >= 'A' & c0 <= 'Z')
+			fn rest(i, acc) if i {
+				len(s) -> acc
+				_ -> {
+					c := s.(i)
+					ok := c = '_' | (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | (c >= '0' & c <= '9')
+					rest(i + 1, acc + if ok {
+						true -> c
+						_ -> '_'
+					})
+				}
+			}
+			rest(1, if ok0 {
+				true -> c0
+				_ -> '_'
+			})
+		}
+	}
+	clean <- scrub(clean)
+	CReserved |> std.each(fn(kw) if clean = kw {
+		true -> clean <- clean + '_mg'
+		_ -> ?
+	})
+	clean
+}
+
+RuntimeLibs := [
+	'std', 'str', 'math', 'math-base', 'math-geo', 'math-stats', 'sort'
+	'random', 'fs', 'fmt', 'json', 'msgpack', 'datetime', 'path'
+	'compression', 'dataprot', 'http', 'socket', 'test', 'debug', 'cli'
+	'md', 'mermaid', 'crypto', 'bitwise', 'bytes', 'sample', 'hex'
+	'ieee754', 'int64', 'unicode-units', 'image'
+]
+
+fn isRuntimeLib(name) {
+	found := false
+	RuntimeLibs |> std.each(fn(rl) if rl = name {
+		true -> found <- true
+		_ -> ?
+	})
+	found
+}
+
+fn cStringLit(s) {
+	fn esc(i, acc) if i {
+		len(s) -> acc
+		_ -> {
+			c := s.(i)
+			e := if c {
+				'"' -> '\\"'
+				'\\' -> '\\\\'
+				'\n' -> '\\n'
+				'\t' -> '\\t'
+				'\r' -> '\\r'
+				_ -> c
+			}
+			esc(i + 1, acc + e)
+		}
+	}
+	'"' + esc(0, '') + '"'
+}
+
+// ---------------------------------------------------------------------------
+// the renderer
+// ---------------------------------------------------------------------------
+
+fn renderCBundle(bundleNode) {
+	st := {
+		fns: {}
+		boxedOrder: []
+		boxedDone: {}
+		wrappers: []
+		wrapCount: 0
+		atomNames: []
+		tmpCount: 0
+		modules: {}
+		moduleOrder: []
+		modOf: {}
+		curModule: ''
+		entryModule: ?
+		exportAdapters: []
+		fnVals: {}
+		hoisted: []
+		globals: {}
+		globalDecls: []
+	}
+	// depth-1 mutation helpers: captured-var writes from 2+ fn scopes are
+	// unreliable in the host VM, so all st mutations from deep scopes route
+	// through these (calls cross boundaries fine — only writes are lost)
+	fn allocWrapCid() {
+		st.wrapCount <- st.wrapCount + 1
+		st.wrapCount
+	}
+	fn regWrapper(token, code) {
+		st.wrappers.(len(st.wrappers)) <- token
+		st.wrappers.(len(st.wrappers)) <- code
+		0
+	}
+	fn swapHoisted(saved) {
+		prev := st.hoisted
+		st.hoisted <- saved
+		prev
+	}
+	fn fwdArgs(k) {
+		fn fa(i, acc) if i < k {
+			true -> fa(i + 1, if i {
+				0 -> 'a[0]'
+				_ -> acc + ', a[' + string(i) + ']'
+			})
+			_ -> acc
+		}
+		fa(0, '')
+	}
+	fn listHasS(l, s) {
+		fn lh(i) if i < len(l) {
+			true -> if l.(i) = s {
+				true -> true
+				_ -> lh(i + 1)
+			}
+			_ -> false
+		}
+		lh(0)
+	}
+	// capture scan: pure STRING-accumulator recursion ('|'-sentinel) —
+	// list/object mutation and local reassignment inside depth>=4 helper
+	// scopes are silently dropped by the host VM; pure concat always works.
+	// Two-pass capture scan. Pass 1 (localIds) collects names DECLARED in
+	// the body (`x := ...` left sides, destructuring aliases); pass 2
+	// (scanFree) collects free identifier refs, excluding locals. Mirrors
+	// collectLocals' node-type switch; propertyAccess right is a property
+	// NAME, not a var ref; nested fn-literal bodies are separate scopes.
+	// String-accumulator style ('|' sentinel) keeps every scope shallow —
+	// list/object mutation and local reassignment inside depth>=4 helper
+	// scopes are silently dropped by the host VM; pure concat always works.
+	fn localLeft(l2, acc) if l2.type {
+		:identifier -> acc + '|' + l2.val + '|'
+		:object -> if l2.entries {
+			? -> acc
+			_ -> localEntL(l2.entries, 0, acc)
+		}
+		_ -> acc
+	}
+	fn localEntL(ents, i, acc) if i < len(ents) {
+		true -> localEntL(ents, i + 1, localLeft(ents.(i).val, acc))
+		_ -> acc
+	}
+	fn localIds(n2, acc) if n2.type {
+		:assignment -> if n2.local? {
+			? -> localIds(n2.right, acc)
+			_ -> localLeft(n2.left, localIds(n2.right, acc))
+		}
+		:block -> if n2.exprs {
+			? -> acc
+			_ -> walkL2(n2.exprs, 0, acc)
+		}
+		:ifExpr -> if n2.branches {
+			? -> localIds(n2.cond, acc)
+			_ -> walkB2(n2.branches, 0, localIds(n2.cond, acc))
+		}
+		:fnCall -> if n2.args {
+			? -> acc
+			_ -> walkL2(n2.args, 0, acc)
+		}
+		:list -> if n2.elems {
+			? -> acc
+			_ -> walkL2(n2.elems, 0, acc)
+		}
+		:object -> if n2.entries {
+			? -> acc
+			_ -> walkO2(n2.entries, 0, acc)
+		}
+		_ -> acc
+	}
+	fn walkL2(l, i, acc) if i < len(l) {
+		true -> walkL2(l, i + 1, localIds(l.(i), acc))
+		_ -> acc
+	}
+	fn walkB2(brs, i, acc) if i < len(brs) {
+		true -> walkB2(brs, i + 1, localIds(brs.(i).body, localIds(brs.(i).target, acc)))
+		_ -> acc
+	}
+	fn walkO2(ents, i, acc) if i < len(ents) {
+		true -> walkO2(ents, i + 1, localIds(ents.(i).val, acc))
+		_ -> acc
+	}
+	fn scanFree(n2, loc, acc) if n2.type {
+		:identifier -> if str.contains?(loc, '|' + n2.val + '|') {
+			true -> acc
+			_ -> acc + '|' + n2.val
+		}
+		:block -> if n2.exprs {
+			? -> acc
+			_ -> walkF2(n2.exprs, 0, loc, acc)
+		}
+		:assignment -> scanFree(n2.right, loc, acc)
+		:binary -> scanFree(n2.right, loc, scanFree(n2.left, loc, acc))
+		:unary -> scanFree(n2.right, loc, acc)
+		// propertyAccess: left is the object; right is a property NAME for
+		// static access but a real EXPRESSION for dynamic access (xs.(i*k))
+		:propertyAccess -> if n2.right.type {
+			:identifier -> scanFree(n2.left, loc, acc)
+			_ -> scanFree(n2.right, loc, scanFree(n2.left, loc, acc))
+		}
+		:fnCall -> scanFree(n2.function, loc, if n2.args {
+			? -> acc
+			_ -> walkF2(n2.args, 0, loc, acc)
+		})
+		:list -> if n2.elems {
+			? -> acc
+			_ -> walkF2(n2.elems, 0, loc, acc)
+		}
+		:object -> if n2.entries {
+			? -> acc
+			_ -> walkO3(n2.entries, 0, loc, acc)
+		}
+		:ifExpr -> if n2.branches {
+			? -> scanFree(n2.cond, loc, acc)
+			_ -> walkF3(n2.branches, 0, loc, scanFree(n2.cond, loc, acc))
+		}
+		:function -> if n2.name {
+			'' -> scanFree(n2.body, loc, acc)
+			_ -> acc
+		}
+		_ -> acc
+	}
+	fn walkF2(l, i, loc, acc) if i < len(l) {
+		true -> walkF2(l, i + 1, loc, scanFree(l.(i), loc, acc))
+		_ -> acc
+	}
+	fn walkF3(brs, i, loc, acc) if i < len(brs) {
+		true -> walkF3(brs, i + 1, loc, scanFree(brs.(i).body, loc, scanFree(brs.(i).target, loc, acc)))
+		_ -> acc
+	}
+	fn walkO3(ents, i, loc, acc) if i < len(ents) {
+		true -> walkO3(ents, i + 1, loc, scanFree(ents.(i).val, loc, acc))
+		_ -> acc
+	}
+	// storeCap writes at depth 2 (reliable); addCap guards via early-return
+	// chain — every store stays <= depth 3.
+	fn storeCap(nm, obj, lst) {
+		obj.(nm) := len(lst)
+		lst.(len(lst)) <- nm
+		0
+	}
+	fn addCap(nm, env2, obj, lst) {
+		if env2.(nm) {
+			? -> 0
+			_ -> storeCap(nm, obj, lst)
+		}
+	}
+	fn addUnique(nm, obj, lst, env2) {
+		if obj.(nm) {
+			? -> addCap(nm, env2, obj, lst)
+			_ -> 0
+		}
+	}
+	fn walkIds(s, i, cur, obj, lst, env2) if i < len(s) {
+		true -> if s.(i) = '|' {
+			true -> if cur {
+				'' -> walkIds(s, i + 1, '', obj, lst, env2)
+				_ -> {
+					addUnique(cur, obj, lst, env2)
+					walkIds(s, i + 1, '', obj, lst, env2)
+				}
+			}
+			_ -> walkIds(s, i + 1, cur + s.(i), obj, lst, env2)
+		}
+		_ -> if cur {
+			// flush the final token: the id string has no trailing '|'
+			'' -> 0
+			_ -> {
+				addUnique(cur, obj, lst, env2)
+				0
+			}
+		}
+	}
+	// pickCaptures returns { obj: name->index, lst: [names] }; selfName
+	// (recursion slot) is appended unconditionally when not present
+	fn pickCaptures(body, env, selfName) {
+		locs := localIds(body, '')
+		ids := scanFree(body, locs, '')
+		capObj := {}
+		capLst := []
+		walkIds(ids, 0, '', capObj, capLst, env)
+		if selfName {
+			'' -> ?
+			_ -> if capObj.(selfName) {
+				? -> storeCap(selfName, capObj, capLst)
+				_ -> ?
+			}
+		}
+		{ obj: capObj, lst: capLst }
+	}
+	// emitMethodCall lowers obj.m(args) as TRUE dynamic dispatch: look up
+	// the member fn value on the object and guarded-call it. Depth-1 helper:
+	// conditional arms 3 levels deep silently misfire in the host VM.
+	fn emitMethodCall(node, env, out) {
+		objX := cStmt(node.function.left, env, out)
+		kf := tmp(out, 'char*')
+		kx := cStringLit(node.function.right.val)
+		if node.function.right.type = :identifier {
+			? -> kx <- cStmt(node.function.right, env, out)
+			_ -> ?
+		}
+		out.(len(out)) <- kf + ' = strdup(' + kx + ');'
+		ftmp := tmp(out, 'mg_val_t')
+		out.(len(out)) <- ftmp + ' = mg_at(' + objX + ', mg_mkstr(' + kf + ', (int64_t)strlen(' + kf + ')));'
+		emitDynCall(ftmp, node, env, out)
+	}
+	// emitDynCall builds a guarded dynamic call to the fn VALUE in fexpr
+	// with node's arguments. Depth-1 helper (see emitMethodCall).
+	fn emitDynCall(fexpr, node, env, out) {
+		st.tmpCount <- st.tmpCount + 1
+		arrT := '__t' + string(st.tmpCount)
+		nargs := len(node.args)
+		// array sized nargs+1: no zero-size C arrays, no host-side
+		// value-ternaries (conditional arms >=2 scopes deep misfire in the
+		// host VM and yield ? in string concatenation)
+		out.(len(out)) <- 'mg_val_t ' + arrT + '[' + string(nargs + 1) + '];'
+		fn aa(i) if i < nargs {
+			true -> {
+				out.(len(out)) <- arrT + '[' + string(i) + '] = ' + cStmt(node.args.(i), env, out) + ';'
+				aa(i + 1)
+			}
+			_ -> ?
+		}
+		aa(0)
+		'mg_callguard(' + fexpr + ', ' + arrT + ', ' + string(nargs) + ')'
+	}
+	// emitBoxedCall: named top-level program fn -> direct boxed call with
+	// null-padded trailing args. Depth-1 helper (see emitMethodCall).
+	fn emitBoxedCall(name, node, env, out) {
+		ensureBoxed(name)
+		key := boxedKey(name)
+		argsX := []
+		fn ca(i) if i < len(node.args) {
+			true -> {
+				argsX << cStmt(node.args.(i), env, out)
+				ca(i + 1)
+			}
+			_ -> ?
+		}
+		ca(0)
+		// pad omitted trailing args with nulls: Oak passes ? for unsupplied
+		// params, the C callee still expects every slot
+		fnode := st.fns.(key)
+		nparams := 0
+		if fnode.args {
+			? -> nparams <- 0
+			_ -> nparams <- len(fnode.args)
+		}
+		fn pad(i) if i < nparams - len(node.args) {
+			true -> {
+				argsX << 'mg_mknull()'
+				pad(i + 1)
+			}
+			_ -> ?
+		}
+		pad(0)
+		'__mg_' + cIdent(key) + '_bx(' + (argsX |> str.join(', ')) + ')'
+	}
+	// emitNamedCall resolves an identifier callee (called only when
+	// builtinCall missed): env-bound fn VALUE, boxed program fn, module
+	// global fn value, or std builtin via mg_std_fn. Early-return CHAIN of
+	// depth-1 helpers — conditional arms >=4 scopes deep misfire in the
+	// host VM, so each check is its own helper (arms never exceed depth 3).
+	fn emitNamedCall(node, env, out) {
+		name := calleeName(node)
+		b2 := builtinCall(name, node, env, out)
+		if b2 {
+			? -> emitResolvedCall(name, node, env, out)
+			_ -> b2
+		}
+	}
+	fn emitResolvedCall(name, node, env, out) {
+		if env.(name) {
+			? -> emitResolvedFns(name, node, env, out)
+			_ -> emitDynCall(env.(name), node, env, out)
+		}
+	}
+	fn emitResolvedFns(name, node, env, out) {
+		if st.fns.(boxedKey(name)) {
+			? -> emitResolvedGlobals(name, node, env, out)
+			_ -> emitBoxedCall(name, node, env, out)
+		}
+	}
+	fn emitResolvedGlobals(name, node, env, out) {
+		if st.globals.(name) {
+			? -> emitDynCall('mg_std_fn(' + cStringLit(name) + ')', node, env, out)
+			_ -> emitDynCall('__mg_g_' + cIdent(name), node, env, out)
+		}
+	}
+	// emitFnLiteral: fn literal in VALUE position. Capture-free literals
+	// become static wrapper closures; capturing literals become REAL
+	// heap-env closures. Depth-1 helper: the literal arm sits 4-5 scopes
+	// deep in cStmt where value-ternaries and stores misfire in the host VM.
+	fn emitFnLiteral(node, env, out) {
+		capRes := pickCaptures(node.body, env, '')
+		if len(capRes.lst) > 0 {
+			true -> emitCaptureClosure(node.args, node.body, '', env, out)
+			_ -> {
+				cid := string(allocWrapCid())
+				prevHoisted := swapHoisted([])
+				body2 := cBoxedBody('__mgcb' + cid, node.args, node.body, {})
+				swapHoisted(prevHoisted)
+				regWrapper('__MGCB' + cid, emitTrampoline(cid, node.args, body2))
+				'__MGCB' + cid
+			}
+		}
+	}
+	// emitLocalDecl: local named fn decl -> capturing closure bound to the
+	// local C var. Depth-1 helper (see emitFnLiteral).
+	fn emitLocalDecl(node, env, out) {
+		cv := emitCaptureClosure(node.args, node.body, node.name, env, out)
+		out.(len(out)) <- '__mg_v_' + cIdent(node.name) + ' = ' + cv + ';'
+		'mg_mknull()'
+	}
+	// emitTrampoline: wraps a capture-free boxed body in a (env,a,n)
+	// trampoline that binds a[i] to the __mg_v_ param names. Pure concat.
+	fn emitTrampoline(cid, names, body2) {
+		fn bindA(i, acc) if i < len(names) {
+			true -> bindA(i + 1, acc + 'mg_val_t __mg_v_' + cIdent(names.(i)) + ' = a[' + string(i) + ']; ')
+			_ -> acc
+		}
+		'static mg_val_t __mgcb' + cid + '(void* env, mg_val_t* a, int n) { (void)env; (void)n; ' + bindA(0, '') + body2 + ' }'
+	}
+	// emitCaptureClosure compiles a capturing fn (literal or local named
+	// decl) into a REAL runtime closure: a heap mg_val_t env-list holding
+	// the captured values, a heap mg_closure_t pointing at a generated
+	// static trampoline + body fn. The closure value is created fresh at
+	// each declaration-site execution, so re-entrant calls (recursion
+	// through the captured self slot) are safe. Returns the C value expr.
+	fn emitCaptureClosure(params, body, selfName, env, out) {
+		cid := string(allocWrapCid()) + 'c'
+		capRes := pickCaptures(body, env, selfName)
+		capList := capRes.lst
+		capObj := capRes.obj
+		fn idxL(i, acc) if i < len(capList) {
+			true -> {
+				acc.(capList.(i)) := string(i)
+				idxL(i + 1, acc)
+			}
+			_ -> acc
+		}
+		capIdx := idxL(0, {})
+		fn envL(i, acc) if i < len(capList) {
+			true -> {
+				acc.(capList.(i)) := 'mg_at(__mg_v_envlst, mg_mkint(' + capIdx.(capList.(i)) + '))'
+				envL(i + 1, acc)
+			}
+			_ -> acc
+		}
+		bodyEnv := envL(0, {})
+		prevHoisted := swapHoisted([])
+		cbfBody := cBoxedBody('__mgcbf' + cid, params, body, bodyEnv)
+		swapHoisted(prevHoisted)
+		fn trL(i, acc) if i < len(params) {
+			true -> trL(i + 1, acc + ', a[' + string(i) + ']')
+			_ -> acc
+		}
+		trArgs := trL(0, '')
+		// sig built by PURE concat (no <<, no deep ternary — both misfire in
+		// the host VM inside depth-1 helpers)
+		fn sdL(i, acc, ps) if i < len(ps) {
+			true -> sdL(i + 1, acc + ', mg_val_t __mg_v_' + cIdent(ps.(i)), ps)
+			_ -> acc
+		}
+		sigParams := 'mg_val_t __mg_v_envlst' + sdL(0, '', params)
+		// ONE expression: local `<-` reassignment inside these helpers is
+		// silently dropped by the host VM (captured-env write bug)
+		wcode := 'static mg_val_t __mgcbf' + cid + '(' + sigParams + ') {\n' + cbfBody + '\n}\nstatic mg_val_t __mgcb' + cid + '(void* envp, mg_val_t* a, int n) { (void)envp; (void)n; mg_val_t __lst = *(mg_val_t*)envp; return __mgcbf' + cid + '(__lst' + trArgs + '); }'
+		regWrapper('__MGCB' + cid, wcode)
+		evn := '__mgev' + cid
+		out.(len(out)) <- 'mg_list_t* ' + evn + ' = mg_list_new(' + string(if len(capList) {
+			0 -> 1
+			_ -> len(capList)
+		}) + ');'
+		fn pushL(i) if i < len(capList) {
+			true -> {
+				vExpr := env.(capList.(i))
+				out.(len(out)) <- 'mg_list_push(' + evn + ', ' + vExpr + ');'
+				pushL(i + 1)
+			}
+			_ -> ?
+		}
+		pushL(0)
+		out.(len(out)) <- 'mg_val_t* __mgevp' + cid + ' = (mg_val_t*)malloc(sizeof(mg_val_t));'
+		out.(len(out)) <- '*__mgevp' + cid + ' = mg_mklist(' + evn + ');'
+		out.(len(out)) <- 'mg_closure_t* __mgcl' + cid + ' = (mg_closure_t*)malloc(sizeof(mg_closure_t));'
+		out.(len(out)) <- '__mgcl' + cid + '->fp = __mgcb' + cid + ';'
+		out.(len(out)) <- '__mgcl' + cid + '->env = (void*)__mgevp' + cid + ';'
+		out.(len(out)) <- 'mg_val_t __mgclv' + cid + ' = mg_mkclo(__mgcl' + cid + ');'
+		if selfName {
+			'' -> ?
+			_ -> out.(len(out)) <- evn + '->data[' + capIdx.(selfName) + '] = __mgclv' + cid + ';'
+		}
+		'__mgclv' + cid
+	}
+	// ---- collect named functions and entry-level exprs ----
+	entryExprs := []
+	// register named fn decls inside a module body as top-level boxed fns
+	// under MODULE-QUALIFIED registry keys
+	fn registerModuleFns(modName, node) if node.type {
+		:block -> if node.exprs {
+			? -> ?
+			_ -> node.exprs |> std.each(fn(e) registerModuleFns(modName, e))
+		}
+		:function -> if node.name {
+			'' -> registerModuleFns(modName, node.body)
+			_ -> {
+				qk := modName + '.' + node.name
+				st.fns.(qk) <- node
+				st.modOf.(qk) <- modName
+				ensureBoxedKey(qk)
+			}
+		}
+		:ifExpr -> if node.branches {
+			? -> ?
+			_ -> node.branches |> std.each(fn(br) registerModuleFns(modName, br.body))
+		}
+		_ -> ?
+	}
+	fn flatten(node, acc) if node.type {
+		:block -> node.exprs |> std.each(fn(e) flatten(e, acc))
+		:function -> if node.name {
+			'' -> if node.body.type {
+				:block -> node.body.exprs |> std.each(fn(e) acc.(len(acc)) <- e)
+				_ -> acc.(len(acc)) <- node.body
+			}
+			_ -> {
+				st.fns.(node.name) <- node
+				acc.(len(acc)) <- {type: :fnDeclMark, tok: ?, name: node.name}
+			}
+		}
+		:fnCall -> if calleeName(node) {
+			'__oak_modularize' -> if isRuntimeLib(node.args.0.val) {
+				true -> ?
+				_ -> {
+					st.modules.(node.args.0.val) <- node.args.1
+					st.moduleOrder.(len(st.moduleOrder)) <- node.args.0.val
+					registerModuleFns(node.args.0.val, node.args.1)
+				}
+			}
+			'__oak_module_import' -> st.entryModule <- node.args.0.val
+			_ -> acc.(len(acc)) <- node
+		}
+		:assignment -> if node.left.type {
+			:identifier -> if node.left.val = '__Oak_Import_Aliases' {
+				true -> ?
+				_ -> acc.(len(acc)) <- node
+			}
+			_ -> acc.(len(acc)) <- node
+		}
+		_ -> acc.(len(acc)) <- node
+	}
+
+	// every named function gets a boxed definition (worklist in decl order).
+	// Keys are module-QUALIFIED for module fns ('<mod>.<name>'); entry-module
+	// fns keep bare keys. Without qualification, same-named fns in different
+	// modules (gpus.available forwarding to gpu.available) collapse onto ONE
+	// C symbol and forward to themselves forever.
+	fn boxedKey(name) if st.curModule {
+		'' -> name
+		_ -> st.curModule + '.' + name
+	}
+	fn ensureBoxedKey(key) if st.fns.(key) {
+		? -> ?
+		_ -> if st.boxedDone.(key) {
+			? -> {
+				st.boxedDone.(key) <- true
+				st.boxedOrder.(len(st.boxedOrder)) <- key
+			}
+			_ -> ?
+		}
+	}
+	fn ensureBoxed(name) {
+		ensureBoxedKey(boxedKey(name))
+	}
+	fn fnValueExpr(name) {
+		key := boxedKey(name)
+		k := if st.fns.(key).args {
+			? -> 0
+			_ -> len(st.fns.(key).args)
+		}
+		if st.fnVals.(key) {
+			? -> {
+				st.exportAdapters.(len(st.exportAdapters)) <- ['__mgfnv_' + cIdent(key), '__mgfnvclo_' + cIdent(key), k, key]
+				st.fnVals.(key) <- len(st.exportAdapters) - 1
+			}
+			_ -> ?
+		}
+		'mg_mkclo(&__mgfnvclo_' + cIdent(key) + ')'
+	}
+	fn isImport(node) if node.type {
+		:assignment -> if node.right.type {
+			:fnCall -> if node.right.function.type {
+				:identifier -> node.right.function.val = 'import'
+				_ -> false
+			}
+			_ -> false
+		}
+		_ -> false
+	}
+	fn isFnDeclMark(node) if node.type {
+		:fnDeclMark -> true
+		_ -> false
+	}
+
+	fn calleeName(node) if node.type {
+		:fnCall -> if node.function.type {
+			:identifier -> node.function.val
+			:propertyAccess -> if node.function.right.type = :identifier {
+				true -> node.function.right.val
+				_ -> ''
+			}
+			_ -> ''
+		}
+		_ -> ''
+	}
+
+	fn isHofName(n) if n {
+		'map' -> true
+		'filter' -> true
+		'each' -> true
+		'reduce' -> true
+		_ -> false
+	}
+	fn hofArityOp(name) if name {
+		'reduce' -> 3
+		_ -> 2
+	}
+	fn hofCallback(name, node) {
+		idx := hofArityOp(name) - 1
+		if node.args {
+			? -> ?
+			_ -> if idx < len(node.args) {
+				true -> if node.args.(idx).type {
+					:function -> node.args.(idx)
+					_ -> ?
+				}
+				_ -> ?
+			}
+		}
+	}
+
+	fn tmp(out, ctype) {
+		st.tmpCount <- st.tmpCount + 1
+		nm := '__t' + string(st.tmpCount)
+		out.(len(out)) <- ctype + ' ' + nm + ';'
+		nm
+	}
+	// fn-scope temp: declaration is hoisted above the function body so the
+	// temp stays visible after nested blocks close (chain results, match
+	// expression results, reduce accumulators)
+	fn hoist(ctype) {
+		st.tmpCount <- st.tmpCount + 1
+		nm := '__t' + string(st.tmpCount)
+		st.hoisted.(len(st.hoisted)) <- ctype + ' ' + nm + ';'
+		nm
+	}
+
+	// atomId interns an atom name and returns its 1-based id (the count of
+	// known atoms after interning). Previously referenced but never defined
+	// — any program with :atom nodes (e.g. compute.oak stage tags) crashed
+	// the C backend with '? is not a function'.
+	fn atomId(name) {
+		fn find(i) if i < len(st.atomNames) {
+			true -> if st.atomNames.(i) = name {
+				true -> i + 1
+				_ -> find(i + 1)
+			}
+			_ -> 0
+		}
+		existing := find(0)
+		if existing > 0 {
+			true -> existing
+			_ -> {
+				st.atomNames.(len(st.atomNames)) <- name
+				len(st.atomNames)
+			}
+		}
+	}
+
+	fn atomEmit(name) {
+		id := atomId(name)
+		fn fill(i) if i < id {
+			true -> {
+				if st.atomNames.(i) {
+					? -> st.atomNames.(i) <- ''
+					_ -> ?
+				}
+				fill(i + 1)
+			}
+			_ -> ?
+		}
+		fill(0)
+		if st.atomNames.(id - 1) = '' {
+			true -> st.atomNames.(id - 1) <- name
+			_ -> ?
+		}
+		'mg_mkatom(' + string(id - 1) + ')'
+	}
+
+	// ---- fused HOF chains ----
+	// collectChain flattens nested HOF calls (the |>-desugared shape) whose
+	// callbacks are literal fnNodes. Innermost-first: chain.0 carries the
+	// real subject; the last entry is the outermost op.
+	fn collectChain(node) {
+		name := calleeName(node)
+		if isHofName(name) {
+			true -> {
+				cb := hofCallback(name, node)
+				if cb {
+					? -> ?
+					_ -> {
+						inner := collectChain(node.args.0)
+						entry := {op: name, cb: cb, subject: ?, seed: ?}
+						if name = 'reduce' {
+							true -> if len(node.args) > 1 {
+								true -> entry.seed <- node.args.1
+								_ -> ?
+							}
+							_ -> ?
+						}
+						if inner {
+							? -> {
+								entry.subject <- node.args.0
+								[entry]
+							}
+							_ -> {
+								inner.(len(inner)) <- entry
+								inner
+							}
+						}
+					}
+				}
+			}
+			_ -> ?
+		}
+	}
+
+	// cEnv2 extends env with callback params bound to C expressions
+	fn cEnv2(env, names, exprs) {
+		e2 := std.clone(env)
+		fn bind(i) if i < len(names) {
+			true -> {
+				e2.(names.(i)) <- exprs.(i)
+				bind(i + 1)
+			}
+			_ -> ?
+		}
+		bind(0)
+		e2
+	}
+
+	// emitChain compiles ONE fused C loop for the whole chain and returns
+	// the C expression yielding the chain result.
+	fn emitChain(chain, env, out) {
+		head := chain.0
+		// pre-pass: reduce accumulators are loop-carried — hoist their
+		// declarations and seed assignments BEFORE the loop
+		accVar2 := ?
+		fn preR(i) if i < len(chain) {
+			true -> {
+				if chain.(i).op = 'reduce' {
+					true -> if accVar2 {
+						? -> {
+							accVar2 <- hoist('mg_val_t')
+							sx := cStmt(chain.(i).seed, env, out)
+							out.(len(out)) <- accVar2 + ' = ' + sx + ';'
+						}
+						_ -> ?
+					}
+					_ -> ?
+				}
+				preR(i + 1)
+			}
+			_ -> ?
+		}
+		preR(0)
+		// accumulate result container for chains ending in map/filter.
+		// MUST be emitted BEFORE the loop header: the container is
+		// loop-carried — allocating inside the loop body re-creates it
+		// every iteration and drops all but the last push.
+		finalOp := chain.(len(chain) - 1).op
+		outList := ?
+		if finalOp {
+			'map' -> {
+				outList <- hoist('mg_list_t*')
+				out.(len(out)) <- outList + ' = mg_list_new(16);'
+			}
+			'filter' -> {
+				outList <- hoist('mg_list_t*')
+				out.(len(out)) <- outList + ' = mg_list_new(16);'
+			}
+			_ -> ?
+		}
+		subj := head.subject
+		isRange := if subj.type {
+			:fnCall -> calleeName(subj) = 'range'
+			_ -> false
+		}
+		iterVar := '__i0'
+		elemVar := '__e0'
+		if isRange {
+			true -> {
+				lo := cStmt(subj.args.0, env, out)
+				hi := cStmt(subj.args.1, env, out)
+				stepExpr := if len(subj.args) > 2 {
+					true -> cStmt(subj.args.2, env, out)
+					_ -> 'mg_mkint(1)'
+				}
+				loI := hoist('int64_t')
+				hiI := hoist('int64_t')
+				stI := hoist('int64_t')
+				out.(len(out)) <- loI + ' = (' + lo + ').u.i;'
+				out.(len(out)) <- hiI + ' = (' + hi + ').u.i;'
+				out.(len(out)) <- stI + ' = (' + stepExpr + ').u.i;'
+				out.(len(out)) <- 'for (int64_t ' + iterVar + ' = ' + loI + '; ' + iterVar + ' < ' + hiI + '; ' + iterVar + ' += ' + stI + ') {'
+				out.(len(out)) <- 'mg_val_t ' + elemVar + ' = mg_mkint(' + iterVar + ');'
+			}
+			_ -> {
+				sx := cStmt(subj, env, out)
+				sv := hoist('mg_val_t')
+				out.(len(out)) <- sv + ' = ' + sx + ';'
+				out.(len(out)) <- 'if ((' + sv + ').tag == MG_LIST) {'
+				out.(len(out)) <- 'for (int64_t ' + iterVar + ' = 0; ' + iterVar + ' < (' + sv + ').u.l->len; ' + iterVar + '++) {'
+				out.(len(out)) <- 'mg_val_t ' + elemVar + ' = (' + sv + ').u.l->data[' + iterVar + '];'
+			}
+		}
+		// stages: chain is innermost-first; stage i's input = output of i-1
+		cur := elemVar
+		accVar := ?
+		fn stage(i) if i < len(chain) {
+			true -> {
+				s := chain.(i)
+				names := if s.cb.args {
+					? -> []
+					_ -> s.cb.args
+				}
+				if s.op {
+					'map' -> {
+						exprs := [cur]
+						if len(names) > 1 {
+							true -> exprs.(len(exprs)) <- 'mg_mkint(' + iterVar + ')'
+							_ -> ?
+						}
+						v := tmp(out, 'mg_val_t')
+						out.(len(out)) <- v + ' = ' + cStmt(s.cb.body, cEnv2(env, names, exprs), out) + ';'
+						cur <- v
+						if i = len(chain) - 1 {
+							true -> out.(len(out)) <- 'mg_list_push(' + outList + ', ' + v + ');'
+							_ -> ?
+						}
+					}
+					'filter' -> {
+						exprs := [cur]
+						if len(names) > 1 {
+							true -> exprs.(len(exprs)) <- 'mg_mkint(' + iterVar + ')'
+							_ -> ?
+						}
+						k := tmp(out, 'mg_val_t')
+						out.(len(out)) <- k + ' = ' + cStmt(s.cb.body, cEnv2(env, names, exprs), out) + ';'
+						out.(len(out)) <- 'if (mg_truthy(' + k + ')) {'
+						if i = len(chain) - 1 {
+							true -> out.(len(out)) <- 'mg_list_push(' + outList + ', ' + cur + ');'
+							_ -> ?
+						}
+						// keep remaining stages inside the guard: handled by
+						// the closeBraces bookkeeping below
+					}
+					'each' -> {
+						exprs := [cur]
+						if len(names) > 1 {
+							true -> exprs.(len(exprs)) <- 'mg_mkint(' + iterVar + ')'
+							_ -> ?
+						}
+						out.(len(out)) <- cStmt(s.cb.body, cEnv2(env, names, exprs), out) + ';'
+					}
+					'reduce' -> {
+						exprs := [accVar2, cur]
+						if len(names) > 2 {
+							true -> exprs.(len(exprs)) <- 'mg_mkint(' + iterVar + ')'
+							_ -> ?
+						}
+						v := tmp(out, 'mg_val_t')
+						out.(len(out)) <- v + ' = ' + cStmt(s.cb.body, cEnv2(env, names, exprs), out) + ';'
+						out.(len(out)) <- accVar2 + ' = ' + v + ';'
+					}
+					_ -> ?
+				}
+				stage(i + 1)
+			}
+			_ -> ?
+		}
+		stage(0)
+		// brace accounting: openBraces tracks every '{' emitChain opened
+		// (the iteration loop, the list-subject guard, and each non-final
+		// filter guard) and closeB closes them all at the end
+		openBraces := 1
+		if isRange {
+			true -> ?
+			_ -> openBraces <- 2
+		}
+		fn closeF(i) if i < len(chain) {
+			true -> {
+				if chain.(i).op = 'filter' {
+					true -> if i != len(chain) - 1 {
+						true -> openBraces <- openBraces + 1
+						_ -> ?
+					}
+					_ -> ?
+				}
+				closeF(i + 1)
+			}
+			_ -> ?
+		}
+		closeF(0)
+		fn closeB(i) if i < openBraces {
+			true -> {
+				out.(len(out)) <- '}'
+				closeB(i + 1)
+			}
+			_ -> ?
+		}
+		closeB(0)
+		if finalOp {
+			'reduce' -> accVar2
+			'map' -> 'mg_mklist(' + outList + ')'
+			'filter' -> 'mg_mklist(' + outList + ')'
+			_ -> 'mg_mknull()'
+		}
+	}
+
+	// collect the local names declared in a body. Walks everything that
+	// shares the enclosing C scope: blocks, assignments, match arms, call
+	// args, operators, collections, and ANONYMOUS fn literals (fused HOF
+	// callback bodies are inlined into the enclosing scope). Named fn
+	// declarations compile to separate functions and are not descended.
+	fn collectLocals(node, acc) if node.type {
+		:block -> if node.exprs {
+			? -> ?
+			_ -> node.exprs |> std.each(fn(e) collectLocals(e, acc))
+		}
+		:assignment -> {
+			if node.local? {
+				true -> if node.left.type {
+					:identifier -> if acc.(node.left.val) {
+						? -> acc.(node.left.val) <- true
+						_ -> ?
+					}
+					:object -> {
+						// destructuring: bind each alias name as a local
+						fn da(i) if i < len(node.left.entries) {
+							true -> {
+								if node.left.entries.(i).val.type = :identifier {
+									true -> if acc.(node.left.entries.(i).val.val) {
+										? -> acc.(node.left.entries.(i).val.val) <- true
+										_ -> ?
+									}
+								}
+								da(i + 1)
+							}
+							_ -> ?
+						}
+						da(0)
+					}
+					_ -> ?
+				}
+				_ -> ?
+			}
+			collectLocals(node.right, acc)
+		}
+		:ifExpr -> {
+			collectLocals(node.cond, acc)
+			if node.branches {
+				? -> ?
+				_ -> node.branches |> std.each(fn(br) {
+					collectLocals(br.target, acc)
+					collectLocals(br.body, acc)
+				})
+			}
+		}
+		:binary -> {
+			collectLocals(node.left, acc)
+			collectLocals(node.right, acc)
+		}
+		:unary -> collectLocals(node.right, acc)
+		:propertyAccess -> {
+			collectLocals(node.left, acc)
+			if node.right.type = :identifier {
+				true -> ?
+				_ -> collectLocals(node.right, acc)
+			}
+		}
+		:fnCall -> {
+			collectLocals(node.function, acc)
+			if node.args {
+				? -> ?
+				_ -> node.args |> std.each(fn(a) collectLocals(a, acc))
+			}
+		}
+		:list -> if node.elems {
+			? -> ?
+			_ -> node.elems |> std.each(fn(e) collectLocals(e, acc))
+		}
+		:object -> if node.entries {
+			? -> ?
+			_ -> node.entries |> std.each(fn(en) {
+				collectLocals(en.key, acc)
+				collectLocals(en.val, acc)
+			})
+		}
+		:function -> if node.name {
+			'' -> collectLocals(node.body, acc)
+			_ -> if st.fns.(boxedKey(node.name)) {
+				// top-level fns are registered separately, not locals
+				? -> acc.(node.name) <- true
+				_ -> ?
+			}
+		}
+		_ -> ?
+	}
+
+	// module-level locals become file-scope statics so boxed fns can read
+	// them (oak module scope is global to the module's fns); idempotent.
+	// The loop helper takes stx explicitly — no 2-deep captures (the VM
+	// loses nested upval member stores).
+	fn regGlobals2(stx, gnames, i) if i < len(gnames) {
+		true -> {
+			if stx.globals.(gnames.(i)) {
+				? -> {
+					stx.globals.(gnames.(i)) <- true
+					stx.globalDecls.(len(stx.globalDecls)) <- 'static mg_val_t __mg_g_' + cIdent(gnames.(i)) + ' = { MG_NULLV, { 0 } };'
+				}
+				_ -> ?
+			}
+			regGlobals2(stx, gnames, i + 1)
+		}
+		_ -> ?
+	}
+	fn registerGlobals(modFn) {
+		locs2 := {}
+		collectLocals(modFn.body, locs2)
+		regGlobals2(st, keys(locs2), 0)
+	}
+
+	// builtins (non-HOF): name -> C expression
+	fn builtinCall(name, node, env, out) if name {
+		'print' -> {
+			out.(len(out)) <- 'mg_print(' + cStmt(node.args.0, env, out) + ');'
+			'mg_mknull()'
+		}
+		'len' -> 'mg_mkint(mg_len(' + cStmt(node.args.0, env, out) + '))'
+		'type' -> 'mg_type_atom(' + cStmt(node.args.0, env, out) + ')'
+		'string' -> 'mg_string_of(' + cStmt(node.args.0, env, out) + ')'
+		'int' -> 'mg_boxed_int(' + cStmt(node.args.0, env, out) + ')'
+		'float' -> 'mg_boxed_float(' + cStmt(node.args.0, env, out) + ')'
+		'keys' -> 'mg_keys(' + cStmt(node.args.0, env, out) + ')'
+		'append' -> 'mg_append(' + cStmt(node.args.0, env, out) + ', ' + cStmt(node.args.1, env, out) + ')'
+		'slice' -> {
+			l := cStmt(node.args.0, env, out)
+			lo := cStmt(node.args.1, env, out)
+			hi := cStmt(node.args.2, env, out)
+			'mg_slice(' + l + ', (' + lo + ').u.i, (' + hi + ').u.i)'
+		}
+		'range' -> {
+			a := cStmt(node.args.0, env, out)
+			b := cStmt(node.args.1, env, out)
+			stp := if len(node.args) > 2 {
+				true -> cStmt(node.args.2, env, out)
+				_ -> 'mg_mkint(1)'
+			}
+			'mg_range((' + a + ').u.i, (' + b + ').u.i, (' + stp + ').u.i)'
+		}
+		'import' -> if node.args.0.type {
+			:string -> if node.args.0.val {
+				'std' -> 'mg_std_object()'
+				_ -> 'mg_module_run(' + cStringLit(node.args.0.val) + ')'
+			}
+			_ -> 'mg_mknull() /* dynamic import: v2 */'
+		}
+		_ -> ?
+	}
+
+	// ---- boxed statement/value compiler ----
+	// returns a C expression yielding the node's value as mg_val_t; hoists
+	// any required statements into `out`.
+	fn cStmt(node, env, out) if node.type {
+		:int -> 'mg_mkint(' + string(node.val) + ')'
+		:float -> 'mg_mkfloat(' + string(node.val) + ')'
+		:bool -> if node.val {
+			true -> 'mg_mkbool(1)'
+			_ -> 'mg_mkbool(0)'
+		}
+		:string -> {
+			p := tmp(out, 'char*')
+			out.(len(out)) <- p + ' = strdup(' + cStringLit(node.val) + ');'
+			'mg_mkstr(' + p + ', (int64_t)strlen(' + p + '))'
+		}
+		:atom -> atomEmit(node.val)
+		:null -> 'mg_mknull()'
+		:identifier -> if node.val = 'null' {
+			// the null literal keyword
+			true -> 'mg_mknull()'
+			_ -> if env.(node.val) {
+			? -> if st.globals.(node.val) {
+				? -> if st.fns.(boxedKey(node.val)) {
+					? -> if node.val = 'map' | node.val = 'filter' | node.val = 'each' | node.val = 'reduce' | node.val = 'default' | node.val = 'append' | node.val = 'keys' | node.val = 'slice' | node.val = 'range' | node.val = 'clone' | node.val = 'every' {
+						// std-builtin referenced as a VALUE (e.g. the implicit
+						// exports object binds them) — resolve through the
+						// runtime std object
+						true -> 'mg_obj_get(mg_std_object().u.o, ' + cStringLit(node.val) + ')'
+						_ -> '__mg_v_' + cIdent(node.val)
+					}
+					_ -> fnValueExpr(node.val)
+				}
+				_ -> '__mg_g_' + cIdent(node.val)
+			}
+			_ -> env.(node.val)
+			}
+		}
+		:binary -> {
+			l := cStmt(node.left, env, out)
+			r := cStmt(node.right, env, out)
+			if node.op {
+				:plus -> 'mg_add(' + l + ', ' + r + ')'
+				:minus -> 'mg_sub(' + l + ', ' + r + ')'
+				:times -> 'mg_mul(' + l + ', ' + r + ')'
+				:divide -> 'mg_div(' + l + ', ' + r + ')'
+				:modulus -> 'mg_mod(' + l + ', ' + r + ')'
+				:power -> 'mg_pow(' + l + ', ' + r + ')'
+				:pushArrow -> {
+				// << mutates lists in place and concatenates strings; the left
+				// operand may be ANY expression (not just an lvalue), so route
+				// through a temp and return it
+				pv := tmp(out, 'mg_val_t')
+				out.(len(out)) <- pv + ' = mg_push(' + l + ', ' + r + ');'
+				pv
+			}
+				:eq -> 'mg_eq(' + l + ', ' + r + ')'
+				:neq -> 'mg_neq(' + l + ', ' + r + ')'
+				:less -> 'mg_cmp_lt(' + l + ', ' + r + ')'
+				:greater -> 'mg_cmp_gt(' + l + ', ' + r + ')'
+				:leq -> 'mg_cmp_le(' + l + ', ' + r + ')'
+				:geq -> 'mg_cmp_ge(' + l + ', ' + r + ')'
+				:and -> 'mg_and(' + l + ', ' + r + ')'
+				:or -> 'mg_or(' + l + ', ' + r + ')'
+				_ -> 'mg_mknull() /* op ' + string(node.op) + ' */'
+			}
+		}
+		:unary -> if node.op {
+			:not -> 'mg_not(' + cStmt(node.right, env, out) + ')'
+			:minus -> 'mg_neg(' + cStmt(node.right, env, out) + ')'
+			_ -> 'mg_mknull()'
+		}
+		:propertyAccess -> {
+			// static key (identifier right) or dynamic key (any expr)
+			l := cStmt(node.left, env, out)
+			k := if node.right.type {
+				:identifier -> {
+					p := tmp(out, 'char*')
+					out.(len(out)) <- p + ' = strdup(' + cStringLit(node.right.val) + ');'
+					'mg_mkstr(' + p + ', (int64_t)strlen(' + p + '))'
+				}
+				_ -> cStmt(node.right, env, out)
+			}
+			'mg_at(' + l + ', ' + k + ')'
+		}
+		:fnCall -> if node.function.type = :propertyAccess {
+			// method call obj.m(...): TRUE dynamic dispatch through the
+			// object value. Previously the callee was resolved by its LAST
+			// segment (gpus.available vs gpu.available collided -> the fn
+			// called itself -> gcc turned it into an infinite loop)
+			true -> emitMethodCall(node, env, out)
+			_ -> {
+			name := calleeName(node)
+			if name = '' {
+				true -> emitDynCall(cStmt(node.function, env, out), node, env, out)
+				_ -> if isHofName(name) {
+					true -> {
+						// fused chain when the callback is a literal fn and
+						// the arity matches the stdlib HOF shape
+						ch := ?
+						if node.args {
+							? -> ?
+							_ -> if len(node.args) = hofArityOp(name) {
+								true -> ch <- collectChain(node)
+								_ -> ?
+							}
+						}
+						if ch {
+							? -> {
+								// non-literal callback (identifier, member expr, ...):
+								// lower to a DYNAMIC call of the std adapter value
+								// with the call's own args — the adapters take the
+								// same (xs, f[, seed]) shape the desugared pipe uses
+								// and dispatch ANY callable (boxed-fn adapter value,
+								// capture-free wrapper, heap closure)
+								emitDynCall('mg_std_fn(' + cStringLit(name) + ')', node, env, out)
+							}
+							_ -> emitChain(ch, env, out)
+						}
+					}
+					_ -> emitNamedCall(node, env, out)
+					}
+					_ -> emitNamedCall(node, env, out)
+				}
+			}
+		}
+		:ifExpr -> {
+			// match arms: literal targets compare by deep equality,
+			// :empty target = wildcard else; no match -> null
+			cv := cStmt(node.cond, env, out)
+			cvar := hoist('mg_val_t')
+			out.(len(out)) <- cvar + ' = ' + cv + ';'
+			rvar := hoist('mg_val_t')
+			out.(len(out)) <- rvar + ' = mg_mknull();'
+			// pre-evaluate match targets into temps — target statements must
+			// not land between the if/else-if chain (C forbids it and the
+			// chain would break). tgts.(i) is '' for :empty targets.
+			tgts := []
+			fn preT(i) if i < len(node.branches) {
+				true -> {
+					br := node.branches.(i)
+					if br.target.type {
+						:empty -> tgts.(len(tgts)) <- ''
+						_ -> {
+							t := hoist('mg_val_t')
+							out.(len(out)) <- t + ' = ' + cStmt(br.target, env, out) + ';'
+							tgts.(len(tgts)) <- t
+						}
+					}
+					preT(i + 1)
+				}
+				_ -> ?
+			}
+			preT(0)
+			// isFirst is threaded as a parameter — captured-var stores from
+			// nested fns are unreliable in the host VM
+			fn arm(i, isFirst) if i < len(node.branches) {
+				true -> {
+					br := node.branches.(i)
+					if br.target.type {
+						:empty -> {
+							out.(len(out)) <- if isFirst {
+								true -> '{'
+								_ -> 'else {'
+							}
+							out.(len(out)) <- rvar + ' = ' + cStmt(br.body, env, out) + ';'
+							out.(len(out)) <- '}'
+						}
+						_ -> {
+							out.(len(out)) <- if isFirst {
+								true -> 'if (mg_val_eq(' + cvar + ', ' + tgts.(i) + ')) {'
+								_ -> 'else if (mg_val_eq(' + cvar + ', ' + tgts.(i) + ')) {'
+							}
+							out.(len(out)) <- rvar + ' = ' + cStmt(br.body, env, out) + ';'
+							out.(len(out)) <- '}'
+							arm(i + 1, false)
+						}
+					}
+				}
+				_ -> ?
+			}
+			arm(0, true)
+			rvar
+		}
+		:assignment -> {
+			rhs := cStmt(node.right, env, out)
+			if node.left.type {
+				:identifier -> {
+					// env wins over st.globals: a local of the boxed fn whose
+					// name ALSO got registered as a file-scope global (nested
+					// literal bodies are visible to registerGlobals) must write
+					// the LOCAL the closures actually capture — otherwise the
+					// write/read split leaves the captured cell null
+					tgt := if env.(node.left.val) {
+						? -> if st.globals.(node.left.val) {
+							? -> '__mg_v_' + cIdent(node.left.val)
+							_ -> '__mg_g_' + cIdent(node.left.val)
+						}
+						_ -> env.(node.left.val)
+					}
+					out.(len(out)) <- tgt + ' = ' + rhs + ';'
+					rhs
+				}
+				:propertyAccess -> {
+					o := cStmt(node.left.left, env, out)
+					k := if node.left.right.type {
+						:identifier -> {
+							p := tmp(out, 'char*')
+							out.(len(out)) <- p + ' = strdup(' + cStringLit(node.left.right.val) + ');'
+							'mg_mkstr(' + p + ', (int64_t)strlen(' + p + '))'
+						}
+						_ -> cStmt(node.left.right, env, out)
+					}
+					out.(len(out)) <- 'mg_set_at(' + o + ', ' + k + ', ' + rhs + ');'
+					rhs
+				}
+				_ -> {
+					// destructuring: { a: a, b: b } := import('std') — bind each
+					// alias from the module's exports object. Previously a v2
+					// no-op, which left every alias undeclared.
+					if node.left.type = :object & node.right.type = :fnCall {
+						true -> {
+							modName := if node.right.args.0.type {
+								:string -> node.right.args.0.val
+								_ -> ''
+							}
+							exportsExpr := if modName = 'std' | modName = 'str' {
+								true -> 'mg_std_object().u.o'
+								_ -> 'mg_module_run(' + cStringLit(modName) + ').u.o'
+							}
+							fn bindAlias(i) if i < len(node.left.entries) {
+								true -> {
+									ent := node.left.entries.(i)
+									if ent.val.type = :identifier {
+										true -> {
+											key := if ent.key.type {
+												:identifier -> ent.key.val
+												_ -> ent.key.val
+											}
+											tgt2 := if st.globals.(ent.val.val) {
+												? -> '__mg_v_' + cIdent(ent.val.val)
+												_ -> '__mg_g_' + cIdent(ent.val.val)
+											}
+											out.(len(out)) <- tgt2 + ' = mg_obj_get(' + exportsExpr + ', ' + cStringLit(key) + ');'
+										}
+									}
+									bindAlias(i + 1)
+								}
+								_ -> ?
+							}
+							bindAlias(0)
+						}
+					}
+					out.(len(out)) <- '/* destructuring assign: v2 */'
+					rhs
+				}
+			}
+		}
+		:list -> {
+			n := if node.elems {
+				? -> 0
+				_ -> len(node.elems)
+			}
+			lv := tmp(out, 'mg_list_t*')
+			out.(len(out)) <- lv + ' = mg_list_new(' + string(if n {
+				0 -> 4
+				_ -> n
+			}) + ');'
+			fn pushE(i) if i < n {
+				true -> {
+					out.(len(out)) <- 'mg_list_push(' + lv + ', ' + cStmt(node.elems.(i), env, out) + ');'
+					pushE(i + 1)
+				}
+				_ -> ?
+			}
+			pushE(0)
+			'mg_mklist(' + lv + ')'
+		}
+		:object -> {
+			n := if node.entries {
+				? -> 0
+				_ -> len(node.entries)
+			}
+			// hoist value exprs first (they may need statements)
+			valExprs := []
+			keys := []
+			fn ev(i) if i < n {
+				true -> {
+					kn := node.entries.(i).key
+					kt := if kn.type {
+						:identifier -> kn.val
+						:string -> kn.val
+						_ -> string(kn.val)
+					}
+					keys.(len(keys)) <- cStringLit(kt)
+					valExprs.(len(valExprs)) <- cStmt(node.entries.(i).val, env, out)
+					ev(i + 1)
+				}
+				_ -> ?
+			}
+			ev(0)
+			arr := tmp(out, 'mg_val_t*')
+			out.(len(out)) <- arr + ' = (mg_val_t*)malloc(' + string(if n {
+				0 -> 1
+				_ -> n * 2
+			}) + ' * sizeof(mg_val_t));'
+			fn fill(i) if i < n {
+				true -> {
+					out.(len(out)) <- arr + '[' + string(i * 2) + '] = mg_mkstrc(' + keys.(i) + ');'
+					out.(len(out)) <- arr + '[' + string(i * 2 + 1) + '] = ' + valExprs.(i) + ';'
+					fill(i + 1)
+				}
+				_ -> ?
+			}
+			fill(0)
+			'mg_obj_lit(' + string(n * 2) + ', ' + arr + ')'
+		}
+		:list -> {
+			elems := if node.elems {
+				? -> []
+				_ -> node.elems
+			}
+			nl := len(elems)
+			allocN2 := if nl = 0 {
+				true -> 1
+				_ -> nl
+			}
+			arr2 := tmp(out, 'mg_val_t*')
+			out.(len(out)) <- arr2 + ' = (mg_val_t*)malloc(' + string(allocN2) + ' * sizeof(mg_val_t));'
+			fn fill2(i) if i < nl {
+				true -> {
+					out.(len(out)) <- arr2 + '[' + string(i) + '] = ' + cStmt(elems.(i), env, out) + ';'
+					fill2(i + 1)
+				}
+				_ -> ?
+			}
+			fill2(0)
+			'mg_list_from(' + string(nl) + ', ' + arr2 + ')'
+		}
+		:block -> {
+			r := 'mg_mknull()'
+			fn scan(i) if i < len(node.exprs) {
+				true -> {
+					v := cStmt(node.exprs.(i), env, out)
+					if i < len(node.exprs) - 1 {
+						true -> {
+							// intermediate statement: bare calls must be emitted
+							// explicitly or their side effect drops
+							if (node.exprs.(i).type = :fnCall) & (v != '') {
+								true -> out.(len(out)) <- '(void)(' + v + ');'
+							}
+							r <- 'mg_mknull()'
+						}
+						_ -> r <- v
+					}
+					scan(i + 1)
+				}
+				_ -> ?
+			}
+			scan(0)
+			r
+		}
+		:function -> if node.name {
+			'' -> emitFnLiteral(node, env, out)
+			_ -> if st.fns.(boxedKey(node.name)) {
+				// LOCAL named fn (fn sub(...) inside a body): a real
+				// capturing closure bound to the local C var — previously
+				// silently dropped, so every recursive local helper
+				// (_mapRange's sub, _chunkBounds, ...) returned null.
+				// st.fns membership is the ONLY top-level test: the env always
+				// contains the collected local at boxed-body compile time
+				? -> emitLocalDecl(node, env, out)
+				_ -> {
+					// top-level fn declaration: registered at top level
+					ensureBoxed(node.name)
+					'mg_mknull()'
+				}
+			}
+		}
+		_ -> 'mg_mknull() /* ' + string(node.type) + ' */'
+	}
+
+	// ---- self-tail-call loop lowering (boxed) ----
+	fn cTailB(fnName, params, node, env, out, depth) if depth {
+		256 -> false
+		_ -> if node.type {
+			:ifExpr -> {
+				cv := cStmt(node.cond, env, out)
+				cvar := hoist('mg_val_t')
+				out.(len(out)) <- cvar + ' = ' + cv + ';'
+				hadW := [true]
+				// pass 1: pre-evaluate every match target into its own temp —
+				// target statements must NOT land between the if/else-if
+				// chain (C forbids statements there and the chain breaks)
+				tgts := []
+				fn preT(i) if i < len(node.branches) {
+					true -> {
+						br := node.branches.(i)
+						if br.target.type {
+							:empty -> tgts.(len(tgts)) <- ''
+							_ -> {
+								t := hoist('mg_val_t')
+								out.(len(out)) <- t + ' = ' + cStmt(br.target, env, out) + ';'
+								tgts.(len(tgts)) <- t
+							}
+						}
+						preT(i + 1)
+					}
+					_ -> ?
+				}
+				preT(0)
+				fn arm(i, isFirst) if i < len(node.branches) {
+					true -> {
+						br := node.branches.(i)
+						if br.target.type {
+							:empty -> {
+								out.(len(out)) <- if isFirst {
+									true -> '{'
+									_ -> 'else {'
+								}
+								t := cTailB(fnName, params, br.body, env, out, depth + 1)
+								out.(len(out)) <- '}'
+								if t = false {
+									true -> hadW.(0) <- false
+									_ -> ?
+								}
+							}
+							_ -> {
+								out.(len(out)) <- if isFirst {
+									true -> 'if (mg_val_eq(' + cvar + ', ' + tgts.(i) + ')) {'
+									_ -> 'else if (mg_val_eq(' + cvar + ', ' + tgts.(i) + ')) {'
+								}
+								t := cTailB(fnName, params, br.body, env, out, depth + 1)
+								out.(len(out)) <- '}'
+								if t = false {
+									true -> hadW.(0) <- false
+									_ -> ?
+								}
+								arm(i + 1, false)
+							}
+						}
+					}
+					_ -> ?
+				}
+				arm(0, true)
+				if hadW.(0) = false {
+					true -> out.(len(out)) <- 'return mg_mknull();'
+					_ -> ?
+				}
+				true
+			}
+			:fnCall -> {
+				isSelf := false
+				if node.function.type = :identifier {
+					true -> if calleeName(node) = fnName {
+						true -> if env.(fnName) {
+							? -> isSelf <- true
+							_ -> ?
+						}
+						_ -> ?
+					}
+					_ -> ?
+				}
+				if isSelf & len(node.args) = len(params) {
+					true -> {
+						argTemps := []
+						fn ev(i) if i < len(node.args) {
+							true -> {
+								x := cStmt(node.args.(i), env, out)
+								t := tmp(out, 'mg_val_t')
+								out.(len(out)) <- t + ' = ' + x + ';'
+								argTemps.(len(argTemps)) <- t
+								ev(i + 1)
+							}
+							_ -> ?
+						}
+						ev(0)
+						fn asg(i) if i < len(params) {
+							true -> {
+								out.(len(out)) <- '__mg_v_' + cIdent(params.(i)) + ' = ' + argTemps.(i) + ';'
+								asg(i + 1)
+							}
+							_ -> ?
+						}
+						asg(0)
+						out.(len(out)) <- 'continue;'
+						true
+					}
+					_ -> {
+						out.(len(out)) <- 'return (' + cStmt(node, env, out) + ');'
+						true
+					}
+				}
+			}
+			:block -> if len(node.exprs) {
+				0 -> {
+					out.(len(out)) <- 'return mg_mknull();'
+					true
+				}
+				_ -> {
+					fn pre(i) if i < len(node.exprs) - 1 {
+						true -> {
+							x := cStmt(node.exprs.(i), env, out)
+							// bare calls in statement position: cStmt returns the
+							// expression without emitting it — emit explicitly
+							if (node.exprs.(i).type = :fnCall) & (x != '') {
+								true -> out.(len(out)) <- '(void)(' + x + ');'
+							}
+							pre(i + 1)
+						}
+						_ -> ?
+					}
+					pre(0)
+					cTailB(fnName, params, node.exprs.(len(node.exprs) - 1), env, out, depth + 1)
+				}
+			}
+			_ -> {
+				out.(len(out)) <- 'return (' + cStmt(node, env, out) + ');'
+				true
+			}
+		}
+	}
+
+	// depth-1 env writers for cBoxedBody (see bindParam/bindLocals)
+	fn bindParam1(envx, nm) {
+		envx.(nm) <- '__mg_v_' + cIdent(nm)
+		0
+	}
+	fn bindParam(envx, ps, i) if i < len(ps) {
+		true -> {
+			bindParam1(envx, ps.(i))
+			bindParam(envx, ps, i + 1)
+		}
+		_ -> ?
+	}
+	fn bindLocal1(envx, nm) if envx.(nm) {
+		? -> envx.(nm) <- '__mg_v_' + cIdent(nm)
+		_ -> 0
+	}
+	fn bindLocal2(envx, nm) {
+		bindLocal1(envx, nm)
+		0
+	}
+	fn bindLocals(envx, names, i) if i < len(names) {
+		true -> {
+			bindLocal2(envx, names.(i))
+			bindLocals(envx, names, i + 1)
+		}
+		_ -> ?
+	}
+	// bareOf: strip the module qualifier from a registry key ('m.n' -> 'n');
+	// self-tail-call detection compares BARE callee names
+	fn lastDotIdx(nm, i, ld) if i < len(nm) {
+		true -> if nm.(i) = '.' {
+			true -> lastDotIdx(nm, i + 1, i)
+			_ -> lastDotIdx(nm, i + 1, ld)
+		}
+		_ -> ld
+	}
+	fn cBoxedBody(fnName, params, body, extraEnv) {
+		ld := lastDotIdx(fnName, 0, -1)
+		tailName := if ld >= 0 {
+			true -> std.slice(fnName, ld + 1)
+			_ -> fnName
+		}
+		out := []
+		st.hoisted <- []
+		locs := {}
+		collectLocals(body, locs)
+		names := keys(locs)
+		env := std.clone(extraEnv)
+		// param/local env-binding goes through depth-1 writer helpers:
+		// arrow-writes to members from helpers nested >=2 deep are dropped
+		// by the host VM (same class as the captured-write bug)
+		bindParam(env, params, 0)
+		fn decl(i) if i < len(names) {
+			true -> {
+				nm := names.(i)
+				if env.(nm) {
+					? -> out.(len(out)) <- 'mg_val_t __mg_v_' + cIdent(nm) + ' = mg_mknull();'
+					_ -> ?
+				}
+				decl(i + 1)
+			}
+			_ -> ?
+		}
+		decl(0)
+		bindLocals(env, names, 0)
+		scratch := []
+		stmts := []
+		tailOK := cTailB(tailName, params, body, env, stmts, 0)
+		if tailOK = false {
+			true -> {
+				st.hoisted <- []
+				stmts <- []
+				r := cStmt(body, env, stmts)
+				stmts.(len(stmts)) <- 'return (' + r + ');'
+			}
+			_ -> {
+				wrapped := ['while (1) {']
+				fn cp(i) if i < len(stmts) {
+					true -> {
+						wrapped.(len(wrapped)) <- stmts.(i)
+						cp(i + 1)
+					}
+					_ -> ?
+				}
+				cp(0)
+				wrapped.(len(wrapped)) <- '}'
+				stmts <- wrapped
+			}
+		}
+		fn ho(i) if i < len(st.hoisted) {
+			true -> {
+				out.(len(out)) <- st.hoisted.(i)
+				ho(i + 1)
+			}
+			_ -> ?
+		}
+		ho(0)
+		fn cp2(i) if i < len(stmts) {
+			true -> {
+				out.(len(out)) <- stmts.(i)
+				cp2(i + 1)
+			}
+			_ -> ?
+		}
+		cp2(0)
+		out |> str.join('\n')
+	}
+
+	fn emitBoxed(key) {
+		node := st.fns.(key)
+		prevMod := st.curModule
+		if st.modOf.(key) {
+			? -> ?
+			_ -> st.curModule <- st.modOf.(key)
+		}
+		params := if node.args {
+			? -> []
+			_ -> node.args
+		}
+		fnDecl := 'static mg_val_t __mg_' + cIdent(key) + '_bx('
+		if len(params) = 0 {
+			true -> fnDecl <- fnDecl + 'void'
+			_ -> {
+				fn pd(i) if i < len(params) {
+					true -> {
+						fnDecl <- fnDecl + if i {
+							0 -> 'mg_val_t __mg_v_' + cIdent(params.(i))
+							_ -> ', mg_val_t __mg_v_' + cIdent(params.(i))
+						}
+						pd(i + 1)
+					}
+					_ -> ?
+				}
+				pd(0)
+			}
+		}
+		fnDecl <- fnDecl + ') {'
+		[fnDecl, cBoxedBody(key, params, node.body, {}), '}'] |> str.join('\n')
+	}
+
+	fn declParams(n) if n {
+		0 -> 'void'
+		_ -> {
+			acc := ''
+			fn scan(i) if i < n {
+				true -> {
+					acc <- acc + if i {
+						0 -> 'mg_val_t'
+						_ -> ', mg_val_t'
+					}
+					scan(i + 1)
+				}
+				_ -> ?
+			}
+			scan(0)
+			acc
+		}
+	}
+
+	// flatten runs here (after every helper fn is defined)
+	flatten(bundleNode, entryExprs)
+
+	// register module globals BEFORE compiling boxed fns — each module's
+	// collectLocals must run under ITS curModule or its named fns miss the
+	// qualified st.fns keys and leak into st.globals as __mg_g_ vars
+	fn preReg(i) if i < len(st.moduleOrder) {
+		true -> {
+			st.curModule <- st.moduleOrder.(i)
+			registerGlobals(st.modules.(st.moduleOrder.(i)))
+			preReg(i + 1)
+		}
+		_ -> ?
+	}
+	preReg(0)
+	st.curModule <- ''
+
+	fn ensureAll(i) if i < len(entryExprs) {
+		true -> {
+			if isFnDeclMark(entryExprs.(i)) {
+				true -> ensureBoxed(entryExprs.(i).name)
+				_ -> ?
+			}
+			ensureAll(i + 1)
+		}
+		_ -> ?
+	}
+	ensureAll(0)
+
+	protos := []
+	fn mkProto(i) if i < len(st.boxedOrder) {
+		true -> {
+			nm := st.boxedOrder.(i)
+			node := st.fns.(nm)
+			nargs := if node.args {
+				? -> 0
+				_ -> len(node.args)
+			}
+			protos.(len(protos)) <- 'static mg_val_t __mg_' + cIdent(nm) + '_bx(' + declParams(nargs) + ');'
+			mkProto(i + 1)
+		}
+		_ -> ?
+	}
+	mkProto(0)
+
+	fn emitBoxedAll(i, acc) if i < len(st.boxedOrder) {
+		true -> emitBoxedAll(i + 1, acc + emitBoxed(st.boxedOrder.(i)) + '\n\n')
+		_ -> acc
+	}
+
+	fn emitWrappers(i, acc) if i < len(st.wrappers) {
+		true -> {
+			token := st.wrappers.(i)
+			code := st.wrappers.(i + 1)
+			cid := token |> std.slice(6)
+			acc2 := acc + code + '\n'
+			acc2 <- acc2 + 'static mg_closure_t __mgclo' + cid + ' = { __mgcb' + cid + ', 0 };\n'
+			emitWrappers(i + 2, acc2)
+		}
+		_ -> acc
+	}
+
+	fn resolveClosers(code) {
+		fn rep(i, acc) if i < len(st.wrappers) {
+			true -> {
+				token := st.wrappers.(i)
+				cid := token |> std.slice(6)
+				rep(i + 2, acc |> str.replace(token, 'mg_mkclo(&__mgclo' + cid + ')'))
+			}
+			_ -> acc
+		}
+		rep(0, code)
+	}
+
+	// export adapters: forward a[0..k-1] to a boxed fn (used for module
+	// export tables and HOF fallback paths)
+	fn emitExportAdapters(i, acc) if i < len(st.exportAdapters) {
+		true -> {
+			ad := st.exportAdapters.(i)
+			fwd := fwdArgs(ad.2)
+			acc2 := acc + 'static mg_val_t ' + ad.0 + '(void* env, mg_val_t* a, int n) { (void)env; (void)n; return __mg_' + cIdent(ad.3) + '_bx(' + fwd + '); }\n'
+			emitExportAdapters(i + 1, acc2)
+		}
+		_ -> acc
+	}
+	fn emitClosureDecls(i, acc) if i < len(st.exportAdapters) {
+		true -> emitClosureDecls(i + 1, acc + 'static mg_closure_t ' + st.exportAdapters.(i).1 + ';\n')
+		_ -> acc
+	}
+	fn emitClosureInits(i, acc) if i < len(st.exportAdapters) {
+		true -> {
+			ad := st.exportAdapters.(i)
+			acc2 := acc + ad.1 + '.fp = ' + ad.0 + '; ' + ad.1 + '.env = 0;\n'
+			emitClosureInits(i + 1, acc2)
+		}
+		_ -> acc
+	}
+
+	// module thunks: run a module body once, return its exports object.
+	// All loop helpers here are renderCBundle-level fns taking explicit
+	// params — no nested closures over st (the VM loses 2-deep upvals).
+	fn thunkDeclLocals(names, out, i) if i < len(names) {
+		true -> {
+			out.(len(out)) <- 'mg_val_t __mg_v_' + cIdent(names.(i)) + ' = mg_mknull();'
+			thunkDeclLocals(names, out, i + 1)
+		}
+		_ -> ?
+	}
+	fn thunkWalk(exprs, out, i) if i < len(exprs) {
+		true -> {
+			e := exprs.(i)
+			// the implicit exports object appended by the transpiler as the
+			// final expression is emitted by the trailing return below —
+			// emitting it twice would duplicate any nested construction
+			isExportsTail := (i = len(exprs) - 1) & (e.type = :object)
+			if !isExportsTail {
+				true -> {
+					x := cStmt(e, {}, out)
+					// cStmt returns an EXPRESSION; a bare call in statement
+					// position must be emitted explicitly or its side effect
+					// is silently dropped (cStmt emits nothing for :fnCall)
+					if (e.type = :fnCall) & (x != '') {
+						true -> out.(len(out)) <- '(void)(' + x + ');'
+					}
+				}
+			}
+			thunkWalk(exprs, out, i + 1)
+		}
+		_ -> ?
+	}
+	fn emitModuleThunk(name) {
+		modFn := st.modules.(name)
+		body := modFn.body
+		cname := '__mg_mod_' + cIdent(name)
+		out := []
+		st.curModule <- name
+		registerGlobals(modFn)
+		st.hoisted <- []
+		stmts := []
+		// module-level names resolve through st.globals inside cStmt
+		thunkWalk(body.exprs, stmts, 0)
+		// the transpiler appends an implicit exports object as the module
+		// body's final expression; the last value IS the return value
+		stmts.(len(stmts)) <- 'return (' + cStmt(body.exprs.(len(body.exprs) - 1), {}, stmts) + ');'
+		fn hoT(i) if i < len(st.hoisted) {
+			true -> {
+				out.(len(out)) <- st.hoisted.(i)
+				hoT(i + 1)
+			}
+			_ -> ?
+		}
+		hoT(0)
+		fn cpT(i) if i < len(stmts) {
+			true -> {
+				out.(len(out)) <- stmts.(i)
+				cpT(i + 1)
+			}
+			_ -> ?
+		}
+		cpT(0)
+		st.curModule <- ''
+		'static mg_val_t ' + cname + '(void) {\n' + (out |> str.join('\n')) + '\n}\n'
+	}
+
+	fn emitModuleThunks(i, acc) if i < len(st.moduleOrder) {
+		true -> emitModuleThunks(i + 1, acc + emitModuleThunk(st.moduleOrder.(i)) + '\n')
+		_ -> acc
+	}
+
+	fn emitRegistry(i, acc) if i < len(st.moduleOrder) {
+		true -> {
+			nm := st.moduleOrder.(i)
+			acc2 := acc + '    {' + cStringLit(nm) + ', __mg_mod_' + cIdent(nm) + ', 0, {0}},\n'
+			emitRegistry(i + 1, acc2)
+		}
+		_ -> acc
+	}
+
+	mainOut := []
+	// direct-mode entry locals (module mode keeps locals in thunks)
+	entryLocals := {}
+	fn scanEntryLocals(i) if i < len(entryExprs) {
+		true -> {
+			if isFnDeclMark(entryExprs.(i)) {
+				true -> ?
+				_ -> if isImport(entryExprs.(i)) {
+					true -> ?
+					_ -> collectLocals(entryExprs.(i), entryLocals)
+				}
+			}
+			scanEntryLocals(i + 1)
+		}
+		_ -> ?
+	}
+	scanEntryLocals(0)
+	entryLocalNames := keys(entryLocals)
+	fn declEntry(i) if i < len(entryLocalNames) {
+		true -> {
+			mainOut.(len(mainOut)) <- 'mg_val_t __mg_v_' + cIdent(entryLocalNames.(i)) + ' = mg_mknull();'
+			declEntry(i + 1)
+		}
+		_ -> ?
+	}
+	declEntry(0)
+	st.hoisted <- []
+	mainHoisted := ?
+	fn entry(i) if i < len(entryExprs) {
+		true -> {
+			e := entryExprs.(i)
+			if isFnDeclMark(e) {
+				true -> ?
+				_ -> if isImport(e) {
+					true -> ?
+					_ -> {
+						x := cStmt(e, {}, mainOut)
+						// bare calls in statement position: cStmt returns
+						// the call expression without emitting it — emit
+						// explicitly so the side effect is not dropped
+						if e.type = :fnCall & x != '' {
+							true -> mainOut.(len(mainOut)) <- '(void)(' + x + ');'
+						}
+					}
+				}
+			}
+			entry(i + 1)
+		}
+		_ -> ?
+	}
+	entry(0)
+
+	// module machinery (registry + lazy run) only when modules exist
+	modCode := ''
+	closureDeclsCode := ''
+	if len(st.moduleOrder) {
+		0 -> ?
+		_ -> {
+			registry := 'typedef struct { const char* name; mg_val_t (*fn)(void); int run; mg_val_t exports; } mg_module_t;\n'
+			registry <- registry + 'static mg_module_t __mg_modules[] = {\n'
+			registry <- emitRegistry(0, registry)
+			registry <- registry + '    {0, 0, 0, {0}}\n};\n'
+			registry <- registry + 'static mg_val_t mg_module_run(const char* name) {\n'
+			registry <- registry + '    for (int i = 0; __mg_modules[i].name; i++) {\n'
+			registry <- registry + '        if (strcmp(__mg_modules[i].name, name) == 0) {\n'
+			registry <- registry + '            if (!__mg_modules[i].run) { __mg_modules[i].run = 1; __mg_modules[i].exports = __mg_modules[i].fn(); }\n'
+			registry <- registry + '            return __mg_modules[i].exports;\n'
+			registry <- registry + '        }\n'
+			registry <- registry + '    }\n'
+			registry <- registry + '    return mg_mknull();\n'
+			registry <- registry + '}\n'
+			thunkCode := emitModuleThunks(0, '')
+			// closure DECLS must precede the boxed fn bodies (they reference
+			// mg_mkclo(&__mgfnvclo_X) for fn-valued args); only the thunks,
+			// adapters, and registry stay in modCode
+			closureDeclsCode <- emitClosureDecls(0, '')
+			// thunks call mg_module_run for imports — the definition lives in
+			// the registry below, so forward-declare it
+			modCode <- ('static mg_val_t mg_module_run(const char* name);\n' + thunkCode + '\n' + emitExportAdapters(0, '') + '\n' + registry)
+		}
+	}
+
+	// atom table: built AFTER all emission (entry body, module thunks,
+	// export adapters) so atoms first interned during thunk emission are
+	// included — previously built before thunk emission, which produced
+	// a zero-size __mg_atoms with a nonzero mg_atom_count (OOB read)
+	atomInit := 'static const char* __mg_atoms[] = { '
+	fn atomItem(i, acc) if i < len(st.atomNames) {
+		true -> atomItem(i + 1, acc + if i {
+			0 -> cStringLit(st.atomNames.(i))
+			_ -> ', ' + cStringLit(st.atomNames.(i))
+		})
+		_ -> acc
+	}
+	atomInit <- atomItem(0, atomInit) + ' };'
+
+	mainStmts := if st.entryModule {
+		? -> mainOut |> str.join('\n')
+		_ -> 'mg_module_run(' + cStringLit(st.entryModule) + ');'
+	}
+	fn hoM(i, acc2) if i < len(st.hoisted) {
+		true -> hoM(i + 1, acc2 + st.hoisted.(i) + '\n')
+		_ -> acc2
+	}
+	mainBody := emitClosureInits(0, '') + '\n' + hoM(0, '') + '\n' + mainStmts
+	mainCode := ['int main(void) {', 'mg_atom_names = (char**)__mg_atoms;', 'mg_atom_count = ' + string(len(st.atomNames)) + ';', mainBody, 'return 0;', '}'] |> str.join('\n')
+
+	globalDeclsCode := st.globalDecls |> str.join('\n')
+
+	parts := []
+	parts.(len(parts)) <- CRuntime
+	parts.(len(parts)) <- atomInit
+	parts.(len(parts)) <- globalDeclsCode
+	parts.(len(parts)) <- closureDeclsCode
+	parts.(len(parts)) <- protos |> str.join('\n')
+	// boxed-fn emission REGISTERS wrappers (nested capturing closures
+	// inside boxed bodies) — emit them first so the wrapper table is
+	// complete, then render the wrapper defs, then place the boxed code
+	boxedAll := emitBoxedAll(0, '')
+	parts.(len(parts)) <- emitWrappers(0, '')
+	parts.(len(parts)) <- boxedAll
+	parts.(len(parts)) <- modCode
+	parts.(len(parts)) <- mainCode
+
+	resolveClosers(parts |> str.join('\n'))
+}

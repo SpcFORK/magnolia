@@ -1,0 +1,1246 @@
+// compute -- unified fused pure-HOF compute pipelines (plan §10.2, TODO-19)
+//
+// Kernels are described with a small pure expression IR (the "MIR-assisted"
+// representation): tagged objects over element inputs, scalar params,
+// constants and primitive ops. One IR tree lowers to
+//
+//   - OpenCL C compute kernels (executed through lib/gpus.oak FFI),
+//   - CUDA C kernels (source generation; execution needs a PTX toolchain),
+//   - GLSL 430 / HLSL 5.0 compute shaders (for the GPU-layers stack),
+//   - an interpreted single-pass CPU execution (the fused fallback).
+//
+// Fusion: map/filter chains collapse into ONE per-element pass; a trailing
+// reduce folds in the same sweep on the CPU path. CPU execution is chunked
+// across go()-workers (one chan per worker, partials folded in order on the
+// main thread), sized to ___runtime_sys_info().cpus.
+//
+// Dispatch policy: when an OpenCL device is present and the problem is large
+// enough (N >= threshold, default 8192), the GPU path runs; any GPU failure
+// at any stage falls back to the CPU path transparently.
+
+std := import('std')
+
+{
+	map: map
+	each: each
+	len: len
+	filter: filter
+	default: default
+	clone: clone
+	slice: slice
+	reduce: reduce
+	append: append
+} := import('std')
+{
+	join: join
+} := import('str')
+
+ieee := import('ieee754')
+gpus := import('gpus')
+
+E := 2.718281828459045
+
+fn _range(n) if n <= 0 {
+	true -> []
+	_ -> std.range(0, n, 1)
+}
+
+// ---------------------------------------------------------------------------
+// expression IR
+// ---------------------------------------------------------------------------
+// Node shapes (all plain objects):
+//   { lit: <number> }            literal
+//   { param: 'a' }               scalar kernel parameter
+//   { inp: 'x' }                 element of a named input array (x, y, ...)
+//   { acc: true }                reduce accumulator
+//   { op: <atom>, l, r? }        operator node; binary when r present
+//
+// Ops: add sub mul div neg abs exp sqrt min max lt gt leq geq eq neq not and or
+
+fn _num(e) if e {
+	? -> 0
+	_ -> if type(e) = :int | type(e) = :float {
+		true -> e
+		_ -> 0
+	}
+}
+
+fn _binOp?(op) if op {
+	:add, :sub, :mul, :div, :mod, :min, :max, :lt, :gt, :leq, :geq, :eq, :neq, :and, :or -> true
+	_ -> false
+}
+
+fn _unOp?(op) if op {
+	:neg, :abs, :exp, :sqrt, :not -> true
+	_ -> false
+}
+
+fn _evalBin(op, a, b) if op {
+	:add -> a + b
+	:sub -> a - b
+	:mul -> a * b
+	:div -> if b = 0 {
+		true -> 0
+		_ -> a / b
+	}
+	:mod -> if b = 0 {
+		true -> 0
+		_ -> a - b * int(a / b)
+	}
+	:min -> if a < b {
+		true -> a
+		_ -> b
+	}
+	:max -> if a > b {
+		true -> a
+		_ -> b
+	}
+	:lt -> if a < b {
+		true -> 1
+		_ -> 0
+	}
+	:gt -> if a > b {
+		true -> 1
+		_ -> 0
+	}
+	:leq -> if a <= b {
+		true -> 1
+		_ -> 0
+	}
+	:geq -> if a >= b {
+		true -> 1
+		_ -> 0
+	}
+	:eq -> if a = b {
+		true -> 1
+		_ -> 0
+	}
+	:neq -> if a != b {
+		true -> 1
+		_ -> 0
+	}
+	:and -> if a != 0 & b != 0 {
+		true -> 1
+		_ -> 0
+	}
+	:or -> if a != 0 | b != 0 {
+		true -> 1
+		_ -> 0
+	}
+	_ -> 0
+}
+
+fn _evalUn(op, a) if op {
+	:neg -> 0 - a
+	:abs -> if a < 0 {
+		true -> 0 - a
+		_ -> a
+	}
+	:exp -> pow(E, a)
+	:sqrt -> if a < 0 {
+		true -> 0
+		_ -> pow(a, 0.5)
+	}
+	:not -> if a = 0 {
+		true -> 1
+		_ -> 0
+	}
+	_ -> 0
+}
+
+// _eval interprets one IR node against env { x, y, ..., acc, i } plus params.
+fn _eval(e, env) if e {
+	? -> 0
+	_ -> if e.lit != ? {
+		true -> _num(e.lit)
+		_ -> if e.param != ? {
+			true -> _num(env.(e.param))
+			_ -> if e.inp != ? {
+				true -> _num(env.(e.inp))
+				_ -> if e.acc = true {
+					true -> _num(env.acc)
+					_ -> if _binOp?(e.op) {
+						true -> _evalBin(e.op, _eval(e.l, env), _eval(e.r, env))
+						_ -> if _unOp?(e.op) {
+							true -> _evalUn(e.op, _eval(e.l, env))
+							_ -> 0
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// _isBoolExpr reports whether an IR tree yields 0/1 predicates.
+fn _isBoolExpr(e) if e {
+	? -> false
+	_ -> if e.op != ? {
+		true -> if _binOp?(e.op) {
+			true -> e.op = :lt | e.op = :gt | e.op = :leq | e.op = :geq | e.op = :eq | e.op = :neq | e.op = :and | e.op = :or
+			_ -> e.op = :not
+		}
+		_ -> false
+	}
+	_ -> false
+}
+
+fn _containsStr(list, s) if len(list) {
+	0 -> false
+	_ -> if list.(0) = s {
+		true -> true
+		_ -> _containsStr(list |> slice(1, len(list)), s)
+	}
+}
+
+// _collectParams gathers every scalar param name used in the tree.
+fn _collectParams(e, acc) if e {
+	? -> acc
+	_ -> if e.param != ? {
+		true -> if acc |> _containsStr(e.param) {
+			true -> acc
+			_ -> acc << e.param
+		}
+		_ -> _collectKids(e, acc, _collectParams)
+	}
+	_ -> acc
+}
+
+// _collectInputs gathers which named input arrays the tree reads.
+fn _collectInputs(e, acc) if e {
+	? -> acc
+	_ -> if e.inp != ? {
+		true -> if acc |> _containsStr(e.inp) {
+			true -> acc
+			_ -> acc << e.inp
+		}
+		_ -> _collectKids(e, acc, _collectInputs)
+	}
+	_ -> acc
+}
+
+fn _collectKids(e, acc, rec) {
+	out := acc
+	if e.l != ? {
+		true -> out <- rec(e.l, out)
+	}
+	if e.r != ? {
+		true -> out <- rec(e.r, out)
+	}
+	out
+}
+
+// ---------------------------------------------------------------------------
+// fusion: stage lists -> single-pass per-element programs
+// ---------------------------------------------------------------------------
+// A stage is { op: :map, expr } | { op: :filter, expr } | { op: :reduce, expr, init }.
+// fuse(stages) -> { ok, kept, expr, reduce, init, params, err }:
+//   kept    - fused per-element filter predicate (? = keep all)
+//   expr    - fused per-element value expression
+//   reduce  - fold expression over acc (? = elementwise output)
+//   init    - reduce seed
+
+fn _substInp(tree, name, repl) if tree {
+	? -> ?
+	_ -> if tree.inp = name {
+		true -> repl
+		_ -> if tree.l != ? | tree.r != ? {
+			true -> {
+				op: tree.op
+				l: _substInp(tree.l, name, repl)
+				r: if tree.r != ? {
+					true -> _substInp(tree.r, name, repl)
+					_ -> ?
+				}
+			}
+			_ -> tree
+		}
+	}
+}
+
+fn _uniq(list) if len(list) {
+	0 -> []
+	_ -> if _containsStr(list |> slice(1, len(list)), list.(0)) {
+		true -> _uniq(list |> slice(1, len(list)))
+		_ -> append([list.(0)], _uniq(list |> slice(1, len(list))))
+	}
+}
+
+fn fuse(stages) {
+	kept := ?
+	expr := { inp: 'x' }
+	reduceExpr := ?
+	reduceInit := 0
+	params := []
+	err := ''
+	stages |> each(fn(st, idx) {
+		last? := idx + 1 = len(stages)
+		if st.op = :map {
+			true -> expr <- _substInp(st.expr, 'x', expr)
+			_ -> if st.op = :filter {
+				true -> {
+					pred := _substInp(st.expr, 'x', expr)
+					if kept {
+						? -> kept <- pred
+						_ -> kept <- { op: :and, l: kept, r: pred }
+					}
+				}
+				_ -> if st.op = :reduce {
+					true -> if last? {
+						true -> {
+							reduceExpr <- _substInp(st.expr, 'x', expr)
+							reduceInit <- _num(st.init)
+						}
+						_ -> err <- 'reduce must be the final stage'
+					}
+					_ -> err <- 'unknown stage op: ' + string(st.op)
+				}
+			}
+		}
+		params <- _collectParams(st.expr, params)
+	})
+	{
+		ok: err = ''
+		kept: kept
+		expr: expr
+		reduce: reduceExpr
+		init: reduceInit
+		params: _uniq(params)
+		err: err
+	}
+}
+
+// ---------------------------------------------------------------------------
+// C-family kernel source generation (OpenCL C, CUDA C, GLSL 430, HLSL 5)
+// ---------------------------------------------------------------------------
+
+fn _cSafe(name) name |> reduce('', fn(acc, c) acc << if c {
+	'?' -> '_qm'
+	'!' -> '_bang'
+	'-' -> '_'
+	'+' -> '_p'
+	_ -> c
+})
+
+fn _cBin(op, a, b) if op {
+	:add -> a << ' + ' << b
+	:sub -> a << ' - ' << b
+	:mul -> a << ' * ' << b
+	:div -> a << ' / ' << b
+	:mod -> 'fmod(' << a << ', ' << b << ')'
+	:min -> 'fmin(' << a << ', ' << b << ')'
+	:max -> 'fmax(' << a << ', ' << b << ')'
+	:lt -> a << ' < ' << b
+	:gt -> a << ' > ' << b
+	:leq -> a << ' <= ' << b
+	:geq -> a << ' >= ' << b
+	:eq -> a << ' == ' << b
+	:neq -> a << ' != ' << b
+	:and -> a << ' && ' << b
+	:or -> a << ' || ' << b
+	_ -> '0.0f'
+}
+
+fn _cUn(op, a) if op {
+	:neg -> '(-' << a << ')'
+	:abs -> 'fabs(' << a << ')'
+	:exp -> 'exp(' << a << ')'
+	:sqrt -> 'sqrt(' << a << ')'
+	:not -> '(!(' << a << '))'
+	_ -> '0.0f'
+}
+
+fn _cFloat(v) if type(v) = :int {
+	true -> string(v) << '.0f'
+	_ -> string(v) << 'f'
+}
+
+// _cExpr lowers an IR tree to a C expression. inMap maps input names to the
+// per-element C lvalue (e.g. x[gid]); accVar is the accumulator variable.
+fn _cExpr(e, inMap, accVar) if e {
+	? -> '0.0f'
+	_ -> if e.lit != ? {
+		true -> _cFloat(_num(e.lit))
+		_ -> if e.param != ? {
+			true -> _cSafe(e.param)
+			_ -> if e.inp != ? {
+				true -> if m := inMap.(e.inp) {
+					? -> '0.0f'
+					_ -> m
+				}
+				_ -> if e.acc = true {
+					true -> accVar
+					_ -> if _binOp?(e.op) {
+						true -> '(' << _cBin(e.op, _cExpr(e.l, inMap, accVar), _cExpr(e.r, inMap, accVar)) << ')'
+						_ -> if _unOp?(e.op) {
+							true -> _cUn(e.op, _cExpr(e.l, inMap, accVar))
+							_ -> '0.0f'
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _paramsDecl(params) if len(params) {
+	0 -> ''
+	_ -> params |> map(fn(p) ', const float ' << _cSafe(p)) |> join('')
+}
+
+// openclSource emits an OpenCL C kernel for a fused program. Reduction
+// kernels write one partial per work-group; the host folds the partials.
+fn openclSource(prog, fnName) {
+	inMap := {}
+	inMap.('x') := 'x[gid]'
+	decl := '(__global const float *x, __global float *out, const int n' << _paramsDecl(prog.params)
+	body := ''
+	if prog.kept != ? {
+		true -> body <- body << '  if(!(' << _cExpr(prog.kept, inMap, '') << ')) return;\n'
+	}
+	if prog.reduce = ? {
+		true -> body <- body << '  out[gid] = ' << _cExpr(prog.expr, inMap, '') << ';\n'
+		_ -> {
+			inMap.('i') := 'gid'
+			body <- body <<
+				('  float acc = ' << _cFloat(prog.init) << ';\n' <<
+				('  acc = ' << _cExpr(prog.reduce, inMap, 'acc') << ';\n') <<
+				('  out[get_group_id(0)] = acc;\n'))
+		}
+	}
+	'// generated by lib/compute.oak (OpenCL C)\n' <<
+		'__kernel void ' << _cSafe(fnName) << decl << ') {\n' <<
+		'  const int gid = get_global_id(0);\n' <<
+		'  if (gid >= n) return;\n' <<
+		body <<
+		'}\n'
+}
+
+// cudaSource emits a CUDA C kernel for the same program.
+fn cudaSource(prog, fnName) {
+	inMap := {}
+	inMap.('x') := 'x[gid]'
+	decl := '(const float *x, float *out, int n' << _paramsDecl(prog.params)
+	body := ''
+	if prog.kept != ? {
+		true -> body <- body << '  if(!(' << _cExpr(prog.kept, inMap, '') << ')) return;\n'
+	}
+	if prog.reduce = ? {
+		true -> body <- body << '  out[gid] = ' << _cExpr(prog.expr, inMap, '') << ';\n'
+		_ -> {
+			inMap.('i') := 'gid'
+			body <- body <<
+				('  float acc = ' << _cFloat(prog.init) << ';\n' <<
+				('  acc = ' << _cExpr(prog.reduce, inMap, 'acc') << ';\n') <<
+				('  out[blockIdx.x] = acc;\n'))
+		}
+	}
+	'// generated by lib/compute.oak (CUDA C)\n' <<
+		'extern "C" __global__ void ' << _cSafe(fnName) << decl << ') {\n' <<
+		'  const int gid = blockIdx.x * blockDim.x + threadIdx.x;\n' <<
+		'  if (gid >= n) return;\n' <<
+		body <<
+		'}\n'
+}
+
+fn _paramIndex(params, p) if len(params) {
+	0 -> 0
+	_ -> if params.(0) = p {
+		true -> 0
+		_ -> 1 + _paramIndex(params |> slice(1, len(params)), p)
+	}
+}
+
+// glslSource emits a GLSL 430 compute shader for the same program.
+fn glslSource(prog, fnName) {
+	inMap := {}
+	inMap.('x') := 'x[gid]'
+	paramsDecl := prog.params |> map(fn(p) 'layout(location = ' << string(_paramIndex(prog.params, p)) << ') in float ' << _cSafe(p) << ';') |> join('\n')
+	body := ''
+	if prog.kept != ? {
+		true -> body <- body << '  if(!(' << _cExpr(prog.kept, inMap, '') << ')) return;\n'
+	}
+	if prog.reduce = ? {
+		true -> body <- body << '  out[gid] = ' << _cExpr(prog.expr, inMap, '') << ';\n'
+		_ -> {
+			inMap.('i') := 'gid'
+			body <- body <<
+				('  float acc = ' << _cFloat(prog.init) << ';\n' <<
+				('  acc = ' << _cExpr(prog.reduce, inMap, 'acc') << ';\n') <<
+				('  out[gl_WorkGroupID.x] = acc;\n'))
+		}
+	}
+	'#version 430\n' <<
+		'layout(local_size_x = 256) in;\n' <<
+		'layout(std430, binding = 0) buffer InBlock { float x[]; };\n' <<
+		'layout(std430, binding = 1) buffer OutBlock { float out[]; };\n' <<
+		paramsDecl << '\n' <<
+		'uniform int n;\n' <<
+		'void main() {\n' <<
+		'  const uint gid = gl_GlobalInvocationID.x;\n' <<
+		'  if (gid >= uint(n)) return;\n' <<
+		body <<
+		'}\n'
+}
+
+// hlslSource emits an HLSL 5.0 compute shader for the same program.
+fn hlslSource(prog, fnName) {
+	inMap := {}
+	inMap.('x') := 'x[gid]'
+	body := ''
+	if prog.kept != ? {
+		true -> body <- body << '  if(!(' << _cExpr(prog.kept, inMap, '') << ')) return;\n'
+	}
+	if prog.reduce = ? {
+		true -> body <- body << '  out[gid] = ' << _cExpr(prog.expr, inMap, '') << ';\n'
+		_ -> {
+			inMap.('i') := 'gid'
+			body <- body <<
+				('  float acc = ' << _cFloat(prog.init) << ';\n' <<
+				('  acc = ' << _cExpr(prog.reduce, inMap, 'acc') << ';\n') <<
+				('  out[gid / 256] = acc;\n'))
+		}
+	}
+	'// generated by lib/compute.oak (HLSL 5.0)\n' <<
+		'StructuredBuffer<float> x : register(t0);\n' <<
+		'RWStructuredBuffer<float> out : register(u0);\n' <<
+		'cbuffer Params : register(b0) { int n; ' << (prog.params |> map(fn(p) 'float ' << _cSafe(p) << ';') |> join(' ')) << ' };\n' <<
+		'[numthreads(256,1,1)]\n' <<
+		'void CSMain(uint3 tid : SV_DispatchThreadID) {\n' <<
+		'  const uint gid = tid.x;\n' <<
+		'  if (gid >= (uint)n) return;\n' <<
+		body <<
+		'}\n'
+}
+
+// ---------------------------------------------------------------------------
+// CPU execution: fused interpretation, chunked across go() workers
+// ---------------------------------------------------------------------------
+
+fn _defaultWorkers() int(default(___runtime_sys_info().cpus, 1))
+
+fn _chunkBounds(n, workers, i) {
+	per := int(n / workers)
+	extra := n - per * workers
+	lo := i * per + if i < extra {
+		true -> i
+		_ -> extra
+	}
+	hi := lo + per + if i < extra {
+		true -> 1
+		_ -> 0
+	}
+	[lo, hi]
+}
+
+// _mkEnv builds an interpreter env from ordered [name, value] param pairs.
+fn _mkEnv(paramPairs) {
+	env := {}
+	paramPairs |> each(fn(pair) env.(pair.(0)) := _num(pair.(1)))
+	env
+}
+
+// _mapRange applies the fused program to xs[lo..hi) into a new list.
+fn _mapRange(prog, xs, env, lo, hi) {
+	fn sub(i, out) if i < hi {
+		true -> {
+			env.('x') := xs.(i)
+			env.('i') := i
+			if prog.kept = ? | _eval(prog.kept, env) != 0 {
+				true -> sub(i + 1, out << _eval(prog.expr, env))
+				_ -> sub(i + 1, out)
+			}
+		}
+		_ -> out
+	}
+	sub(lo, [])
+}
+
+// _reduceRange folds the fused reduce expr over xs[lo..hi).
+fn _reduceRange(prog, xs, env, lo, hi, seed) {
+	fn sub(i, accv) if i < hi {
+		true -> {
+			env.('x') := xs.(i)
+			env.('i') := i
+			if prog.kept = ? | _eval(prog.kept, env) != 0 {
+				true -> {
+					env.acc <- accv
+					sub(i + 1, _eval(prog.reduce, env))
+				}
+				_ -> sub(i + 1, accv)
+			}
+		}
+		_ -> accv
+	}
+	sub(lo, seed)
+}
+
+fn _workerCount(n, workers) if workers < 1 {
+	true -> 1
+	_ -> if workers > n {
+		true -> n
+		_ -> workers
+	}
+}
+
+// _runMapCpu executes a fused (map|filter) program over the whole input,
+// split across workers; results concatenated in worker order.
+fn _runMapCpu(prog, xs, paramPairs, workers) {
+	n := len(xs)
+	w := _workerCount(n, workers)
+	if n = 0 {
+		true -> []
+		_ -> if w = 1 {
+			true -> _mapRange(prog, xs, _mkEnv(paramPairs), 0, n)
+			_ -> {
+				ch := make_chan()
+				_range(w) |> each(fn(k) {
+					go(fn {
+						bounds := _chunkBounds(n, w, k)
+						chan_send(ch, [k, _mapRange(prog, xs, _mkEnv(paramPairs), bounds.0, bounds.1)])
+					})
+				})
+				_joinOrdered(_collectPairs(ch, w))
+			}
+		}
+	}
+}
+
+// _collectPairs receives w [workerIndex, value] pairs from a chan.
+fn _collectPairs(ch, w) if w <= 0 {
+	true -> []
+	_ -> append(_collectPairs(ch, w - 1), [chan_recv(ch).data])
+}
+
+// _joinOrdered sorts [index, list] pairs by index and concatenates.
+fn _joinOrdered(pairs) {
+	sorted := _insertSortPairs(pairs)
+	sorted |> reduce([], fn(acc, p) append(acc, p.(1)))
+}
+
+fn _insertSortPairs(pairs) pairs |> reduce([], fn(acc, p) _insertPair(acc, p))
+
+fn _insertPair(sorted, pair) if len(sorted) {
+	0 -> [pair]
+	_ -> {
+		head := sorted.(0)
+		if head.(0) > pair.(0) {
+			true -> append([pair], sorted)
+			_ -> append([head], _insertPair(sorted |> slice(1, len(sorted)), pair))
+		}
+	}
+}
+
+// _runReduceCpu executes a fused reduce program, folding worker partials.
+fn _runReduceCpu(prog, xs, paramPairs, workers) {
+	n := len(xs)
+	w := _workerCount(n, workers)
+	if n = 0 {
+		true -> prog.init
+		_ -> if w = 1 {
+			true -> _reduceRange(prog, xs, _mkEnv(paramPairs), 0, n, prog.init)
+			_ -> {
+				ch := make_chan()
+				_range(w) |> each(fn(k) {
+					go(fn {
+						bounds := _chunkBounds(n, w, k)
+						chan_send(ch, _reduceRange(prog, xs, _mkEnv(paramPairs), bounds.0, bounds.1, prog.init))
+					})
+				})
+				_foldPartials(ch, w, prog.init)
+			}
+		}
+	}
+}
+
+fn _foldPartials(ch, w, seed) if w <= 0 {
+	true -> seed
+	_ -> _foldPartials(ch, w - 1, seed + _num(chan_recv(ch).data))
+}
+
+// ---------------------------------------------------------------------------
+// GPU marshalling (f32 LE byte strings via ieee754 + bits)
+// ---------------------------------------------------------------------------
+
+fn _u32Bytes(n) {
+	v := int(n)
+	[v % 256, int(v / 256) % 256, int(v / 65536) % 256, int(v / 16777216) % 256]
+}
+
+fn _u64Bytes(v) {
+	w := int(v)
+	[
+		w % 256
+		int(w / 256) % 256
+		int(w / 65536) % 256
+		int(w / 16777216) % 256
+		int(w / 1099511627776) % 256
+		int(w / 281474976710656) % 256
+		0
+		0
+	]
+}
+
+// _readU64LE assembles a little-endian u64 from a byte string.
+fn _readU64LE(bs) {
+	bl := bits(bs)
+	_num(bl.(0)) + _num(bl.(1)) * 256 + _num(bl.(2)) * 65536 +
+		_num(bl.(3)) * 16777216 + _num(bl.(4)) * 1099511627776 +
+		_num(bl.(5)) * 281474976710656 + _num(bl.(6)) * 72057594037927936
+}
+
+fn _readU32LE(bs) {
+	bl := bits(bs)
+	_num(bl.(0)) + _num(bl.(1)) * 256 + _num(bl.(2)) * 65536 + _num(bl.(3)) * 16777216
+}
+
+// _f32ToNum decodes an IEEE-754 binary32 bit pattern to a host number.
+fn _f32ToNum(u) {
+	sign := if u >= 2147483648 {
+		true -> 0 - 1
+		_ -> 1
+	}
+	e := int(u / 8388608) % 256
+	frac := u % 8388608
+	if e = 0 {
+		true -> sign * frac * pow(2.0, -149)
+		_ -> if e = 255 {
+			true -> sign * 3.4e38
+			_ -> sign * (1 + frac / 8388608.0) * pow(2.0, e - 127)
+		}
+	}
+}
+
+// _packF32 encodes a list of numbers as an f32 little-endian byte string.
+fn _packF32(list) {
+	fn sub(i, acc) if i < len(list) {
+		true -> sub(i + 1, append(acc, _u32Bytes(ieee.fromNumber(_num(list.(i)), false).bits)))
+		_ -> acc
+	}
+	bits(sub(0, []))
+}
+
+// _unpackF32 decodes count f32 values from a byte string.
+fn _unpackF32(bs, count) {
+	bl := bits(bs)
+	fn sub(i, acc) if i < count {
+		true -> {
+			u := _num(bl.(i * 4)) + _num(bl.(i * 4 + 1)) * 256 +
+				_num(bl.(i * 4 + 2)) * 65536 + _num(bl.(i * 4 + 3)) * 16777216
+			sub(i + 1, append(acc, [_f32ToNum(u)]))
+		}
+		_ -> acc
+	}
+	sub(0, [])
+}
+
+// _paramValue finds the value for one param name in [name, value] pairs.
+fn _paramValue(paramPairs, name, i) if i < len(paramPairs) {
+	true -> if paramPairs.(i).(0) = name {
+		true -> _num(paramPairs.(i).(1))
+		_ -> _paramValue(paramPairs, name, i + 1)
+	}
+	_ -> 0
+}
+
+// ---------------------------------------------------------------------------
+// OpenCL launch path (via lib/gpus.oak FFI)
+// ---------------------------------------------------------------------------
+
+_openclSymbols := [
+	'clGetPlatformIDs'
+	'clGetDeviceIDs'
+	'clCreateContext'
+	'clCreateCommandQueue'
+	'clCreateBuffer'
+	'clCreateProgramWithSource'
+	'clBuildProgram'
+	'clCreateKernel'
+	'clSetKernelArg'
+	'clEnqueueNDRangeKernel'
+	'clEnqueueWriteBuffer'
+	'clEnqueueReadBuffer'
+	'clFinish'
+	'clReleaseMemObject'
+	'clReleaseKernel'
+	'clReleaseProgram'
+	'clReleaseCommandQueue'
+	'clReleaseContext'
+]
+
+// _resolveOpencl resolves every required symbol or returns { type: :error }.
+fn _resolveOpencl() {
+	procs := {}
+	bad := ''
+	_openclSymbols |> each(fn(sym) if bad = '' {
+		true -> {
+			r := gpus.resolve(sym, [])
+			if r.type = :ok {
+				true -> procs.(sym) := r.proc
+				_ -> bad <- sym + ': ' + default(r.error, 'unresolved')
+			}
+		}
+	})
+	if bad != '' {
+		true -> { type: :error, error: bad }
+		_ -> { type: :ok, procs: procs }
+	}
+}
+
+// _status reads a signed cl_int written into a 4-byte out buffer.
+fn _status(buf) {
+	u := _readU32LE(buf)
+	if u >= 2147483648 {
+		true -> u - 4294967296
+		_ -> u
+	}
+}
+
+// _openclRun executes one fused program on the first OpenCL device.
+// Returns { type: :ok, out } or { type: :error, error }.
+fn _openclRun(prog, xs, paramPairs) {
+	r := _resolveOpencl()
+	if r.type = :error {
+		true -> r
+		_ -> {
+			p := r.procs
+			n := len(xs)
+			src := openclSource(prog, 'oak_compute')
+			platBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+			st := syscall(p.('clGetPlatformIDs'), 1, pointer(platBuf), pointer(0))
+			if st != 0 {
+				true -> { type: :error, error: 'clGetPlatformIDs=' + string(st) }
+				_ -> {
+					platform := _readU64LE(platBuf)
+					devBuf := bits([0, 0, 0, 0, 0, 0, 0, 0])
+					st2 := syscall(p.('clGetDeviceIDs'), platform, 2, 1, pointer(devBuf), pointer(0))
+					if st2 != 0 {
+						true -> { type: :error, error: 'clGetDeviceIDs=' + string(st2) }
+						_ -> _openclCtx(p, src, prog, xs, paramPairs, n, devBuf)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _openclCtx(p, src, prog, xs, paramPairs, n, devBuf) {
+	errBuf := bits([0, 0, 0, 0])
+	ctx := syscall(p.('clCreateContext'), pointer(0), 1, pointer(devBuf), pointer(0), pointer(0), pointer(errBuf))
+	if _status(errBuf) != 0 {
+		true -> { type: :error, error: 'clCreateContext=' + string(_status(errBuf)) }
+		_ -> {
+			queue := syscall(p.('clCreateCommandQueue'), ctx, _readU64LE(devBuf), 0, pointer(errBuf))
+			if _status(errBuf) != 0 {
+				true -> { type: :error, error: 'clCreateCommandQueue=' + string(_status(errBuf)) }
+				_ -> _openclBuild(p, src, prog, xs, paramPairs, n, devBuf, ctx, queue)
+			}
+		}
+	}
+}
+
+fn _openclBuild(p, src, prog, xs, paramPairs, n, devBuf, ctx, queue) {
+	errBuf := bits([0, 0, 0, 0])
+	srcLen := _u64Bytes(len(src))
+	progH := syscall(p.('clCreateProgramWithSource'), ctx, 1, pointer(src), pointer(srcLen), pointer(errBuf))
+	if _status(errBuf) != 0 {
+		true -> { type: :error, error: 'clCreateProgramWithSource=' + string(_status(errBuf)) }
+		_ -> {
+			st := syscall(p.('clBuildProgram'), progH, 1, pointer(devBuf), pointer(0), pointer(0), pointer(0))
+			if st != 0 {
+				true -> { type: :error, error: 'clBuildProgram=' + string(st) }
+				_ -> {
+					kerr := bits([0, 0, 0, 0])
+					nameBuf := 'oak_compute'
+					kernel := syscall(p.('clCreateKernel'), progH, pointer(nameBuf), pointer(kerr))
+					if _status(kerr) != 0 {
+						true -> { type: :error, error: 'clCreateKernel=' + string(_status(kerr)) }
+						_ -> _openclBuffers(p, prog, xs, paramPairs, n, ctx, queue, kernel, progH)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _openclBuffers(p, prog, xs, paramPairs, n, ctx, queue, kernel, progH) {
+	errBuf := bits([0, 0, 0, 0])
+	xBytes := _packF32(xs)
+	groups := int(n / 256)
+	if n % 256 > 0 {
+		true -> groups <- groups + 1
+	}
+	if groups < 1 {
+		true -> groups <- 1
+	}
+	isReduce := prog.reduce != ?
+	outSize := if isReduce {
+		true -> groups * 4
+		_ -> n * 4
+	}
+	inBuf := syscall(p.('clCreateBuffer'), ctx, 4, n * 4, pointer(0), pointer(errBuf))
+	if _status(errBuf) != 0 {
+		true -> { type: :error, error: 'clCreateBuffer(in)=' + string(_status(errBuf)) }
+		_ -> {
+			outBuf := syscall(p.('clCreateBuffer'), ctx, 1, outSize, pointer(0), pointer(errBuf))
+			if _status(errBuf) != 0 {
+				true -> { type: :error, error: 'clCreateBuffer(out)=' + string(_status(errBuf)) }
+				_ -> {
+					stw := syscall(p.('clEnqueueWriteBuffer'), queue, inBuf, 1, 0, n * 4, pointer(xBytes), 0, pointer(0), pointer(0))
+					if stw != 0 {
+						true -> { type: :error, error: 'clEnqueueWriteBuffer=' + string(stw) }
+						_ -> _openclLaunch(p, prog, xs, paramPairs, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx)
+					}
+				}
+			}
+		}
+	}
+}
+
+// _setArgs binds kernel args: in buffer, out buffer, n, then params.
+fn _setArgs(p, kernel, prog, paramPairs, inBuf, outBuf, n) {
+	inH := _u64Bytes(inBuf)
+	outH := _u64Bytes(outBuf)
+	nBuf := _u32Bytes(n)
+	st0 := syscall(p.('clSetKernelArg'), kernel, 0, 8, pointer(inH))
+	st1 := syscall(p.('clSetKernelArg'), kernel, 1, 8, pointer(outH))
+	st2 := syscall(p.('clSetKernelArg'), kernel, 2, 4, pointer(nBuf))
+	if st0 != 0 | st1 != 0 | st2 != 0 {
+		true -> { type: :error, error: 'clSetKernelArg(base)=' + string(st0) + ',' + string(st1) + ',' + string(st2) }
+		_ -> {
+			bad := ''
+			prog.params |> each(fn(pn, idx) if bad = '' {
+				true -> {
+					val := _paramValue(paramPairs, pn, 0)
+					vBuf := _u32Bytes(ieee.fromNumber(val, false).bits)
+					st := syscall(p.('clSetKernelArg'), kernel, 3 + idx, 4, pointer(vBuf))
+					if st != 0 {
+						true -> bad <- 'clSetKernelArg(' + pn + ')=' + string(st)
+					}
+				}
+			})
+			if bad != '' {
+				true -> { type: :error, error: bad }
+				_ -> { type: :ok }
+			}
+		}
+	}
+}
+
+fn _openclLaunch(p, prog, xs, paramPairs, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx) {
+	argRes := _setArgs(p, kernel, prog, paramPairs, inBuf, outBuf, n)
+	if argRes.type = :error {
+		true -> argRes
+		_ -> _openclDispatch(p, prog, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx)
+	}
+}
+
+fn _openclDispatch(p, prog, n, groups, outSize, queue, kernel, inBuf, outBuf, progH, ctx) {
+	gws := _u64Bytes(groups * 256)
+	st := syscall(p.('clEnqueueNDRangeKernel'), queue, kernel, 1, pointer(0), pointer(gws), pointer(0), 0, pointer(0), pointer(0))
+	if st != 0 {
+		true -> { type: :error, error: 'clEnqueueNDRangeKernel=' + string(st) }
+		_ -> {
+			stf := syscall(p.('clFinish'), queue)
+			outHost := bits(_zeroBytes(outSize))
+			strd := syscall(p.('clEnqueueReadBuffer'), queue, outBuf, 1, 0, outSize, pointer(outHost), 0, pointer(0), pointer(0))
+			if stf != 0 | strd != 0 {
+				true -> { type: :error, error: 'read=' + string(stf) + ',' + string(strd) }
+				_ -> {
+					syscall(p.('clReleaseMemObject'), inBuf)
+					syscall(p.('clReleaseMemObject'), outBuf)
+					syscall(p.('clReleaseKernel'), kernel)
+					syscall(p.('clReleaseProgram'), progH)
+					syscall(p.('clReleaseCommandQueue'), queue)
+					syscall(p.('clReleaseContext'), ctx)
+					if prog.reduce != ? {
+						true -> { type: :ok, out: _reducePartials(outHost, groups) }
+						_ -> { type: :ok, out: _unpackF32(outHost, n) }
+					}
+				}
+			}
+		}
+	}
+}
+
+fn _zeroBytes(count) {
+	fn sub(i, acc) if i < count {
+		true -> sub(i + 1, append(acc, [0]))
+	}
+	sub(0, [])
+}
+
+// _reducePartials sums the per-workgroup f32 partials.
+fn _reducePartials(outHost, groups) {
+	vals := _unpackF32(outHost, groups)
+	vals |> reduce(0, fn(acc, v) acc + v)
+}
+
+// ---------------------------------------------------------------------------
+// public kernels
+// ---------------------------------------------------------------------------
+
+fn _defaultThreshold() 8192
+
+fn _mkOpts(opts) {
+	o := if opts {
+		? -> {}
+		_ -> opts |> clone()
+	}
+	if o.threshold = ? {
+		true -> o.threshold <- _defaultThreshold()
+	}
+	if o.workers = ? {
+		true -> o.workers <- _defaultWorkers()
+	}
+	if o.force = ? {
+		true -> o.force := ''
+	}
+	o
+}
+
+// _gpuEligible? decides whether the OpenCL path may run: allowed by opts,
+// large enough, no filter-elementwise program (GPU output gaps), GPU present.
+fn _gpuEligible?(prog, n, o) if o.force = 'cpu' {
+	true -> false
+	_ -> if n < o.threshold & o.force != 'gpu' {
+		true -> false
+		_ -> if prog.kept != ? & prog.reduce = ? {
+			true -> false
+			_ -> device().type = :gpu
+		}
+	}
+}
+
+// _exec runs a fused program: OpenCL when eligible, else multi-core CPU.
+// Any GPU failure falls back to CPU transparently.
+fn _exec(prog, xs, paramPairs, o) if _gpuEligible?(prog, len(xs), o) {
+	true -> {
+		r := _openclRun(prog, xs, paramPairs)
+		if r.type = :ok {
+			true -> r.out
+			_ -> _runMapCpu(prog, xs, paramPairs, o.workers)
+		}
+	}
+	_ -> _runMapCpu(prog, xs, paramPairs, o.workers)
+}
+
+fn _execReduce(prog, xs, paramPairs, o) if _gpuEligible?(prog, len(xs), o) {
+	true -> {
+		r := _openclRun(prog, xs, paramPairs)
+		if r.type = :ok {
+			true -> r.out
+			_ -> _runReduceCpu(prog, xs, paramPairs, o.workers)
+		}
+	}
+	_ -> _runReduceCpu(prog, xs, paramPairs, o.workers)
+}
+
+// pipeline(stages, xs, paramPairs?, opts?) fuses the stage list and executes
+// it in one pass. Stage exprs read the element as { inp: 'x' }, scalars as
+// { param: 'a' }, the accumulator in a reduce as { acc: true }. Returns the
+// output list (elementwise) or scalar (reduce), or { type: :error }.
+fn pipeline(stages, xs, paramPairs, opts) {
+	o := _mkOpts(opts)
+	pairs := default(paramPairs, [])
+	prog := fuse(stages)
+	if !prog.ok {
+		true -> { type: :error, error: prog.err }
+		_ -> if prog.reduce != ? {
+			true -> _execReduce(prog, xs, pairs, o)
+			_ -> _exec(prog, xs, pairs, o)
+		}
+	}
+}
+
+// mapFused maps a fused per-element expr over xs (list -> list).
+fn mapFused(expr, xs, paramPairs, opts) {
+	o := _mkOpts(opts)
+	prog := fuse([{ op: :map, expr: expr }])
+	_exec(prog, xs, default(paramPairs, []), o)
+}
+
+// filterFused filters xs by a predicate expr (list -> list).
+fn filterFused(expr, xs, paramPairs, opts) {
+	o := _mkOpts(opts)
+	prog := fuse([{ op: :filter, expr: expr }])
+	_exec(prog, xs, default(paramPairs, []), o)
+}
+
+// reduceSum folds a per-element expr (+ acc) over xs into a scalar.
+fn reduceSum(expr, xs, paramPairs, opts) {
+	o := _mkOpts(opts)
+	prog := fuse([{ op: :reduce, expr: { op: :add, l: expr, r: { acc: true } }, init: 0 }])
+	_execReduce(prog, xs, default(paramPairs, []), o)
+}
+
+// dotProduct computes sum(x[i] * y[i]) in one chunked pass.
+fn dotProduct(xs, ys, opts) {
+	o := _mkOpts(opts)
+	n := if len(xs) < len(ys) {
+		true -> len(xs)
+		_ -> len(ys)
+	}
+	_chunkedScalar(n, o.workers, fn(lo, hi) _dotRange(xs, ys, lo, hi, 0))
+}
+
+fn _dotRange(xs, ys, lo, hi, seed) {
+	fn sub(i, accv) if i < hi {
+		true -> sub(i + 1, accv + xs.(i) * ys.(i))
+		_ -> accv
+	}
+	sub(lo, seed)
+}
+
+// _chunkedScalar splits [0..n) across workers; each worker folds its range
+// with fn(lo, hi); partials are summed in worker order.
+fn _chunkedScalar(n, workers, fnk) {
+	w := _workerCount(n, workers)
+	if n = 0 {
+		true -> 0
+		_ -> if w = 1 {
+			true -> fnk(0, n)
+			_ -> {
+				ch := make_chan()
+				_range(w) |> each(fn(k) {
+					go(fn {
+						bounds := _chunkBounds(n, w, k)
+						chan_send(ch, [k, fnk(bounds.0, bounds.1)])
+					})
+				})
+				pairs := _collectPairs(ch, w)
+				_insertSortPairs(pairs) |> reduce(0, fn(acc, p) acc + p.(1))
+			}
+		}
+	}
+}
+
+// saxpy computes a*x + y elementwise.
+fn saxpy(a, xs, ys, opts) {
+	o := _mkOpts(opts)
+	n := if len(xs) < len(ys) {
+		true -> len(xs)
+		_ -> len(ys)
+	}
+	_chunkedMap(n, o.workers, fn(i) a * xs.(i) + ys.(i))
+}
+
+// _chunkedMap splits [0..n) across workers; fn(i) produces element i.
+fn _chunkedMap(n, workers, fnk) {
+	w := _workerCount(n, workers)
+	if n = 0 {
+		true -> []
+		_ -> if w = 1 {
+			true -> _produceRange(fnk, 0, n)
+			_ -> {
+				ch := make_chan()
+				_range(w) |> each(fn(k) {
+					go(fn {
+						bounds := _chunkBounds(n, w, k)
+						chan_send(ch, [k, _produceRange(fnk, bounds.0, bounds.1)])
+					})
+				})
+				_joinOrdered(_collectPairs(ch, w))
+			}
+		}
+	}
+}
+
+fn _produceRange(fnk, lo, hi) {
+	fn sub(i, out) if i < hi {
+		true -> sub(i + 1, out << fnk(i))
+		_ -> out
+	}
+	sub(lo, [])
+}
+
+// matmul multiplies an n*m by m*p matrix (row-major flat lists).
+fn matmul(A, B, n, m, p, opts) {
+	o := _mkOpts(opts)
+	_chunkedMap(n, o.workers, fn(i) _matRow(A, B, i, m, p)) |> joinListsFlat()
+}
+
+fn _matRow(A, B, i, m, p) {
+	_range(p) |> map(fn(j) {
+		fn ksub(k, accv) if k < m {
+			true -> ksub(k + 1, accv + A.(i * m + k) * B.(k * p + j))
+			_ -> accv
+		}
+		ksub(0, 0)
+	})
+}
+
+fn joinListsFlat(lists) if len(lists) {
+	0 -> []
+	_ -> append(lists.(0), joinListsFlat(lists |> slice(1, len(lists))))
+}
+
+// softmax computes the numerically-stable softmax of logits in three
+// chunk-parallel passes (max, exp, normalize).
+fn softmax(logits, opts) {
+	o := _mkOpts(opts)
+	if len(logits) = 0 {
+		true -> []
+		_ -> {
+			maxV := _chunkedScalar(len(logits), o.workers, fn(lo, hi) _maxRange(logits, lo, hi))
+			exps := _chunkedMap(len(logits), o.workers, fn(i) pow(E, logits.(i) - maxV))
+			total := reduceSum({ inp: 'x' }, exps, [], o)
+			if total = 0 {
+				true -> logits |> map(fn(x) 0)
+				_ -> _chunkedMap(len(exps), o.workers, fn(i) exps.(i) / total)
+			}
+		}
+	}
+}
+
+fn _maxRange(xs, lo, hi) {
+	fn sub(i, m) if i < hi {
+		true -> if xs.(i) > m {
+			true -> sub(i + 1, xs.(i))
+			_ -> sub(i + 1, m)
+		}
+		_ -> m
+	}
+	sub(lo + 1, xs.(lo))
+}
+
+// ---------------------------------------------------------------------------
+// dispatch helpers (GPU execution lands with the OpenCL runtime)
+// ---------------------------------------------------------------------------
+
+// device probes the GPU backends once and reports what compute would use.
+fn device() {
+	chosen := gpus.select([])
+	if chosen.type = :ok {
+		true -> {
+			type: :gpu
+			backend: chosen.backend.name
+		}
+		_ -> {
+			type: :cpu
+			workers: _defaultWorkers()
+		}
+	}
+}
+
+// f32Bits returns the IEEE-754 binary32 encoding of a number (GPU marshalling).
+fn f32Bits(x) ieee.fromNumber(x, false).bits
+
+{
+	fuse: fuse
+	openclSource: openclSource
+	cudaSource: cudaSource
+	glslSource: glslSource
+	hlslSource: hlslSource
+	mapFused: mapFused
+	filterFused: filterFused
+	reduceSum: reduceSum
+	dotProduct: dotProduct
+	saxpy: saxpy
+	matmul: matmul
+	softmax: softmax
+	pipeline: pipeline
+	device: device
+	f32Bits: f32Bits
+	workers: _defaultWorkers
+}

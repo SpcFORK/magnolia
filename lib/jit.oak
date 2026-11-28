@@ -1,0 +1,259 @@
+// jit — Runtime Value Specialization (plan §5.5 / §9.2)
+//
+// Specializes an Oak function on runtime-loaded constants (strides,
+// thresholds, coefficients, schema layouts) into native x86-64 machine
+// code, compiled in microseconds with zero external compiler subprocess.
+//
+// Usage:
+//   jit := import('jit')
+//
+//   spec := jit.specialize('fn f(x) x * C + K', { C: 7, K: 2 })
+//   spec.call(5)          // -> 37 (native, SysV integer args)
+//   spec.addr             // entry address of the native code
+//   spec.compileNs        // how long the whole pipeline took (ns)
+//   spec.free()           // release the executable mapping
+//
+// How it works:
+//   1. Parse the (single-function) source and substitute every identifier
+//      found in boundEnv with its integer value, folding constant binary
+//      expressions (+ - * & | ^ << >>) at the AST level.
+//   2. Lower the substituted function to IR via codegen-native's IR
+//      compiler and emit x86-64 machine bytes in fn-entry mode (no
+//      _start prologue) via createX86_64Generator.compile(ir, opts).
+//   3. Slice the function body out of the emitted code, copy it into
+//      executable memory through the host's ___runtime_jit_* bridge, and
+//      wrap the address in a callable that passes machine-word args.
+//
+// Notes:
+//   - Only integer constants are bound in v1; strings/floats in boundEnv
+//     are ignored. Unknown identifiers compile to the IR compiler's
+//     stand-in constant 0.
+//   - The specialized function receives integer args per SysV (rdi, rsi,
+//     rdx, rcx, r8, r9, then stack); it must return an integer in rax.
+//   - fn bodies in this dialect are expression-positioned (no `return`
+//     statement); error results are { type: :error, error: msg } objects
+//     returned as the value of an if/else expression.
+
+{
+	map: map
+	each: each
+	len: len
+	slice: slice
+} := import('std')
+{
+	join: join
+	split: split
+	trim: trim
+} := import('str')
+
+syntax := import('syntax')
+cgn := import('codegen-native')
+
+fn jitErr(msg) { type: :error, error: msg }
+
+// ---------------------------------------------------------------------------
+// AST constant substitution + folding
+// ---------------------------------------------------------------------------
+
+// foldBinary computes an integer result for a literal binary expression,
+// or ? when the op is not foldable in v1 (division/modulo keep host
+// float semantics and are not folded).
+fn foldBinary(op, a, b) if op {
+	:plus -> a + b
+	:minus -> a - b
+	:times -> a * b
+	:and -> a & b
+	:or -> a | b
+	:xor -> a ^ b
+	:lshift, :pushArrow -> a << b
+	:rshift -> a >> b
+	_ -> ?
+}
+
+// literalKind reports whether a node is a self-evaluating leaf we keep.
+fn isLeaf(node) if node.type {
+	:int -> true
+	:float -> true
+	:string -> true
+	:bool -> true
+	:null -> true
+	_ -> false
+}
+
+// subAndFold walks an AST node, replacing identifiers bound in env with
+// integer literals and folding literal binary/unary expressions.
+fn subAndFold(node, env) if node {
+	? -> node
+	_ -> if node.type {
+		:identifier -> if env.(node.val) != ? {
+			true -> { type: :int, tok: node.tok, val: env.(node.val) }
+			_ -> node
+		}
+		_ -> if isLeaf(node) {
+			true -> node
+			_ -> if node.type {
+				:binary -> {
+					left := subAndFold(node.left, env)
+					right := subAndFold(node.right, env)
+					if left.type = :int & right.type = :int {
+						true -> {
+							folded := foldBinary(node.op, left.val, right.val)
+							if folded != ? {
+								true -> { type: :int, tok: node.tok, val: folded }
+								_ -> { type: :binary, tok: node.tok, op: node.op, left: left, right: right }
+							}
+						}
+						_ -> { type: :binary, tok: node.tok, op: node.op, left: left, right: right }
+					}
+				}
+				:unary -> {
+					inner := subAndFold(node.right, env)
+					if node.op = :minus & inner.type = :int {
+						true -> { type: :int, tok: node.tok, val: 0 - inner.val }
+						_ -> { type: :unary, tok: node.tok, op: node.op, right: inner }
+					}
+				}
+				:ifExpr -> {
+					branches := node.branches |> map(fn(br) {
+						cond := subAndFold(br.cond, env)
+						target := if br.target {
+							? -> br.target
+							_ -> if isLeaf(br.target) {
+								true -> br.target
+								_ -> subAndFold(br.target, env)
+							}
+						}
+						{
+							type: :ifBranch,
+							tok: br.tok,
+							target: target,
+							body: subAndFold(br.body, env),
+						}
+					})
+					{
+						type: :ifExpr,
+						tok: node.tok,
+						cond: subAndFold(node.cond, env),
+						branches: branches,
+					}
+				}
+				:fnCall -> {
+					args := node.args |> map(fn(a) subAndFold(a, env))
+					{
+						type: :fnCall,
+						tok: node.tok,
+						function: node.function,
+						args: args,
+						restArg: node.restArg,
+					}
+				}
+				:block -> {
+					exprs := node.exprs |> map(fn(e) subAndFold(e, env))
+					{ type: :block, tok: node.tok, exprs: exprs }
+				}
+				_ -> node
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Specialization pipeline (expression-positioned helpers, no return stmts)
+// ---------------------------------------------------------------------------
+
+// extractFn parses a source and yields the single function node, or an
+// error object.
+fn extractFn(fnSource) {
+	nodes := syntax.parse(fnSource)
+	fnNode := ?
+	other := 0
+	nodes |> each(fn(n) if n.type {
+		:function -> fnNode <- n
+		_ -> other <- other + 1
+	})
+	if fnNode = ? {
+		true -> jitErr('jit.specialize source must define a function')
+		_ -> if other > 0 {
+			true -> jitErr('jit.specialize source must contain exactly one function')
+			_ -> fnNode
+		}
+	}
+}
+
+// lowerToCode substitutes constants, lowers to IR, emits fn-entry machine
+// code, and yields { code, label } — or an error object.
+fn lowerToCode(fnNode, boundEnv) {
+	subBody := subAndFold(fnNode.body, boundEnv)
+	subFn := {
+		type: :function,
+		tok: fnNode.tok,
+		name: fnNode.name,
+		args: fnNode.args,
+		body: subBody,
+	}
+	// wrap: fn def + call to it, so the IR compiler gives us a callable
+	// program; the machine code at the fn label is the fn itself with
+	// SysV args
+	argRefs := fnNode.args |> map(fn(a) { type: :identifier, tok: fnNode.tok, val: a })
+	block := {
+		type: :block,
+		tok: fnNode.tok,
+		exprs: [subFn, {
+			type: :fnCall,
+			tok: fnNode.tok,
+			function: { type: :identifier, tok: fnNode.tok, val: fnNode.name },
+			args: argRefs,
+			restArg: ?,
+		}]
+	}
+	irP := cgn.createIRCompiler().compile(block)
+	// the wrapped block defines exactly one function; in fn-entry mode the
+	// emitted code starts with the compileFnBody skip jmp (E9 + rel32 = 5
+	// bytes) and the function label sits immediately after it. (Reading
+	// gen-returned labelOffsets lists from a module-level fn hits the
+	// object-member capture gap, so we use this structural invariant.)
+	entryLabel := 'fn_0'
+	gen := cgn.createX86_64Generator()
+	out := gen.compile(irP, { fnEntry: entryLabel })
+	entryOff := 5
+	code := out.code |> slice(entryOff, len(out.code))
+	{ code: code, label: entryLabel }
+}
+
+// Specialize a single-function source on runtime integer constants and
+// return a native callable descriptor, or an error object.
+fn specialize(fnSource, boundEnv) {
+		if boundEnv = ? -> boundEnv <- {}
+		startNs := nanotime()
+		// stage 1: parse
+		stage1 := extractFn(fnSource)
+		if stage1.type = :error {
+			true -> stage1
+			_ -> {
+				// stage 2: substitute, lower, emit
+				stage2 := lowerToCode(stage1, boundEnv)
+				if stage2.type = :error {
+					true -> stage2
+					_ -> {
+						// stage 3: load into executable memory
+						addr := ___runtime_jit_compile(stage2.code)
+						if type(addr) = :object {
+							true -> addr // error object from the bridge
+							_ -> {
+								compileNs := nanotime() - startNs
+								{
+									addr: addr,
+									size: len(stage2.code),
+									code: stage2.code,
+									compileNs: compileNs,
+									label: stage2.label,
+									call: fn(args...) ___runtime_jit_call(addr, args...),
+									free: fn() ___runtime_jit_free(addr),
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+}

@@ -1,0 +1,498 @@
+// ast-optimize -- MIR-assisted pre-codegen optimization pass (plan §10.1)
+//
+// A target-agnostic AST pass applied to every module before bundle
+// rendering. It gives all transpile targets (web/ts/lua/java/wasm/go/c/
+// native) two transforms:
+//
+//   1. Constant propagation & folding: identifiers bound to literal
+//      values are replaced with the literal downstream, and literal
+//      binary/unary expressions fold at compile time (+ - * & | ^ << >>
+//      comparisons and unary minus, plus string concatenation).
+//      If-expressions whose condition folds to a literal keep only the
+//      live branch (dead-branch elimination).
+//   2. Self-tail-recursion to native-loop lowering: a function whose
+//      body is a two-branch if with a pure self-call in tail position is
+//      rewritten to a :whileExpr loop that rebinds the parameters,
+//      eliminating trampoline/stack-churn allocations in targets whose
+//      loops are cheap and stack frames are not.
+//
+// The pass only introduces the new :whileExpr node type when the caller
+// permits it (allowWhile? — set for web/ts/lua/java, whose renderers emit
+// native loops for it; go/c/native/wasm get the folding pass only, so
+// their renderers never see it).
+//
+// Safety rules:
+//   - A function call kills all tracked constant bindings (calls may
+//     mutate captured nonlocals).
+//   - A reassignment with a non-literal RHS, or a nonlocal assignment
+//     (local?: false), kills the binding.
+//   - At an if-join, only names bound to the same literal in every
+//     branch survive (conservative merge).
+//   - Self-call arguments must be pure (literals/identifiers/arithmetic
+//     over those) to become loop step expressions.
+
+{
+	map: map
+	each: each
+	len: len
+	slice: slice
+	filter: filter
+	append: append
+} := import('std')
+{
+	join: join
+	replace: replace
+} := import('str')
+
+// ---------------------------------------------------------------------------
+// literal helpers
+// ---------------------------------------------------------------------------
+
+fn _isLiteral(node) if node.type {
+	:int -> true
+	:float -> true
+	:bool -> true
+	:string -> true
+	_ -> false
+}
+
+// _lit rebuilds a literal node preserving the value's type
+fn _lit(tok, val) if type(val) {
+	:string -> { type: :string, tok: tok, val: val }
+	:bool -> { type: :bool, tok: tok, val: val }
+	:float -> { type: :float, tok: tok, val: val }
+	_ -> { type: :int, tok: tok, val: val }
+}
+
+fn _foldBinary(op, a, b) if op {
+	:plus -> if type(a) = :string & type(b) = :string {
+		true -> a << b
+		_ -> if type(a) = :string | type(b) = :string {
+			true -> ?
+			_ -> a + b
+		}
+	}
+	:minus -> a - b
+	:times -> a * b
+	:and -> a & b
+	:or -> a | b
+	:xor -> a ^ b
+	:lshift -> a << b
+	:rshift -> a >> b
+	:eq -> a = b
+	:neq -> a != b
+	:lt -> a < b
+	:gt -> a > b
+	:leq -> a <= b
+	:geq -> a >= b
+	_ -> ?
+}
+
+// ---------------------------------------------------------------------------
+// constant environment (threaded as an immutable [name, val] pair list)
+// ---------------------------------------------------------------------------
+
+fn _envGet(env, name, i) if i < len(env) {
+	true -> if env.(i).0 = name {
+		true -> env.(i).1
+		_ -> _envGet(env, name, i + 1)
+	}
+	_ -> ?
+}
+
+fn _envBind(env, name, val) [[name, val]] << env
+
+fn _envKill(env, name) env |> filter(fn(pair) pair.0 != name)
+
+// merge: keep only pairs present with identical values in every branch env
+fn _envMerge(envs, i, acc) if i < len(envs) {
+	true -> {
+		next := acc |> filter(fn(pair) {
+			v := _envGet(envs.(i), pair.0, 0)
+			if v {
+				? -> false
+				_ -> v = pair.1
+			}
+		})
+		_envMerge(envs, i + 1, next)
+	}
+	_ -> acc
+}
+
+// ---------------------------------------------------------------------------
+// walker: constant propagation + folding (env threaded through params)
+// ---------------------------------------------------------------------------
+
+fn _walk(node, env) if node {
+	? -> node
+	_ -> if node.type {
+		:int -> node
+		:float -> node
+		:bool -> node
+		:string -> node
+		:null -> node
+		:atom -> node
+		:empty -> node
+		:identifier -> {
+			v := _envGet(env, node.val, 0)
+			if v {
+				? -> node
+				_ -> _lit(node.tok, v)
+			}
+		}
+		:unary -> {
+			inner := _walk(node.right, env)
+			if node.op = :minus & inner.type = :int {
+				true -> _lit(node.tok, 0 - inner.val)
+				_ -> { type: :unary, tok: node.tok, op: node.op, right: inner }
+			}
+		}
+		:binary -> {
+			left := _walk(node.left, env)
+			right := _walk(node.right, env)
+			if _isLiteral(left) {
+				true -> if _isLiteral(right) {
+					true -> {
+						folded := _foldBinary(node.op, left.val, right.val)
+						if folded != ? {
+							true -> _lit(node.tok, folded)
+							_ -> { type: :binary, tok: node.tok, op: node.op, left: left, right: right }
+						}
+					}
+					_ -> { type: :binary, tok: node.tok, op: node.op, left: left, right: right }
+				}
+				_ -> { type: :binary, tok: node.tok, op: node.op, left: left, right: right }
+			}
+		}
+		:fnCall -> {
+			// a call may mutate captured nonlocals: walk args in a fresh
+			// env and return with bindings killed by the caller
+			args := node.args |> map(fn(a) _walk(a, []))
+			{
+				type: :fnCall,
+				tok: node.tok,
+				function: _walk(node.function, []),
+				args: args,
+				restArg: node.restArg
+			}
+		}
+		:list -> {
+			elems := node.elems |> map(fn(e) _walk(e, []))
+			{ type: :list, tok: node.tok, elems: elems }
+		}
+		:object -> {
+			entries := node.entries |> map(fn(entry) {
+				{ key: _walk(entry.key, []), val: _walk(entry.val, []) }
+			})
+			{ type: :object, tok: node.tok, entries: entries }
+		}
+		:propertyAccess -> {
+			{ type: :propertyAccess, tok: node.tok, left: _walk(node.left, env), right: _walk(node.right, env) }
+		}
+		:assignment -> {
+			{
+				type: :assignment,
+				tok: node.tok,
+				local?: node.local?,
+				left: node.left,
+				right: _walk(node.right, env)
+			}
+		}
+		:ifExpr -> _walkIf(node, env)
+		:block -> _walkBlock(node, env)
+		:function -> {
+			// nested fn: fresh scope, own params shadow everything
+			body := _walk(node.body, [])
+			{
+				type: :function,
+				tok: node.tok,
+				name: node.name,
+				args: node.args,
+				restArg: node.restArg,
+				body: body
+			}
+		}
+		:whileExpr -> {
+			{
+				type: :whileExpr,
+				tok: node.tok,
+				cond: _walk(node.cond, env),
+				body: _walk(node.body, env)
+			}
+		}
+		_ -> node
+	}
+}
+
+// _walkIf folds if-expressions: a literal condition keeps only the live
+// branch; otherwise branches are walked in copied envs.
+fn _walkIf(node, env) if cond := _walk(node.cond, env) {
+	_ -> if cond.type = :bool {
+		true -> {
+			branches := node.branches
+			if cond.val {
+				true -> _walk(branches.(0).body, env)
+				_ -> if len(branches) > 1 {
+					true -> _walk(branches.(1).body, env)
+					_ -> { type: :null, tok: node.tok, val: ? }
+				}
+			}
+		}
+		_ -> {
+			branchEnv := _envBind(env, '__oak_branch_sentinel__', 0)
+			branches := node.branches |> map(fn(br) {
+				{
+					type: :ifBranch,
+					tok: br.tok,
+					target: _walk(br.target, env),
+					body: _walk(br.body, branchEnv)
+				}
+			})
+			{ type: :ifExpr, tok: node.tok, cond: cond, branches: branches }
+		}
+	}
+}
+
+// _walkBlock walks a block's exprs in order, threading constant bindings:
+// literal assignments bind, non-literal or nonlocal assignments kill,
+// calls kill, if-expressions merge their branches' effects.
+fn _walkBlock(node, env) {
+	exprs := node.exprs
+	out := []
+	cur := env
+	fn walkOther(e, i) {
+		walked := _walk(e, cur)
+		out << walked
+		if e.type = :ifExpr -> {
+			// merge branch effects conservatively
+			branchEnvs := e.branches |> map(fn(br) _envCollect(br.body, cur, []))
+			if len(branchEnvs) {
+				true -> cur <- _envMerge(branchEnvs, 0, branchEnvs.(0))
+				_ -> cur <- []
+			}
+		}
+		if e.type = :fnCall {
+			true -> cur <- []
+		}
+		walkExprs(i + 1)
+	}
+	fn walkOne(e, i) {
+		isAssign := e.type = :assignment & e.left.type = :identifier
+		if isAssign -> {
+			if e.local? {
+				true -> if _isLiteral(e.right) {
+					true -> cur <- _envBind(cur, e.left.val, e.right.val)
+					_ -> cur <- _envKill(cur, e.left.val)
+				}
+				_ -> cur <- _envKill(cur, e.left.val)
+			}
+			out << _walk(e, cur)
+			walkExprs(i + 1)
+		}
+		if !isAssign -> walkOther(e, i)
+	}
+	fn walkExprs(i) if i < len(exprs) {
+		true -> walkOne(exprs.(i), i)
+		_ -> ?
+	}
+	walkExprs(0)
+	outBlock := { type: :block, tok: node.tok, exprs: out }
+	if node.decls != ? -> outBlock.decls := node.decls
+	if node.hasLocal != ? -> outBlock.hasLocal := node.hasLocal
+	outBlock
+}
+
+// _envCollect collects literal assignments made unconditionally at the
+// top level of a body (assignments/nested blocks); calls kill everything.
+fn _envCollect(node, env, acc) if node.type {
+	:assignment -> if node.left.type = :identifier {
+		// index/property assignments (left not an identifier) and any other
+		// fall-through must still return acc — a ? here flows into
+		// _envMerge as a branch env and crashes on len(?)
+		true -> if node.local? {
+			true -> if _isLiteral(node.right) {
+				true -> _envBind(acc, node.left.val, node.right.val)
+				_ -> _envKill(acc, node.left.val)
+			}
+			_ -> _envKill(acc, node.left.val)
+		}
+		_ -> acc
+	}
+	:block -> {
+		cur := acc
+		fn collect(i) if i < len(node.exprs) {
+			true -> {
+				r := _envCollect(node.exprs.(i), env, cur)
+				if r = ? {
+					true -> ?
+					_ -> cur <- r
+				}
+				collect(i + 1)
+			}
+			_ -> cur
+		}
+		collect(0)
+	}
+	:ifExpr -> {
+		branchEnvs := node.branches |> map(fn(br) _envCollect(br.body, env, acc))
+		// conservative: fold in the branches' bindings only when present;
+		// always return acc otherwise (never ? — ? crashes _envMerge)
+		if len(branchEnvs) > 0 {
+			true -> {
+				_envMerge(branchEnvs, 0, branchEnvs.(0))
+			}
+		}
+		acc
+	}
+	_ -> acc
+}
+
+// ---------------------------------------------------------------------------
+// self-tail-recursion -> while lowering
+// ---------------------------------------------------------------------------
+
+fn _isPureArg(node) if node.type {
+	:int -> true
+	:float -> true
+	:bool -> true
+	:identifier -> true
+	:unary -> _isPureArg(node.right)
+	:binary -> if _isPureArg(node.left) {
+		true -> _isPureArg(node.right)
+	}
+	_ -> false
+}
+
+fn _isSelfCall(node, name) if node.type {
+	:fnCall -> if node.function.type = :identifier {
+		true -> node.function.val = name
+	}
+	_ -> false
+}
+
+// _tailLoop rewrites a two-branch if body with a tail-position self-call
+// into a block [whileExpr, baseExpr]; otherwise yields the body unchanged.
+fn _tailLoop(fnNode) {
+	body := fnNode.body
+	if body.type = :ifExpr {
+		true -> _tailLoopBody(body, fnNode)
+		_ -> body
+	}
+}
+
+fn _tailLoopBody(body, fnNode) if len(body.branches) = 2 {
+	true -> {
+		b0 := body.branches.(0)
+		b1 := body.branches.(1)
+		if _isSelfCall(b0.body, fnNode.name) {
+			true -> _tailLoopWith(b0, b1, body, fnNode)
+			_ -> if _isSelfCall(b1.body, fnNode.name) {
+				true -> _tailLoopWith(b1, b0, body, fnNode)
+				_ -> body
+			}
+		}
+	}
+	_ -> body
+}
+
+fn _tailLoopWith(recArm, baseArm, body, fnNode) {
+	call := recArm.body
+	arityOk := len(call.args) = len(fnNode.args)
+	restOk := fnNode.restArg = '' | fnNode.restArg = ?
+	condOk := recArm.target.type != :empty | baseArm.target.type != :empty
+	eligible := arityOk & restOk & condOk & _allPure(call.args, 0)
+	if eligible {
+		true -> _tailLoopBuild(recArm, call, baseArm, body, fnNode)
+		_ -> body
+	}
+}
+
+fn _allPure(args, i) if i < len(args) {
+	true -> if _isPureArg(args.(i)) {
+		true -> _allPure(args, i + 1)
+		_ -> false
+	}
+	_ -> true
+}
+
+fn _tailLoopBuild(recArm, call, baseArm, body, fnNode) {
+	// loop while the recursive arm's guard holds
+	cond := if recArm.target.type = :empty {
+		true -> { type: :binary, tok: body.tok, op: :neq, left: body.cond, right: baseArm.target }
+		_ -> { type: :binary, tok: body.tok, op: :eq, left: body.cond, right: recArm.target }
+	}
+	// Parallel-assignment semantics: all call args must be evaluated against
+	// the OLD parameter values. Evaluate them into per-iteration temps, then
+	// rebind the params — the while body block carries decls so renderers
+	// emit a scoped IIFE (JS) or local declarations (Lua/Java).
+	tempNames := call.args |> map(fn(a, i) '__oak_t_' << string(fnNode.name) << '_' << string(i))
+	tempAssigns := call.args |> map(fn(a, i) {
+		type: :assignment,
+		tok: call.tok,
+		local?: true,
+		left: { type: :identifier, tok: call.tok, val: tempNames.(i) },
+		right: a
+	})
+	rebinds := call.args |> map(fn(a, i) {
+		type: :assignment,
+		tok: call.tok,
+		local?: false,
+		left: { type: :identifier, tok: call.tok, val: fnNode.args.(i) },
+		right: { type: :identifier, tok: call.tok, val: tempNames.(i) }
+	})
+	loopBody := {
+		type: :block,
+		tok: body.tok,
+		decls: tempNames,
+		exprs: tempAssigns |> append(rebinds)
+	}
+	{
+		type: :block,
+		tok: body.tok,
+		exprs: [{
+			type: :whileExpr,
+			tok: body.tok,
+			cond: cond,
+			body: loopBody
+		}, baseArm.body]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+
+// optimizeProgram walks a module block: folds constants, propagates
+// literal bindings, and (when allowWhile?) lowers self-tail-recursion in
+// every function definition to native :whileExpr loops.
+fn optimizeProgram(block, allowWhile?) {
+	fn walkFn(node) {
+		body := if allowWhile? {
+			true -> _tailLoop(node)
+			_ -> node.body
+		}
+		{
+			type: :function,
+			tok: node.tok,
+			name: node.name,
+			args: node.args,
+			restArg: node.restArg,
+			body: _walk(body, [])
+		}
+	}
+
+	fn walkTop(node) if node.type {
+		:function -> walkFn(node)
+		_ -> node
+	}
+
+	if block.type = :block {
+		true -> {
+			exprs := block.exprs |> map(fn(e) walkTop(e))
+			_walkBlock({ type: :block, tok: block.tok, exprs: exprs }, [])
+		}
+		_ -> block
+	}
+}
+
+{optimizeProgram: optimizeProgram, walk: _walk}
