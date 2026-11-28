@@ -1049,7 +1049,7 @@ fn renderCBundle(bundleNode) {
 			_ -> {
 				cid := string(allocWrapCid())
 				prevHoisted := swapHoisted([])
-				body2 := cBoxedBody('__mgcb' + cid, node.args, node.body, {})
+				body2 := cBoxedBody('__mgcb' + cid, node.args, node.body, {}, '')
 				swapHoisted(prevHoisted)
 				regWrapper('__MGCB' + cid, emitTrampoline(cid, node.args, body2))
 				'__MGCB' + cid
@@ -1100,7 +1100,7 @@ fn renderCBundle(bundleNode) {
 		}
 		bodyEnv := envL(0, {})
 		prevHoisted := swapHoisted([])
-		cbfBody := cBoxedBody('__mgcbf' + cid, params, body, bodyEnv)
+		cbfBody := cBoxedBody('__mgcbf' + cid, params, body, bodyEnv, selfName)
 		swapHoisted(prevHoisted)
 		fn trL(i, acc) if i < len(params) {
 			true -> trL(i + 1, acc + ', a[' + string(i) + ']')
@@ -2113,7 +2113,7 @@ fn renderCBundle(bundleNode) {
 	}
 
 	// ---- self-tail-call loop lowering (boxed) ----
-	fn cTailB(fnName, params, node, env, out, depth) if depth {
+	fn cTailB(fnName, params, node, env, out, depth, looseSelf) if depth {
 		256 -> false
 		_ -> if node.type {
 			:ifExpr -> {
@@ -2150,7 +2150,7 @@ fn renderCBundle(bundleNode) {
 									true -> '{'
 									_ -> 'else {'
 								}
-								t := cTailB(fnName, params, br.body, env, out, depth + 1)
+								t := cTailB(fnName, params, br.body, env, out, depth + 1, looseSelf)
 								out.(len(out)) <- '}'
 								if t = false {
 									true -> hadW.(0) <- false
@@ -2162,7 +2162,7 @@ fn renderCBundle(bundleNode) {
 									true -> 'if (mg_val_eq(' + cvar + ', ' + tgts.(i) + ')) {'
 									_ -> 'else if (mg_val_eq(' + cvar + ', ' + tgts.(i) + ')) {'
 								}
-								t := cTailB(fnName, params, br.body, env, out, depth + 1)
+								t := cTailB(fnName, params, br.body, env, out, depth + 1, looseSelf)
 								out.(len(out)) <- '}'
 								if t = false {
 									true -> hadW.(0) <- false
@@ -2185,9 +2185,15 @@ fn renderCBundle(bundleNode) {
 				isSelf := false
 				if node.function.type = :identifier {
 					true -> if calleeName(node) = fnName {
-						true -> if env.(fnName) {
-							? -> isSelf <- true
-							_ -> ?
+						// looseSelf: closure self-recursion goes through the env
+						// slot, which IS bound — skip the shadow guard so the
+						// self-tail call still loop-lowers (constant C stack)
+						true -> if looseSelf {
+							true -> isSelf <- true
+							_ -> if env.(fnName) {
+								? -> isSelf <- true
+								_ -> ?
+							}
 						}
 						_ -> ?
 					}
@@ -2243,7 +2249,7 @@ fn renderCBundle(bundleNode) {
 						_ -> ?
 					}
 					pre(0)
-					cTailB(fnName, params, node.exprs.(len(node.exprs) - 1), env, out, depth + 1)
+					cTailB(fnName, params, node.exprs.(len(node.exprs) - 1), env, out, depth + 1, looseSelf)
 				}
 			}
 			_ -> {
@@ -2289,11 +2295,21 @@ fn renderCBundle(bundleNode) {
 		}
 		_ -> ld
 	}
-	fn cBoxedBody(fnName, params, body, extraEnv) {
+	fn cBoxedBody(fnName, params, body, extraEnv, selfName) {
 		ld := lastDotIdx(fnName, 0, -1)
 		tailName := if ld >= 0 {
 			true -> std.slice(fnName, ld + 1)
 			_ -> fnName
+		}
+		// closure bodies self-recur through the env slot under their LOCAL
+		// name — pass it as the tail target with a loose shadow guard
+		looseSelf := false
+		if selfName {
+			'' -> ?
+			_ -> {
+				tailName <- selfName
+				looseSelf <- true
+			}
 		}
 		out := []
 		st.hoisted <- []
@@ -2320,7 +2336,7 @@ fn renderCBundle(bundleNode) {
 		bindLocals(env, names, 0)
 		scratch := []
 		stmts := []
-		tailOK := cTailB(tailName, params, body, env, stmts, 0)
+		tailOK := cTailB(tailName, params, body, env, stmts, 0, looseSelf)
 		if tailOK = false {
 			true -> {
 				st.hoisted <- []
@@ -2390,7 +2406,7 @@ fn renderCBundle(bundleNode) {
 			}
 		}
 		fnDecl <- fnDecl + ') {'
-		[fnDecl, cBoxedBody(key, params, node.body, {}), '}'] |> str.join('\n')
+		[fnDecl, cBoxedBody(key, params, node.body, {}, ''), '}'] |> str.join('\n')
 	}
 
 	fn declParams(n) if n {
