@@ -1,6 +1,18 @@
 //go:build !windows && (!linux || !cgo)
+
+package main
+
+// oakJITCallSupported reports whether oakSyscallN can invoke an arbitrary
+// native function pointer. The portable fallback maps onto syscall.Syscall,
+// which interprets the target as a kernel syscall number — calling JIT
+// code through it would crash, so the JIT call builtin reports unsupported.
+const oakJITCallSupported = false
+
 import "syscall"
 
+// oakSyscallN is the portable fallback raw-syscall trampoline used when CGO is
+// disabled or the target is not Linux/Windows. It maps Oak's `syscall` builtin
+// onto Go's portable syscall.Syscall / syscall.Syscall6 wrappers.
 func oakSyscallN(trap uintptr, args ...uintptr) (uintptr, uintptr, syscall.Errno) {
 	var a [6]uintptr
 	if len(args) > len(a) {
