@@ -1,0 +1,91 @@
+OPS := 60000
+CAP := 512
+cache := {}
+slots := []
+head := -1
+tail := -1
+size := 0
+hits := 0
+fn detach(nd) {
+  p := slots.(nd).p
+  nx := slots.(nd).n
+  if p >= 0 {
+    true -> slots.(p).n <- nx
+    _ -> ?
+  }
+  if nx >= 0 {
+    true -> slots.(nx).p <- p
+    _ -> ?
+  }
+  if head = nd {
+    true -> head <- nx
+    _ -> ?
+  }
+  if tail = nd {
+    true -> tail <- p
+    _ -> ?
+  }
+}
+fn pushFront(nd) {
+  slots.(nd).p <- -1
+  slots.(nd).n <- head
+  if head >= 0 {
+    true -> slots.(head).p <- nd
+    _ -> ?
+  }
+  head <- nd
+  if tail < 0 {
+    true -> tail <- nd
+    _ -> ?
+  }
+}
+fn reps(r) if r = 0 {
+  true -> ?
+  _ -> {
+    cache <- {}
+    slots <- []
+    head <- -1
+    tail <- -1
+    size <- 0
+    hits <- 0
+    ops(0)
+    reps(r - 1)
+  }
+}
+fn ops(i) if i < OPS {
+  true -> {
+    k := (i * 2481) % 4096
+    if i % 4 = 0 {
+      true -> k <- i % 128
+      _ -> ?
+    }
+    nd := cache.(k)
+    if nd {
+      ? -> {
+        if size = CAP {
+          true -> {
+            old := tail
+            detach(old)
+            cache.(slots.(old).k) <- ?
+            size <- size - 1
+          }
+          _ -> ?
+        }
+        slots << { k: k, v: i, p: -1, n: head }
+        nn := len(slots) - 1
+        pushFront(nn)
+        cache.(k) <- nn
+        size <- size + 1
+      }
+      _ -> {
+        detach(nd)
+        pushFront(nd)
+        hits <- hits + 1
+      }
+    }
+    ops(i + 1)
+  }
+  _ -> ?
+}
+reps(20)
+print('lru=' + string(hits))

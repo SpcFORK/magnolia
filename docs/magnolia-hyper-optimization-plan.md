@@ -513,3 +513,44 @@ The three `--c` gaps (sieve element-store, lru `<<` rebound-list push,
 go()/chan runtime) are the concrete M2 C-backend worklist surfaced by this
 gate. `particles_soa` / `stride_jit` remain M2-pending workloads (JIT not
 built).
+
+#### §11.3.1a M2 C-backend worklist closure — faithful-port re-run (2026-11-26, this sandbox)
+
+The three §11.3.1 `--c` gaps plus the two regression failures found while
+re-running the *faithful* workloads (not the TODO-20 probe shapes) are all
+closed. Fixes, each its own commit:
+
+- **arith TCO + format** — self-tail loop-lowering (while(1) param-rebind
+  with a char-loop `lastDotIdx`/`tailName` callee-name match) gives `go()`
+  1M-deep recursion constant C stack; `mg_div` gained an int/int fast path
+  (`mg_mkint(a/b)`) matching the interpreter's exact integer division, so
+  arith prints `500000500042` instead of `%g` float `5.00001e+11`.
+- **lru `<<` on a rebound list** — pushes now write through the env slot
+  when the local is rebound, closing §11.3.1's "len(?)" failure.
+- **sieve + computefuse stack overflow (new failure mode)** — fn literals
+  compile to wrapper closures whose self-calls run under the fn's LOCAL
+  name through the env slot and `mg_call` trampolines; the self-tail
+  detector compared global keys and the shadow guard always saw the slot
+  bound, so deep recursion (`fill`/`clearK` at 100k, `compute.eval` at
+  20k×50) blew the C stack. `cBoxedBody` now re-targets `tailName` at the
+  closure's local self name with `looseSelf=true` (skips the shadow guard
+  only for the closure's own self-calls); commits `23986b6`, `a759e06`.
+
+**Faithful 7-workload `--c` gate — all pass, exact checksums, exit 0**
+(gcc -O2, min-of-3, this box):
+
+| Workload | `--c` output | time |
+| :--- | :--- | :--- |
+| `fib35` | ✓ `9227465` | 644 ms |
+| `arith_loop` | ✓ `500000500042` | 1,142 ms (was 1,208 ms float, no TCO) |
+| `sieve` | ✓ `9592` | 744 ms (was stack overflow) |
+| `lru` | ✓ `14968` | 10.1 s (was runtime error) |
+| `records` | ✓ `30005` | 293 ms |
+| `pipe_fusion` | ✓ `133346667` | 196 ms |
+| `computefuse` | ✓ `50` | 56 ms (was transpile error, then stack overflow) |
+
+`go test ./...` green; differential oracle 6/6 (wasm skipped, no wabt);
+the full 13-probe regression ladder stays green. The faithful ports are
+committed under `bench/todo04/oak/` (see its README for provenance and
+checksums). `particles_soa` / `stride_jit` remain M2-pending (JIT
+workloads, not C-backend).
