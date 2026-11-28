@@ -554,3 +554,61 @@ the full 13-probe regression ladder stays green. The faithful ports are
 committed under `bench/todo04/oak/` (see its README for provenance and
 checksums). `particles_soa` / `stride_jit` remain M2-pending (JIT
 workloads, not C-backend).
+
+---
+
+## §12. M2 completion — the two pending §6.3 workloads (TODO-21, planned 2026-11-26)
+
+§6.3 lists eight canonical workloads; seven have faithful ports and full
+engine parity (§11.3.1a). The two remaining rows — `particles_soa` (#6,
+AoS vs Auto-SoA SIMD, plan §5.3) and `stride_jit` (#8, Runtime Value
+Specialization, plan §5.5) — are planned and executed here.
+
+### Ground truth already verified in-sandbox (2026-11-26)
+- `jit.specialize` works on this box via the Go host mmap bridge under
+  both `-n` and `-b` (probe: `fn f(x) x * C + K` bound `{C:7,K:2}` →
+  80 ✓, compile ≈ 1.3 ms), and the full stride-kernel dialect
+  (`*`, `+`, `>>`, `&`, `%` on runtime operands with constant binding)
+  specializes byte-identically to the interpreter (`spec=242 gen=242`).
+- The particles pattern (list of same-shape objects, indexed
+  `ps.(i).x <- ...` field stores) is already CORRECT on `-n`/`-b`/`--c`
+  (generic boxed AoS, exit 0, matching checksums) — SoA synthesis is a
+  pure performance feature, so oracle parity can be locked before the
+  optimizer lands.
+
+### TODO-21a — workload + reference landing (`[ ]`)
+1. `bench/todo04/cpp/particles_soa.cpp` — idiomatic AoS
+   `struct Particle {x,y,z,vx,vy,vz}` `std::vector`, n=20000, 10 update
+   sweeps (x += vx·dt etc., volatile-derived dt), checkpoint sums at
+   sweep 0 and 9, `REPS=200`; `stride_jit.cpp` — data-derived (never
+   foldable) stride/divisor/threshold kernel over 20000 pseudo-random
+   int64s, 50 passes, `REPS=200`, `printf` checksum first line.
+2. Faithful oak ports `bench/todo04/oak/particles_soa.oak` (same shapes,
+   self-tail update/sum loops, `REPS=10`) and `stride_jit.oak` (generic
+   pass + `jit.specialize` bound `{s,d,t}` + 50 native passes,
+   `REPS=1`); runner `WORKLOADS` extended with both.
+3. Oracle parity: `-n` = `-b` = cpp checksums identical for both;
+   `--c` parity for `particles_soa` (generic path); `--c stride_jit`
+   expected ✗ (jit is a host-side module — document, don't force).
+   §6.3 table rows filled; 21a ticked.
+
+### TODO-21b — Auto-AoS→SoA synthesis in the C backend (`[ ]`)
+`MG_SOA` columnar value in the CRuntime (64B-aligned `double` columns,
+per-field static int/float tag) + synthesis in `codegen-c`:
+1. **Build site**: `xs := std.range(...) |> std.map(fn(...) { k: numeric... })`
+   with homogeneous all-numeric object literal → emit columnar build
+   loop instead of the generic fused map.
+2. **Lowered accesses**: `xs.(i).k` read → tagged column load
+   (`mkint`/`mkfloat` per field tag); `xs.(i).k <- v` → column store;
+   `len(xs)` → column length. Everything else (capture, print, compare,
+   non-indexed use) → synthesis aborts, fully generic emission.
+3. **Validation**: 5-probe SoA ladder (read-only, write-through, int
+   fields, float fields, guard-abort) byte-parity with `-n`; full 13-probe
+   ladder + oracle + `go test ./...` stay green; AoS-vs-SoA-vs-cpp
+   timing recorded in §12.1; 21b ticked.
+
+### TODO-21c — stride_jit specialization ledger (`[ ]`)
+Measure and record: `spec.compileNs` (specialization pipeline latency),
+generic-interpreted vs specialized-native per-element throughput on the
+locked workload, and the static-AOT (cpp volatile) comparison — closing
+§6.3 row #8; 21c ticked.
