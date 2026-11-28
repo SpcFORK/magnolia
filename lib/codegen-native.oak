@@ -74,6 +74,11 @@ IR_JMP       := :ir_jmp          // goto label
 IR_JZ        := :ir_jz           // if %cond == 0 goto label
 IR_JNZ       := :ir_jnz          // if %cond != 0 goto label
 IR_LABEL     := :ir_label        // label:
+IR_ARG       := :ir_arg          // %dst = SysV arg register #a
+IR_STKARG    := :ir_stkarg       // stack-passed arg: %dst = [rbp + 16 + 8*(a-6)]
+IR_FRAME     := :ir_frame        // function prologue: push rbp; mov rbp,rsp; sub rsp,#a
+IR_RETQ      := :ir_retq         // plain ret (no frame teardown), %a = result
+IR_CMOV      := :ir_cmov         // %dst = %cond ? %a : %b
 IR_ALLOC     := :ir_alloc        // %dst = alloc(size)  — heap allocation
 IR_PUSH      := :ir_push         // push(%src) to list
 IR_INDEX     := :ir_index        // %dst = %obj[%key]
@@ -116,6 +121,11 @@ fn irGt(dst, a, b) irInst(IR_GT, dst, a, b, ?)
 fn irLeq(dst, a, b) irInst(IR_LEQ, dst, a, b, ?)
 fn irGeq(dst, a, b) irInst(IR_GEQ, dst, a, b, ?)
 fn irCall(dst, fnReg, args) irInst(IR_CALL, dst, fnReg, ?, { args: args })
+fn irArg(dst, idx) irInst(IR_ARG, dst, idx, ?, ?)
+fn irFrame(size) irInst(IR_FRAME, ?, size, ?, ?)
+fn irStkArg(dst, idx) irInst(IR_STKARG, dst, idx, ?, ?)
+fn irRetQ(src) irInst(IR_RETQ, ?, src, ?, ?)
+fn irCmov(dst, cond, a, b) irInst(IR_CMOV, dst, cond, ?, { a: a, b: b })
 fn irRet(src) irInst(IR_RET, ?, src, ?, ?)
 fn irJmp(label) irInst(IR_JMP, ?, ?, ?, { label: label })
 fn irJz(cond, label) irInst(IR_JZ, ?, cond, ?, { label: label })
@@ -138,12 +148,22 @@ fn createIRCompiler() {
 	instructions := []
 	stringPool := []
 	functionPool := []
+	// st.0 = current name->vreg env; st.1 = [name, label] fn pairs.
+	// Captured-list index ops are reliable at closure depth where captured
+	// object member writes and beyond-first param bindings are not.
+	// fnTablePairs aliases st.1 through a directly-captured variable so the
+	// compile() result can hand it out (object-member fns cannot read the
+	// st pair reliably).
+	fnTablePairs := []
+	st := [{}, fnTablePairs]
 
 	fn freshReg() {
 		r := nextReg.0
 		nextReg.0 <- r + 1
 		r
 	}
+
+	fn regCount() nextReg.0
 
 	fn freshLabel(prefix) {
 		l := nextLabel.0
@@ -166,227 +186,350 @@ fn createIRCompiler() {
 		}
 	}
 
-	// Compile an AST node, returning the register holding the result
-	fn compileNode(node) if node {
-		? -> {
-			dst := freshReg()
-			emit(irConst(dst, ?))
-			dst
+	// find a function label by name in the pair list
+	fn findFn(pairs, name, i) if i < len(pairs) {
+		true -> {
+			if pairs.(i).0 = name {
+				true -> pairs.(i).1
+				_ -> findFn(pairs, name, i + 1)
+			}
 		}
-		_ -> if node.type {
-			:null -> {
+		_ -> ?
+	}
+
+	// bind registers for list elements into dst (alloc + push)
+	fn walkListElems(elems, i, dst) if i < len(elems) {
+		true -> {
+			elemReg := compileNode(elems.(i))
+			emit(irPush(dst, elemReg))
+			walkListElems(elems, i + 1, dst)
+		}
+		_ -> ?
+	}
+
+	// bind object entries into dst (alloc + setIndex)
+	fn walkObjEntries(entries, i, dst) if i < len(entries) {
+		true -> {
+			keyReg := compileNode(entries.(i).key)
+			valReg := compileNode(entries.(i).val)
+			emit(irSetIndex(dst, keyReg, valReg))
+			walkObjEntries(entries, i + 1, dst)
+		}
+		_ -> ?
+	}
+
+	// walk block statements, returning the last expression's register
+	fn walkBlockExprs(exprs, i, acc) if i < len(exprs) {
+		true -> walkBlockExprs(exprs, i + 1, compileNode(exprs.(i)), acc)
+		_ -> acc
+	}
+
+	// walk ifExpr branches: equality-match arms against cond, default arm
+	// binds unconditionally; result lands in resultReg
+	fn walkBranches(branches, i, condReg, resultReg, endLabel) if i < len(branches) {
+		true -> {
+			if branches.(i).target.type {
+				:empty -> {
+					bodyReg := compileNode(branches.(i).body)
+					emit(irStore(resultReg, bodyReg))
+				}
+				_ -> {
+					targetReg := compileNode(branches.(i).target)
+					matchReg := freshReg()
+					emit(irEq(matchReg, condReg, targetReg))
+					nextLabel := freshLabel('if_next')
+					emit(irJz(matchReg, nextLabel))
+					bodyReg := compileNode(branches.(i).body)
+					emit(irStore(resultReg, bodyReg))
+					emit(irJmp(endLabel))
+					emit(irLabel(nextLabel))
+				}
+			}
+			walkBranches(branches, i + 1, condReg, resultReg, endLabel)
+		}
+		_ -> ?
+	}
+
+	// bind fn call args (compiling each), returning the vreg list
+	fn walkArgs(args, i, acc) if i < len(args) {
+		true -> {
+			acc << compileNode(args.(i))
+			walkArgs(args, i + 1, acc)
+		}
+		_ -> acc
+	}
+
+	// compile a named function body: SysV param regs -> homes, body, ret
+	fn compileFnBody(fnNode, fnLabel) {
+		skipLabel := freshLabel('fn_skip')
+		emit(irJmp(skipLabel))
+		emit(irLabel(fnLabel))
+		emit(irFrame(regCount())) // own frame: recursion-safe homes
+		paramEnv := {}
+		fn bindParams(i, penv) if i < len(fnNode.args) {
+			true -> {
+				if penv.(fnNode.args.(i)) {
+					? -> penv.(fnNode.args.(i)) <- freshReg()
+					_ -> ?
+				}
+				if i < 6 {
+					true -> emit(irArg(penv.(fnNode.args.(i)), i))
+					_ -> emit(irStkArg(penv.(fnNode.args.(i)), i))
+				}
+				bindParams(i + 1, penv)
+			}
+			_ -> ?
+		}
+		if fnNode.args {
+			? -> ?
+			_ -> bindParams(0, paramEnv)
+		}
+		st.0 <- paramEnv
+		bodyReg := compileNode(fnNode.body)
+		emit(irRet(bodyReg))
+		emit(irLabel(skipLabel))
+	}
+
+	// Compile an AST node, returning the register holding the result
+	fn compileNode(node) {
+		env := st.0
+		ftab := st.1
+		if node {
+			? -> {
 				dst := freshReg()
 				emit(irConst(dst, ?))
 				dst
 			}
-
-			:empty -> {
-				dst := freshReg()
-				emit(irConst(dst, ?))
-				dst
-			}
-
-			:int -> {
-				dst := freshReg()
-				emit(irConst(dst, node.val))
-				dst
-			}
-
-			:float -> {
-				dst := freshReg()
-				emit(irConst(dst, node.val))
-				dst
-			}
-
-			:bool -> {
-				dst := freshReg()
-				emit(irConst(dst, node.val))
-				dst
-			}
-
-			:string -> {
-				dst := freshReg()
-				idx := internString(node.val)
-				emit(irConst(dst, { stringIdx: idx }))
-				dst
-			}
-
-			:atom -> {
-				dst := freshReg()
-				idx := internString(node.val)
-				emit(irConst(dst, { atomIdx: idx }))
-				dst
-			}
-
-			:identifier -> {
-				dst := freshReg()
-				emit(irLoad(dst, node.val))
-				dst
-			}
-
-			:list -> {
-				dst := freshReg()
-				emit(irAlloc(dst, len(node.elems)))
-				node.elems |> each(fn(elem) {
-					elemReg := compileNode(elem)
-					emit(irPush(dst, elemReg))
-				})
-				dst
-			}
-
-			:object -> {
-				dst := freshReg()
-				emit(irAlloc(dst, len(node.entries)))
-				node.entries |> each(fn(entry) {
-					keyReg := compileNode(entry.key)
-					valReg := compileNode(entry.val)
-					emit(irSetIndex(dst, keyReg, valReg))
-				})
-				dst
-			}
-
-			:unary -> if node.op {
-				:minus -> {
-					src := compileNode(node.right)
+			_ -> if node.type {
+				:null -> {
 					dst := freshReg()
-					emit(irNeg(dst, src))
+					emit(irConst(dst, ?))
 					dst
 				}
-				:exclam -> {
-					src := compileNode(node.right)
+
+				:empty -> {
 					dst := freshReg()
-					emit(irNot(dst, src))
+					emit(irConst(dst, ?))
 					dst
 				}
-			}
 
-			:binary -> {
-				aReg := compileNode(node.left)
-				bReg := compileNode(node.right)
-				dst := freshReg()
-				if node.op {
-					:plus -> emit(irAdd(dst, aReg, bReg))
-					:minus -> emit(irSub(dst, aReg, bReg))
-					:times -> emit(irMul(dst, aReg, bReg))
-					:divide -> emit(irDiv(dst, aReg, bReg))
-					:modulus -> emit(irMod(dst, aReg, bReg))
-					:and -> emit(irAnd(dst, aReg, bReg))
-					:or -> emit(irOr(dst, aReg, bReg))
-					:xor -> emit(irXor(dst, aReg, bReg))
-					:pushArrow -> emit(irPush(aReg, bReg))
-					:rshift -> emit(irShr(dst, aReg, bReg))
-					:eq -> emit(irEq(dst, aReg, bReg))
-					:neq -> emit(irNeq(dst, aReg, bReg))
-					:greater -> emit(irGt(dst, aReg, bReg))
-					:less -> emit(irLt(dst, aReg, bReg))
-					:geq -> emit(irGeq(dst, aReg, bReg))
-					:leq -> emit(irLeq(dst, aReg, bReg))
+				:int -> {
+					dst := freshReg()
+					emit(irConst(dst, node.val))
+					dst
 				}
-				dst
-			}
 
-			:assignment -> {
-				srcReg := compileNode(node.right)
-				if node.left.type {
-					:identifier -> emit(irStore(node.left.val, srcReg))
-					:propertyAccess -> {
-						objReg := compileNode(node.left.left)
-						keyReg := compileNode(node.left.right)
-						emit(irSetIndex(objReg, keyReg, srcReg))
+				:float -> {
+					dst := freshReg()
+					emit(irConst(dst, node.val))
+					dst
+				}
+
+				:bool -> {
+					dst := freshReg()
+					emit(irConst(dst, node.val))
+					dst
+				}
+
+				:string -> {
+					dst := freshReg()
+					idx := internString(node.val)
+					emit(irConst(dst, { stringIdx: idx }))
+					dst
+				}
+
+				:atom -> {
+					dst := freshReg()
+					idx := internString(node.val)
+					emit(irConst(dst, { atomIdx: idx }))
+					dst
+				}
+
+				:identifier -> {
+					dst := freshReg()
+					if env.(node.val) {
+						? -> emit(irConst(dst, 0)) // unknown symbol: stand-in nil
+						_ -> emit(irLoad(dst, env.(node.val)))
+					}
+					dst
+				}
+
+				:list -> {
+					dst := freshReg()
+					emit(irAlloc(dst, len(node.elems)))
+					walkListElems(node.elems, 0, dst)
+					dst
+				}
+
+				:object -> {
+					dst := freshReg()
+					emit(irAlloc(dst, len(node.entries)))
+					walkObjEntries(node.entries, 0, dst)
+					dst
+				}
+
+				:unary -> if node.op {
+					:minus -> {
+						src := compileNode(node.right)
+						dst := freshReg()
+						emit(irNeg(dst, src))
+						dst
+					}
+					:exclam -> {
+						src := compileNode(node.right)
+						dst := freshReg()
+						emit(irNot(dst, src))
+						dst
 					}
 				}
-				srcReg
-			}
 
-			:propertyAccess -> {
-				objReg := compileNode(node.left)
-				keyReg := compileNode(node.right)
-				dst := freshReg()
-				emit(irIndex(dst, objReg, keyReg))
-				dst
-			}
+				:binary -> {
+					aReg := compileNode(node.left)
+					bReg := compileNode(node.right)
+					dst := freshReg()
+					if node.op {
+						:plus -> emit(irAdd(dst, aReg, bReg))
+						:minus -> emit(irSub(dst, aReg, bReg))
+						:times -> emit(irMul(dst, aReg, bReg))
+						:divide -> emit(irDiv(dst, aReg, bReg))
+						:modulus -> emit(irMod(dst, aReg, bReg))
+						:and -> emit(irAnd(dst, aReg, bReg))
+						:or -> emit(irOr(dst, aReg, bReg))
+						:xor -> emit(irXor(dst, aReg, bReg))
+						// '<<' is dual-purpose in Magnolia (list append / int shl);
+						// native v1 compiles it as integer shift-left
+						:pushArrow -> emit(irShl(dst, aReg, bReg))
+						:rshift -> emit(irShr(dst, aReg, bReg))
+						:eq -> emit(irEq(dst, aReg, bReg))
+						:neq -> emit(irNeq(dst, aReg, bReg))
+						:greater -> emit(irGt(dst, aReg, bReg))
+						:less -> emit(irLt(dst, aReg, bReg))
+						:geq -> emit(irGeq(dst, aReg, bReg))
+						:leq -> emit(irLeq(dst, aReg, bReg))
+					}
+					dst
+				}
 
-			:ifExpr -> {
-				condReg := compileNode(node.cond)
-				endLabel := freshLabel('if_end')
-				resultReg := freshReg()
-
-				node.branches |> each(fn(br, i) {
-					if br.target.type = :empty {
-						true -> {
-							// default branch
-							bodyReg := compileNode(br.body)
-							emit(irStore(resultReg, bodyReg))
+				:assignment -> {
+					srcReg := compileNode(node.right)
+					if node.left.type {
+						:identifier -> {
+							name := node.left.val
+							if env.(name) {
+								? -> env.(name) <- freshReg()
+								_ -> ?
+							}
+							emit(irStore(env.(name), srcReg))
 						}
-						_ -> {
-							targetReg := compileNode(br.target)
-							matchReg := freshReg()
-							emit(irEq(matchReg, condReg, targetReg))
-							nextLabel := freshLabel('if_next')
-							emit(irJz(matchReg, nextLabel))
-							bodyReg := compileNode(br.body)
-							emit(irStore(resultReg, bodyReg))
-							emit(irJmp(endLabel))
-							emit(irLabel(nextLabel))
+						:propertyAccess -> {
+							objReg := compileNode(node.left.left)
+							keyReg := compileNode(node.left.right)
+							emit(irSetIndex(objReg, keyReg, srcReg))
 						}
 					}
-				})
-
-				emit(irLabel(endLabel))
-				resultReg
-			}
-
-			:block -> {
-				lastReg := freshReg()
-				emit(irConst(lastReg, ?))
-				node.exprs |> each(fn(expr) {
-					lastReg <- compileNode(expr)
-				})
-				lastReg
-			}
-
-			:function -> {
-				fnLabel := freshLabel('fn')
-				captures := []
-				fnIdx := len(functionPool)
-				functionPool << {
-					label: fnLabel
-					args: node.args
-					restArg: node.restArg
-					body: node.body
+					srcReg
 				}
-				dst := freshReg()
-				emit(irClosure(dst, fnIdx, captures))
-				dst
-			}
 
-			:fnCall -> {
-				fnReg := compileNode(node.function)
-				argRegs := node.args |> map(compileNode)
-				dst := freshReg()
-				emit(irCall(dst, fnReg, argRegs))
-				dst
-			}
+				:propertyAccess -> {
+					objReg := compileNode(node.left)
+					keyReg := compileNode(node.right)
+					dst := freshReg()
+					emit(irIndex(dst, objReg, keyReg))
+					dst
+				}
 
-			_ -> {
-				dst := freshReg()
-				emit(irConst(dst, ?))
-				dst
+				:ifExpr -> {
+					condReg := compileNode(node.cond)
+					endLabel := freshLabel('if_end')
+					resultReg := freshReg()
+					emit(irConst(resultReg, 0)) // default when no branch matches
+					walkBranches(node.branches, 0, condReg, resultReg, endLabel)
+					emit(irLabel(endLabel))
+					resultReg
+				}
+
+				:block -> if len(node.exprs) {
+					0 -> {
+						lastReg := freshReg()
+						emit(irConst(lastReg, ?))
+						lastReg
+					}
+					_ -> walkBlockExprs(node.exprs, 0, 0)
+				}
+
+				:function -> if node.name {
+					?, '' -> {
+						// anonymous closure: no calling convention yet, stand-in nil
+						dst := freshReg()
+						emit(irConst(dst, 0))
+						dst
+					}
+					_ -> {
+						fnLabel := freshLabel('fn')
+						functionPool << {
+							label: fnLabel
+							args: node.args
+							restArg: node.restArg
+							body: node.body
+						}
+						ftab << [node.name, fnLabel]
+						compileFnBody(node, fnLabel)
+						freshReg()
+					}
+				}
+
+				:fnCall -> if node.function.type = :identifier {
+					true -> {
+						fnLabel := findFn(ftab, node.function.val, 0)
+						if fnLabel {
+							? -> {
+								// not a known function (builtin/extern): nil
+								walkArgs(node.args, 0, [])
+								dst := freshReg()
+								emit(irConst(dst, 0))
+								dst
+							}
+							_ -> {
+								argRegs := walkArgs(node.args, 0, [])
+								dst := freshReg()
+								emit(irCall(dst, fnLabel, argRegs))
+								dst
+							}
+						}
+					}
+					_ -> {
+						walkArgs(node.args, 0, [])
+						dst := freshReg()
+						emit(irConst(dst, 0))
+						dst
+					}
+				}
+
+				_ -> {
+					dst := freshReg()
+					emit(irConst(dst, ?))
+					dst
+				}
 			}
 		}
 	}
 
 	{
 		compile: fn(ast) {
-			compileNode(ast)
+			st.0 <- {}
+			emit(irLabel('main_top'))
+			topReg := compileNode(ast)
+			emit(irRetQ(topReg)) // plain ret: main_top runs in _start's frame
 			{
 				instructions: instructions
 				stringPool: stringPool
 				functionPool: functionPool
+				fnTable: fnTablePairs
 				regCount: nextReg.0
 			}
 		}
 		compileNode: compileNode
+		getFnTable: fn() fnTablePairs
 		getInstructions: fn() instructions
 		getStringPool: fn() stringPool
 		getFunctionPool: fn() functionPool
@@ -400,130 +543,462 @@ fn createIRCompiler() {
 fn createX86_64Generator() {
 	code := []
 	relocations := []
-	labelOffsets := {}
+	fixups := []
+	labelPairs := [] // [label, codeOffset] recorded during emission
+	frameSize := [0] // set by compile(); used by :ir_frame
 
-	// Emit raw bytes
 	fn emitByte(b) code << (b & 255)
-
-	fn emitWord(w) {
-		emitByte(w & 255)
-		emitByte((w >> 8) & 255)
-	}
-
 	fn emitDword(d) {
 		emitByte(d & 255)
 		emitByte((d >> 8) & 255)
 		emitByte((d >> 16) & 255)
 		emitByte((d >> 24) & 255)
 	}
-
 	fn emitQword(q) {
 		emitDword(q & 4294967295)
 		emitDword((q >> 32) & 4294967295)
 	}
 
-	// x86-64 register encoding (caller-saved: rax, rcx, rdx, r8-r11)
-	fn regEncoding(vreg) {
-		// Map virtual registers to physical registers
-		// rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7
-		// r8=8, r9=9, r10=10, r11=11, r12=12, r13=13, r14=14, r15=15
-		if vreg {
-			0 -> 0   // rax
-			1 -> 1   // rcx
-			2 -> 2   // rdx
-			3 -> 6   // rsi
-			4 -> 7   // rdi
-			5 -> 8   // r8
-			6 -> 9   // r9
-			7 -> 10  // r10
-			8 -> 11  // r11
-			_ -> 0   // spill to stack (simplified)
-		}
-	}
-
-	// REX prefix for 64-bit operand
+	// REX prefix: r/b are physical register numbers (flags derived)
 	fn rexW(r, b) {
-		0x48 | (if r > 7 { true -> 4, _ -> 0 }) | (if b > 7 { true -> 1, _ -> 0 })
+		0x48 | (if r > 7 {
+			true -> 4
+			_ -> 0
+		}) | (if b > 7 {
+			true -> 1
+			_ -> 0
+		})
 	}
+	fn modRM(mod, reg, rm) ((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
 
-	// ModRM byte
-	fn modRM(mod, reg, rm) {
-		((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
+	// Every virtual register gets a stack home at [rbp - 8*(vreg+1)].
+	// Scratch registers (rax/rcx/rdx + SysV arg regs) are never live across
+	// IR instructions, so no clobbering is possible regardless of regCount.
+	fn vregDisp(vreg) {
+		d := 8 * (vreg + 1)
+		4294967296 - d // encode as int32 displacement
 	}
-
-	// mov r64, imm64
-	fn emitMovImm64(reg, imm) {
-		phys := regEncoding(reg)
-		emitByte(rexW(0, phys))
-		emitByte(0xB8 + (phys & 7))
-		emitQword(imm)
+	fn loadHome(phys, vreg) {
+		emitByte(rexW(phys, 5))
+		emitByte(0x8B)
+		emitByte(modRM(2, phys, 5))
+		emitDword(vregDisp(vreg))
 	}
-
-	// mov r64, r64
-	fn emitMovReg(dst, src) {
-		dPhys := regEncoding(dst)
-		sPhys := regEncoding(src)
+	fn storeHome(vreg, phys) {
+		emitByte(rexW(phys, 5))
+		emitByte(0x89)
+		emitByte(modRM(2, phys, 5))
+		emitDword(vregDisp(vreg))
+	}
+	fn emitMovRR(dPhys, sPhys) {
 		emitByte(rexW(sPhys, dPhys))
 		emitByte(0x89)
 		emitByte(modRM(3, sPhys, dPhys))
 	}
-
-	// add r64, r64
-	fn emitAddReg(dst, src) {
-		dPhys := regEncoding(dst)
-		sPhys := regEncoding(src)
+	fn emitAddRR(dPhys, sPhys) {
 		emitByte(rexW(sPhys, dPhys))
 		emitByte(0x01)
 		emitByte(modRM(3, sPhys, dPhys))
 	}
-
-	// sub r64, r64
-	fn emitSubReg(dst, src) {
-		dPhys := regEncoding(dst)
-		sPhys := regEncoding(src)
+	fn emitSubRR(dPhys, sPhys) {
 		emitByte(rexW(sPhys, dPhys))
 		emitByte(0x29)
 		emitByte(modRM(3, sPhys, dPhys))
 	}
+	fn emitCmpRR(aPhys, bPhys) {
+		emitByte(rexW(bPhys, aPhys))
+		emitByte(0x39)
+		emitByte(modRM(3, bPhys, aPhys))
+	}
+	// setcc al + movzx rax, al (comparison result materialization)
+	fn emitSetCC(cc) {
+		emitByte(0x0F)
+		emitByte(cc)
+		emitByte(0xC0)
+		emitByte(0x48)
+		emitByte(0x0F)
+		emitByte(0xB6)
+		emitByte(0xC0)
+	}
+	// jump/call with rel32 placeholder registered for later patching
+	fn emitBranch(opBytes, label) {
+		opBytes |> each(fn(b) emitByte(b))
+		fixups << { pos: len(code), label: label }
+		emitDword(0)
+	}
 
-	// ret
-	fn emitRet() emitByte(0xC3)
+	// print result to stdout (decimal int64) then exit(0).
+	// Machine-verified template (assembled+tested with gcc).
+	// Input: rdi = value. Never returns.
+	fn emitPrintExit() {
+		[
+			85, 72, 137, 229, 72, 131, 236, 64, 72, 137, 248, 69, 49, 210, 72,
+			133, 192, 117, 16, 198, 69, 255, 48, 65, 186, 1, 0, 0, 0, 72, 141,
+			117, 254, 235, 61, 69, 49, 219, 72, 133, 192, 121, 9, 65, 187, 1,
+			0, 0, 0, 72, 247, 216, 72, 141, 117, 255, 185, 10, 0, 0, 0, 72,
+			153, 72, 247, 249, 128, 194, 48, 136, 22, 72, 255, 206, 65, 255,
+			194, 72, 133, 192, 117, 235, 69, 133, 219, 116, 9, 198, 6, 45, 72,
+			255, 206, 65, 255, 194, 72, 255, 198, 184, 1, 0, 0, 0, 191, 1, 0,
+			0, 0, 68, 137, 210, 15, 5, 184, 60, 0, 0, 0, 49, 255, 15, 5
+		] |> each(fn(b) emitByte(b))
+	}
 
-	// nop
-	fn emitNop() emitByte(0x90)
+	// SysV AMD64 integer arg registers
+	argPhys := [7, 6, 2, 1, 8, 9] // rdi rsi rdx rcx r8 r9
 
-	// Compile a single IR instruction to x86-64 bytes
-	fn compileIR(inst) if inst.op {
-		:ir_const -> if type(inst.a) {
-			:int -> emitMovImm64(inst.dst, inst.a)
-			_ -> emitMovImm64(inst.dst, 0)
+	fn compileIR(inst, frame) if inst.op {
+		:ir_const -> {
+			imm := if type(inst.a) {
+				:int -> inst.a
+				:bool -> if inst.a {
+					true -> 1
+					_ -> 0
+				}
+				_ -> 0
+			}
+			emitByte(0x48)
+			emitByte(0xB8)
+			emitQword(imm)
+			storeHome(inst.dst, 0)
+		}
+		:ir_arg -> {
+			phys := if inst.a < len(argPhys) {
+				true -> argPhys.(inst.a)
+				_ -> 0
+			}
+			emitMovRR(0, phys)
+			storeHome(inst.dst, 0)
+		}
+		:ir_load -> {
+			loadHome(0, inst.a)
+			storeHome(inst.dst, 0)
+		}
+		:ir_store -> {
+			loadHome(0, inst.a)
+			storeHome(inst.dst, 0)
 		}
 		:ir_add -> {
-			emitMovReg(inst.dst, inst.a)
-			emitAddReg(inst.dst, inst.b)
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitAddRR(0, 1)
+			storeHome(inst.dst, 0)
 		}
 		:ir_sub -> {
-			emitMovReg(inst.dst, inst.a)
-			emitSubReg(inst.dst, inst.b)
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitSubRR(0, 1)
+			storeHome(inst.dst, 0)
+		}
+		:ir_mul -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(0x48)
+			emitByte(0x0F)
+			emitByte(0xAF)
+			emitByte(0xC1) // imul rax, rcx
+			storeHome(inst.dst, 0)
+		}
+		:ir_div -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(0x48)
+			emitByte(0x99) // cqo
+			emitByte(0x48)
+			emitByte(0xF7)
+			emitByte(0xF9) // idiv rcx -> quotient rax
+			storeHome(inst.dst, 0)
+		}
+		:ir_mod -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(0x48)
+			emitByte(0x99) // cqo
+			emitByte(0x48)
+			emitByte(0xF7)
+			emitByte(0xF9) // idiv rcx -> remainder rdx
+			emitMovRR(0, 2)
+			storeHome(inst.dst, 0)
+		}
+		:ir_neg -> {
+			loadHome(0, inst.a)
+			emitByte(0x48)
+			emitByte(0xF7)
+			emitByte(0xD8) // neg rax
+			storeHome(inst.dst, 0)
+		}
+		:ir_not -> {
+			loadHome(0, inst.a)
+			emitByte(0x48)
+			emitByte(0x85)
+			emitByte(modRM(3, 0, 0)) // test rax,rax (cmp self always sets ZF!)
+			emitSetCC(0x94) // sete
+			storeHome(inst.dst, 0)
+		}
+		:ir_and -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(rexW(0, 1))
+			emitByte(0x21)
+			emitByte(0xC8)
+			storeHome(inst.dst, 0)
+		}
+		:ir_or -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(rexW(0, 1))
+			emitByte(0x09)
+			emitByte(0xC8)
+			storeHome(inst.dst, 0)
+		}
+		:ir_xor -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(rexW(0, 1))
+			emitByte(0x31)
+			emitByte(0xC8)
+			storeHome(inst.dst, 0)
+		}
+		:ir_shl -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(0x48)
+			emitByte(0xD3)
+			emitByte(0xE0) // shl rax, cl
+			storeHome(inst.dst, 0)
+		}
+		:ir_shr -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitByte(0x48)
+			emitByte(0xD3)
+			emitByte(0xF8) // sar rax, cl (arithmetic, matches host '>>')
+			storeHome(inst.dst, 0)
+		}
+		:ir_eq, :ir_neq, :ir_lt, :ir_gt, :ir_leq, :ir_geq -> {
+			loadHome(0, inst.a)
+			loadHome(1, inst.b)
+			emitCmpRR(0, 1)
+			cc := if inst.op {
+				:ir_eq -> 0x94
+				:ir_neq -> 0x95
+				:ir_lt -> 0x9C
+				:ir_gt -> 0x9F
+				:ir_leq -> 0x9E
+				_ -> 0x9D
+			}
+			emitSetCC(cc)
+			storeHome(inst.dst, 0)
+		}
+		:ir_cmov -> {
+			loadHome(2, inst.a) // cond -> rdx
+			emitByte(rexW(2, 2))
+			emitByte(0x85)
+			emitByte(0xD2) // test rdx, rdx
+			loadHome(0, inst.extra.a)
+			loadHome(1, inst.extra.b)
+			emitByte(0x48)
+			emitByte(0x0F)
+			emitByte(0x44)
+			emitByte(0xC1) // cmove rax, rcx
+			storeHome(inst.dst, 0)
+		}
+		:ir_jz -> {
+			loadHome(0, inst.a)
+			emitByte(0x48)
+			emitByte(0x85)
+			emitByte(modRM(3, 0, 0)) // test rax,rax
+			emitBranch([0x0F, 0x84], inst.extra.label)
+		}
+		:ir_jnz -> {
+			loadHome(0, inst.a)
+			emitByte(0x48)
+			emitByte(0x85)
+			emitByte(modRM(3, 0, 0)) // test rax,rax
+			emitBranch([0x0F, 0x85], inst.extra.label)
+		}
+		:ir_jmp -> emitBranch([0xE9], inst.extra.label)
+		:ir_label -> ? // resolved by the size pre-pass
+		:ir_call -> {
+			args := inst.extra.args
+			stackCount := if len(args) > 6 {
+				true -> len(args) - 6
+				_ -> 0
+			}
+			// reserve shadow space for args 7+, store right-to-left
+			if stackCount > 0 {
+				true -> {
+					emitByte(0x48)
+					emitByte(0x81)
+					emitByte(0xEC)
+					emitDword(8 * stackCount) // sub rsp, 8*n
+				}
+				_ -> ?
+			}
+			fn setArgs(i) if i < len(args) {
+				true -> {
+					if i < 6 {
+						true -> {
+							phys := argPhys.(i)
+							emitByte(rexW(phys, 5))
+							emitByte(0x8B)
+							emitByte(modRM(2, phys, 5))
+							emitDword(vregDisp(args.(i)))
+						}
+						_ -> {
+							loadHome(0, args.(i))
+							disp := 8 * (i - 6)
+							emitByte(0x48)
+							emitByte(0x89)
+							if disp < 128 {
+								true -> {
+									emitByte(0x44)
+									emitByte(0x24)
+									emitByte(disp) // mov [rsp+disp8], rax
+								}
+								_ -> {
+									emitByte(0x84)
+									emitByte(0x24)
+									emitDword(disp) // mov [rsp+disp32], rax
+								}
+							}
+						}
+					}
+					setArgs(i + 1)
+				}
+				_ -> ?
+			}
+			setArgs(0)
+			emitBranch([0xE8], inst.a) // irCall carries the fn label in a
+			if stackCount > 0 {
+				true -> {
+					emitByte(0x48)
+					emitByte(0x81)
+					emitByte(0xC4)
+					emitDword(8 * stackCount) // add rsp, 8*n
+				}
+				_ -> ?
+			}
+			storeHome(inst.dst, 0)
+		}
+		:ir_stkarg -> {
+			emitByte(0x48)
+			emitByte(0x8B)
+			emitByte(0x85)
+			emitDword(16 + 8 * (inst.a - 6)) // mov rax, [rbp + 16 + 8*(i-6)]
+			storeHome(inst.dst, 0)
+		}
+		:ir_frame -> {
+			emitByte(0x55) // push rbp
+			emitByte(0x48)
+			emitByte(0x89)
+			emitByte(0xE5) // mov rbp, rsp
+			emitByte(0x48)
+			emitByte(0x81)
+			emitByte(0xEC) // sub rsp, frame (imm32)
+			emitDword(frame)
 		}
 		:ir_ret -> {
-			if inst.a != ? -> emitMovReg(0, inst.a)
-			emitRet()
+			if inst.a != ? {
+				true -> loadHome(0, inst.a)
+				_ -> ?
+			}
+			emitByte(0xC9) // leave
+			emitByte(0xC3) // ret
 		}
-		:ir_label -> {
-			labelOffsets.(inst.extra.label) <- len(code)
+		:ir_retq -> {
+			if inst.a != ? {
+				true -> loadHome(0, inst.a)
+				_ -> ?
+			}
+			emitByte(0xC3) // plain ret (no frame of its own)
 		}
-		:ir_nop -> emitNop()
-		_ -> emitNop()
+		:ir_nop -> emitByte(0x90)
+		_ -> {
+			// unsupported op (alloc/push/index/closure/...): stand-in 0
+			if inst.dst != ? {
+				true -> {
+					emitByte(0x48)
+					emitByte(0xB8)
+					emitQword(0)
+					storeHome(inst.dst, 0)
+				}
+				_ -> emitByte(0x90)
+			}
+		}
+	}
+
+	fn emitInsts(insts, i, frame) if i < len(insts) {
+		true -> {
+			inst := insts.(i)
+			if inst.op = :ir_label {
+				true -> {
+					labelPairs << [inst.extra.label, len(code)]
+					emitInsts(insts, i + 1, frame)
+				}
+				_ -> {
+					compileIR(inst, frame)
+					emitInsts(insts, i + 1, frame)
+				}
+			}
+		}
+		_ -> ?
+	}
+	fn findOffset(pairs, label, i) if i < len(pairs) {
+		true -> {
+			if pairs.(i).0 = label {
+				true -> pairs.(i).1
+				_ -> findOffset(pairs, label, i + 1)
+			}
+		}
+		_ -> -1
+	}
+	fn patch(fx, i, out) if i < len(fx) {
+		true -> {
+			f := fx.(i)
+			target := findOffset(labelPairs, f.label, 0)
+			rel := target - (f.pos + 4)
+			out.(f.pos) <- rel & 255
+			out.(f.pos + 1) <- (rel >> 8) & 255
+			out.(f.pos + 2) <- (rel >> 16) & 255
+			out.(f.pos + 3) <- (rel >> 24) & 255
+			patch(fx, i + 1, out)
+		}
+		_ -> ?
 	}
 
 	{
-		compile: fn(irProgram) {
-			irProgram.instructions |> each(compileIR)
+		// opts is ? or { fnEntry: label } — fnEntry mode emits only the IR
+		// instructions (no _start prologue / print+exit), so the code at the
+		// entry label is directly callable with SysV integer args.
+		compile: fn(irProgram, opts) {
+			frame := 8 * (irProgram.regCount + 8)
+			frame <- frame + (16 - frame % 16) % 16
+			fnEntryMode := opts != ? & opts.fnEntry != ?
+			if !fnEntryMode -> {
+				// _start: frame setup, call top-level, print+exit
+				emitByte(0x55) // push rbp
+				emitByte(0x48)
+				emitByte(0x89)
+				emitByte(0xE5) // mov rbp, rsp
+				emitByte(0x48)
+				emitByte(0x81)
+				emitByte(0xEC) // sub rsp, frame (imm32)
+				emitDword(frame)
+				emitBranch([0xE8], 'main_top')
+				emitMovRR(7, 0) // mov rdi, rax
+				emitBranch([0xE8], 'print_exit') // call print helper (prints rdi, exits 0)
+				labelPairs << ['print_exit', len(code)]
+				emitPrintExit()
+				emitByte(0xC3)
+			}
+			// pass 2: emit machine bytes (labels recorded at actual offsets)
+			emitInsts(irProgram.instructions, 0, frame)
+			// pass 3: patch branch/call rel32s
+			patch(fixups, 0, code)
 			{
 				code: code
 				relocations: relocations
-				labelOffsets: labelOffsets
+				labelOffsets: labelPairs
 				stringPool: irProgram.stringPool
 			}
 		}
@@ -590,7 +1065,7 @@ fn createARM64Generator() {
 	}
 
 	{
-		compile: fn(irProgram) {
+		compile: fn(irProgram, opts) {
 			irProgram.instructions |> each(compileIR)
 			{
 				code: code
@@ -616,5 +1091,5 @@ fn compileToNative(ast, arch) {
 		_ -> createX86_64Generator()
 	}
 
-	generator.compile(irProgram)
+	generator.compile(irProgram, ?)
 }

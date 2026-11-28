@@ -70,6 +70,38 @@ const (
 	opScopePush  opcode = 51
 	opScopePop   opcode = 52
 	opCallSpread opcode = 53 // u8 arity — last arg is a list to spread
+
+	// Lexical-coordinate upvalue ops (M1 TODO-09, §7.4). Operand: u16 depth
+	// (1 = immediate lexical parent function, counting up to the chunk
+	// top-level), u16 slot (the ancestor's local slot), u16 name constant
+	// index kept solely for the defensive name-based fallback.
+	opLoadUpvalFast  opcode = 54
+	opStoreUpvalFast opcode = 55
+
+	// In-frame higher-order-function loops (M1 TODO-12, §7.8). Operand:
+	// u16 function-template index of the literal fnNode callback. The VM
+	// runs the callback as a plain frame between iterations (no child VM,
+	// no closure allocation); opReturn drives the iteration state machine.
+	opHOFMap    opcode = 56 // pop subject; push list/str of f(elem, i)
+	opHOFFilter opcode = 57 // pop subject; push elements where f(elem, i) == true
+	opHOFEach   opcode = 58 // pop subject; call f(elem, i); push null
+	opHOFReduce opcode = 59 // pop seed, pop subject; push f(acc, elem, i) fold
+
+	// Superinstruction (M1 TODO-10, §7.5): fuses the ubiquitous comparison-
+	// match prologue `LOAD_LOCAL s; CONST_INT imm; LT; DUP; CONST_TRUE; EQ;
+	// JUMP_FALSE; POP(+POP)` (9 dispatches) into one. Operand: u16 local
+	// slot, i32 immediate, i32 else-target. Emitted only inside function
+	// bodies (top-level phantom-local semantics stay on the generic path).
+	// Falls through when locals[slot] < imm (Eq-true), else jumps after
+	// consuming the condition; the else path pushes null for no-match
+	// fall-through, matching the tree-walker (fixes the cond-leak bug).
+	opLtLocalJumpTrue opcode = 60
+
+	// Inline-cached property access (M1 TODO-11, §7.7). Operand: u16
+	// constant-pool index of the interned property name. Avoids pushing a
+	// key *StringValue per access (zero alloc) and skips the key pop.
+	opGetPropConst opcode = 61 // pop obj; push obj.<name>
+	opSetPropConst opcode = 62 // pop val, pop obj; obj.<name> = val; push val
 )
 
 var opcodeNames = [...]string{
@@ -88,6 +120,10 @@ var opcodeNames = [...]string{
 	"SWAP", "MATCH_JUMP",
 	"SCOPE_PUSH", "SCOPE_POP",
 	"CALL_SPREAD",
+	"LOAD_UPVAL_FAST", "STORE_UPVAL_FAST",
+	"HOF_MAP", "HOF_FILTER", "HOF_EACH", "HOF_REDUCE",
+	"LT_LOCAL_JUMP_TRUE",
+	"GET_PROP_CONST", "SET_PROP_CONST",
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +156,12 @@ type funcTemplate struct {
 	hasRestArg bool
 	localNames []string // name for each local slot (for scope chain construction)
 	defn       *fnNode  // preserved AST for interpreter() engine switching
+	// needsHeapScope is true only when this function's body contains an inner
+	// fnNode literal (at any depth). Inner closures capture the enclosing
+	// scope chain, so frames of such functions must allocate a heap vmScope;
+	// all other frames run on the VM's contiguous locals slab with zero
+	// per-call allocations (M1 TODO-08, §7.2).
+	needsHeapScope bool
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +445,7 @@ type compiler struct {
 	scopeStack   [][]string // saved locals for outer scopes
 	parentLocals [][]string // stack of parent scope local name lists (for upvalue resolution)
 	sourceMap    []sourceMapEntry
+	fnScopeFlags []bool // per-function: body contains an inner fnNode (needsHeapScope)
 }
 
 func newCompiler() *compiler {
@@ -531,6 +574,24 @@ func (co *compiler) popScope() {
 	}
 }
 
+// resolveUpvalueCoord locates name in an ancestor function's local list and
+// returns its lexical coordinates: depth 1 = the immediate lexical parent
+// function, depth len(parentLocals) = the chunk top-level; slot is the
+// ancestor's local slot index. Runtime resolution walks the persistent heap
+// scope chain (every function on a closure's lexical chain is heap-scoped by
+// TODO-08's needsHeapScope induction), giving O(depth) direct indexing with
+// no name hashing (M1 TODO-09, §7.4).
+func (co *compiler) resolveUpvalueCoord(name string) (depth int, slot int, ok bool) {
+	for i := len(co.parentLocals) - 1; i >= 0; i-- {
+		for j, n := range co.parentLocals[i] {
+			if n == name {
+				return len(co.parentLocals) - i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
 // resolveUpvalue checks if name exists in any parent scope.
 func (co *compiler) resolveUpvalue(name string) bool {
 	for i := len(co.parentLocals) - 1; i >= 0; i-- {
@@ -604,6 +665,14 @@ func (co *compiler) compileNodeTail(node astNode, isTail bool) {
 		if localIdx >= 0 {
 			co.emitOp(opLoadLocal)
 			co.emitU16(localIdx)
+		} else if depth, slot, ok := co.resolveUpvalueCoord(n.payload); ok {
+			// Found in a parent scope with known coordinates — emit direct
+			// lexical-coordinate lookup (name kept for the defensive fallback).
+			nameIdx := co.addString(n.payload)
+			co.emitOp(opLoadUpvalFast)
+			co.emitU16(depth)
+			co.emitU16(slot)
+			co.emitU16(nameIdx)
 		} else if co.resolveUpvalue(n.payload) {
 			// Found in a parent scope — emit name-based upvalue lookup
 			nameIdx := co.addString(n.payload)
@@ -637,40 +706,11 @@ func (co *compiler) compileNodeTail(node astNode, isTail bool) {
 		}
 
 	case binaryNode:
-		// Pipe operator: x |> f(a, b) desugars to f(x, a, b)
-		if n.op == pipeArrow {
-			if call, ok := n.right.(fnCallNode); ok {
-				// Compile the function reference
-				co.compileNode(call.fn)
-				// Compile the piped value as first argument
-				co.compileNode(n.left)
-				// Compile additional arguments
-				for _, arg := range call.args {
-					co.compileNode(arg)
-				}
-				arity := 1 + len(call.args)
-				if call.restArg != nil {
-					co.compileNode(call.restArg)
-					arity++
-				}
-				if isTail && len(co.parentLocals) > 0 && call.restArg == nil {
-					co.emitOp(opTailCall)
-				} else {
-					co.emitOp(opCall)
-				}
-				co.emit(byte(arity & 0xFF))
-			} else {
-				co.compileNode(n.right)
-				co.compileNode(n.left)
-				if isTail && len(co.parentLocals) > 0 {
-					co.emitOp(opTailCall)
-				} else {
-					co.emitOp(opCall)
-				}
-				co.emit(1)
-			}
-			return
-		}
+		// NOTE: the former `n.op == pipeArrow` branch was dead code and has
+		// been removed (M1 TODO-05, §7.6). The parser desugars `x |> f(a, b)`
+		// into fnCallNode{fn: f, args: [x, a, b]} at parse time (parse.go),
+		// so a binaryNode carrying pipeArrow can never reach the compiler
+		// from parsed Oak programs.
 		co.compileNode(n.left)
 		co.compileNode(n.right)
 		switch n.op {
@@ -718,13 +758,14 @@ func (co *compiler) compileNodeTail(node astNode, isTail bool) {
 	case propertyAccessNode:
 		co.compileNode(n.left)
 		if ident, ok := n.right.(identifierNode); ok {
+			// Inline cache (M1 TODO-11): constant key fused into the op.
 			idx := co.addString(ident.payload)
-			co.emitOp(opConstStr)
+			co.emitOp(opGetPropConst)
 			co.emitU16(idx)
 		} else {
 			co.compileNode(n.right)
+			co.emitOp(opGetProp)
 		}
-		co.emitOp(opGetProp)
 
 	case listNode:
 		for _, elem := range n.elems {
@@ -767,8 +808,16 @@ func (co *compiler) compileNodeTail(node astNode, isTail bool) {
 		co.compileIfTail(n, isTail)
 
 	case fnNode:
+		// An inner fnNode captures the enclosing scope chain: mark the
+		// immediately-enclosing function as needing a heap scope (M1 TODO-08).
+		if len(co.fnScopeFlags) > 0 {
+			co.fnScopeFlags[len(co.fnScopeFlags)-1] = true
+		}
 		co.compileFunction(&n)
 	case *fnNode:
+		if len(co.fnScopeFlags) > 0 {
+			co.fnScopeFlags[len(co.fnScopeFlags)-1] = true
+		}
 		co.compileFunction(n)
 
 	case classNode:
@@ -793,6 +842,14 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 			co.emitOp(opDup)
 			co.emitOp(opStoreLocal)
 			co.emitU16(localIdx)
+		} else if depth, slot, ok := co.resolveUpvalueCoord(left.payload); ok {
+			// Assignment to an outer variable with known coordinates
+			nameIdx := co.addString(left.payload)
+			co.emitOp(opDup)
+			co.emitOp(opStoreUpvalFast)
+			co.emitU16(depth)
+			co.emitU16(slot)
+			co.emitU16(nameIdx)
 		} else if co.resolveUpvalue(left.payload) {
 			// Assignment to an outer variable
 			nameIdx := co.addString(left.payload)
@@ -810,14 +867,16 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 	case propertyAccessNode:
 		co.compileNode(left.left)
 		if ident, ok := left.right.(identifierNode); ok {
+			// Inline cache (M1 TODO-11): constant key fused into the op.
 			idx := co.addString(ident.payload)
-			co.emitOp(opConstStr)
+			co.compileNode(n.right)
+			co.emitOp(opSetPropConst)
 			co.emitU16(idx)
 		} else {
 			co.compileNode(left.right)
+			co.compileNode(n.right)
+			co.emitOp(opSetProp)
 		}
-		co.compileNode(n.right)
-		co.emitOp(opSetProp)
 
 	case listNode:
 		co.compileNode(n.right)
@@ -843,12 +902,12 @@ func (co *compiler) compileAssignment(n assignmentNode) {
 			// Keys in destructuring patterns are property names, not variable refs
 			if ident, ok := entry.key.(identifierNode); ok {
 				idx := co.addString(ident.payload)
-				co.emitOp(opConstStr)
+				co.emitOp(opGetPropConst)
 				co.emitU16(idx)
 			} else {
 				co.compileNode(entry.key)
+				co.emitOp(opGetProp)
 			}
-			co.emitOp(opGetProp)
 			if ident, ok := entry.val.(identifierNode); ok {
 				idx := co.declareLocal(ident.payload)
 				co.emitOp(opStoreLocal)
@@ -872,52 +931,234 @@ func (co *compiler) compileIf(n ifExprNode) {
 }
 
 func (co *compiler) compileIfTail(n ifExprNode, isTail bool) {
+	// Superinstruction fast path (M1 TODO-10, §7.5): `if local < imm` with a
+	// literal-true arm (+ optional wildcard) is the hottest pattern in the
+	// corpus (fib, loop counters, AVM1) — 9 dispatches fuse into 1.
+	if co.parentLocals != nil {
+		if sl, imm, ok := co.matchLtLocalImmTrue(n); ok {
+			co.compileLtLocalImmTrue(n, sl, imm, isTail)
+			return
+		}
+	}
 	co.compileNode(n.cond)
 	var endJumps []int
 
+	// M1 TODO-05 (§7.6): group consecutive branches that share an identical
+	// body AST. The parser's multi-target sugar `a, b -> body` splits one arm
+	// into multiple ifBranch entries referencing the SAME body node, so the
+	// naive path compiled the body once per target. Here every matching
+	// target jumps directly to a single compiled copy of the body, shrinking
+	// emitted bytecode for idioms like `'Z', 'B', 'C', 'S', 'I' -> 0`.
+	//
+	// Body identity is keyed by the body's rendered form: identical render
+	// implies identical compiled code, so coalescing is always safe.
+	type bodyGroup struct {
+		targets     []astNode
+		body        astNode
+		bodyKey     string
+		hasWildcard bool
+	}
+	groups := make([]*bodyGroup, 0, len(n.branches))
 	for _, br := range n.branches {
 		if _, isEmpty := br.target.(emptyNode); isEmpty {
+			// Wildcard matches unconditionally and terminates its group.
+			groups = append(groups, &bodyGroup{body: br.body, hasWildcard: true})
+			continue
+		}
+		key := br.body.String()
+		if len(groups) > 0 {
+			last := groups[len(groups)-1]
+			if !last.hasWildcard && last.bodyKey == key {
+				last.targets = append(last.targets, br.target)
+				continue
+			}
+		}
+		groups = append(groups, &bodyGroup{
+			targets: []astNode{br.target},
+			body:    br.body,
+			bodyKey: key,
+		})
+	}
+
+	for _, g := range groups {
+		var groupSkips []int
+		if g.hasWildcard {
 			// Default/wildcard branch: pop condition, execute body
 			co.emitOp(opPop)
-			co.compileNodeTail(br.body, isTail)
+			co.compileNodeTail(g.body, isTail)
 		} else {
-			// Duplicate condition, compile target, compare
-			co.emitOp(opDup)
-			co.compileNode(br.target)
-			co.emitOp(opEq)
-			// Jump past this branch body if no match
-			co.emitOp(opJumpFalse)
-			skipOffset := co.offset()
-			co.emitI32(0)
-			// Match: pop condition, execute body, jump to end
-			co.emitOp(opPop)
-			co.compileNodeTail(br.body, isTail)
-			co.emitOp(opJump)
-			endJumpOffset := co.offset()
-			co.emitI32(0)
-			endJumps = append(endJumps, endJumpOffset)
-			// Patch skip
-			co.patchI32(skipOffset, co.offset())
+			// For each target: test condition, and on match jump to the
+			// single shared body emitted after all tests.
+			var toBody []int
+			for _, t := range g.targets {
+				co.emitOp(opDup)
+				co.compileNode(t)
+				co.emitOp(opEq)
+				co.emitOp(opJumpFalse)
+				skipOffset := co.offset()
+				co.emitI32(0)
+				groupSkips = append(groupSkips, skipOffset)
+				// Match: pop condition, jump to shared body
+				co.emitOp(opPop)
+				co.emitOp(opJump)
+				toBody = append(toBody, co.offset())
+				co.emitI32(0)
+			}
+			bodyStart := co.offset()
+			for _, off := range toBody {
+				co.patchI32(off, bodyStart)
+			}
+			co.compileNodeTail(g.body, isTail)
+		}
+		co.emitOp(opJump)
+		endJumps = append(endJumps, co.offset())
+		co.emitI32(0)
+		// Non-matching targets skip past this group's shared body and the
+		// group's end-jump; that position is only known now, after the body
+		// has been emitted.
+		afterGroup := co.offset()
+		for _, s := range groupSkips {
+			co.patchI32(s, afterGroup)
 		}
 	}
 
+	// No-match fall-through parity (tree-walker returns null): the last
+	// non-wildcard group's false path reaches endTarget with the condition
+	// still on the stack — pop it and push null. With a trailing wildcard,
+	// the wildcard always matches and consumes the condition itself.
+	if len(groups) > 0 && !groups[len(groups)-1].hasWildcard {
+		co.emitOp(opPop)
+		co.emitOp(opConstNull)
+	}
 	endTarget := co.offset()
 	for _, off := range endJumps {
 		co.patchI32(off, endTarget)
 	}
 }
 
-// compileFunction compiles a fn definition.
+// matchLtLocalImmTrue reports whether the if-expression has the superinstr
+// shape: cond = `local < imm-literal`, first arm targets literal true, and
+// the final arm (when present) is a wildcard. Returns the local slot and
+// immediate.
+func (co *compiler) matchLtLocalImmTrue(n ifExprNode) (int, int64, bool) {
+	bin, ok := n.cond.(binaryNode)
+	if !ok || bin.op != less {
+		return 0, 0, false
+	}
+	id, ok := bin.left.(identifierNode)
+	if !ok {
+		return 0, 0, false
+	}
+	slot := co.resolveLocal(id.payload)
+	if slot < 0 {
+		return 0, 0, false
+	}
+	lit, ok := bin.right.(intNode)
+	if !ok {
+		return 0, 0, false
+	}
+	if len(n.branches) == 0 {
+		return 0, 0, false
+	}
+	if tb, ok := n.branches[0].target.(boolNode); !ok || !tb.payload {
+		return 0, 0, false
+	}
+	if len(n.branches) == 1 {
+		return slot, lit.payload, true
+	}
+	if len(n.branches) == 2 {
+		if _, ok := n.branches[1].target.(emptyNode); ok {
+			return slot, lit.payload, true
+		}
+	}
+	return 0, 0, false
+}
+
+// compileLtLocalImmTrue emits the fused comparison-match superinstruction.
+func (co *compiler) compileLtLocalImmTrue(n ifExprNode, slot int, imm int64, isTail bool) {
+	co.emitOp(opLtLocalJumpTrue)
+	co.emitU16(slot)
+	co.emitI32(int(imm))
+	elseSite := co.offset()
+	co.emitI32(0)
+
+	co.compileNodeTail(n.branches[0].body, isTail)
+	if len(n.branches) == 2 {
+		// Else target = start of the wildcard body (its value is the result).
+		co.emitOp(opJump)
+		endSite := co.offset()
+		co.emitI32(0)
+		co.patchI32(elseSite, co.offset())
+		co.compileNodeTail(n.branches[1].body, isTail)
+		co.patchI32(endSite, co.offset())
+	} else {
+		// No wildcard: else jumps to an emitted null (no-match parity with
+		// the tree-walker); the match path skips it.
+		co.emitOp(opJump)
+		skipNull := co.offset()
+		co.emitI32(0)
+		co.patchI32(elseSite, co.offset())
+		co.emitOp(opConstNull)
+		co.patchI32(skipNull, co.offset())
+	}
+}
+
+// compileFunction compiles a fn definition (registers the template, emits
+// CLOSURE, and binds the name in the outer scope when named).
 func (co *compiler) compileFunction(n *fnNode) {
+	fnIdx := co.emitFunctionBody(n)
+
+	// Emit CLOSURE in outer code
+	co.emitOp(opClosure)
+	co.emitU16(fnIdx)
+
+	// If named, also bind as local in outer scope
+	if n.name != "" {
+		co.emitOp(opDup)
+		co.emitOp(opStoreLocal)
+		co.emitU16(co.resolveLocal(n.name))
+	}
+}
+
+// hofCallbackFnIdx compiles a literal fnNode callback argument into a
+// registered function template and returns its index, for opHOF* ops.
+// Returns ok=false for non-fnNode arguments (fast path not applicable).
+func (co *compiler) hofCallbackFnIdx(arg astNode) (int, bool) {
+	switch cb := arg.(type) {
+	case fnNode:
+		// The callback is an inner fnNode of the enclosing function: its
+		// body may capture enclosing locals, so the enclosing function must
+		// heap-scope its frames (TODO-08 induction). The HOF fast path
+		// bypasses compileNode(fnNode), which is where the normal marking
+		// happens — without this mark, callbacks defined inside a slab-frame
+		// function silently resolve captured locals to null (TODO-14 fix).
+		if len(co.fnScopeFlags) > 0 {
+			co.fnScopeFlags[len(co.fnScopeFlags)-1] = true
+		}
+		return co.emitFunctionBody(&cb), true
+	case *fnNode:
+		if len(co.fnScopeFlags) > 0 {
+			co.fnScopeFlags[len(co.fnScopeFlags)-1] = true
+		}
+		return co.emitFunctionBody(cb), true
+	}
+	return 0, false
+}
+
+// emitFunctionBody compiles a fn definition body and registers its function
+// template, returning the template index. Shared by inline closure literals
+// (which then emit opClosure themselves) and HOF in-frame callbacks (whose
+// templates are referenced directly by opHOF* ops — no closure allocation,
+// M1 TODO-12 §7.8).
+func (co *compiler) emitFunctionBody(n *fnNode) int {
 	// NOTE: Do NOT capture fnIdx here — inner function compilations
 	// will register their templates first, shifting the index.
 
 	// Pre-declare the function name in the outer scope BEFORE compiling body.
 	// This ensures the name is in the parent locals so the body can
 	// reference it as an upvalue for self-recursion.
-	var nameSlot int
 	if n.name != "" {
-		nameSlot = co.declareLocal(n.name)
+		co.declareLocal(n.name)
 	}
 
 	// Save outer locals (now includes the pre-declared function name)
@@ -926,6 +1167,9 @@ func (co *compiler) compileFunction(n *fnNode) {
 
 	// Push outer locals onto parentLocals stack for upvalue resolution
 	co.parentLocals = append(co.parentLocals, savedLocals)
+
+	// Track whether this body contains inner fnNodes (heap-scope requirement)
+	co.fnScopeFlags = append(co.fnScopeFlags, false)
 
 	// Jump over inline function body
 	co.emitOp(opJump)
@@ -972,27 +1216,20 @@ func (co *compiler) compileFunction(n *fnNode) {
 	co.patchI32(jumpOverOffset, fnBodyEnd)
 
 	// Register function template AFTER body compilation (correct index)
+	needsHeapScope := co.fnScopeFlags[len(co.fnScopeFlags)-1]
+	co.fnScopeFlags = co.fnScopeFlags[:len(co.fnScopeFlags)-1]
 	fnIdx := len(co.functions)
 	co.functions = append(co.functions, funcTemplate{
-		offset:     fnBodyStart,
-		arity:      len(n.args),
-		localCount: localCount,
-		name:       n.name,
-		hasRestArg: n.restArg != "",
-		localNames: localNamesCopy,
-		defn:       n,
+		offset:         fnBodyStart,
+		arity:          len(n.args),
+		localCount:     localCount,
+		name:           n.name,
+		hasRestArg:     n.restArg != "",
+		localNames:     localNamesCopy,
+		defn:           n,
+		needsHeapScope: needsHeapScope,
 	})
-
-	// Emit CLOSURE in outer code
-	co.emitOp(opClosure)
-	co.emitU16(fnIdx)
-
-	// If named, also bind as local in outer scope
-	if n.name != "" {
-		co.emitOp(opDup)
-		co.emitOp(opStoreLocal)
-		co.emitU16(nameSlot)
-	}
+	return fnIdx
 }
 
 // compileClass compiles a class node (desugars to fn).
@@ -1029,6 +1266,61 @@ func (co *compiler) compileFnCallTail(n fnCallNode, isTail bool) {
 		co.compileNode(n.args[0])
 		co.emitOp(opImportDyn)
 		return
+	}
+
+	// In-frame HOF loops (M1 TODO-12, §7.8): std map/filter/each/reduce called
+	// with a literal fnNode callback compile to dedicated ops that run the
+	// callback as an in-frame loop — no closure allocation, no per-element
+	// accumulator `<<` churn, no child VMs. The callee (identifier or
+	// property access such as std.map) is evaluated first and left for the
+	// op to pop, so both `map(...)` and `std.map(...)` shapes specialize;
+	// shadowed identifiers keep the generic call.
+	if n.restArg == nil {
+		hofTarget := ""
+		switch fnExpr := n.fn.(type) {
+		case identifierNode:
+			if co.resolveLocal(fnExpr.payload) < 0 && !co.resolveUpvalue(fnExpr.payload) {
+				hofTarget = fnExpr.payload
+			}
+		case propertyAccessNode:
+			if id, ok := fnExpr.right.(identifierNode); ok {
+				if _, ok2 := fnExpr.left.(identifierNode); ok2 {
+					hofTarget = id.payload
+				}
+			}
+		}
+		switch hofTarget {
+		case "map", "filter", "each":
+			if len(n.args) == 2 {
+				if fnIdx, ok2 := co.hofCallbackFnIdx(n.args[1]); ok2 {
+					// stack: [callee, subject]
+					co.compileNode(n.fn)
+					co.compileNode(n.args[0])
+					switch hofTarget {
+					case "map":
+						co.emitOp(opHOFMap)
+					case "filter":
+						co.emitOp(opHOFFilter)
+					default:
+						co.emitOp(opHOFEach)
+					}
+					co.emitU16(fnIdx)
+					return
+				}
+			}
+		case "reduce":
+			if len(n.args) == 3 {
+				if fnIdx, ok2 := co.hofCallbackFnIdx(n.args[2]); ok2 {
+					// stack: [callee, subject, seed]
+					co.compileNode(n.fn)
+					co.compileNode(n.args[0])
+					co.compileNode(n.args[1])
+					co.emitOp(opHOFReduce)
+					co.emitU16(fnIdx)
+					return
+				}
+			}
+		}
 	}
 
 	// Check for built-in function calls
@@ -1164,6 +1456,34 @@ func disassemble(chunk *bytecodeChunk) string {
 				fmt.Fprintf(&sb, " #%d", v)
 			}
 			advance = 3
+		case opHOFMap, opHOFFilter, opHOFEach, opHOFReduce:
+			v := int(bc[i+1]) | int(bc[i+2])<<8
+			fmt.Fprintf(&sb, " fn#%d", v)
+			advance = 3
+		case opGetPropConst, opSetPropConst:
+			v := int(bc[i+1]) | int(bc[i+2])<<8
+			if v < len(chunk.constants) {
+				fmt.Fprintf(&sb, " '%s'", chunk.constants[v].str)
+			} else {
+				fmt.Fprintf(&sb, " #%d", v)
+			}
+			advance = 3
+		case opLtLocalJumpTrue:
+			s := int(bc[i+1]) | int(bc[i+2])<<8
+			imm := int32(uint32(bc[i+3]) | uint32(bc[i+4])<<8 | uint32(bc[i+5])<<16 | uint32(bc[i+6])<<24)
+			tgt := int32(uint32(bc[i+7]) | uint32(bc[i+8])<<8 | uint32(bc[i+9])<<16 | uint32(bc[i+10])<<24)
+			fmt.Fprintf(&sb, " @%d <%d else->%d", s, imm, tgt)
+			advance = 11
+		case opLoadUpvalFast, opStoreUpvalFast:
+			d := int(bc[i+1]) | int(bc[i+2])<<8
+			s := int(bc[i+3]) | int(bc[i+4])<<8
+			v := int(bc[i+5]) | int(bc[i+6])<<8
+			if v < len(chunk.constants) {
+				fmt.Fprintf(&sb, " d%d s%d '%s'", d, s, chunk.constants[v].str)
+			} else {
+				fmt.Fprintf(&sb, " d%d s%d #%d", d, s, v)
+			}
+			advance = 7
 		case opJump, opJumpFalse, opMatchJump:
 			v := int(bc[i+1]) | int(bc[i+2])<<8 | int(bc[i+3])<<16 | int(bc[i+4])<<24
 			fmt.Fprintf(&sb, " ->%d", v)
@@ -1218,6 +1538,10 @@ type callFrame struct {
 	fnIdx    int     // function template index (-1 for top-level)
 	locals   []Value // local variable slots
 	scope    *vmScope
+	baseLocal int // slab window base (localSP at call entry); -1 for heap frames
+	// parentScope is the closure's captured scope for slab frames (whose own
+	// scope is nil). Name-based upvalue reads/writes resolve against it.
+	parentScope *vmScope
 }
 
 // VM is the bytecode virtual machine.
@@ -1230,16 +1554,274 @@ type VM struct {
 	ctx        *Context // for built-in function dispatch + imports
 	initLocals []Value  // pre-populated local slot values (for bytecode() builtin)
 	outerScope *vmScope // enclosing scope for upvalue resolution in bytecode() builtin
+	// localsSlab is a contiguous pre-allocated register file shared by all
+	// non-escaping frames of this VM. Each call windows into it; returns
+	// restore localSP in O(1). Zero heap allocations per slab call.
+	localsSlab []Value
+	localSP    int
+	// hofStack drives in-frame higher-order-function loops (opHOF*). Each
+	// entry is one active HOF whose callback frame is currently executing.
+	hofStack []hofState
 }
+
+// hofKind enumerates the in-frame HOF loop shapes.
+type hofKind byte
+
+const (
+	hofMap hofKind = iota
+	hofFilter
+	hofEach
+	hofReduce
+)
+
+// hofState is the iteration state of one active in-frame HOF loop. The
+// callback runs as a plain VM frame; opReturn detects the callback frame by
+// index (frameIdx == len(frames) after pop), accumulates, and either pushes
+// the next iteration's frame or finishes the loop.
+type hofState struct {
+	kind      hofKind
+	fnIdx     int
+	sub       *ListValue   // list subject (element source)
+	sstr      *StringValue // string subject (element source)
+	acc       *ListValue   // list result accumulator (map/filter)
+	sacc      *StringValue // string result accumulator (map/filter)
+	accNull   bool         // map over string saw a non-string/int result → overall null
+	seed      Value        // reduce accumulator (current value)
+	frame     callFrame    // prepared callback frame, re-pushed per iteration
+	frameIdx  int          // vm.frames index the callback frame occupies
+	i, n      int          // iteration index and subject length
+	returnPC  int          // pc right after the opHOF* instruction
+	baseLocal int          // slab window base of the callback frame; -1 heap
+}
+
+// elemAt returns the subject element at index i (list element or 1-char
+// string), matching std's xs.(i) index access.
+func (st *hofState) elemAt(i int) Value {
+	if st.sub != nil {
+		return (*st.sub)[i]
+	}
+	return MakeSingleByteString((*st.sstr)[i])
+}
+
+// hofFillArgs writes the callback's arguments into the frame's locals window:
+// (elem, i) for map/filter/each, (acc, elem, i) for reduce. Slots beyond the
+// callback's arity stay null (normalizeCallArgs padding semantics).
+func (vm *VM) hofFillArgs(st *hofState) {
+	locals := st.frame.locals
+	for j := range locals {
+		locals[j] = null
+	}
+	idxVal := makeIntValue(int64(st.i))
+	switch st.kind {
+	case hofReduce:
+		if len(locals) > 0 {
+			locals[0] = st.seed
+		}
+		if len(locals) > 1 {
+			locals[1] = st.elemAt(st.i)
+		}
+		if len(locals) > 2 {
+			locals[2] = idxVal
+		}
+	default:
+		if len(locals) > 0 {
+			locals[0] = st.elemAt(st.i)
+		}
+		if len(locals) > 1 {
+			locals[1] = idxVal
+		}
+	}
+}
+
+// hofRefresh prepares the callback frame for the next iteration. Self-tail
+// recursion and same-shape reuse keep the original locals slice; a non-self
+// tail call inside the callback swaps frame.locals to a foreign slice that
+// may be captured, so heap frames get a fresh locals + scope (slab windows
+// are always private — opReturn freed them before we get here).
+func (vm *VM) hofRefresh(st *hofState) {
+	if st.baseLocal >= 0 {
+		vm.localSP = st.baseLocal + len(st.frame.locals) + vmSlabHeadroom
+	} else if st.frame.fnIdx != st.fnIdx {
+		locals := make([]Value, len(st.frame.locals))
+		for j := range locals {
+			locals[j] = null
+		}
+		st.frame.locals = locals
+		if st.frame.scope != nil {
+			st.frame.scope = &vmScope{names: st.frame.scope.names, values: locals, parent: st.frame.scope.parent}
+		}
+	}
+	vm.hofFillArgs(st)
+}
+
+// hofAccumulate folds one callback return value into the loop state.
+func (st *hofState) hofAccumulate(retVal Value) {
+	switch st.kind {
+	case hofMap:
+		if st.acc != nil {
+			*st.acc = append(*st.acc, retVal)
+		} else {
+			switch r := retVal.(type) {
+			case *StringValue:
+				*st.sacc = append(*st.sacc, *r...)
+			case IntValue:
+				*st.sacc = append(*st.sacc, byte(r))
+			default:
+				// acc << x on a string with a non-string/int result yields
+				// null, which poisons the rest of the std loop.
+				st.accNull = true
+			}
+		}
+	case hofFilter:
+		if bv, ok := retVal.(BoolValue); ok && bool(bv) {
+			if st.acc != nil {
+				*st.acc = append(*st.acc, st.elemAt(st.i))
+			} else {
+				*st.sacc = append(*st.sacc, (*st.sstr)[st.i])
+			}
+		}
+	case hofReduce:
+		st.seed = retVal
+	}
+}
+
+// hofResult computes the loop's final return value, mirroring std semantics:
+// map/filter return the accumulator, each returns null, reduce returns the
+// final accumulator.
+func (st *hofState) hofResult() Value {
+	switch st.kind {
+	case hofMap:
+		if st.acc != nil {
+			return st.acc
+		}
+		if st.accNull {
+			return null
+		}
+		return st.sacc
+	case hofFilter:
+		if st.acc != nil {
+			return st.acc
+		}
+		return st.sacc
+	case hofEach:
+		return null
+	default:
+		return st.seed
+	}
+}
+
+// hofStart classifies the subject and either (a) starts the in-frame loop by
+// pushing the first callback frame (returns started=true), (b) finishes
+// immediately for empty subjects by pushing the result (started=false), or
+// (c) falls back to the generic std-lib call for unsupported subjects
+// (started=false). Mirrors lib/std.oak exactly (M1 TODO-12, §7.8).
+func (vm *VM) hofStart(kind hofKind, fnIdx int, subject, seed, callee Value, topScope *vmScope) (bool, *runtimeError) {
+	ft := &vm.chunk.functions[fnIdx]
+	curScope := vm.currentScope(topScope)
+	st := hofState{kind: kind, fnIdx: fnIdx, seed: seed, baseLocal: -1}
+	finish := func(result Value) (bool, *runtimeError) {
+		vm.push(result)
+		return false, nil
+	}
+	switch s := subject.(type) {
+	case *ListValue:
+		st.sub = s
+		st.n = len(*s)
+		if kind == hofMap || kind == hofFilter {
+			acc := make(ListValue, 0, st.n)
+			st.acc = &acc
+		}
+	case *StringValue:
+		st.sstr = s
+		st.n = len(*s)
+		if kind == hofMap || kind == hofFilter {
+			st.sacc = &StringValue{}
+		}
+	default:
+		// Unsupported subject: exact std semantics via the generic path,
+		// calling the same callee value the op popped off the stack.
+		callback := &closureVal{fnIdx: fnIdx, parentScope: curScope, defn: ft.defn}
+		var args []Value
+		if kind == hofReduce {
+			args = []Value{subject, seed, callback}
+		} else {
+			args = []Value{subject, callback}
+		}
+		res, err := vm.genericCall(callee, args)
+		if err != nil {
+			return false, err
+		}
+		return finish(res)
+	}
+	if st.n == 0 {
+		return finish(st.hofResult())
+	}
+	st.returnPC = vm.pc
+	// Build the first callback frame (slab window when possible).
+	if !ft.needsHeapScope && !ft.hasRestArg {
+		if base := vm.localSP; base+ft.localCount+vmSlabHeadroom <= len(vm.localsSlab) {
+			window := vm.localsSlab[base : base+ft.localCount : base+ft.localCount+vmSlabHeadroom]
+			st.baseLocal = base
+			st.frame = callFrame{
+				returnPC:    st.returnPC,
+				baseSlot:    vm.sp,
+				fnIdx:       fnIdx,
+				locals:      window,
+				scope:       nil,
+				baseLocal:   base,
+				parentScope: curScope,
+			}
+			vm.hofFillArgs(&st)
+			vm.localSP = base + ft.localCount + vmSlabHeadroom
+			st.frameIdx = len(vm.frames)
+			vm.hofStack = append(vm.hofStack, st)
+			vm.frames = append(vm.frames, vm.hofStack[len(vm.hofStack)-1].frame)
+			vm.pc = ft.offset
+			return true, nil
+		}
+	}
+	locals := make([]Value, ft.localCount)
+	for j := range locals {
+		locals[j] = null
+	}
+	st.frame = callFrame{
+		returnPC:    st.returnPC,
+		baseSlot:    vm.sp,
+		fnIdx:       fnIdx,
+		locals:      locals,
+		scope:       nil,
+		baseLocal:   -1,
+		parentScope: curScope,
+	}
+	if ft.needsHeapScope {
+		st.frame.scope = &vmScope{names: ft.localNames, values: locals, parent: curScope}
+	}
+	vm.hofFillArgs(&st)
+	st.frameIdx = len(vm.frames)
+	vm.hofStack = append(vm.hofStack, st)
+	vm.frames = append(vm.frames, vm.hofStack[len(vm.hofStack)-1].frame)
+	vm.pc = ft.offset
+	return true, nil
+}
+
+// vmSlabSlots is the per-VM locals slab size. Frames that do not fit fall
+// back to heap-allocated locals (correct, just slower).
+const vmSlabSlots = 65536
+
+// vmSlabHeadroom reserves extra capacity per slab window so that the
+// defensive append growth in opStoreLocal stays inside this frame's own
+// reserved region instead of corrupting the next frame's window.
+const vmSlabHeadroom = 8
 
 func newVM(chunk *bytecodeChunk, ctx *Context) *VM {
 	return &VM{
-		chunk:  chunk,
-		pc:     0,
-		stack:  make([]Value, 1024),
-		sp:     0,
-		frames: make([]callFrame, 0, 64),
-		ctx:    ctx,
+		chunk:      chunk,
+		pc:         0,
+		stack:      make([]Value, 1024),
+		sp:         0,
+		frames:     make([]callFrame, 0, 64),
+		ctx:        ctx,
+		localsSlab: make([]Value, vmSlabSlots),
 	}
 }
 
@@ -1247,8 +1829,9 @@ func newVM(chunk *bytecodeChunk, ctx *Context) *VM {
 var vmPool = sync.Pool{
 	New: func() interface{} {
 		return &VM{
-			stack:  make([]Value, 1024),
-			frames: make([]callFrame, 0, 64),
+			stack:      make([]Value, 1024),
+			frames:     make([]callFrame, 0, 64),
+			localsSlab: make([]Value, vmSlabSlots),
 		}
 	},
 }
@@ -1263,6 +1846,8 @@ func acquireVM(chunk *bytecodeChunk, ctx *Context) *VM {
 	vm.ctx = ctx
 	vm.initLocals = nil
 	vm.outerScope = nil
+	vm.localSP = 0
+	vm.hofStack = vm.hofStack[:0]
 	return vm
 }
 
@@ -1272,11 +1857,67 @@ func releaseVM(vm *VM) {
 	for i := 0; i < vm.sp; i++ {
 		vm.stack[i] = nil
 	}
+	// Clear consumed slab windows for the same reason.
+	for i := 0; i < vm.localSP; i++ {
+		vm.localsSlab[i] = nil
+	}
+	vm.localSP = 0
+	// Clear HOF loop states (hold Value references).
+	for i := range vm.hofStack {
+		vm.hofStack[i].frame.locals = nil
+		vm.hofStack[i].sub = nil
+		vm.hofStack[i].sstr = nil
+		vm.hofStack[i].acc = nil
+		vm.hofStack[i].sacc = nil
+		vm.hofStack[i].seed = nil
+	}
+	vm.hofStack = vm.hofStack[:0]
 	vm.chunk = nil
 	vm.ctx = nil
 	vm.initLocals = nil
 	vm.outerScope = nil
 	vmPool.Put(vm)
+}
+
+// genericCall invokes callee with args outside the fast-path frame machinery:
+// bytecode closures run in a pooled child VM (bridged scopes), Oak AST
+// closures and arbitrary callables dispatch through the tree-walker. Used by
+// opHOF* for subjects the in-frame loops do not support, preserving exact
+// std-lib semantics (M1 TODO-12 §7.8).
+func (vm *VM) genericCall(callee Value, args []Value) (Value, *runtimeError) {
+	switch fn := callee.(type) {
+	case *closureVal:
+		if fn.defn != nil {
+			chunk := vm.ctx.getOrCompileChunk(fn.defn)
+			initVals := normalizeCallArgs(len(fn.defn.args), args)
+			if fn.defn.restArg != "" {
+				var restList ListValue
+				if len(args) > len(fn.defn.args) {
+					restList = ListValue(args[len(fn.defn.args):])
+				} else {
+					restList = ListValue{}
+				}
+				initVals = append(initVals[:len(fn.defn.args)], &restList)
+			}
+			sub := acquireVM(chunk, vm.ctx)
+			sub.initLocals = initVals
+			sub.outerScope = fn.parentScope
+			res, err := sub.run()
+			releaseVM(sub)
+			return res, err
+		}
+		if fn.call != nil {
+			return fn.call(args)
+		}
+		return vm.ctx.evalFnCall(callee, false, args)
+	case BuiltinFnValue:
+		for i, a := range args {
+			args[i] = vm.interopValue(a)
+		}
+		return fn.fn(args)
+	default:
+		return vm.ctx.evalFnCall(callee, false, args)
+	}
 }
 
 func (vm *VM) push(v Value) {
@@ -1326,9 +1967,14 @@ func (vm *VM) currentFrame() *callFrame {
 
 // currentScope returns the scope for upvalue resolution.
 func (vm *VM) currentScope(topScope *vmScope) *vmScope {
-	frame := vm.currentFrame()
-	if frame != nil {
-		return frame.scope
+	// Slab frames have nil scopes (their locals are slot-addressed and can
+	// never be captured by closures). Walk down to the nearest heap scope so
+	// name-based upvalue lookups from inside slab frames still resolve
+	// against the enclosing lexical scope chain (M1 TODO-08).
+	for i := len(vm.frames) - 1; i >= 0; i-- {
+		if s := vm.frames[i].scope; s != nil {
+			return s
+		}
 	}
 	return topScope
 }
@@ -1428,11 +2074,12 @@ func (vm *VM) callClosure(cv *closureVal, args []Value) (Value, *runtimeError) {
 	}
 
 	vm.frames = append(vm.frames, callFrame{
-		returnPC: len(vm.chunk.code), // halt after return
-		baseSlot: vm.sp,
-		fnIdx:    cv.fnIdx,
-		locals:   locals,
-		scope:    scope,
+		returnPC:  len(vm.chunk.code), // halt after return
+		baseSlot:  vm.sp,
+		fnIdx:     cv.fnIdx,
+		locals:    locals,
+		scope:     scope,
+		baseLocal: -1,
 	})
 	vm.pc = ft.offset
 	return vm.run()
@@ -1546,7 +2193,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 
 		case opConstInt:
 			v := vm.fetchI32()
-			vm.push(IntValue(v))
+			vm.push(makeIntValue(int64(v)))
 
 		case opConstFloat:
 			idx := vm.fetchU16()
@@ -1616,6 +2263,113 @@ func (vm *VM) run() (Value, *runtimeError) {
 				topLocals[slot] = val
 			}
 
+		case opLtLocalJumpTrue:
+			slot := vm.fetchU16()
+			imm := vm.fetchI32()
+			target := vm.fetchI32()
+			var cond Value
+			frame := vm.currentFrame()
+			if frame != nil {
+				var lv Value = null
+				if slot < len(frame.locals) {
+					lv = frame.locals[slot]
+				}
+				if li, ok := lv.(IntValue); ok {
+					cond = BoolValue(li < IntValue(imm))
+				} else {
+					cond = vmLt(lv, makeIntValue(int64(imm)))
+				}
+			} else {
+				// Top level: mirror opLoadLocal's topLocals read.
+				var lv Value = null
+				if slot < len(topLocals) {
+					lv = topLocals[slot]
+				}
+				cond = vmLt(lv, makeIntValue(int64(imm)))
+			}
+			if bv, ok := cond.(BoolValue); ok && bool(bv) {
+				// Match: fall through to the true arm (cond consumed).
+			} else {
+				// No match (incl. non-bool cond): jump to the else stream —
+				// wildcard body, or an emitted null for the 1-arm shape.
+				vm.pc = target
+			}
+
+		case opHOFMap, opHOFFilter, opHOFEach, opHOFReduce:
+			fnIdx := vm.fetchU16()
+			kind := hofKind(op - opHOFMap)
+			var seed Value
+			if kind == hofReduce {
+				// stack: [callee, subject, seed] (seed emitted last)
+				seed = vm.pop()
+			}
+			subject := vm.pop()
+			callee := vm.pop()
+			started, hErr := vm.hofStart(kind, fnIdx, subject, seed, callee, topScope)
+			if hErr != nil {
+				return nil, hErr
+			}
+			if started {
+				continue
+			}
+
+		case opLoadUpvalFast, opStoreUpvalFast:
+			depth := int(vm.fetchU16())
+			slot := int(vm.fetchU16())
+			nameIdx := vm.fetchU16()
+			name := vm.chunk.constants[nameIdx].str
+			frame := vm.currentFrame()
+			var sc *vmScope
+			if frame != nil {
+				if frame.scope != nil {
+					sc = frame.scope.parent
+				} else {
+					sc = frame.parentScope
+				}
+			} else {
+				sc = topScope
+			}
+			// Walk (depth-1) lexical hops up the persistent heap scope chain.
+			for hop := 1; hop < depth && sc != nil; hop++ {
+				sc = sc.parent
+			}
+			if sc != nil && slot < len(sc.values) {
+				if op == opLoadUpvalFast {
+					v := sc.values[slot]
+					if v == nil {
+						v = null
+					}
+					vm.push(v)
+					continue
+				}
+				// opStoreUpvalFast: frame.locals aliases sc.values, so the
+				// write lands in the ancestor's slot directly.
+				sc.values[slot] = vm.pop()
+				continue
+			}
+			// Defensive fallback: resolve by name (bridges, extended slots).
+			if op == opLoadUpvalFast {
+				found := false
+				if sc != nil {
+					if val, ok := sc.get(name); ok && val != nil && val != null {
+						vm.push(val)
+						found = true
+					}
+				}
+				if !found {
+					if val, _ := vm.ctx.scope.get(name); val != nil && val != null {
+						vm.push(val)
+					} else {
+						vm.push(null)
+					}
+				}
+				continue
+			}
+			val := vm.pop()
+			if sc != nil {
+				sc.set(name, val)
+			}
+
 		case opLoadUpval:
 			nameIdx := vm.fetchU16()
 			name := vm.chunk.constants[nameIdx].str
@@ -1623,12 +2377,18 @@ func (vm *VM) run() (Value, *runtimeError) {
 			found := false
 			if scope != nil {
 				// For a function frame, start searching from the parent scope
-				// (the closure's captured scope), not the current function's scope
+				// (the closure's captured scope), not the current function's scope.
+				// Slab frames carry the captured scope in frame.parentScope.
 				frame := vm.currentFrame()
 				var searchScope *vmScope
-				if frame != nil && frame.scope != nil {
-					searchScope = frame.scope.parent
-				} else {
+				if frame != nil {
+					if frame.scope != nil {
+						searchScope = frame.scope.parent
+					} else {
+						searchScope = frame.parentScope
+					}
+				}
+				if searchScope == nil {
 					searchScope = scope
 				}
 				if val, ok := searchScope.get(name); ok && val != nil && val != null {
@@ -1653,9 +2413,14 @@ func (vm *VM) run() (Value, *runtimeError) {
 			if scope != nil {
 				frame := vm.currentFrame()
 				var searchScope *vmScope
-				if frame != nil && frame.scope != nil {
-					searchScope = frame.scope.parent
-				} else {
+				if frame != nil {
+					if frame.scope != nil {
+						searchScope = frame.scope.parent
+					} else {
+						searchScope = frame.parentScope
+					}
+				}
+				if searchScope == nil {
 					searchScope = scope
 				}
 				searchScope.set(name, val)
@@ -1666,7 +2431,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			left := vm.pop()
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li + ri))
+					vm.push(makeIntValue(int64(li + ri)))
 					break
 				}
 			}
@@ -1688,7 +2453,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			left := vm.pop()
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li - ri))
+					vm.push(makeIntValue(int64(li - ri)))
 					break
 				}
 			}
@@ -1699,7 +2464,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			left := vm.pop()
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li * ri))
+					vm.push(makeIntValue(int64(li * ri)))
 					break
 				}
 			}
@@ -1711,7 +2476,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok && ri != 0 {
 					if li%ri == 0 {
-						vm.push(IntValue(li / ri))
+						vm.push(makeIntValue(int64(li / ri)))
 					} else {
 						vm.push(FloatValue(float64(li) / float64(ri)))
 					}
@@ -1729,7 +2494,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			left := vm.pop()
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok && ri != 0 {
-					vm.push(IntValue(li % ri))
+					vm.push(makeIntValue(int64(li % ri)))
 					break
 				}
 			}
@@ -1748,7 +2513,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			v := vm.pop()
 			switch val := v.(type) {
 			case IntValue:
-				vm.push(IntValue(-val))
+				vm.push(makeIntValue(int64(-val)))
 			case FloatValue:
 				vm.push(FloatValue(-val))
 			default:
@@ -1761,7 +2526,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			switch lv := left.(type) {
 			case IntValue:
 				if rv, ok := right.(IntValue); ok {
-					vm.push(IntValue(lv & rv))
+					vm.push(makeIntValue(int64(lv & rv)))
 				} else {
 					vm.push(null)
 				}
@@ -1803,7 +2568,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			switch lv := left.(type) {
 			case IntValue:
 				if rv, ok := right.(IntValue); ok {
-					vm.push(IntValue(lv | rv))
+					vm.push(makeIntValue(int64(lv | rv)))
 				} else {
 					vm.push(null)
 				}
@@ -1845,7 +2610,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			switch lv := left.(type) {
 			case IntValue:
 				if rv, ok := right.(IntValue); ok {
-					vm.push(IntValue(lv ^ rv))
+					vm.push(makeIntValue(int64(lv ^ rv)))
 				} else {
 					vm.push(null)
 				}
@@ -1886,7 +2651,7 @@ func (vm *VM) run() (Value, *runtimeError) {
 			left := vm.pop()
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok {
-					vm.push(IntValue(li >> uint(ri)))
+					vm.push(makeIntValue(int64(li >> uint(ri))))
 				} else {
 					vm.push(null)
 				}
@@ -1904,6 +2669,17 @@ func (vm *VM) run() (Value, *runtimeError) {
 					break
 				}
 			}
+			// Object identity parity with the tree-walker's eq (evalBinaryOp):
+			// `=` on object records compares map identity. Deep Eq here would
+			// recurse infinitely on cyclic graphs (lru nodes, parent links).
+			if lo, ok := left.(ObjectValue); ok {
+				if ro, ok2 := right.(ObjectValue); ok2 {
+					vm.push(BoolValue(ifaceDataPtr(lo) == ifaceDataPtr(ro)))
+				} else {
+					vm.push(BoolValue(false))
+				}
+				break
+			}
 			// Fast path for single-byte string comparison (dominant in char loops)
 			if ls, ok := left.(*StringValue); ok {
 				if rs, ok := right.(*StringValue); ok {
@@ -1918,6 +2694,14 @@ func (vm *VM) run() (Value, *runtimeError) {
 		case opNeq:
 			right := vm.pop()
 			left := vm.pop()
+			if lo, ok := left.(ObjectValue); ok {
+				if ro, ok2 := right.(ObjectValue); ok2 {
+					vm.push(BoolValue(ifaceDataPtr(lo) != ifaceDataPtr(ro)))
+				} else {
+					vm.push(BoolValue(true))
+				}
+				break
+			}
 			if li, ok := left.(IntValue); ok {
 				if ri, ok := right.(IntValue); ok {
 					vm.push(BoolValue(li != ri))
@@ -2032,6 +2816,48 @@ func (vm *VM) run() (Value, *runtimeError) {
 			vmSetProp(obj, key, val)
 			vm.push(val)
 
+		case opGetPropConst:
+			idx := vm.fetchU16()
+			keyStr := vm.chunk.constants[idx].str
+			obj := vm.pop()
+			switch o := obj.(type) {
+			case ObjectValue:
+				if v, ok := o[keyStr]; ok {
+					vm.push(v)
+				} else {
+					vm.push(null)
+				}
+			case ClassValue:
+				if v, ok := o.static[keyStr]; ok {
+					vm.push(v)
+				} else {
+					vm.push(null)
+				}
+			default:
+				sv := StringValue(keyStr)
+				res, errMsg := vmGetProp(obj, &sv)
+				if errMsg != "" {
+					return nil, vm.vmError(errMsg)
+				}
+				vm.push(res)
+			}
+
+		case opSetPropConst:
+			idx := vm.fetchU16()
+			keyStr := vm.chunk.constants[idx].str
+			val := vm.pop()
+			obj := vm.pop()
+			switch o := obj.(type) {
+			case ObjectValue:
+				mu := objLock(o)
+				o[keyStr] = val
+				mu.Unlock()
+			default:
+				sv := StringValue(keyStr)
+				vmSetProp(obj, &sv, val)
+			}
+			vm.push(val)
+
 		case opJump:
 			target := vm.fetchI32()
 			vm.pc = target
@@ -2062,6 +2888,37 @@ func (vm *VM) run() (Value, *runtimeError) {
 				// Fast path for closure calls: copy args directly from
 				// stack to locals, avoiding intermediate args slice allocation.
 				ft := &vm.chunk.functions[fn.fnIdx]
+
+				// Slab fast path (M1 TODO-08, §7.2): frames of functions that
+				// contain no inner fnNode run entirely on the VM's contiguous
+				// locals slab — 0 heap allocations for locals, scope, or frame.
+				if !ft.needsHeapScope && !ft.hasRestArg {
+					if base := vm.localSP; base+ft.localCount+vmSlabHeadroom <= len(vm.localsSlab) {
+						window := vm.localsSlab[base : base+ft.localCount : base+ft.localCount+vmSlabHeadroom]
+						for i := range window {
+							window[i] = null
+						}
+						argBase := vm.sp - arity
+						n := ft.arity
+						if arity < n {
+							n = arity
+						}
+						copy(window[:n], vm.stack[argBase:argBase+n])
+						vm.localSP = base + ft.localCount + vmSlabHeadroom
+						vm.sp = argBase - 1 // pop callee + args
+						vm.frames = append(vm.frames, callFrame{
+							returnPC:    vm.pc,
+							baseSlot:    vm.sp,
+							fnIdx:       fn.fnIdx,
+							locals:      window,
+							scope:       nil,
+							baseLocal:   base,
+							parentScope: fn.parentScope,
+						})
+						vm.pc = ft.offset
+						continue
+					}
+				}
 
 				locals := make([]Value, ft.localCount)
 				for i := range locals {
@@ -2154,6 +3011,35 @@ func (vm *VM) run() (Value, *runtimeError) {
 			vm.frames = vm.frames[:len(vm.frames)-1]
 			vm.pc = frame.returnPC
 			vm.sp = frame.baseSlot
+			if frame.baseLocal >= 0 {
+				// Slab frame: O(1) bulk "free" by restoring the slab pointer.
+				vm.localSP = frame.baseLocal
+			}
+			// In-frame HOF loop step (M1 TODO-12, §7.8): if the frame that
+			// just returned was an opHOF* callback, accumulate and iterate
+			// (or finish) instead of returning to the call site.
+			if hs := len(vm.hofStack); hs > 0 && vm.hofStack[hs-1].frameIdx == len(vm.frames) {
+				st := &vm.hofStack[hs-1]
+				st.hofAccumulate(retVal)
+				st.i++
+				if st.i < st.n {
+					// Re-push the same prepared callback frame for the next
+					// element; refresh its locals window in place.
+					vm.hofRefresh(st)
+					vm.frames = append(vm.frames, st.frame)
+					vm.pc = vm.chunk.functions[st.fnIdx].offset
+					continue
+				}
+				// Loop finished: free the slab window and push the result.
+				if st.baseLocal >= 0 {
+					vm.localSP = st.baseLocal
+				}
+				result := st.hofResult()
+				vm.hofStack = vm.hofStack[:hs-1]
+				vm.push(result)
+				vm.pc = st.returnPC
+				continue
+			}
 			vm.push(retVal)
 
 		case opCallSpread:
@@ -2205,11 +3091,12 @@ func (vm *VM) run() (Value, *runtimeError) {
 					parent: fn.parentScope,
 				}
 				vm.frames = append(vm.frames, callFrame{
-					returnPC: vm.pc,
-					baseSlot: vm.sp,
-					fnIdx:    fn.fnIdx,
-					locals:   locals,
-					scope:    scope,
+					returnPC:  vm.pc,
+					baseSlot:  vm.sp,
+					fnIdx:     fn.fnIdx,
+					locals:    locals,
+					scope:     scope,
+					baseLocal: -1,
 				})
 				vm.pc = ft.offset
 
@@ -2249,11 +3136,8 @@ func (vm *VM) run() (Value, *runtimeError) {
 
 		case opTailCall:
 			arity := int(vm.fetchU8())
-			args := make([]Value, arity)
-			for j := arity - 1; j >= 0; j-- {
-				args[j] = vm.pop()
-			}
-			callee := vm.pop()
+			argBase := vm.sp - arity
+			callee := vm.stack[argBase-1]
 
 			switch fn := callee.(type) {
 			case *closureVal:
@@ -2262,31 +3146,43 @@ func (vm *VM) run() (Value, *runtimeError) {
 				// Reuse the current frame for tail calls
 				frame := vm.currentFrame()
 				if frame != nil {
-					// Fast path: self-recursion — reuse locals array
+					// Fast path: self-recursion — overwrite the frame's locals
+					// window in place directly from the operand stack (zero
+					// allocations: no args slice, no locals, no scope).
+					// Self-recursion where the callee frame is a slab frame is
+					// handled by len(frame.locals) >= ft.localCount plus the
+					// in-place copy below.
 					if fn.fnIdx == frame.fnIdx && len(frame.locals) >= ft.localCount {
 						locals := frame.locals
 						paramCount := ft.arity
-						for i := 0; i < paramCount && i < len(args); i++ {
-							locals[i] = args[i]
+						n := paramCount
+						if arity < n {
+							n = arity
 						}
-						// Zero remaining locals beyond params
+						copy(locals[:n], vm.stack[argBase:argBase+n])
 						for i := paramCount; i < ft.localCount; i++ {
 							locals[i] = null
 						}
 						if ft.hasRestArg && paramCount < len(locals) {
 							var restList ListValue
-							if len(args) > paramCount {
-								restList = ListValue(args[paramCount:])
+							if arity > paramCount {
+								restList = ListValue(vm.stack[argBase+paramCount : vm.sp])
 							} else {
 								restList = ListValue{}
 							}
 							locals[paramCount] = &restList
 						}
-						frame.scope.values = locals
-						frame.scope.parent = fn.parentScope
+						vm.sp = argBase - 1 // pop callee + args
+						if frame.scope != nil {
+							frame.scope.values = locals
+							frame.scope.parent = fn.parentScope
+						}
 						vm.pc = ft.offset
 					} else {
 						// Different function or different local count — allocate new
+						args := make([]Value, arity)
+						copy(args, vm.stack[argBase:vm.sp])
+						vm.sp = argBase - 1 // pop callee + args
 						locals := make([]Value, ft.localCount)
 						for i := range locals {
 							locals[i] = null
@@ -2318,6 +3214,9 @@ func (vm *VM) run() (Value, *runtimeError) {
 					}
 				} else {
 					// Tail call at top level — same as regular call
+					args := make([]Value, arity)
+					copy(args, vm.stack[argBase:vm.sp])
+					vm.sp = argBase - 1 // pop callee + args
 					locals := make([]Value, ft.localCount)
 					for i := range locals {
 						locals[i] = null
@@ -2332,17 +3231,21 @@ func (vm *VM) run() (Value, *runtimeError) {
 						parent: fn.parentScope,
 					}
 					vm.frames = append(vm.frames, callFrame{
-						returnPC: vm.pc,
-						baseSlot: vm.sp,
-						fnIdx:    fn.fnIdx,
-						locals:   locals,
-						scope:    scope,
+						returnPC:  vm.pc,
+						baseSlot:  vm.sp,
+						fnIdx:     fn.fnIdx,
+						locals:    locals,
+						scope:     scope,
+						baseLocal: -1,
 					})
 					vm.pc = ft.offset
 				}
 
 			default:
 				// For non-closures, just do a regular call
+				args := make([]Value, arity)
+				copy(args, vm.stack[argBase:vm.sp])
+				vm.sp = argBase - 1 // pop callee + args
 				switch fn2 := callee.(type) {
 				case BuiltinFnValue:
 					for i, a := range args {
@@ -2454,17 +3357,17 @@ func (vm *VM) callBuiltin(idx int, args []Value) (Value, *runtimeError) {
 		return null, nil
 	case 1: // len
 		if len(args) < 1 {
-			return IntValue(0), nil
+			return makeIntValue(int64(0)), nil
 		}
 		switch v := args[0].(type) {
 		case *StringValue:
-			return IntValue(len(*v)), nil
+			return makeIntValue(int64(len(*v))), nil
 		case *ListValue:
-			return IntValue(len(*v)), nil
+			return makeIntValue(int64(len(*v))), nil
 		case ObjectValue:
-			return IntValue(len(v)), nil
+			return makeIntValue(int64(len(v))), nil
 		default:
-			return IntValue(0), nil
+			return makeIntValue(int64(0)), nil
 		}
 	case 2: // type
 		if len(args) < 1 {
@@ -2511,20 +3414,20 @@ func (vm *VM) callBuiltin(idx int, args []Value) (Value, *runtimeError) {
 		}
 	case 4: // int
 		if len(args) < 1 {
-			return IntValue(0), nil
+			return makeIntValue(int64(0)), nil
 		}
 		switch v := args[0].(type) {
 		case IntValue:
 			return v, nil
 		case FloatValue:
-			return IntValue(v), nil
+			return makeIntValue(int64(v)), nil
 		case *StringValue:
 			if n, err := strconv.ParseInt(string(*v), 10, 64); err == nil {
-				return IntValue(n), nil
+				return makeIntValue(int64(n)), nil
 			}
 			return null, nil
 		default:
-			return IntValue(0), nil
+			return makeIntValue(int64(0)), nil
 		}
 	case 5: // float
 		if len(args) < 1 {
@@ -2548,7 +3451,7 @@ func (vm *VM) callBuiltin(idx int, args []Value) (Value, *runtimeError) {
 			return null, nil
 		}
 		if sv, ok := args[0].(*StringValue); ok && len(*sv) > 0 {
-			return IntValue((*sv)[0]), nil
+			return makeIntValue(int64((*sv)[0])), nil
 		}
 		return null, nil
 	case 7: // char
@@ -2696,7 +3599,7 @@ func vmAdd(a, b Value) Value {
 	case IntValue:
 		switch bv := b.(type) {
 		case IntValue:
-			return IntValue(av + bv)
+			return makeIntValue(int64(av + bv))
 		case FloatValue:
 			return FloatValue(float64(av) + float64(bv))
 		case PointerValue:
@@ -2734,7 +3637,7 @@ func vmSub(a, b Value) Value {
 	case IntValue:
 		switch bv := b.(type) {
 		case IntValue:
-			return IntValue(av - bv)
+			return makeIntValue(int64(av - bv))
 		case FloatValue:
 			return FloatValue(float64(av) - float64(bv))
 		case PointerValue:
@@ -2752,7 +3655,7 @@ func vmSub(a, b Value) Value {
 		case IntValue:
 			return PointerValue(uintptr(av) - uintptr(bv))
 		case PointerValue:
-			return IntValue(int64(uintptr(av) - uintptr(bv)))
+			return makeIntValue(int64(uintptr(av) - uintptr(bv)))
 		}
 	}
 	return null
@@ -2763,7 +3666,7 @@ func vmMul(a, b Value) Value {
 	case IntValue:
 		switch bv := b.(type) {
 		case IntValue:
-			return IntValue(av * bv)
+			return makeIntValue(int64(av * bv))
 		case FloatValue:
 			return FloatValue(float64(av) * float64(bv))
 		}
@@ -2791,7 +3694,7 @@ func vmDiv(a, b Value) (Value, string) {
 				return nil, "Division by zero"
 			}
 			if av%bv == 0 {
-				return IntValue(av / bv), ""
+				return makeIntValue(int64(av / bv)), ""
 			}
 			return FloatValue(float64(av) / float64(bv)), ""
 		case FloatValue:
@@ -2825,7 +3728,7 @@ func vmMod(a, b Value) (Value, string) {
 			if bv == 0 {
 				return nil, "Division by zero"
 			}
-			return IntValue(av % bv), ""
+			return makeIntValue(int64(av % bv)), ""
 		case FloatValue:
 			if bv == 0 {
 				return nil, "Division by zero"
@@ -3008,7 +3911,7 @@ func vmConcat(left, right Value) Value {
 			if rv < 0 {
 				return null
 			}
-			return IntValue(lv << uint(rv))
+			return makeIntValue(int64(lv << uint(rv)))
 		}
 	case *StringValue:
 		if rv, ok := right.(*StringValue); ok {

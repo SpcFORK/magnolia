@@ -7,6 +7,7 @@ vmRuntime := import('wasm-vm-runtime')
 
 std := import('std')
 map := std.map
+slice := std.slice
 toHex := std.toHex
 
 str := import('str')
@@ -51,8 +52,10 @@ fn encodeWATString(s) {
 
 // renderWasmBundle renders Oak AST nodes to WebAssembly text format.
 // It embeds the bundled Oak source in linear memory and expects a host
-// runtime import (`oak.run`) to execute the source.
-fn renderWasmBundle(bundleNode, renderOakBundle) {
+// runtime import (`oak.run`) to execute the source. Statically int-typed
+// functions (typedWat, from lib/ast-wat.oak) are additionally compiled to
+// real wasm functions and exported as direct fast paths.
+fn renderWasmBundle(bundleNode, renderOakBundle, typedWat) {
 	bundleSource := renderOakBundle(bundleNode)
 	encoded := encodeWATString(bundleSource)
 	bundleSourceWAT := encoded.escaped
@@ -64,7 +67,7 @@ fn renderWasmBundle(bundleNode, renderOakBundle) {
 	if bytesRequired % pageBytes > 0 -> memoryPages <- memoryPages + 1
 	if memoryPages < 1 -> memoryPages <- 1
 
-	';; oak build --wasm
+	wat := ';; oak build --wasm
 (module
   (import "oak" "run" (func $__oak_run (param i32 i32) (result i32)))
 	(memory (export "memory") ' << string(memoryPages) << ')
@@ -94,6 +97,15 @@ fn renderWasmBundle(bundleNode, renderOakBundle) {
   )
 )
 '
+	if len(typedWat.names) > 0 {
+		true -> {
+			// splice the typed fast-path functions in before the module's
+			// closing paren (last two chars are ")\n")
+			idx := len(wat) - 2
+			wat <- (wat |> slice(0, idx)) << typedWat.wat << (wat |> slice(idx, len(wat)))
+		}
+	}
+	wat
 }
 
 // renderWasmVMBundle compiles Oak AST to bytecodes and generates a

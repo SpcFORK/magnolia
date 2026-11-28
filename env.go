@@ -101,6 +101,10 @@ func (c *Context) LoadBuiltins() {
 	c.LoadFunc("utf16", c.oakUTF16)
 	c.LoadFunc("bits", c.oakBits)
 	c.LoadFunc("addr", c.oakAddr)
+	// executable-memory bridge for lib/jit.oak runtime value specialization
+	c.LoadFunc("___runtime_jit_compile", c.oakRuntimeJITCompile)
+	c.LoadFunc("___runtime_jit_call", c.oakRuntimeJITCall)
+	c.LoadFunc("___runtime_jit_free", c.oakRuntimeJITFree)
 	c.LoadFunc("pointer", c.oakPointer) // convert integer or string to a pointer value
 	c.LoadFunc("memread", c.oakMemRead)
 	c.LoadFunc("memwrite", c.oakMemWrite)
@@ -491,6 +495,20 @@ func (c *Context) oakImport(args []Value) (Value, *runtimeError) {
 	// if a stdlib, just import the library from binary
 	if isStdLib(pathStr) {
 		return c.LoadLib(pathStr)
+	}
+
+	// Embedded sources (stdlib libs and CLI commands) reference each other
+	// with './name.ext' relative paths that have no meaning on disk; map
+	// them back onto the embedded library set so the bundled lib tree is
+	// self-contained.
+	if strings.HasPrefix(c.currentFile, "(") {
+		base := strings.TrimPrefix(pathStr, "./")
+		if ext := filepath.Ext(base); ext != "" {
+			base = base[:len(base)-len(ext)]
+		}
+		if base != pathStr && isStdLib(base) {
+			return c.LoadLib(base)
+		}
 	}
 
 	supportedExts := []string{".oak", ".ok", ".mag", ".mg"}
@@ -1450,6 +1468,10 @@ func (c *Context) oakWinMsgLoop(args []Value) (Value, *runtimeError) {
 }
 
 func (c *Context) oakGo(args []Value) (Value, *runtimeError) {
+	// From this point the engine may run Oak code concurrently: flip the
+	// global lock gate before the spawned goroutine can observe it
+	// (M1 TODO-06, §7.3). Monotonic - never flips back to false.
+	engConcurrent.Store(true)
 	if len(args) < 1 {
 		return nil, &runtimeError{
 			reason: "go requires at least 1 argument (function to run)",
@@ -2133,6 +2155,9 @@ func (h oakHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ctx *Context) oakListen(args []Value) (Value, *runtimeError) {
+	// listen() spawns concurrent event goroutines: flip the lock gate
+	// (M1 TODO-06). Monotonic - never flips back to false.
+	engConcurrent.Store(true)
 	if err := ctx.requireArgLen("listen", args, 2); err != nil {
 		return nil, err
 	}

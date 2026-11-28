@@ -7,11 +7,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
 // byte slice helpers from the Ink interpreter source code,
@@ -179,6 +180,38 @@ type BoolValue bool
 const oakTrue = BoolValue(true)
 const oakFalse = BoolValue(false)
 
+// intValCache holds pre-boxed Value interfaces for the dominant integer range
+// so that makeIntValue returns zero-allocation interface values for loop
+// counters, indices, codepoints, and small arithmetic results (M1 TODO-07, §7.1).
+var (
+	intCacheLo = int64(-4096)
+	intCacheHi = int64(65535)
+	intValCache []Value
+)
+
+func init() {
+	intValCache = make([]Value, int(intCacheHi-intCacheLo)+1)
+	for i := range intValCache {
+		// Direct construction: calling makeIntValue here would read the
+		// cache entry being filled (nil) and poison the whole table.
+		intValCache[i] = IntValue(intCacheLo + int64(i))
+	}
+}
+
+// makeIntValue returns a Value for n, reusing the pre-boxed cache entry when
+// n lies inside the cached range. Integers are not pointer-shaped, so a bare
+// IntValue(n) conversion allocates on every call; the cache removes that
+// allocation for the overwhelming majority of runtime integers.
+func makeIntValue(n int64) Value {
+	if n >= intCacheLo && n <= intCacheHi {
+		return intValCache[n-intCacheLo]
+	}
+	return IntValue(n)
+}
+
+// makeInt is an alias kept short at VM hot sites.
+func makeInt(n int64) Value { return makeIntValue(int64(n)) }
+
 func (v BoolValue) String() string {
 	if v {
 		return "true"
@@ -270,10 +303,36 @@ const objMuN = 32
 
 var objMu [objMuN]sync.RWMutex
 
+// engConcurrent flips monotonically to true the first time go()/listen()
+// spawn concurrent goroutines (env.go). While false, every lock helper
+// below returns the shared serial mutex, which is uncontended in
+// single-goroutine execution, eliminating atomic lock traffic on the hot
+// path (M1 TODO-06, §7.3). The Store inside go()/listen() happens before
+// the spawned goroutine can run (goroutine-creation happens-before edge),
+// so no access can observe the transition mid-race.
+var engConcurrent atomic.Bool
+
+// serialMu is the uncontended mutex handed out while the engine is in
+// single-goroutine mode. Helpers return it already locked (readers must
+// Unlock/RUnlock exactly as with the striped path).
+var serialMu sync.RWMutex
+
+// ifaceDataPtr extracts the data word of an interface value without
+// reflection (the second machine word of an eface). For ObjectValue (a
+// map), *ListValue and *StringValue this is exactly the identity pointer
+// that reflect.ValueOf(v).Pointer() returns, at zero allocation cost.
+func ifaceDataPtr(v interface{}) uintptr {
+	return (*[2]uintptr)(unsafe.Pointer(&v))[1]
+}
+
 // objLock acquires an exclusive lock for the given ObjectValue and
 // returns the mutex so the caller can Unlock it.
 func objLock(m ObjectValue) *sync.RWMutex {
-	mu := &objMu[reflect.ValueOf(m).Pointer()/8%objMuN]
+	if !engConcurrent.Load() {
+		serialMu.Lock()
+		return &serialMu
+	}
+	mu := &objMu[ifaceDataPtr(m)/8%objMuN]
 	mu.Lock()
 	return mu
 }
@@ -281,7 +340,11 @@ func objLock(m ObjectValue) *sync.RWMutex {
 // objRLock acquires a shared read lock for the given ObjectValue and
 // returns the mutex so the caller can RUnlock it.
 func objRLock(m ObjectValue) *sync.RWMutex {
-	mu := &objMu[reflect.ValueOf(m).Pointer()/8%objMuN]
+	if !engConcurrent.Load() {
+		serialMu.RLock()
+		return &serialMu
+	}
+	mu := &objMu[ifaceDataPtr(m)/8%objMuN]
 	mu.RLock()
 	return mu
 }
@@ -294,7 +357,11 @@ var listMu [listMuN]sync.RWMutex
 // listLock acquires an exclusive lock for the given *ListValue and
 // returns the mutex so the caller can Unlock it.
 func listLock(l *ListValue) *sync.RWMutex {
-	mu := &listMu[reflect.ValueOf(l).Pointer()/8%listMuN]
+	if !engConcurrent.Load() {
+		serialMu.Lock()
+		return &serialMu
+	}
+	mu := &listMu[uintptr(unsafe.Pointer(l))/8%listMuN]
 	mu.Lock()
 	return mu
 }
@@ -302,7 +369,11 @@ func listLock(l *ListValue) *sync.RWMutex {
 // listRLock acquires a shared read lock for the given *ListValue and
 // returns the mutex so the caller can RUnlock it.
 func listRLock(l *ListValue) *sync.RWMutex {
-	mu := &listMu[reflect.ValueOf(l).Pointer()/8%listMuN]
+	if !engConcurrent.Load() {
+		serialMu.RLock()
+		return &serialMu
+	}
+	mu := &listMu[uintptr(unsafe.Pointer(l))/8%listMuN]
 	mu.RLock()
 	return mu
 }
@@ -315,7 +386,11 @@ var strMu [strMuN]sync.RWMutex
 // strLock acquires an exclusive lock for the given *StringValue and
 // returns the mutex so the caller can Unlock it.
 func strLock(s *StringValue) *sync.RWMutex {
-	mu := &strMu[reflect.ValueOf(s).Pointer()/8%strMuN]
+	if !engConcurrent.Load() {
+		serialMu.Lock()
+		return &serialMu
+	}
+	mu := &strMu[uintptr(unsafe.Pointer(s))/8%strMuN]
 	mu.Lock()
 	return mu
 }
@@ -323,7 +398,11 @@ func strLock(s *StringValue) *sync.RWMutex {
 // strRLock acquires a shared read lock for the given *StringValue and
 // returns the mutex so the caller can RUnlock it.
 func strRLock(s *StringValue) *sync.RWMutex {
-	mu := &strMu[reflect.ValueOf(s).Pointer()/8%strMuN]
+	if !engConcurrent.Load() {
+		serialMu.RLock()
+		return &serialMu
+	}
+	mu := &strMu[uintptr(unsafe.Pointer(s))/8%strMuN]
 	mu.RLock()
 	return mu
 }
@@ -342,7 +421,7 @@ func (v ObjectValue) stringWithSeen(seen map[uintptr]bool, depth int) string {
 	if depth > 64 {
 		return "{...}"
 	}
-	ptr := reflect.ValueOf(v).Pointer()
+	ptr := ifaceDataPtr(v)
 	if seen[ptr] {
 		return "{...}"
 	}
@@ -1176,24 +1255,24 @@ var divisionByZeroErr = runtimeError{
 func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 	switch op {
 	case plus:
-		return IntValue(left + right), nil
+		return makeIntValue(int64(left + right)), nil
 	case minus:
-		return IntValue(left - right), nil
+		return makeIntValue(int64(left - right)), nil
 	case times:
-		return IntValue(left * right), nil
+		return makeIntValue(int64(left * right)), nil
 	case divide:
 		if right == 0 {
 			return nil, &divisionByZeroErr
 		}
 		if left%right == 0 {
-			return IntValue(left / right), nil
+			return makeIntValue(int64(left / right)), nil
 		}
 		return FloatValue(float64(left) / float64(right)), nil
 	case modulus:
 		if right == 0 {
 			return nil, &divisionByZeroErr
 		}
-		return IntValue(left % right), nil
+		return makeIntValue(int64(left % right)), nil
 	case power:
 		// int ** int can produce a float if exponent is negative
 		if right < 0 {
@@ -1204,13 +1283,13 @@ func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 		if result > math.MaxInt64 || result < math.MinInt64 {
 			return FloatValue(result), nil
 		}
-		return IntValue(int64(result)), nil
+		return makeIntValue(int64(result)), nil
 	case xor:
-		return IntValue(left ^ right), nil
+		return makeIntValue(int64(left ^ right)), nil
 	case and:
-		return IntValue(left & right), nil
+		return makeIntValue(int64(left & right)), nil
 	case or:
-		return IntValue(left | right), nil
+		return makeIntValue(int64(left | right)), nil
 	case pushArrow:
 		// bitwise left shift
 		if right < 0 {
@@ -1218,7 +1297,7 @@ func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 				reason: fmt.Sprintf("Shift amount must be non-negative, got %d", right),
 			}
 		}
-		return IntValue(left << uint(right)), nil
+		return makeIntValue(int64(left << uint(right))), nil
 	case rshift:
 		// bitwise right shift
 		if right < 0 {
@@ -1226,7 +1305,7 @@ func intBinaryOp(op tokKind, left, right IntValue) (Value, *runtimeError) {
 				reason: fmt.Sprintf("Shift amount must be non-negative, got %d", right),
 			}
 		}
-		return IntValue(left >> uint(right)), nil
+		return makeIntValue(int64(left >> uint(right))), nil
 	case greater:
 		return BoolValue(left > right), nil
 	case less:
@@ -1305,7 +1384,7 @@ func shallowEqual(left, right Value) bool {
 		if !ok {
 			return false
 		}
-		return reflect.ValueOf(l).Pointer() == reflect.ValueOf(r).Pointer()
+		return ifaceDataPtr(l) == ifaceDataPtr(r)
 	default:
 		return left.Eq(right)
 	}
@@ -1323,7 +1402,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 		v := StringValue(payload)
 		return &v, nil
 	case intNode:
-		return IntValue(n.payload), nil
+		return makeIntValue(int64(n.payload)), nil
 	case floatNode:
 		return FloatValue(n.payload), nil
 	case boolNode:
@@ -1941,11 +2020,11 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			if rightInt, ok := rightComputed.(IntValue); ok {
 				switch n.op {
 				case plus:
-					return IntValue(leftInt + rightInt), nil
+					return makeIntValue(int64(leftInt + rightInt)), nil
 				case minus:
-					return IntValue(leftInt - rightInt), nil
+					return makeIntValue(int64(leftInt - rightInt)), nil
 				case times:
-					return IntValue(leftInt * rightInt), nil
+					return makeIntValue(int64(leftInt * rightInt)), nil
 				case less:
 					return BoolValue(leftInt < rightInt), nil
 				case greater:
@@ -1959,14 +2038,14 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 						return nil, &runtimeError{reason: "Division by zero", pos: n.pos()}
 					}
 					if leftInt%rightInt == 0 {
-						return IntValue(leftInt / rightInt), nil
+						return makeIntValue(int64(leftInt / rightInt)), nil
 					}
 					return FloatValue(float64(leftInt) / float64(rightInt)), nil
 				case modulus:
 					if rightInt == 0 {
 						return nil, &runtimeError{reason: "Division by zero", pos: n.pos()}
 					}
-					return IntValue(leftInt % rightInt), nil
+					return makeIntValue(int64(leftInt % rightInt)), nil
 				default:
 					val, err := intBinaryOp(n.op, leftInt, rightInt)
 					if err != nil {
@@ -2192,7 +2271,7 @@ func (c *Context) evalExprWithOpt(node astNode, sc scope, thunkable bool) (Value
 			case PointerValue:
 				switch n.op {
 				case minus:
-					return IntValue(int64(uintptr(left) - uintptr(r))), nil
+					return makeIntValue(int64(uintptr(left) - uintptr(r))), nil
 				case greater:
 					return BoolValue(uintptr(left) > uintptr(r)), nil
 				case less:

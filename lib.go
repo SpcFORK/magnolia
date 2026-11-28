@@ -175,6 +175,12 @@ var libsyntaxtokenize string
 //go:embed lib/syntax-parse.oak
 var libsyntaxparse string
 
+//go:embed lib/mir.oak
+var libmir string
+
+//go:embed lib/codegen-c.oak
+var libcodegenC string
+
 //go:embed lib/syntax-macros.oak
 var libsyntaxmacros string
 
@@ -258,6 +264,18 @@ var libastgo string
 
 //go:embed lib/ast-ir.oak
 var libastir string
+
+//go:embed lib/jit.oak
+var libjit string
+
+//go:embed lib/ast-optimize.oak
+var libastoptimize string
+
+//go:embed lib/ast-wat.oak
+var libastwat string
+
+//go:embed lib/compute.oak
+var libcompute string
 
 //go:embed lib/applet.oak
 var libapplet string
@@ -729,86 +747,20 @@ var libb64hex string
 
 // Opt-in, separately preflighted JVM/MIDP and media helpers. The auto-load list is unchanged.
 //
-//go:embed lib/applet.oak
-var libapplet string
-
-//go:embed lib/applet-api.oak
-var libappletapi string
-
-//go:embed lib/applet-bytecode.oak
-var libappletbytecode string
-
-//go:embed lib/applet-class.oak
-var libappletclass string
-
 //go:embed lib/applet-gui.oak
 var libappletgui string
-
-//go:embed lib/applet-host.oak
-var libapplethost string
-
-//go:embed lib/applet-java.oak
-var libappletjava string
-
-//go:embed lib/applet-js-host.oak
-var libappletjshost string
-
-//go:embed lib/applet-manifest.oak
-var libappletmanifest string
-
-//go:embed lib/applet-oak.oak
-var libappletoak string
-
-//go:embed lib/applet-recompile.oak
-var libappletrecompile string
-
-//go:embed lib/applet-runtime.oak
-var libappletruntime string
-
-//go:embed lib/applet-zip.oak
-var libappletzip string
-
-//go:embed lib/build-applet.oak
-var libbuildapplet string
 
 //go:embed lib/fliplay-control.oak
 var libfliplaycontrol string
 
-//go:embed lib/font-bake.oak
-var libfontbake string
-
 //go:embed lib/gui-bounded-input.oak
 var libguiboundedinput string
-
-//go:embed lib/gui-drawlist.oak
-var libguidrawlist string
 
 //go:embed lib/gui-image.oak
 var libguiimage string
 
 //go:embed lib/gui-pixels.oak
 var libguipixels string
-
-//go:embed lib/jvm-bridge.oak
-var libjvmbridge string
-
-//go:embed lib/jvm-fp.oak
-var libjvmfp string
-
-//go:embed lib/jvm-jar-manifest.oak
-var libjvmjarmanifest string
-
-//go:embed lib/jvm-jar-write.oak
-var libjvmjarwrite string
-
-//go:embed lib/jvm-java-input.oak
-var libjvmjavainput string
-
-//go:embed lib/jvm-java-subset.oak
-var libjvmjavasubset string
-
-//go:embed lib/jvm-vm-libs.oak
-var libjvmvmlibs string
 
 //go:embed lib/midlet.oak
 var libmidlet string
@@ -818,9 +770,6 @@ var libmidpdeviceprofile string
 
 //go:embed lib/midp-indexed-png.oak
 var libmidpindexedpng string
-
-//go:embed lib/style-bake.oak
-var libstylebake string
 
 //go:embed lib/swf-as3-cws.oak
 var libswfas3cws string
@@ -846,20 +795,20 @@ var libavm1swftimelineprefix string
 //go:embed lib/avm1-swf-button-prefix.oak
 var libavm1swfbuttonprefix string
 
-//go:embed lib/transpile-ui.oak
-var libtranspileui string
+//go:embed lib/gui-render-core.oak
+var libguirendercore string
 
-//go:embed lib/ui-core.oak
-var libuicore string
 
-//go:embed lib/ui-sdk.oak
-var libuisdk string
+//go:embed lib/gui-window-nest.oak
+var libguiwindownest string
 
-//go:embed lib/ui-sim.oak
-var libuisim string
 
-//go:embed lib/ui-surface.oak
-var libuisurface string
+//go:embed lib/obj.oak
+var libobj string
+
+
+//go:embed lib/web-pipeline.oak
+var libwebpipeline string
 
 var stdlibs = map[string]string{
 	"std":                             libstd,
@@ -927,6 +876,8 @@ var stdlibs = map[string]string{
 	"syntax":                          libsyntax,
 	"syntax-tokenize":                 libsyntaxtokenize,
 	"syntax-parse":                    libsyntaxparse,
+	"mir":                             libmir,
+	"codegen-c":                       libcodegenC,
 	"syntax-macros":                   libsyntaxmacros,
 	"syntax-print":                    libsyntaxprint,
 	"syntaxfmt":                       libsyntaxfmt,
@@ -956,6 +907,10 @@ var stdlibs = map[string]string{
 	"ast-java":                        libastjava,
 	"ast-go":                          libastgo,
 	"ast-ir":                          libastir,
+	"jit":                             libjit,
+	"ast-optimize":                    libastoptimize,
+	"ast-wat":                         libastwat,
+	"compute":                         libcompute,
 	"applet":                          libapplet,
 	"applet-api":                          libappletapi,
 	"applet-bytecode":                          libappletbytecode,
@@ -1109,37 +1064,14 @@ var stdlibs = map[string]string{
 	"web-runtime":                     libwebruntime,
 	"b64":                             libb64,
 	"b64-hex":                         libb64hex,
-	"applet":                          libapplet,
-	"applet-api":                      libappletapi,
-	"applet-bytecode":                 libappletbytecode,
-	"applet-class":                    libappletclass,
 	"applet-gui":                      libappletgui,
-	"applet-host":                     libapplethost,
-	"applet-java":                     libappletjava,
-	"applet-js-host":                  libappletjshost,
-	"applet-manifest":                 libappletmanifest,
-	"applet-oak":                      libappletoak,
-	"applet-recompile":                libappletrecompile,
-	"applet-runtime":                  libappletruntime,
-	"applet-zip":                      libappletzip,
-	"build-applet":                    libbuildapplet,
 	"fliplay-control":                 libfliplaycontrol,
-	"font-bake":                       libfontbake,
 	"gui-bounded-input":               libguiboundedinput,
-	"gui-drawlist":                    libguidrawlist,
 	"gui-image":                       libguiimage,
 	"gui-pixels":                      libguipixels,
-	"jvm-bridge":                      libjvmbridge,
-	"jvm-fp":                          libjvmfp,
-	"jvm-jar-manifest":                libjvmjarmanifest,
-	"jvm-jar-write":                   libjvmjarwrite,
-	"jvm-java-input":                  libjvmjavainput,
-	"jvm-java-subset":                 libjvmjavasubset,
-	"jvm-vm-libs":                     libjvmvmlibs,
 	"midlet":                          libmidlet,
 	"midp-device-profile":             libmidpdeviceprofile,
 	"midp-indexed-png":                libmidpindexedpng,
-	"style-bake":                      libstylebake,
 	"swf-as3-cws":                     libswfas3cws,
 	"swf-as3-abc-pool":                libswfas3abcpool,
 	"swf-as3-abc-signatures":          libswfas3abcsignatures,
@@ -1148,11 +1080,10 @@ var stdlibs = map[string]string{
 	"avm1-preloader":                  libavm1preloader,
 	"avm1-swf-timeline-prefix":        libavm1swftimelineprefix,
 	"avm1-swf-button-prefix":          libavm1swfbuttonprefix,
-	"transpile-ui":                    libtranspileui,
-	"ui-core":                         libuicore,
-	"ui-sdk":                          libuisdk,
-	"ui-sim":                          libuisim,
-	"ui-surface":                      libuisurface,
+	"gui-render-core": libguirendercore,
+	"gui-window-nest": libguiwindownest,
+	"obj": libobj,
+	"web-pipeline": libwebpipeline,
 }
 
 var stdlibAutoLoadOrder = []string{
@@ -1203,6 +1134,8 @@ var stdlibAutoLoadOrder = []string{
 	"syntax-tokenize",
 	"syntax-parse",
 	"syntax-macros",
+	"mir",
+	"codegen-c",
 	"syntax-print",
 	"syntaxfmt",
 	"Virtual",
@@ -1220,6 +1153,10 @@ var stdlibAutoLoadOrder = []string{
 	"ast-java",
 	"ast-go",
 	"ast-ir",
+	"jit",
+	"ast-optimize",
+	"ast-wat",
+	"compute",
 	"codegen-go",
 	"codegen-native",
 	"assembler",

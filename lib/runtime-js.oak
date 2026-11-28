@@ -175,7 +175,7 @@ function __as_oak_string(x) {
 	return x;
 }
 // coerce string-API arguments the way host JS does: Oak strings unwrap to
-// their primitive, absent values become 'null'/'undefined', host values
+// their primitive, absent values become \'null\'/\'undefined\', host values
 // (RegExp, numbers, booleans) pass through for native ToString coercion
 function __oak_str_arg(x) {
 	if (x === undefined) return \'undefined\';
@@ -820,7 +820,7 @@ function exec(path, args = [], stdin = "") {
 			return {
 				type: Symbol.for("end"),
 				status: 0,
-				stdout: __as_oak_string(cmdArgs.join(" ") + "\n"),
+				stdout: __as_oak_string(cmdArgs.join(" ") + "\\n"),
 				stderr: __as_oak_string(""),
 			};
 		}
@@ -850,12 +850,12 @@ function exec(path, args = [], stdin = "") {
 					const part = slash < 0 ? rel : rel.slice(0, slash);
 					if (part) parts.add(part);
 				}
-				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(Array.from(parts).sort().join("\n") + "\n"), stderr: __as_oak_string("") };
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(Array.from(parts).sort().join("\\n") + "\\n"), stderr: __as_oak_string("") };
 			}
 			return __oak_io_error("ls() unavailable in this runtime");
 		}
 		if (cmd === "pwd") {
-			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("/\n"), stderr: __as_oak_string("") };
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("/\\n"), stderr: __as_oak_string("") };
 		}
 		if (cmd === "true") {
 			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(""), stderr: __as_oak_string("") };
@@ -880,7 +880,7 @@ function exec(path, args = [], stdin = "") {
 			}
 		}
 		if (cmd === "date") {
-			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(new Date().toString() + "\n"), stderr: __as_oak_string("") };
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(new Date().toString() + "\\n"), stderr: __as_oak_string("") };
 		}
 		if (cmd === "wc") {
 			if (cmdArgs.length === 0) return __oak_io_error("wc() missing file argument");
@@ -888,10 +888,10 @@ function exec(path, args = [], stdin = "") {
 			if (vfs && typeof vfs.readFile === "function") {
 				const data = vfs.readFile(cmdArgs[0]);
 				if (data == null) return __oak_io_error("wc() no such file: " + cmdArgs[0]);
-				const lines = data.split("\n").length;
+				const lines = data.split("\\n").length;
 				const chars = data.length;
 				const words = data.split(/\s+/).filter(w => w !== "").length;
-				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(`${lines} ${words} ${chars} ${cmdArgs[0]}\n`), stderr: __as_oak_string("") };
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(`${lines} ${words} ${chars} ${cmdArgs[0]}\\n`), stderr: __as_oak_string("") };
 			}
 		}
 		if (cmd === "head" || cmd === "tail") {
@@ -899,18 +899,18 @@ function exec(path, args = [], stdin = "") {
 			const vfs = __oak_get_vfs();
 			if (vfs && typeof vfs.readFile === "function") {
 				const data = vfs.readFile(cmdArgs[0]) || "";
-				const allLines = data.split("\n");
+				const allLines = data.split("\\n");
 				let resultLines;
 				if (cmd === "head") resultLines = allLines.slice(0, 10);
 				else resultLines = allLines.slice(-10);
-				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(resultLines.join("\n") + "\n"), stderr: __as_oak_string("") };
+				return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string(resultLines.join("\\n") + "\\n"), stderr: __as_oak_string("") };
 			}
 		}
 		if (cmd === "whoami") {
-			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("oak\n"), stderr: __as_oak_string("") };
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("oak\\n"), stderr: __as_oak_string("") };
 		}
 		if (cmd === "hostname") {
-			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("oak-runtime\n"), stderr: __as_oak_string("") };
+			return { type: Symbol.for("end"), status: 0, stdout: __as_oak_string("oak-runtime\\n"), stderr: __as_oak_string("") };
 		}
 		return __oak_io_error("exec() command not found on web: " + cmd);
 	} catch (e) {
@@ -1162,7 +1162,6 @@ function mkdir() {
 		return { type: Symbol.for("end") };
 	}
 	return __oak_io_error("mkdir() unavailable in this runtime");
-}
 }
 function stat() {
 	const target = __oak_to_string_value(arguments[0]);
@@ -1650,6 +1649,8 @@ function socket_connect(address, options, cb) {
 		}
 		return __oak_socket_unavailable(\'socket_connect\', cb);
 	}
+	return __oak_socket_unavailable(\'socket_connect\', cb);
+}
 function socket_send(socket, data, cb) {
 	const [entry, err] = __oak_socket_get(socket, \'socket_send\');
 	if (err) {
@@ -1750,7 +1751,7 @@ function socket_recv_exact(socket, size, cb) {
 		return __oak_io_error(\'socket_recv_exact() requires a callback in this runtime\');
 	}
 	if (entry.virtual) {
-		// If buffer has enough data, return it. Otherwise return what's available.
+		// If buffer has enough data, return it. Otherwise return what\'s available.
 		const avail = entry.buffer ? entry.buffer.length : 0;
 		if (avail >= count) {
 			const data = entry.buffer.slice(0, count);
@@ -2565,7 +2566,7 @@ function __oak_js_try(fn) {
 // (lib/std.oak). Module closures shadow bare global builtin names with
 // their own same-named bindings; these never-shadowed aliases give the
 // capture idiom a path back to the real globals. Only the builtins that
-// are actually destructured from import('std') by lib modules are listed.
+// are actually destructured from import(\'std\') by lib modules are listed.
 var __oak_builtin_bits = (typeof bits === "function") ? bits : undefined;
 var __oak_builtin_char = (typeof char === "function") ? char : undefined;
 var __oak_builtin_codepoint = (typeof codepoint === "function") ? codepoint : undefined;

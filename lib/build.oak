@@ -43,6 +43,8 @@ syntax := import('syntax')
 bundleUtils := import('bundle-utils')
 transform := import('ast-transform')
 transpile := import('transpile')
+astOptimize := import('ast-optimize')
+astWat := import('ast-wat')
 packModule := import('pack')
 buildIncludes := import('build-includes')
 buildIdent := import('build-ident')
@@ -75,6 +77,8 @@ Ts? := false
 Lua? := false
 Java? := false
 Graph? := false
+C? := false
+CC? := false
 Target := 'oak'
 Output := ?
 Includes := []
@@ -102,6 +106,8 @@ fn applyConfig(config) {
 		Lua?: Lua?
 		Java?: Java?
 		Graph?: Graph?
+		C?: C?
+		CC?: CC?
 		Target: Target
 		Output: Output
 		Includes: Includes
@@ -133,6 +139,8 @@ fn applyConfig(config) {
 	Lua? <- state.Lua?
 	Java? <- state.Java?
 	Graph? <- state.Graph?
+	C? <- state.C?
+	CC? <- state.CC?
 	Target <- state.Target
 	Output <- state.Output
 	Includes <- state.Includes
@@ -247,9 +255,11 @@ fn renderJSBundle(bundleNode) {
 }
 
 fn renderWasmBundle(bundleNode) {
+	typedWat := astWat.emitTypedWAT(bundleNode)
 	runtimeCodegen.renderWasmBundle(
 		bundleNode
 		fn(node) buildRender.renderOakBundle(node, VFSFiles, encodeJSON, OakNativeRuntime, formatIdent, Abort)
+		typedWat
 	)
 }
 
@@ -912,6 +922,19 @@ fn renderLuaBundle(bundleNode) {
 				}
 			}
 		}
+		:whileExpr -> (if stmtMode {
+			true -> ''
+			_ -> '(function() '
+		}) + 'while ' + renderChild(node.cond) + ' do\n' + {
+			result := ''
+			node.body.exprs |> each(fn(expr) {
+				result <- result + renderNodeMode(expr, true) + '\n'
+			})
+			result
+		} + 'end' + (if stmtMode {
+			true -> ''
+			_ -> '\nreturn nil\nend)()'
+		})
 		:fnCall -> renderChild(node.function) + '(' + (node.args |> map(renderNode) |> join(', ')) + ')'
 	}
 
@@ -1242,6 +1265,17 @@ fn renderJavaBundle(bundleNode) {
 				_ -> javaIdent(node.name) + ' = ' + fnBody
 			}
 		}
+		:whileExpr -> '((Function<Void, Object>) (__oak_v) -> {\n' << {
+			result := 'while (Boolean.TRUE.equals(' << renderNode(node.cond) << ')) {\n'
+			if node.body.decls != ? -> node.body.decls |> each(fn(d) {
+				result <- result << 'Object ' << javaIdent(d) << ' = null;\n'
+			})
+			node.body.exprs |> each(fn(expr) {
+				result <- result << renderNode(expr) << ';\n'
+			})
+			result <- result << '}\n'
+			result
+		} << 'return null;\n}).apply(null)'
 		:fnCall -> '((Function<Object[], Object>) ' << renderNode(node.function) << ').apply(new Object[]{' << node.args |> map(renderNode) |> join(', ') << '})'
 	}
 
@@ -1256,6 +1290,14 @@ fn renderJavaBundle(bundleNode) {
 fn renderGoBundle(bundleNode) {
 	codegenGo := import('codegen-go')
 	codegenGo.renderGoBundle(bundleNode)
+}
+
+// renderCBundle transpiles the Oak AST bundle to self-contained C11
+// ("Goose+ Mode", TODO-14). --cc additionally invokes the system compiler
+// to produce a native binary next to the emitted source.
+fn renderCBundle(bundleNode) {
+	codegenC := import('codegen-c')
+	codegenC.renderCBundle(bundleNode)
 }
 
 // renderNativeBundle compiles the Oak AST bundle to native machine code
@@ -1284,7 +1326,7 @@ fn renderNativeBundle(bundleNode) {
 		_ -> nativeCodegen.createX86_64Generator()
 	}
 
-	compiled := generator.compile(irProgram)
+	compiled := generator.compile(irProgram, ?)
 
 	result := linker.link({
 		format: format
@@ -1536,6 +1578,7 @@ fn renderBundle(bundleNode) {
 		renderGoBundle
 		renderNativeBundle
 		renderGraphBundle
+		renderCBundle
 	)
 }
 
@@ -1565,7 +1608,15 @@ fn runOak(config) {
 	// compile the import map into a bundle with an entrypoint and render to
 	// bundle program text
 	moduleKeys := ModuleNodes |> keys() |> sort!()
-	compiledModules := pmap(moduleKeys, fn(name) [name, name |> cachedParse() |> transform.wrapBlock() |> transpile.transpileNode() |> analyzeNode() |> wrapModule()])
+	// MIR-assisted fast paths (plan §10.1): the AST pre-pass folds constants
+	// and propagates literal bindings for every target. Tail-call lowering to
+	// :whileExpr is gated to targets whose renderer supports the node type.
+	lowerTail := Target = 'web' | Target = 'ts' | Target = 'lua' | Target = 'java'
+	compiledModules := pmap(moduleKeys, fn(name) {
+		optd := name |> cachedParse() |> transform.wrapBlock()
+		optd <- astOptimize.optimizeProgram(optd, lowerTail)
+		[ name, optd |> transpile.transpileNode() |> analyzeNode() |> wrapModule() ]
+	})
 	BundleFile := compiledModules |>
 		wrapBundle(AbsoluteEntry) |>
 		renderBundle()
@@ -1578,6 +1629,21 @@ fn runOak(config) {
 			? -> {type: :error, message: format('[oak build] Could not write bundle to {{0}}', Output)}
 			_ -> {
 				Log(format('[oak build] Bundle written to {{0}}', Output))
+				if CC? {
+					// --cc: compile the emitted C with the system compiler
+					true -> {
+						ccOut := if str.endsWith?(Output, '.c') {
+							true -> str.slice(Output, 0, len(Output) - 2)
+							_ -> Output + '.out'
+						}
+						ccRes := exec('gcc', ['-O3', '-march=native', '-o', ccOut, Output, '-lm'], '')
+						if ccRes.status = 0 {
+							true -> Log(format('[oak build] Native binary written to {{0}}', ccOut))
+							_ -> std.println('[oak build] gcc failed:\n' + ccRes.stderr)
+						}
+					}
+					_ -> ?
+				}
 				{type: :ok, value: BundleFile, target: Target}
 			}
 		}

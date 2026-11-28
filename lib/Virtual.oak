@@ -39,6 +39,89 @@ cs VirtualMachine {
 	callStack := []
 	macros := {}
 
+	// Scope chains: a scope is an object with an optional __parent key.
+	// Lookup walks the chain; non-local (<-) assignment writes through to the
+	// scope where the name is bound (upvalue semantics); local (:=) assignment
+	// always shadows in the current scope. Closures capture their defining
+	// scope by reference.
+	// memberKey resolves a property-access right-hand node to a key value:
+	// bare identifiers are static keys; anything else (including the
+	// block-wrapped computed form xs.(i)) is evaluated and kept raw so
+	// lists/strings can index by int and objects coerce to string.
+	fn memberKey(node, sc) if node.type {
+		:identifier -> node.val
+		_ -> evalExpr(node, sc)
+	}
+
+	fn scopeGet(sc, name) if sc.(name) != ? {
+		true -> sc.(name)
+		_ -> if sc.__parent != ? {
+			true -> scopeGet(sc.__parent, name)
+			_ -> ?
+		}
+	}
+
+	fn scopeSet(sc, name, val) if sc.(name) != ? {
+		true -> sc.(name) := val
+		_ -> if sc.__parent != ? {
+			true -> scopeSet(sc.__parent, name, val)
+			_ -> sc.(name) := val
+		}
+	}
+
+	// deep structural equality -- mirrors the Go host's Value.Eq used by
+	// ==/!= (Oak's own = via shallowEqual would compare containers by
+	// identity and report false for equal-valued distinct lists/objects)
+	fn deepEq(l, r) if type(l) {
+		:list -> {
+			if type(r) = :list {
+				true -> {
+					if len(l) = len(r) {
+						true -> {
+							fn eqAt(i) if i < len(l) {
+								true -> {
+									if deepEq(l.(i), r.(i)) {
+										true -> eqAt(i + 1)
+										_ -> false
+									}
+								}
+								_ -> true
+							}
+							eqAt(0)
+						}
+						_ -> false
+					}
+				}
+				_ -> false
+			}
+		}
+		:object -> {
+			if type(r) = :object {
+				true -> {
+					lk := builtinKeys(l)
+					rk := builtinKeys(r)
+					if len(lk) = len(rk) {
+						true -> {
+							fn eqKey(i) if i < len(lk) {
+								true -> {
+									if rk |> contains?(lk.(i)) & deepEq(l.(lk.(i)), r.(lk.(i))) {
+										true -> eqKey(i + 1)
+										_ -> false
+									}
+								}
+								_ -> true
+							}
+							eqKey(0)
+						}
+						_ -> false
+					}
+				}
+				_ -> false
+			}
+		}
+		_ -> l = r
+	}
+
 	fn evalBinaryOp(op, left, right) if op {
 		:plus -> if type(left) {
 			:int -> left + right
@@ -55,12 +138,14 @@ cs VirtualMachine {
 		:and -> left & right
 		:or -> left | right
 		:xor -> left ^ right
+		:pushArrow -> left << right
 		:greater -> left > right
 		:less -> left < right
-		:eq -> left = right
+		:eq -> deepEq(left, right)
+		:deepEq -> deepEq(left, right)
 		:geq -> left >= right
 		:leq -> left <= right
-		:neq -> left != right
+		:neq -> !deepEq(left, right)
 		_ -> ?
 	}
 
@@ -80,7 +165,7 @@ cs VirtualMachine {
 		:string -> node.val
 		:atom -> atom(node.val)
 		:bool -> node.val
-		:identifier -> sc.(node.val) |> default(?)
+		:identifier -> scopeGet(sc, node.val)
 		:list -> node.elems |> map(fn(el) evalExpr(el, sc))
 		:object -> {
 			result := {}
@@ -94,11 +179,18 @@ cs VirtualMachine {
 			result
 		}
 		:function -> {
-			type: :function
-			params: node.args
-			restArg: node.restArg
-			body: node.body
-			closure: clone(sc)
+			clos := {
+				type: :function
+				params: node.args
+				restArg: node.restArg
+				body: node.body
+				closure: sc
+			}
+			if node.name {
+				?, '' -> ?
+				_ -> sc.(node.name) := clos
+			}
+			clos
 		}
 		:fnCall -> if node.function.type = :identifier & node.function.val = 'import' {
 			true -> {
@@ -112,7 +204,26 @@ cs VirtualMachine {
 					}
 					_ -> {
 						parsed := parseSource(source)
-						evalAst(parsed, {})
+						modScope := merge(clone(globalScope), {})
+						evalAst(parsed, modScope)
+						// Synthesize the module's exports object: every binding
+						// the module created at its top level (the bundler does
+						// the same when packing modules). For 'std', also expose
+						// the interpreter globals for packed-bundle parity.
+						exports := {}
+						modScope |> builtinKeys() |> each(fn(k) if k {
+							'__parent' -> ?
+							_ -> if modScope.(k) != ? {
+								true -> if globalScope.(k) != ? {
+									// global builtin: only re-export for 'std'
+									// (host parity: import('std') exposes globals)
+									true -> if name = 'std' -> exports.(k) := modScope.(k)
+									_ -> exports.(k) := modScope.(k)
+								}
+								_ -> exports.(k) := modScope.(k)
+							}
+						})
+						exports
 					}
 				}
 			}
@@ -121,7 +232,7 @@ cs VirtualMachine {
 				args := node.args |> map(fn(arg) evalExpr(arg, sc))
 				if type(callee) = :object & callee.type = :function {
 					true -> {
-						fnScope := clone(callee.closure)
+						fnScope := { __parent: callee.closure }
 						callee.params |> each(fn(param, i) {
 							fnScope.(param) := args.(i) |> default(?)
 						})
@@ -153,23 +264,26 @@ cs VirtualMachine {
 		}
 		:propertyAccess -> {
 			obj := evalExpr(node.left, sc)
-			key := if node.right.type = :identifier {
-				true -> node.right.val
-				_ -> string(evalExpr(node.right, sc))
+			key := memberKey(node.right, sc)
+			if type(obj) = :list | type(obj) = :string {
+				true -> obj.(key)
+				_ -> obj.(string(key))
 			}
-			obj.(key)
 		}
 		:assignment -> {
 			val := evalExpr(node.right, sc)
 			if node.left.type {
-				:identifier -> sc.(node.left.val) := val
+				:identifier -> if node.local? {
+					false -> scopeSet(sc, node.left.val, val)
+					_ -> sc.(node.left.val) := val
+				}
 				:propertyAccess -> {
 					obj := evalExpr(node.left.left, sc)
-					key := if node.left.right.type = :identifier {
-						true -> node.left.right.val
-						_ -> string(evalExpr(node.left.right, sc))
+					key := memberKey(node.left.right, sc)
+					if type(obj) = :list | type(obj) = :string {
+						true -> obj.(key) <- val
+						_ -> obj.(string(key)) <- val
 					}
-					obj.(key) <- val
 				}
 				_ -> val
 			}
@@ -192,10 +306,11 @@ cs VirtualMachine {
 			result
 		}
 		:block -> {
-			blockScope := clone(sc)
+			// Oak blocks do not introduce a scope; bindings inside a block
+			// belong to the enclosing function scope
 			result := ?
 			node.exprs |> each(fn(expr) {
-				result <- evalExpr(expr, blockScope)
+				result <- evalExpr(expr, sc)
 			})
 			result
 		}
